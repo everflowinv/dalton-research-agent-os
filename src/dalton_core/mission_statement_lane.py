@@ -321,6 +321,15 @@ class MissionStatementLaneCoordinator:
             outcome = self._settle(dispatch, "succeeded", None)
             outcome["line_count"] = recorded["line_count"]
             outcome["accessions"] = [item["accession"] for item in recorded["filings"]]
+            store_path = getattr(self.missions.store, "path", ":memory:")
+            if str(store_path) != ":memory:":
+                from .statement_context import refresh_company_contexts
+                outcome["statement_contexts"] = refresh_company_contexts(
+                    self.missions.store, Path(store_path).parent, dispatch["company_ref"],
+                    ingest_ids=[item["ingest_id"] for item in recorded["filings"]])
+                from .model_cell_reconciliation import ModelCellReconciliationAuthority
+                reconciled = ModelCellReconciliationAuthority(self.missions.store).refresh(dispatch["company_ref"])
+                outcome["model_cell_reconciliation"] = {"cells": len(reconciled), "compared": sum(row["status"] == "compared" for row in reconciled), "unavailable": sum(row["status"] == "unavailable" for row in reconciled)}
             settled.append(outcome)
         return settled
 
@@ -570,18 +579,14 @@ class MissionStatementLaneCoordinator:
         }
 
 
-# P13ak: SEC asks a client to say who it is and how to reach it. The
-# statements lane says so in its own name rather than borrowing the
-# company-facts lane's, and it carries the same contact address this Core
-# already publishes on its outbound public requests -- the parser refuses an
-# identity without one, which is how the first live tick failed.
-STATEMENT_LANE_USER_AGENT = (
-    "Dalton Research Agent OS SEC financial-statements lane everflow@lumos.space"
-)
-# Contracts coexist.  An already-approved v2 remains usable and emits its old
-# projection; an approved v3 wins only after its exact record is selected.
+# Compatibility label only; outbound SEC identity comes from the operator's
+# explicit lane option or the writer's existing configured SEC identity.
+STATEMENT_LANE_USER_AGENT = "Dalton Research Agent OS SEC financial-statements lane"
+# Contracts coexist. The newest explicitly approved identity wins; older
+# projected wires remain readable but cannot stand in for complete identities.
 STATEMENT_LANE_GOVERNANCE = "sec-financial-statements-v2.json"
 STATEMENT_LANE_GOVERNANCE_CANDIDATES = (
+    "sec-financial-statements-v4.json",
     "sec-financial-statements-v3.json",
     STATEMENT_LANE_GOVERNANCE,
 )
@@ -654,11 +659,27 @@ def build_launcher(args: Any) -> Any | None:
             raise ValueError("statement filing limit form must be unique")
         limits[form] = limit
         explicitly_limited.add(form)
+    # These shared writer arguments already derive from the service's
+    # configured SEC User-Agent; governance records do not contain contacts.
+    user_agent = next((value.strip() for value in (
+        getattr(args, "statement_lane_user_agent", None),
+        getattr(args, "sec_lane_user_agent", None),
+        getattr(args, "sec_company_resolver_identity", None),
+    ) if isinstance(value, str) and value.strip()), None)
+    if args.statement_lane_fixture is None:
+        import re
+
+        if user_agent is None or re.search(
+            r"[^\s<>@]+@[^\s<>@]+\.[^\s<>@]+", user_agent
+        ) is None:
+            raise ValueError(
+                "SEC statements require a configured User-Agent with a contact email"
+            )
     return SecFinancialsLauncher(
         state_dir=_Path(args.db).expanduser().resolve().parent,
         governance_path=args.statement_lane_governance,
         mode_args=mode_args,
-        user_agent=args.statement_lane_user_agent,
+        user_agent=user_agent,
         scheduling_forms=forms,
         scheduling_limits=limits,
     )
@@ -672,8 +693,7 @@ def argv_fragment(context: Any) -> list[str]:
     from .sec_financials_core import sec_financials_identity
 
     governance = None
-    for version, filename in ((3, STATEMENT_LANE_GOVERNANCE_CANDIDATES[0]),
-                              (2, STATEMENT_LANE_GOVERNANCE_CANDIDATES[1])):
+    for version, filename in zip((4, 3, 2), STATEMENT_LANE_GOVERNANCE_CANDIDATES):
         candidate = context.state / "connector-governance" / filename
         if not candidate.is_file():
             continue
@@ -699,7 +719,6 @@ def argv_fragment(context: Any) -> list[str]:
         limits = DEFAULT_FORM_LIMITS
     argv = [
         "--statement-lane-governance", str(governance),
-        "--statement-lane-user-agent", STATEMENT_LANE_USER_AGENT,
     ]
     for form in forms:
         argv += ["--statement-lane-form", form]

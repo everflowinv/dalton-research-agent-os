@@ -55,6 +55,24 @@ NO_EVIDENCE = "no-evidence"
 # request in flight, or there was no route just then. The very next tick can
 # do the work.
 TRANSIENT_STATUSES: frozenset[str] = frozenset({"busy", "model_unavailable"})
+# 2026-10-08 (ws-7d GOOGL): outcomes where no draft was made at all.  An
+# ``input_unchanged`` hold costs nothing and says the bounded table is the one
+# the current version was drawn from; counting it as a failed draft doubled
+# the back-off (GOOGL: three "failures", none of them a model call) and kept
+# the next real redraw waiting up to 48 hours.
+NO_DRAFT_STATUSES: frozenset[str] = frozenset({"input_unchanged", "dry_run"})
+# Owner-facing words for what a run that published nothing ran into.
+OUTCOME_WORDS: dict[str, str] = {
+    "verifier_rejected": "独立核验驳回",
+    "duplicate": "与当前版本相同，没有新内容",
+    "no_admitted_debates": "所有候选争论都被研究宪法门拒绝",
+    "refused": "草稿不符合输出契约",
+    "unverified": "核验没有给出结论",
+    "not_independent": "核验模型与起草模型不独立",
+    "gated": "没有配置起草模型",
+    "not_authorized": "研究任务没有授权争论图",
+    "input_unchanged": "输入表与当前版本相同，未调用模型",
+}
 # The one outcome that changes what the next tick sees. After it the stored
 # version's fingerprint equals the evidence's, so the selector skips the
 # subject on its own and no hold is needed.
@@ -279,7 +297,9 @@ class MissionDebateMapLaneCoordinator:
         if subject_ref:
             self._pace_settled(str(subject_ref), published=published,
                                transient=str(map_status or settled.get("status"))
-                               in TRANSIENT_STATUSES)
+                               in TRANSIENT_STATUSES,
+                               outcome=str(map_status or settled.get("status") or ""),
+                               detail=settled.get("failure_reason"))
         if hold and subject_ref and fingerprint:
             key = business_key or f"{subject_ref}|{fingerprint}"
             reason = settled.get("failure_reason") or f"last run: {map_status or settled.get('status')}"
@@ -296,14 +316,22 @@ class MissionDebateMapLaneCoordinator:
 
     # -- pacing -----------------------------------------------------------
 
-    def _pace_settled(self, subject_ref: str, *, published: bool, transient: bool) -> None:
+    def _pace_settled(self, subject_ref: str, *, published: bool, transient: bool,
+                      outcome: str | None = None, detail: Any = None) -> None:
         """Book a finished run: a draft that published, or one that did not."""
 
         entry = self.pacing.get(subject_ref)
         launched = entry.pop("open_launched_at", None)
-        if transient or launched is None:
-            # No route, the scheduler busy: nothing was drafted, so nothing is
-            # paced -- the lane's own probe rule decides when to ask again.
+        if outcome:
+            text = str(outcome)
+            if detail:
+                text += f": {str(detail)[:120]}"
+            entry["last_outcome"] = text
+        if transient or launched is None or outcome in NO_DRAFT_STATUSES:
+            # No route, the scheduler busy, or held before any model call:
+            # nothing was drafted, so nothing is paced -- the lane's own
+            # probe rule and the (subject, fingerprint) hold decide when to
+            # ask again.
             self.pacing.put(subject_ref, entry)
             return
         entry["last_draft_at"] = launched
@@ -376,15 +404,18 @@ class MissionDebateMapLaneCoordinator:
             wait = min(MIN_REDRAW_SECONDS * (2 ** (failures - 1)), MAX_BACKOFF_SECONDS)
             until = last + timedelta(seconds=wait)
             if now < until:
-                return (f"backing off after {failures} draft(s) that published nothing; "
-                        f"next draft after {until.isoformat()}")
+                last = str(entry.get("last_outcome") or "")
+                word = OUTCOME_WORDS.get(last.split(":", 1)[0], "")
+                said = f"（最近一次：{word + '，' if word else ''}{last}）" if last else ""
+                return (f"连续 {failures} 次起草没有发布{said}；"
+                        f"下次起草在 {until.isoformat()} 之后")
             return None
         if urgent_key is not None and entry.get("urgent_key") != urgent_key:
             return None
         until = last + timedelta(seconds=MIN_REDRAW_SECONDS)
         if now < until:
-            return (f"drawn at {last.isoformat()}; the next redraw is due after "
-                    f"{until.isoformat()}")
+            return (f"上次起草于 {last.isoformat()}；每 6 小时最多重画一次，"
+                    f"下次在 {until.isoformat()} 之后")
         return None
 
     # -- the tick ---------------------------------------------------------
@@ -439,6 +470,9 @@ class MissionDebateMapLaneCoordinator:
         blocked: tuple[str, str, str] | None = None
         retired: set[str] | None = None
         self._urgent: dict[str, str | None] = {}
+        # 2026-10-08: every held subject and why, not only the first one.  The
+        # tick said "GOOGL: backing off" while META's own reason was nowhere.
+        self.held_subjects: dict[str, str] = {}
         subjects = self._subjects(mission)
         # B1-5: one grouped scan says which subjects could have moved, before
         # a single fingerprint is built.  Six subjects each read and hashed
@@ -506,16 +540,30 @@ class MissionDebateMapLaneCoordinator:
             if decision is not None:
                 blocked = blocked or (subject_ref, fingerprint,
                                       decision.classification.reason)
+                self.held_subjects[label] = str(decision.classification.reason)
                 continue
             paced = self._paced(str(subject_ref), urgent_key)
             if paced is not None:
                 blocked = blocked or (subject_ref, fingerprint, paced)
+                self.held_subjects[label] = paced
                 continue
             self._urgent[str(subject_ref)] = urgent_key
             return subject_ref, fingerprint, None
         if blocked is not None:
             return blocked
         return None, None, None
+
+    def _held_keys(self, mission: Any) -> dict[str, str]:
+        """``held:<TICKER>`` -> why, one short string per held subject."""
+
+        tickers = {str(item.get("company_ref")): str(item.get("ticker") or "")
+                   for item in (mission.get("universe") or [])
+                   if isinstance(item, dict)}
+        keys: dict[str, str] = {}
+        for subject_ref, reason in (getattr(self, "held_subjects", None) or {}).items():
+            label = tickers.get(subject_ref) or subject_ref.rsplit(":", 1)[-1]
+            keys[f"held:{label}"[:60]] = str(reason)[:200]
+        return keys
 
     def dispatch_once(self) -> dict[str, Any]:
         settled = self._settle_open()
@@ -529,6 +577,7 @@ class MissionDebateMapLaneCoordinator:
                     "reason": f"{type(exc).__name__}: {exc}"}
         recomputed = ({} if not self.recomputed
                       else {"recomputed": list(self.recomputed)})
+        recomputed.update(self._held_keys(mission))
         if subject_ref is None:
             return {"status": "idle", "settled": settled, **recomputed,
                     "reason": "every subject's map was drawn from the evidence "
@@ -619,6 +668,7 @@ def argv_fragment(context: Any) -> list[str]:
 # is not this slice's file; it is named in the report's integration list.
 LANE = register_lane(LaneSpec(
     operation="dispatch_debate_map",
+    failure_ledger="mission_debate_map",
     # 135: after the reading lanes that produce the Claims it argues over and
     # before nothing in particular. Wave 2's other agents took the neighbouring
     # tens; this one is deliberately not adjacent to the Claim index, because

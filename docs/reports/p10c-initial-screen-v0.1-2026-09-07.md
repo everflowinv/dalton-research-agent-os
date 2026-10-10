@@ -64,7 +64,7 @@ Claim；P10a 让每家公司进入了阶段并算出资料底座；P10b 清掉�
 授权后，下一跳就会开始按优先级为每家公司起草：
 
 ```
-cd /Users/everflow/Projects/dalton-research-agent-os
+cd $HOME/Projects/dalton-research-agent-os
 .venv/bin/python scripts/publish_extraction_authority_chain.py --live \
   --add-write-scope deliverable
 ```

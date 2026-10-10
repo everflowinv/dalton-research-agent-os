@@ -446,6 +446,7 @@ def argv_fragment(context: Any) -> list[str]:
 
 LANE = register_lane(LaneSpec(
     operation="dispatch_research_task",
+    failure_ledger="research_task",
     order=150,
     driver_key="research_task",
     # The pool is not declared here: C2's LANE_POOLS already names this lane's

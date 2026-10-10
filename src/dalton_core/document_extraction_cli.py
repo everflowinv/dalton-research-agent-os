@@ -25,7 +25,7 @@ import os
 import sys
 from datetime import datetime, timezone
 from pathlib import Path
-from collections.abc import Mapping
+from collections.abc import Mapping, Sequence
 from typing import Any
 
 from .alphaengine_acquisition_launcher import AlphaEngineAcquisitionLauncher
@@ -406,6 +406,9 @@ def run_extraction(
         # Windows a previous run already proved dead, stepped over without
         # re-rendering the document.  Live this was 24% of all window reads.
         "windows_skipped_by_exclusion": 0,
+        # 2026-10-09: orphaned windows (a WorkOrder with no formal result)
+        # this run re-drove through the Scheduler's own retry.
+        "redriven_windows": [],
         # C2-3: the reviews a secondary pass finished with this tick, and why.
         # One entry per review, written to the ledger as well, so the same
         # document is not re-derived on the next tick to learn the same
@@ -496,6 +499,17 @@ def run_extraction(
         pointers = host.store.connection.execute(
             "SELECT mission_version_id FROM coverage_mission_pointer ORDER BY mission_ref"
         ).fetchall()
+        # Cached originals become independent reviews even on an empty queue
+        # or a support-only pass. Registration itself makes no paid call.
+        from .document_extraction_launcher import register_held_annual_attachments
+        from .document_extraction import acquisition_spool
+        attachments = register_held_annual_attachments(
+            host.coverage_mission, state_dir=state, requested_by=requested_by,
+            spool_factory=lambda: acquisition_spool(host, host.web_fetch_launcher, 'source:sec-edgar'))
+        if attachments['registered']:
+            summary['annual_report_attachments'] = attachments['registered']
+        if attachments['refused']:
+            summary['annual_report_attachment_refusals'] = attachments['refused']
         # 2026-09-27: a support-only run reads no window, runs no secondary
         # pass and admits nothing; it goes straight to the support checks.
         # The P13i subject re-check is maintenance of the same kind -- it reads
@@ -653,6 +667,11 @@ def run_extraction(
                     continue
                 summary["reviews_scanned"] += 1
                 review_hash = content_hash(review)
+                if actor.startswith("automation:"):
+                    earlier = _carry_earlier_conclusion(host, review, review_hash, actor)
+                    if earlier is not None:
+                        summary.setdefault("carried_conclusions", []).append(earlier)
+                        continue
                 excluded = windows.exclusions(
                     review["review_id"], review_hash,
                     model_config_hash=window_config_hash)
@@ -723,7 +742,19 @@ def run_extraction(
                         break
                     context = view["context"]
                     offsets.append(offset)
-                    if view["status"] == "not_generated":
+                    # 2026-10-09: a window whose WorkOrder exists but holds no
+                    # formal result is an orphan -- the child that enqueued it
+                    # died mid-call (live: ACN's FY26 Q4 transcript, window
+                    # 36000, enqueued 10-08 10:30, lease expired 13:51, attempt
+                    # 2 ready and nobody to run it).  Only ``generate`` ever ran
+                    # a WorkOrder, and it was only called for windows with none,
+                    # so the review could never complete and sat in the queue
+                    # while every tick reported "nothing to draft".  The
+                    # Scheduler already holds the retry; run it through the
+                    # same path, under the same caps.  A live lease answers
+                    # "waiting" and nothing is spent.
+                    redrive = view["status"] == "pending"
+                    if view["status"] == "not_generated" or redrive:
                         if not view["generation_enabled"]:
                             stop_reason = f"gated:{view['gate_reason']}"
                             complete = False
@@ -746,6 +777,14 @@ def run_extraction(
                             expected_context_hash=context["content_hash"], actor_ref=actor,
                         )
                         drafted += 1
+                        if redrive:
+                            summary["redriven_windows"].append({
+                                "review_id": review["review_id"],
+                                "document_ref": review["document_ref"],
+                                "offset": offset,
+                                "work_order_ref": view.get("work_order_ref"),
+                                "status": result.get("status"),
+                            })
                         if review["review_id"] in directed_reviews:
                             # G1: a window the plan asked for, paid for. The
                             # metric to watch after deploy.
@@ -1010,6 +1049,7 @@ def run_extraction(
             "windows_succeeded": succeeded,
             "windows_isolated": len(summary["isolated_windows"]),
             "windows_skipped_by_exclusion": summary["windows_skipped_by_exclusion"],
+            "windows_redriven": len(summary["redriven_windows"]),
             "reviews_complete": summary["reviews_complete"],
             # True when the run produced real work despite ending on a stop
             # reason that used to mark the whole thing a failure.
@@ -1081,10 +1121,13 @@ def _reevaluate_unattributed(
 
     from .document_extraction import SUBJECT_RULE_REF
 
+    from .store import content_hash
+    rule_ref = service.subject_rule_ref(mission)
+
     moment = (now or datetime.now(timezone.utc)).astimezone(timezone.utc)
     day = moment.replace(hour=0, minute=0, second=0, microsecond=0).isoformat()
-    pass_ref = "subject_reevaluation:" + SUBJECT_RULE_REF
-    result: dict[str, Any] = {"mission_version_ref": mission["id"], "rule_ref": SUBJECT_RULE_REF,
+    pass_ref = "subject_reevaluation:" + rule_ref
+    result: dict[str, Any] = {"mission_version_ref": mission["id"], "rule_ref": rule_ref,
                               "checked": 0, "reopened": [], "still_unattributed": 0,
                               "unreadable": 0, "remaining": 0, "stop_reason": None}
     try:
@@ -1098,11 +1141,11 @@ def _reevaluate_unattributed(
             "WHERE dv.mission_ref=v.mission_ref AND dv.version_number>v.version_number "
             "AND d.document_ref=r.document_ref) "
             "ORDER BY r.updated_at DESC, r.review_id",
-            (mission["mission_ref"], f"[{SUBJECT_RULE_REF}]"),
+            (mission["mission_ref"], f"[{rule_ref}]"),
         ).fetchall()
         done = windows.exhausted_reviews(pass_ref)
         reopened_today = host.coverage_mission.subject_reevaluation_reopens_since(
-            SUBJECT_RULE_REF, day)
+            rule_ref, day)
     except Exception as exc:  # noqa: BLE001 - a re-check is never a gate on the queue
         result["stop_reason"] = f"{type(exc).__name__}: {exc}"[:300]
         return result
@@ -1136,7 +1179,7 @@ def _reevaluate_unattributed(
             try:
                 reopened = host.coverage_mission.reopen_unattributed_document_review(
                     review["review_id"], expected_review_hash=review_hash, actor_ref=actor,
-                    rule_ref=SUBJECT_RULE_REF, matched=list(subject["matched"]))
+                    rule_ref=rule_ref, matched=list(subject["matched"]))
             except Exception as exc:  # noqa: BLE001 - one refusal must not stop the rest
                 result.setdefault("refused", []).append(
                     {"review_id": review["review_id"], "reason": f"{type(exc).__name__}: {exc}"[:300]})
@@ -1517,6 +1560,7 @@ def _secondary_sweep(
     if limit <= 0:
         return None
     spent = 0
+    consecutive_certain_failures = 0
     pass_ref = str(entries)
     known: dict[tuple[str, str], dict[str, Any]] = {}
     if ledger is not None:
@@ -1626,6 +1670,9 @@ def _secondary_sweep(
                          "offset": offset, "status": status,
                          "replayed": bool(result.get("replayed"))}
                 entry.update({name: len(result.get(key, [])) for name, key in counts.items()})
+                for field in ("error_code", "work_order_ref", "formal_result_ref", "formal_result_hash"):
+                    if result.get(field):
+                        entry[field] = result[field]
                 # P13y: a pass that lost its learned requirements still reads,
                 # on the universal floor alone, and used to look identical to a
                 # company nobody had read yet. The summary is where the evidence
@@ -1647,12 +1694,34 @@ def _secondary_sweep(
                     windows_replayed += 1
                 produced += len(result.get(total[1], []) or ())
                 if status in {"failed", "no_result"} and not result.get("replayed"):
-                    done()
-                    return {
-                        **entry, "pass": entries,
-                        "error_code": result.get("error_code"),
-                        "work_order_ref": result.get("work_order_ref"),
-                    }
+                    budget = result.get("model_budget") or {}
+                    verdict = classify_window_failure(
+                        error_code=result.get("error_code"),
+                        budget_status=budget.get("status"),
+                    )
+                    # A terminal exact formal result plus known fee is required.
+                    # Budget refusal and unknown sends still stop this pass.
+                    if (result.get("formal_terminal") is not True
+                            or not verdict["cost_certain"]
+                            or (budget.get("status") == "not_reserved"
+                                and result.get("not_sent_proved") is not True)
+                            or budget.get("status") == "rejected"
+                            or result.get("error_code") == "DAY_BUDGET_EXCEEDED"):
+                        done()
+                        return {**entry, "pass": entries, **verdict}
+                    consecutive_certain_failures += 1
+                    summary.setdefault("isolated_windows", []).append({
+                        **entry, "pass": entries, **verdict,
+                    })
+                    if consecutive_certain_failures >= CONSECUTIVE_CERTAIN_FAILURE_LIMIT:
+                        done()
+                        return {**entry, "pass": entries, **verdict,
+                                "reason": "consecutive settled secondary failures reached the existing limit"}
+                    # The existing formal result prevents another model call for
+                    # this window. Do not use a prose-window exclusion here: it
+                    # would wrongly exclude other research passes over the bytes.
+                elif status not in {"failed", "no_result"}:
+                    consecutive_certain_failures = 0
                 if status == "not_attributed":
                     # Attribution is decided over the whole document, not the
                     # window, so every later window would answer identically.
@@ -1681,6 +1750,120 @@ def _secondary_sweep(
                 )
     done()
     return None
+
+
+#: 2026-09-29: why a staged candidate waits for a person, by the wording of
+#: its hold.  The rationale used to say "cited span does not name the company,
+#: or the independent support check did not pass" for every source, although
+#: the support check covered only notes and AlphaEngine -- on a web page or a
+#: Guidepoint interview the second half was never true.
+_HOLD_KINDS = (
+    ("independent support check", "the independent support check did not pass"),
+    ("cited span never names", "the cited span does not name the company"),
+    ("temporally impossible", "temporally impossible at the document's date"),
+    ("statistics compilation", "the page is a statistics compilation"),
+)
+
+
+def staged_rationale(source_ref: str, carried: Sequence[Mapping[str, Any]],
+                     held: Sequence[Mapping[str, Any]], rejected: Sequence[Mapping[str, Any]],
+                     *, extra: str | None = None) -> str:
+    """The resolution rationale of an ``extraction_staged`` review, true for its source.
+
+    Held candidates are counted by what actually held them; the support check
+    is named only for a source it covers, and a source it does not cover says
+    so rather than implying a check that never ran.
+    """
+
+    from .claim_support_verification import VERIFIED_SOURCE_REFS
+
+    counts: dict[str, int] = {}
+    for outcome in held:
+        reason = str(outcome.get("reason") or "")
+        label = next((text for needle, text in _HOLD_KINDS if needle in reason),
+                     "another admission rule")
+        counts[label] = counts.get(label, 0) + 1
+    why = "; ".join(f"{count}: {label}" for label, count in counts.items())
+    covered = source_ref in VERIFIED_SOURCE_REFS
+    check = ("each admitted statement passed the independent support check" if covered
+             else f"{source_ref} is not covered by the independent support check")
+    text = (f"ADR-0005 policy admission: {len(carried)} qualitative claim(s) admitted "
+            f"({check}), {len(held)} held for human review"
+            + (f" ({why})" if why else "") + f", {len(rejected)} suggestion(s) refused")
+    return text + (f"; {extra}" if extra else "")
+
+
+def _record_outcome(host: ExtractionHost, review: Mapping[str, Any], actor: str,
+                    outcomes: Sequence[Mapping[str, Any]], summary: dict[str, Any]) -> None:
+    """``DocumentAdmissionOutcomes.record`` for a review that reached a conclusion."""
+
+    from .document_admission_scope import DocumentAdmissionOutcomes
+
+    carried = [o for o in outcomes if o["status"] in ("admitted", "duplicate")]
+    held = [o for o in outcomes if o["status"] == "held"]
+    anchor = next((o["candidate_claim_ref"] for o in (*carried, *held)
+                   if o.get("candidate_claim_ref")), None)
+    if anchor is None:
+        return
+    try:
+        DocumentAdmissionOutcomes(host.store).record(
+            review=review, candidate_claim_ref=anchor,
+            claim_version_refs=[o.get("claim_version_ref") for o in carried],
+            admitted=len(carried), held=len(held), actor_ref=actor)
+    except Exception as exc:  # noqa: BLE001 - the close below still runs
+        summary.setdefault("admission_outcome_failures", []).append(
+            {"review_id": review["review_id"], "reason": f"{type(exc).__name__}: {exc}"[:300]})
+
+
+def _carry_earlier_conclusion(host: ExtractionHost, review: Mapping[str, Any], review_hash: str,
+                              actor: str) -> dict[str, Any] | None:
+    """Close an open review whose document an earlier review already read and admitted.
+
+    2026-09-29: the reading queue's side of the DXC re-read.  A review opened
+    under a later version before the earlier read's conclusion was written
+    (the carry ran first) is closed on that conclusion here, before any
+    window is drafted or paid for.  None when there is no earlier conclusion.
+    """
+
+    from .document_admission_scope import admission_outcome, carried_conclusion_rationale
+
+    prior = admission_outcome(host.store.connection, document_ref=review["document_ref"],
+                              company_ref=review["company_ref"], exclude_review_id=review["review_id"])
+    if prior is None:
+        return None
+    entry = {"review_id": review["review_id"], "document_ref": review["document_ref"],
+             "from_review_id": prior["review_id"],
+             "from_version_ref": prior["mission_version_ref"]}
+    try:
+        resolution = host.coverage_mission.resolve_document_review(
+            review["review_id"], resolution="extraction_staged", actor_ref=actor,
+            candidate_claim_version_ref=prior["candidate_claim_ref"],
+            rationale=carried_conclusion_rationale(prior), expected_review_hash=review_hash)
+        entry["status"] = resolution["state"]
+    except Exception as exc:  # noqa: BLE001 - reported; the review is simply not read now
+        entry["status"] = f"unresolved: {type(exc).__name__}: {exc}"[:300]
+    return entry
+
+
+def _scope_note(outcomes: Sequence[Mapping[str, Any]], scope: Mapping[str, Any] | None) -> str | None:
+    """What the document's admission scope kept out of the Ledger, for the rationale."""
+
+    from .document_admission_scope import RULE_REF
+
+    ledger = sum(1 for o in outcomes if o["status"] == "duplicate" and o.get("scope"))
+    within = sum(1 for o in outcomes if o["status"] == "scope_duplicate")
+    truncated = sum(1 for o in outcomes if o["status"] == "truncated")
+    if not (ledger or within or truncated):
+        return None
+    cap = (scope or {}).get("cap")
+    parts = []
+    if ledger:
+        parts.append(f"{ledger} already in the Ledger from this document (same span or same finding)")
+    if within:
+        parts.append(f"{within} restating another statement of this document")
+    if truncated:
+        parts.append(f"{truncated} over the cap of {cap} per document, least informative first")
+    return f"not admitted under {RULE_REF}: " + "; ".join(parts)
 
 
 def _refusal_reasons(result: Mapping[str, Any]) -> list[str]:
@@ -1715,7 +1898,28 @@ def _admit_complete_reviews(host: ExtractionHost, service: DocumentExtractionSer
             "and drafted from, but have no candidate citation authority to be staged "
             "through, so no Claim was published from this read"
         )
-        for offset in [] if unstageable else offsets:
+        # 2026-09-29: what the document may still add, planned over all its
+        # windows before any is checked or committed (document_admission_scope).
+        scope: dict[str, Any] | None = None
+        if not unstageable and offsets:
+            try:
+                scope = service.review_admission_scope(
+                    review_id=review["review_id"], expected_review_hash=review_hash,
+                    offsets=offsets, actor_ref=actor)
+            except Exception as exc:
+                gated = f"{type(exc).__name__}: {exc}"
+            if scope is not None and scope.get("counts"):
+                tally = summary.setdefault("admission_scope", {
+                    "rule_ref": scope.get("rule_ref"), "cap": scope.get("cap"), "reviews": 0,
+                    "duplicates_of_ledger": 0, "duplicates_in_document": 0, "truncated": 0})
+                tally["reviews"] += 1
+                for decision in scope["decisions"].values():
+                    if decision["decision"] == "truncated":
+                        tally["truncated"] += 1
+                    elif decision["decision"] == "duplicate":
+                        ledger = str(decision.get("duplicate_of", "")).startswith("claim-version:")
+                        tally["duplicates_of_ledger" if ledger else "duplicates_in_document"] += 1
+        for offset in [] if (unstageable or gated) else offsets:
             try:
                 view = service.view(
                     review_id=review["review_id"], expected_review_hash=review_hash,
@@ -1729,6 +1933,7 @@ def _admit_complete_reviews(host: ExtractionHost, service: DocumentExtractionSer
                     break
                 result = service.admit_suggestions(
                     review_id=review["review_id"], expected_review_hash=review_hash, offset=offset, actor_ref=actor,
+                    scope=scope,
                 )
             except Exception as exc:
                 gated = f"{type(exc).__name__}: {exc}"
@@ -1767,6 +1972,11 @@ def _admit_complete_reviews(host: ExtractionHost, service: DocumentExtractionSer
         if gated is not None:
             summary["resolved_reviews"].append({"review_id": review["review_id"], "status": "held", "reason": gated})
             continue
+        # 2026-09-29: every window has gone through admission.  Write that
+        # down before the review is closed: when the close fails (DXC's
+        # d50efc..., v26 -> v27 mid-run), the carry into the next version and
+        # the reading queue carry this conclusion instead of reading again.
+        _record_outcome(host, review, actor, outcomes, summary)
         try:
             receipts = [service.read_completion_receipt(
                 review_id=review["review_id"], source_review_hash=review_hash,
@@ -1782,6 +1992,7 @@ def _admit_complete_reviews(host: ExtractionHost, service: DocumentExtractionSer
             continue
         fresh = [o for o in outcomes if o["status"] == "admitted"]
         carried = [o for o in outcomes if o["status"] in ("admitted", "duplicate")]
+        scope_note = _scope_note(outcomes, scope)
         summary["formal_authority_writes"] += 2 * len(fresh)  # one Evidence and one Claim version each
         rejected = [o for o in outcomes if o["status"] == "rejected"]
         # 2026-09-24: staged but not committed, because the cited span never
@@ -1806,14 +2017,14 @@ def _admit_complete_reviews(host: ExtractionHost, service: DocumentExtractionSer
                                                 "reason": conflicts[0]["reason"]})
             continue
         try:
-            if carried or held:
+            anchor = next((o["candidate_claim_ref"] for o in (*carried, *held)
+                           if o.get("candidate_claim_ref")), None)
+            if anchor is not None:
                 resolution = host.coverage_mission.resolve_document_review(
                     review["review_id"], resolution="extraction_staged", actor_ref=actor,
-                    candidate_claim_version_ref=(carried or held)[0]["candidate_claim_ref"],
-                    rationale=(f"ADR-0005 policy admission: {len(carried)} qualitative claim(s) admitted, "
-                               f"{len(held)} held for human review (cited span does not name the "
-                               f"company, or the independent support check did not pass), "
-                               f"{len(rejected)} suggestion(s) refused"),
+                    candidate_claim_version_ref=anchor,
+                    rationale=staged_rationale(review["source_ref"], carried, held, rejected,
+                                               extra=scope_note),
                     expected_review_hash=review_hash,
                 )
             elif unstageable is not None:
@@ -1827,11 +2038,17 @@ def _admit_complete_reviews(host: ExtractionHost, service: DocumentExtractionSer
                 resolution = host.coverage_mission.resolve_document_review(
                     review["review_id"], resolution="dismissed", actor_ref=actor,
                     rationale=(f"ADR-0005: mission automation found no admissible qualitative statement in "
-                               f"{len(offsets)} window(s); {len(rejected)} suggestion(s) refused by policy"),
+                               f"{len(offsets)} window(s); {len(rejected)} suggestion(s) refused by policy"
+                               + (f"; {scope_note}" if scope_note else "")),
                     expected_review_hash=review_hash,
                 )
             entry = {"review_id": review["review_id"], "status": resolution["state"],
                      "admitted": len(carried), "held": len(held), "rejected": len(rejected)}
+            dropped = [o for o in outcomes if o["status"] in ("truncated", "scope_duplicate")]
+            if dropped:
+                entry["out_of_scope"] = {
+                    "truncated": sum(1 for o in dropped if o["status"] == "truncated"),
+                    "duplicates_in_document": sum(1 for o in dropped if o["status"] == "scope_duplicate")}
             if unstageable is not None:
                 entry["reason"] = unstageable
             summary["resolved_reviews"].append(entry)

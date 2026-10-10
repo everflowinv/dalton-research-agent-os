@@ -22,7 +22,7 @@ VERDICT={'verdict':'pass','faithful':True,'no_new_facts':True,'meaning_preserved
 class PreparationTests(unittest.TestCase):
     def setUp(self):
         self.temp=tempfile.TemporaryDirectory();self.addCleanup(self.temp.cleanup)
-        self.calls=[];self.request_ids=[];self.excluded=[]
+        self.calls=[];self.request_ids=[];self.excluded=[];self.prompts=[]
         self.args=dict(mission={},draft_config={'name':'draft'},verifier_config={'name':'verify'},
           checker_config={'name':'checker'},brain_config={'name':'brain'},scheduler_db=Path('unused'),
           work_dir=Path(self.temp.name),max_cost=.2,attempts=3)
@@ -34,6 +34,7 @@ class PreparationTests(unittest.TestCase):
             def call(self,*,purpose,**kw):
                 owner.calls.append(purpose)
                 owner.request_ids.append(kw.get('request_id'))
+                owner.prompts.append(kw.get('prompt'))
                 response=owner.responses[purpose]
                 if isinstance(response,list):response=response.pop(0)
                 if isinstance(response,Exception):raise response
@@ -49,15 +50,87 @@ class PreparationTests(unittest.TestCase):
 
     def run_one(self):return prep.run_chunk((0,0,SOURCE),**self.args)[2]
 
+    def test_changed_sections_reuse_cache_and_keep_full_merged_fact_context(self):
+        root=Path(self.temp.name)
+        paths={}
+        for name in ('draft','verify','checker','brain'):
+            paths[name]=root/(name+'.json');paths[name].write_text(json.dumps({'name':name}))
+        args=SimpleNamespace(work_dir=root/'work',output_directory=root/'out',scheduler_db=root/'s',
+            model_config=paths['draft'],verifier_config=paths['verify'],checker_config=paths['checker'],
+            brain_config=paths['brain'],workers=1,chunk_chars=45000,max_cost_per_call=.2,attempts=2,only=None)
+        product=copy.deepcopy(SOURCE);product['subject_ref']='company:test'
+        product['sections'].append({'title':'Cost','body':'Cost was 456 USD.','gaps':[]})
+        chinese=copy.deepcopy(CHINESE);chinese['sections'].append({'index':1,'title':'成本','body':'成本为 456 美元。','gaps':[]})
+        revision=copy.deepcopy(REVISION);revision['sections']=copy.deepcopy(chinese['sections'])
+        self.responses.update(research_localization=chinese,research_language_revision=revision)
+        self.assertEqual(prep.build(args,{'mission':{},'products':[product]}),0)
+        self.assertEqual(len(self.calls),4)
+        updated=copy.deepcopy(product);updated['version_ref']='screen:2';updated['sections'][1]['body']='Cost was 457 USD.'
+        changed={'sections':[{'index':0,'title':'成本','body':'成本为 457 美元。','gaps':[]}]}
+        self.responses.update(research_localization=changed,
+            research_language_check={'overall':'可读。','suggestions':[]},
+            research_language_revision={'decisions':[],'sections':changed['sections']})
+        self.assertEqual(prep.build(args,{'mission':{},'products':[updated]}),0)
+        self.assertEqual(len(self.calls),9)
+        self.assertNotIn('Revenue was 123 USD.',self.prompts[4])
+        self.assertNotIn('收入为 123',self.prompts[5])
+        self.assertIn('Revenue was 123 USD.',self.prompts[-1])
+        self.assertIn('成本为 457',self.prompts[-1])
+        self.assertIn('收入为 123',self.prompts[-1])
+        from dalton_core.research_publication_limits import observability
+        calls=[row['count'] for row in observability(args.work_dir/'publication-limits.sqlite3')['rows'] if row['kind']=='call']
+        self.assertEqual(sum(calls),9)
+
+    def test_typed_surface_changed_sections_reuse_exact_cache_and_bind_whole_source_budget(self):
+        root=Path(self.temp.name)
+        paths={}
+        for name in ('draft','verify','checker','brain'):
+            paths[name]=root/(name+'.json');paths[name].write_text(json.dumps({'name':name}))
+        args=SimpleNamespace(work_dir=root/'work',output_directory=root/'out',scheduler_db=root/'s',
+            model_config=paths['draft'],verifier_config=paths['verify'],checker_config=paths['checker'],
+            brain_config=paths['brain'],workers=1,chunk_chars=45000,max_cost_per_call=.2,attempts=2,only=None)
+        from dalton_core.final_surface_products import _product, _sections, _hash
+        from dalton_core.research_source_projection import publication_source_hash
+        product=_product('surface_model_notes','company:test','model:1','a'*64,
+            _sections('Revenue','Revenue was 123 USD.')+_sections('Cost','Cost was 456 USD.'))
+        chinese=copy.deepcopy(CHINESE);chinese['sections'].append({'index':1,'title':'成本','body':'成本为 456 美元。','gaps':[]})
+        revision=copy.deepcopy(REVISION);revision['sections']=copy.deepcopy(chinese['sections'])
+        self.responses.update(research_localization=chinese,research_language_revision=revision)
+        self.assertEqual(prep.build(args,{'mission':{},'products':[product]}),0)
+        self.assertEqual(len(self.calls),4)
+        updated=copy.deepcopy(product);updated['version_ref']='screen:2';updated['sections'][1]['body']='Cost was 457 USD.'
+        updated['content_hash']=_hash({k:v for k,v in updated.items() if k!='content_hash'})
+        changed={'sections':[{'index':0,'title':'成本','body':'成本为 457 美元。','gaps':[]}]}
+        self.responses.update(research_localization=changed,
+            research_language_check={'overall':'可读。','suggestions':[]},
+            research_language_revision={'decisions':[],'sections':changed['sections']})
+        self.assertEqual(prep.build(args,{'mission':{},'products':[updated]}),0)
+        self.assertEqual(len(self.calls),9)
+        self.assertNotIn('Revenue was 123 USD.',self.prompts[4])
+        self.assertNotIn('收入为 123',self.prompts[5])
+        self.assertIn('Revenue was 123 USD.',self.prompts[-1])
+        self.assertIn('成本为 457',self.prompts[-1])
+        self.assertIn('收入为 123',self.prompts[-1])
+        from dalton_core.research_publication_limits import observability
+        calls=[row['count'] for row in observability(args.work_dir/'publication-limits.sqlite3')['rows'] if row['kind']=='call']
+        self.assertEqual(sum(calls),9)
+        from dalton_core.research_publication_limits import PublicationLimits
+        import sqlite3
+        db=sqlite3.connect(args.work_dir/'publication-limits.sqlite3')
+        keys={row[0] for row in db.execute('SELECT DISTINCT source_hash FROM publication_events')}
+        db.close()
+        self.assertEqual(keys,{publication_source_hash(product),publication_source_hash(updated)})
+        self.assertTrue(all('source_product' not in prompt and 'projection_slice' not in prompt for prompt in self.prompts))
+
     def test_repair_prompt_keeps_display_facts_without_repeating_authority_payloads(self):
         source = copy.deepcopy(SOURCE)
         source['sources'] = [{'raw_document': 'large-raw-authority' * 10000}]
         prompt = prep._repair_prompt(product=source, draft_localized=CHINESE,
             review={'language_review': STYLE, 'brain_revision': REVISION},
-            failure={'reason': 'preserve the currency'}, attempt=1)
+            failure={'reason': 'preserve the currency','verifier':{'findings':[{'section_index':0,'source_quote':'Revenue was 123 USD.','candidate_quote':'收入为 123 美元。','code':'changed_fact','reason':'preserve the currency'}]}}, attempt=1)
         self.assertNotIn('large-raw-authority', prompt)
         self.assertIn('Revenue was 123 USD.', prompt)
-        self.assertIn(prep.source_content_hash(source), prompt)
+        self.assertIn('待修章节', prompt)
         self.assertIn('preserve the currency', prompt)
 
     def test_initial_brain_can_reduce_output_only_after_a_proved_route_rejection(self):
@@ -177,23 +250,23 @@ class PreparationTests(unittest.TestCase):
         with self.assertRaises(CockpitModelError):self.run_one()
         self.assertEqual(self.calls,['research_localization'])
 
-    def test_three_invalid_drafts_get_one_cached_brain_repair_before_review(self):
+    def test_old_three_attempt_config_is_clamped_to_two_before_brain_repair(self):
         bad={'sections':[{'index':0,'title':'收入','body':'收入为 124 USD。','gaps':[]}]}
         self.responses['research_localization']=[bad,bad,bad]
         self.responses[prep.BRAIN_PURPOSE]=[CHINESE,REVISION]
         result=self.run_one()
-        self.assertEqual(self.calls.count('research_localization'),3)
+        self.assertEqual(self.calls.count('research_localization'),2)
         self.assertEqual(self.calls.count(prep.BRAIN_PURPOSE),2)
         self.assertEqual(self.calls.count(prep.CHECKER_PURPOSE),1)
         self.assertTrue(any(x.startswith('zh-draft-brain-repair-') for x in self.request_ids))
-        self.assertEqual(len(result['draft_failures']),3)
+        self.assertEqual(len(result['draft_failures']),2)
         self.assertEqual(result['draft']['route_decision_ref'],prep.BRAIN_PURPOSE)
         self.assertEqual(self.excluded,[ [prep.BRAIN_PURPOSE,prep.BRAIN_PURPOSE] ])
         calls=len(self.calls);self.assertEqual(self.run_one(),result);self.assertEqual(len(self.calls),calls)
 
     def test_final_transport_failure_never_uses_brain_draft_repair(self):
         bad={'sections':[{'index':0,'title':'收入','body':'收入为 124 USD。','gaps':[]}]}
-        self.responses['research_localization']=[bad,bad,CockpitModelError('broker busy')]
+        self.responses['research_localization']=[bad,CockpitModelError('broker busy')]
         with self.assertRaisesRegex(CockpitModelError,'broker busy'):self.run_one()
         self.assertEqual(self.calls.count(prep.BRAIN_PURPOSE),0)
 
@@ -274,11 +347,11 @@ class PreparationTests(unittest.TestCase):
     def test_style_config_or_source_change_does_not_reuse_style(self):
         self.run_one()
         self.args['checker_config']={'name':'checker-v2'}
-        self.run_one()
+        with self.assertRaisesRegex(prep.PublicationParked,'24h_limit'): self.run_one()
         changed=copy.deepcopy(SOURCE);changed['version_ref']='screen:2'
         prep.run_chunk((0,0,changed),**self.args)
         self.assertEqual(self.calls.count(prep.CHECKER_PURPOSE),3)
-        self.assertEqual(self.calls.count(prep.BRAIN_PURPOSE),3)
+        self.assertEqual(self.calls.count(prep.BRAIN_PURPOSE),2)
         self.assertEqual(self.calls.count('research_localization'),3)
 
     def test_explicit_legacy_config_migrates_only_completed_style(self):
@@ -310,7 +383,7 @@ class PreparationTests(unittest.TestCase):
         repaired=copy.deepcopy(REVISION)
         repaired['sections'][0]['body']='收入是 123 USD。'
         failed={**VERDICT,'verdict':'fail','faithful':False,
-                'findings':['修订把 USD 改成美元，未保留来源中的单位写法']}
+                'findings':[{'section_index':0,'source_quote':'Revenue was 123 USD.','candidate_quote':'收入为 123 美元。','code':'changed_fact','reason':'单位表达不一致'}]}
         self.responses[prep.BRAIN_PURPOSE]=[REVISION,repaired]
         self.responses['research_localization_verifier']=[failed,VERDICT]
         with self.assertRaises(ValueError):self.run_one()
@@ -340,32 +413,22 @@ class PreparationTests(unittest.TestCase):
         self.args['repair_reviewed']=True
         with self.assertRaisesRegex(ValueError,'number tokens'):self.run_one()
         self.assertEqual(self.calls.count(prep.CHECKER_PURPOSE),1)
-        self.assertEqual(self.calls.count(prep.BRAIN_PURPOSE),3)
+        self.assertEqual(self.calls.count(prep.BRAIN_PURPOSE),2)
         self.assertEqual(self.calls.count('research_localization_verifier'),0)
         self.assertFalse(list(Path(self.temp.name).glob('chunks/*.json')))
 
-    def test_explicit_third_repair_reuses_failed_calls_and_original_checker(self):
-        revisions = [copy.deepcopy(REVISION) for _ in range(4)]
-        for index, revision in enumerate(revisions):
-            revision['sections'][0]['body'] = f'收入为 123 美元。说明{chr(65 + index)}。'
-        failed = {**VERDICT, 'verdict': 'fail', 'faithful': False,
-                  'findings': ['删除原文没有的额外比较判断。']}
-        self.responses[prep.BRAIN_PURPOSE] = revisions
-        self.responses['research_localization_verifier'] = [failed, failed, failed, VERDICT]
-        self.args['repair_reviewed'] = True
-        with self.assertRaisesRegex(ValueError, 'verifier'):
-            self.run_one()
-        self.assertEqual(self.calls.count(prep.BRAIN_PURPOSE), 3)
-        self.args['extra_brain_repair'] = True
-        result = self.run_one()
-        self.assertEqual(self.calls.count(prep.BRAIN_PURPOSE), 4)
-        self.assertEqual(self.calls.count(prep.CHECKER_PURPOSE), 1)
-        self.assertEqual(self.calls.count('research_localization'), 1)
-        self.assertEqual(self.calls.count('research_localization_verifier'), 4)
-        self.assertEqual(len(result['repair_brain_calls']), 3)
-        before = len(self.calls)
-        self.assertEqual(self.run_one(), result)
-        self.assertEqual(len(self.calls), before)
+    def test_explicit_third_repair_switch_cannot_bypass_two_language_rounds(self):
+        failed={**VERDICT,'verdict':'fail','faithful':False,
+            'findings':[{'section_index':0,'source_quote':'Revenue was 123 USD.',
+                'candidate_quote':'收入为 123 美元。','code':'changed_fact','reason':'必须保持原意'}]}
+        self.responses[prep.BRAIN_PURPOSE]=[copy.deepcopy(REVISION),copy.deepcopy(REVISION)]
+        self.responses['research_localization_verifier']=[failed,failed]
+        self.args.update(repair_reviewed=True,extra_brain_repair=True)
+        with self.assertRaisesRegex(ValueError,'verifier'): self.run_one()
+        self.assertEqual(self.calls.count(prep.BRAIN_PURPOSE),2)
+        before=len(self.calls)
+        with self.assertRaises(ValueError): self.run_one()
+        self.assertEqual(len(self.calls),before)
 
     def test_extra_repair_requires_explicit_reviewed_repair_mode(self):
         self.args['extra_brain_repair'] = True
@@ -419,7 +482,7 @@ class PreparationTests(unittest.TestCase):
 
     def test_reviewed_repair_reuses_a_legacy_failed_semantic_call(self):
         repaired=copy.deepcopy(REVISION);repaired['sections'][0]['body']='收入是 123 USD。'
-        failed={**VERDICT,'verdict':'fail','faithful':False,'findings':['单位表达不一致']}
+        failed={**VERDICT,'verdict':'fail','faithful':False,'findings':[{'section_index':0,'source_quote':'Revenue was 123 USD.','candidate_quote':'收入为 123 美元。','code':'changed_fact','reason':'单位表达不一致'}]}
         self.responses[prep.BRAIN_PURPOSE]=[REVISION,repaired]
         self.responses['research_localization_verifier']=[failed,VERDICT]
         with self.assertRaises(ValueError):self.run_one()

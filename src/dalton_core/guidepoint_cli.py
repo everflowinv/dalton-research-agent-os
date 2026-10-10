@@ -63,7 +63,12 @@ from .observability import ObservabilityStore
 from .openclaw_connector_bridge import LoopbackStreamableHttpMcpHandle
 from .raw_spool import RawSpool
 from .runner_journal import RunnerJournal
-from .scheduler import Scheduler
+from .scheduler import LaneChildScheduler
+from .sqlite_contention import (
+    LANE_LOCK_RETRY_SECONDS,
+    is_sqlite_lock_error,
+    sqlite_lock_failure,
+)
 from .store import DaltonStore, canonical_json
 
 
@@ -107,6 +112,7 @@ def run_discovery(
     summary_dir: Path,
     catalog_db: Path | None = None,
     spool_dir: Path | None = None,
+    lock_retry_seconds: float = LANE_LOCK_RETRY_SECONDS,
 ) -> dict[str, Any]:
     """Authorize, search, and append the discovery record; return the summary."""
 
@@ -114,8 +120,9 @@ def run_discovery(
     out = secure_dir(summary_dir)
     spool_root = secure_dir(spool_dir if spool_dir is not None else state / "connector-spool")
     core, connectors, observability, journal = _open_core(state)
-    scheduler = Scheduler(
-        str(state / "scheduler.sqlite"), default_lease_seconds=30, max_lease_seconds=60
+    scheduler = LaneChildScheduler(
+        str(state / "scheduler.sqlite"), default_lease_seconds=30, max_lease_seconds=60,
+        lock_retry_seconds=lock_retry_seconds,
     )
     # One catalog file per governed capability: ``CapabilityCatalog.prepare``
     # only admits a descriptor published at the catalog's current epoch and
@@ -199,7 +206,14 @@ def run_discovery(
         }
         summary["provider_calls"] = receipt["provider_calls"]
         if receipt["outcome"] != "succeeded" or receipt["source_envelope_ref"] is None:
-            summary["failure_reason"] = f"search outcome {receipt['outcome']}"
+            # 2026-10-08: carry the provider's own words (the runner journal
+            # holds them) and their class, instead of "search outcome retryable".
+            from .provider_failure import failure_reason_text, journal_failure
+
+            detail = journal_failure(core.connection, receipt["connector_invocation_ref"])
+            summary["failure_detail"] = detail
+            summary["failure_reason"] = failure_reason_text(
+                f"search outcome {receipt['outcome']}", detail)
             return summary
         present = guidepoint_excerpts_in_authority(
             core.connection,
@@ -234,6 +248,9 @@ def run_discovery(
         summary["failure_reason"] = f"{type(exc).__name__}: {exc}"
         return summary
     except Exception as exc:  # unexpected: record the reason, then surface it
+        if is_sqlite_lock_error(exc):
+            summary.update(sqlite_lock_failure(exc))
+            return summary
         summary["failure_reason"] = f"unexpected {type(exc).__name__}: {exc}"
         raise
     finally:

@@ -40,7 +40,7 @@ import math
 import re
 import sqlite3
 import time
-from collections.abc import Mapping, Sequence
+from collections.abc import Iterable, Mapping, Sequence
 from types import MappingProxyType
 from contextlib import contextmanager
 from datetime import datetime, timedelta, timezone
@@ -713,7 +713,8 @@ def validate_mission_stage_record(value: Mapping[str, Any]) -> dict[str, Any]:
     return wire
 
 
-def validate_mission_stage_reopen(value: Mapping[str, Any]) -> dict[str, Any]:
+def validate_mission_stage_reopen(value: Mapping[str, Any], *,
+                                  policy_automation: bool = False) -> dict[str, Any]:
     """The closed shape of a reopen marker.
 
     Its ``status`` is fixed rather than a vocabulary: a row in this ledger says
@@ -734,7 +735,8 @@ def validate_mission_stage_reopen(value: Mapping[str, Any]) -> dict[str, Any]:
     if wire["status"] != STAGE_REOPENED:
         raise CoverageMissionValidationError("a stage reopen's status is always 'reopened'")
     wire["actor_ref"] = _actor(wire["actor_ref"])
-    if not wire["actor_ref"].startswith("human:"):
+    if not wire["actor_ref"].startswith("human:") and not (
+            policy_automation and wire["actor_ref"].startswith("automation:")):
         raise CoverageMissionValidationError(
             "re-opening a decided gate is a human checkpoint (ADR-0008)"
         )
@@ -853,6 +855,9 @@ def _statement_line_row(row: Any) -> dict[str, Any]:
 
     wire = dict(row)
     wire["is_breakdown"] = bool(row["is_breakdown"]) or row["dimension_axis"] is not None
+    raw_dimensions = wire.pop("dimensions_json", None)
+    if raw_dimensions is not None:
+        wire["dimensions"] = json.loads(raw_dimensions)
     return wire
 
 
@@ -908,6 +913,64 @@ def _needs(value: Any, name: str) -> list[dict[str, str]]:
     return result
 
 
+# P2-5 (2026-09-30): a per-document failure cap on the hourly retry.  ws-7d
+# fetched the same two MSFT 10-K pages every hour for twelve days (162
+# attempts each, every one ``PublicTransportResponseTooLarge``) because a
+# *retryable* failure was retried forever; legacy did the same with a
+# websets.exa.ai page.  After ``FETCH_FAILURE_CAP`` consecutive failed
+# attempts of one document, with no success in between, the document rests
+# for ``FETCH_FAILURE_COOLDOWN`` from its last failure, then gets one more
+# try.  The count is per (source, document ref), not per ledger row, because
+# every new mission version carries the same document forward under a new
+# record id.
+FETCH_FAILURE_CAP = 3
+FETCH_FAILURE_COOLDOWN = timedelta(hours=24)
+
+
+def capped_fetch_failures(
+    rows: Iterable[Mapping[str, Any]], *, as_of: datetime,
+    cap: int = FETCH_FAILURE_CAP, cooldown: timedelta = FETCH_FAILURE_COOLDOWN,
+) -> list[dict[str, Any]]:
+    """Documents resting under the failure cap, from acquisition attempts.
+
+    ``rows`` are ``coverage_mission_acquisition_attempts`` rows (``source_ref``,
+    ``document_ref``, ``host``, ``outcome``, ``created_at``) in any order.  Pure,
+    so the retry query and the owner's to-do list apply the same rule.
+    """
+
+    if not isinstance(cap, int) or cap < 1:
+        raise CoverageMissionValidationError("failure cap must be a positive integer")
+    if not isinstance(cooldown, timedelta) or cooldown <= timedelta(0):
+        raise CoverageMissionValidationError("failure cooldown must be a positive duration")
+    if not isinstance(as_of, datetime) or as_of.tzinfo is None:
+        raise CoverageMissionValidationError("as_of must be timezone-aware")
+    streaks: dict[tuple[str, str], dict[str, Any]] = {}
+    for row in sorted(rows, key=lambda item: (str(item["created_at"]),
+                                              str(item.get("attempt_ref") or ""))):
+        document_ref = row["document_ref"]
+        if not document_ref:
+            continue
+        key = (str(row["source_ref"]), str(document_ref))
+        if row["outcome"] == "acquired":
+            streaks.pop(key, None)
+            continue
+        streak = streaks.setdefault(key, {"source_ref": key[0], "document_ref": key[1],
+                                          "consecutive_failures": 0})
+        streak["consecutive_failures"] += 1
+        streak["host"] = row["host"]
+        streak["last_outcome"] = row["outcome"]
+        streak["last_failure_at"] = str(row["created_at"])
+    capped = []
+    for streak in streaks.values():
+        if streak["consecutive_failures"] < cap:
+            continue
+        until = datetime.fromisoformat(streak["last_failure_at"]) + cooldown
+        if as_of < until:
+            capped.append({**streak, "until": until.isoformat(timespec="microseconds")})
+    capped.sort(key=lambda item: (item["last_failure_at"], item["document_ref"]))
+    return capped
+
+
 def _host_list(value: Any, name: str) -> list[str]:
     """Lowercase registrable hostnames, unique, in the order given."""
 
@@ -954,6 +1017,18 @@ class CoverageMissionAuthority:
         self._migrate_plan_sufficiency()
         self._migrate_plan_json()
         self._migrate_statement_dimension_count()
+        self._migrate_statement_dimensions()
+
+    def _migrate_statement_dimensions(self) -> None:
+        """Legacy projected contexts remain unknown; new complete identities persist."""
+
+        columns = {row[1] for row in self.connection.execute(
+            "PRAGMA table_info(coverage_mission_statement_lines)").fetchall()}
+        if "dimensions_json" not in columns:
+            if self.connection.in_transaction:
+                raise RuntimeError("statement dimensions migration requires no open transaction")
+            self.connection.execute(
+                "ALTER TABLE coverage_mission_statement_lines ADD COLUMN dimensions_json TEXT")
 
     def _migrate_statement_dimension_count(self) -> None:
         """Keep legacy projected contexts unknown; preserve proof on new rows."""
@@ -1417,6 +1492,25 @@ class CoverageMissionAuthority:
             return result
 
     def mission(self, version_id: str) -> dict[str, Any]:
+        """One mission version, as the caller should see it.
+
+        2026-10-06 (vision-gap #11): while a controller lane dispatches
+        (``owner_levers.dispatch_scope``), the companies the owner paused are
+        left out of ``universe`` so the lane does not start new work for them.
+        Everywhere else -- and in this authority's own reads, which use
+        :meth:`_mission_record` -- the record is returned exactly as stored.
+        """
+
+        from .owner_levers import dispatch_view
+
+        return dispatch_view(self._mission_record(version_id))
+
+    def active_mission(self, mission_ref: str) -> dict[str, Any]:
+        from .owner_levers import dispatch_view
+
+        return dispatch_view(self._active_mission_record(mission_ref))
+
+    def _mission_record(self, version_id: str) -> dict[str, Any]:
         version_id = _text(version_id, "version_id")
         row = self.connection.execute(
             "SELECT * FROM coverage_mission_versions WHERE mission_version_id=?", (version_id,)
@@ -1440,14 +1534,14 @@ class CoverageMissionAuthority:
             raise CoverageMissionConflict("coverage mission authority drifted")
         return wire
 
-    def active_mission(self, mission_ref: str) -> dict[str, Any]:
+    def _active_mission_record(self, mission_ref: str) -> dict[str, Any]:
         mission_ref = _text(mission_ref, "mission_ref")
         pointer = self.connection.execute(
             "SELECT * FROM coverage_mission_pointer WHERE mission_ref=?", (mission_ref,)
         ).fetchone()
         if pointer is None:
             raise CoverageMissionNotFound("coverage mission pointer was not found")
-        wire = self.mission(pointer["mission_version_id"])
+        wire = self._mission_record(pointer["mission_version_id"])
         if wire["version"] != pointer["version_number"] or wire["content_hash"] != pointer["content_hash"]:
             raise CoverageMissionConflict("coverage mission pointer drifted")
         return wire
@@ -1477,7 +1571,7 @@ class CoverageMissionAuthority:
             for row in self.connection.execute(
                 "SELECT mission_version_id FROM coverage_mission_pointer ORDER BY mission_ref"
             ).fetchall():
-                mission = self.mission(row["mission_version_id"])
+                mission = self._mission_record(row["mission_version_id"])
                 if company_ref in {member["company_ref"] for member in mission["universe"]}:
                     candidates.append(mission)
             if len(candidates) != 1:
@@ -1486,7 +1580,7 @@ class CoverageMissionAuthority:
                 )
             mission = candidates[0]
         else:
-            mission = self.mission(_text(mission_version_ref, "mission_version_ref"))
+            mission = self._mission_record(_text(mission_version_ref, "mission_version_ref"))
             pointer = self.connection.execute(
                 "SELECT mission_version_id FROM coverage_mission_pointer WHERE mission_ref=?",
                 (mission["mission_ref"],),
@@ -1558,7 +1652,7 @@ class CoverageMissionAuthority:
             for row in self.connection.execute(
                 "SELECT mission_version_id FROM coverage_mission_pointer ORDER BY mission_ref"
             ).fetchall():
-                mission = self.mission(row["mission_version_id"])
+                mission = self._mission_record(row["mission_version_id"])
                 if company_ref in {member["company_ref"] for member in mission["universe"]}:
                     candidates.append(mission)
             if len(candidates) != 1:
@@ -1567,7 +1661,7 @@ class CoverageMissionAuthority:
                 )
             mission = candidates[0]
         else:
-            mission = self.mission(_text(mission_version_ref, "mission_version_ref"))
+            mission = self._mission_record(_text(mission_version_ref, "mission_version_ref"))
             pointer = self.connection.execute(
                 "SELECT mission_version_id FROM coverage_mission_pointer WHERE mission_ref=?",
                 (mission["mission_ref"],),
@@ -1629,7 +1723,7 @@ class CoverageMissionAuthority:
             for row in self.connection.execute(
                 "SELECT mission_version_id FROM coverage_mission_pointer ORDER BY mission_ref"
             ).fetchall():
-                mission = self.mission(row["mission_version_id"])
+                mission = self._mission_record(row["mission_version_id"])
                 if company_ref in {member["company_ref"] for member in mission["universe"]}:
                     candidates.append(mission)
             if len(candidates) != 1:
@@ -1638,7 +1732,7 @@ class CoverageMissionAuthority:
                 )
             mission = candidates[0]
         else:
-            mission = self.mission(_text(mission_version_ref, "mission_version_ref"))
+            mission = self._mission_record(_text(mission_version_ref, "mission_version_ref"))
             pointer = self.connection.execute(
                 "SELECT mission_version_id FROM coverage_mission_pointer WHERE mission_ref=?",
                 (mission["mission_ref"],),
@@ -2310,6 +2404,7 @@ class CoverageMissionAuthority:
         included_discovery_ref: str | None = None,
         excluded_discovery_refs: Sequence[str] = (),
         included_hosts: Sequence[str] | None = None,
+        excluded_document_refs: Sequence[str] = (),
     ) -> dict[str, Any] | None:
         """Next ``discovered`` document across active missions, or None.
 
@@ -2354,6 +2449,14 @@ class CoverageMissionAuthority:
             _text(ref, "excluded_discovery_ref") for ref in excluded_discovery_refs))
         if excluded_discoveries:
             query += " AND d.discovery_ref NOT IN (%s)" % ",".join("?"*len(excluded_discoveries)); params.extend(excluded_discoveries)
+        # ADR-0015: documents a code-owned spec does not fetch (an 8-K that is
+        # not an Item 2.02 earnings release) stay ``discovered`` and are
+        # stepped over rather than holding the queue.
+        excluded_documents = tuple(dict.fromkeys(
+            _text(ref, "excluded_document_ref") for ref in excluded_document_refs))
+        if excluded_documents:
+            query += " AND d.document_ref NOT IN (%s)" % ",".join("?" * len(excluded_documents))
+            params.extend(excluded_documents)
         if included_document_refs is not None:
             included=tuple(dict.fromkeys(_text(ref,"included_document_ref") for ref in included_document_refs))
             if not included: return None
@@ -2560,6 +2663,7 @@ class CoverageMissionAuthority:
         source_grade: str,
         figures: Sequence[Mapping[str, Any]],
         observed_by: str,
+        numeric_contract_ref: str | None = None,
     ) -> dict[str, Any]:
         """Journal figures read out of one document's window.
 
@@ -2575,6 +2679,14 @@ class CoverageMissionAuthority:
             NumericCandidateError,
             verify_numeric_candidate,
         )
+
+        from .document_numeric_unit_contracts import (
+            DIRECTED_NUMERIC_CONTRACT_REF, DIRECTED_FIGURE_VERIFIER_REF, numeric_units,
+        )
+        try:
+            numeric_units(numeric_contract_ref)
+        except ValueError as exc:
+            raise CoverageMissionValidationError(str(exc)) from exc
 
         company_ref = _text(company_ref, "company_ref")
         review_ref = _text(review_ref, "review_ref")
@@ -2603,7 +2715,8 @@ class CoverageMissionAuthority:
             )}
             try:
                 wires.append(verify_numeric_candidate(
-                    candidate, {candidate["quote_id"]: citation}))
+                    candidate, {candidate["quote_id"]: citation},
+                    numeric_contract_ref=numeric_contract_ref))
             except NumericCandidateError as exc:
                 raise CoverageMissionValidationError(
                     f"figure is not supported by the quote it cites: {exc}"
@@ -2628,6 +2741,14 @@ class CoverageMissionAuthority:
                     "SELECT 1 FROM coverage_mission_document_figures WHERE figure_id=?",
                     (figure_id,),
                 ).fetchone() is not None:
+                    if numeric_contract_ref is not None:
+                        prior_units = cur.execute(
+                            "SELECT unit,currency,scale FROM coverage_mission_document_figures WHERE figure_id=?",
+                            (figure_id,),
+                        ).fetchone()
+                        if tuple(prior_units) != (wire["unit"], wire["currency"], wire["scale"]):
+                            raise CoverageMissionValidationError(
+                                "existing figure uses different units; it cannot satisfy this directed numeric target")
                     # A withdrawn figure keeps its identity, so re-reading the
                     # same fact from the same document cannot quietly reinstate
                     # it. Reported separately: "we already have this" and "we
@@ -2652,7 +2773,9 @@ class CoverageMissionAuthority:
                     "unit": wire["unit"], "currency": wire["currency"],
                     "scale": wire["scale"], "basis": wire["basis"],
                     "source_grade": source_grade,
-                    "verified_by": DOCUMENT_FIGURE_VERIFIER_REF,
+                    "verified_by": (DIRECTED_FIGURE_VERIFIER_REF
+                                    if numeric_contract_ref == DIRECTED_NUMERIC_CONTRACT_REF
+                                    else DOCUMENT_FIGURE_VERIFIER_REF),
                     "observed_by": observed_by, "created_at": now,
                 }
                 record["content_hash"] = content_hash(record)
@@ -3011,11 +3134,16 @@ class CoverageMissionAuthority:
         included_document_refs: Sequence[str] | None = None,
         restricted_spec_refs: Sequence[str] = (),
         recovery_probe_hosts: Sequence[str] = (),
+        excluded_document_refs: Sequence[str] = (),
     ) -> dict[str, Any] | None:
         """Oldest ``acquisition_failed`` document whose last update is older
         than the retry interval, or None.  Failures (provider errors, orphaned
         children after a deploy restart) are retried once the interval passes;
-        the wait keeps the shared budget honest instead of hot-looping."""
+        the wait keeps the shared budget honest instead of hot-looping.
+
+        ``excluded_document_refs`` are documents resting under the failure
+        cap (:func:`capped_fetch_failures`); they are not offered again until
+        their cooldown ends."""
 
         if not isinstance(older_than, timedelta) or older_than <= timedelta(0):
             raise CoverageMissionValidationError("retry interval must be a positive duration")
@@ -3072,9 +3200,30 @@ class CoverageMissionAuthority:
                     "WHERE x.record_id=d.discovery_ref AND x.spec_ref=?))"
                 )
                 params.extend((excluded_mission, need["company_ref"], need["spec_ref"]))
+        resting = tuple(dict.fromkeys(_text(ref, "excluded_document_ref")
+                                      for ref in excluded_document_refs))
+        if resting:
+            query += (" AND (d.document_ref IS NULL OR d.document_ref NOT IN (%s))"
+                      % ",".join("?" * len(resting)))
+            params.extend(resting)
         query += " ORDER BY d.updated_at,d.record_id LIMIT 1"
         row = self.connection.execute(query, params).fetchone()
         return None if row is None else self._document_row(row)
+
+    def capped_failed_documents(
+        self, *, as_of: datetime, source_ref: str | None = None,
+        cap: int = FETCH_FAILURE_CAP, cooldown: timedelta = FETCH_FAILURE_COOLDOWN,
+    ) -> list[dict[str, Any]]:
+        """Documents whose retries are resting under the failure cap."""
+
+        query = ("SELECT attempt_ref,source_ref,document_ref,host,outcome,created_at "
+                 "FROM coverage_mission_acquisition_attempts")
+        params: list[Any] = []
+        if source_ref is not None:
+            query += " WHERE source_ref=?"
+            params.append(_text(source_ref, "source_ref"))
+        rows = [dict(row) for row in self.connection.execute(query, params)]
+        return capped_fetch_failures(rows, as_of=as_of, cap=cap, cooldown=cooldown)
 
     def launched_discovered_documents(
         self, *, limit: int = 20, source_ref: str | None = None
@@ -3188,6 +3337,41 @@ class CoverageMissionAuthority:
         return self._document_row(row)
 
     def settle_discovered_document(
+        self, record_id: str, *, status: str, reason: str | None = None,
+        failure_retryable: bool | None = None, transport_code: str | None = None,
+        transport_evidence_ref: str | None = None,
+        transport_evidence_hash: str | None = None,
+    ) -> dict[str, Any]:
+        result = self._settle_discovered_document_record(
+            record_id, status=status, reason=reason, failure_retryable=failure_retryable,
+            transport_code=transport_code, transport_evidence_ref=transport_evidence_ref,
+            transport_evidence_hash=transport_evidence_hash)
+        # Acquisition is committed first. Replays can safely retry context refresh;
+        # a context refusal never converts acquired original bytes into a failure.
+        path = getattr(self.store, "path", ":memory:")
+        if (result["status"] == "acquired" and result["source_ref"] == "source:sec-edgar"
+                and str(result["document_ref"]).startswith("sec:filing:")
+                and str(path) != ":memory:"):
+            try:
+                accession = result["document_ref"][len("sec:filing:"):]
+                ingests = [row[0] for row in self.connection.execute(
+                    "SELECT ingest_id FROM coverage_mission_statement_filings WHERE company_ref=? AND accession=?",
+                    (result["company_ref"], accession)).fetchall()]
+                if ingests:
+                    from .statement_context import refresh_company_contexts
+                    result["statement_contexts"] = refresh_company_contexts(
+                        self.store, Path(path).parent, result["company_ref"],
+                        ingest_ids=ingests, force=True)
+            except Exception as exc:
+                # Only the supplementary refresh is recoverable. The formal
+                # acquisition transaction above must still propagate failures.
+                result["statement_context_refresh"] = {
+                    "status": "refused", "reason": f"{type(exc).__name__}: {exc}"[:500],
+                    "document_ref": result["document_ref"], "retry_via": "model_unit_preflight",
+                }
+        return result
+
+    def _settle_discovered_document_record(
         self, record_id: str, *, status: str, reason: str | None = None,
         failure_retryable: bool | None = None, transport_code: str | None = None,
         transport_evidence_ref: str | None = None,
@@ -3355,7 +3539,7 @@ class CoverageMissionAuthority:
         if pointer is None:
             return []
         current_ref = pointer["mission_version_id"]
-        mission = self.mission(current_ref)
+        mission = self._mission_record(current_ref)
         principal = mission["autonomy"]["automation_principal"]
         query = (
             "SELECT d.* FROM coverage_mission_discovered_documents d "
@@ -3510,7 +3694,7 @@ class CoverageMissionAuthority:
         rows = self.connection.execute(query, params).fetchall()
         if not rows:
             return []
-        principal = self.mission(current_ref)["autonomy"]["automation_principal"]
+        principal = self._mission_record(current_ref)["autonomy"]["automation_principal"]
         grants: dict[tuple[str, str], dict[str, Any] | str] = {}
         result: list[dict[str, Any]] = []
         for row in rows:
@@ -3561,6 +3745,46 @@ class CoverageMissionAuthority:
             by_source.setdefault(row["source_ref"], {})[row["carry_disposition"]] = row["n"]
         return {"mission_ref": mission_ref, "dispositions": counts, "by_source": by_source}
 
+    def register_acquired_annual_attachment(self, parent_record_id: str, *,
+                                           state_dir: Any, spool: Any,
+                                           receipt_reader: Any,
+                                           requested_by: str) -> dict[str, Any] | None:
+        """Queue an already acquired Exhibit 13 through the normal review gate.
+
+        The parent's discovery remains provenance, while the actual attachment
+        fetch is independently re-proved. This performs no retrieval and never
+        relabels the parent body or creates a successful acquisition attempt.
+        """
+        from .sec_annual_report_exhibit import verified_exhibit_source
+        parent=self.connection.execute('SELECT * FROM coverage_mission_discovered_documents WHERE record_id=?',
+                                       (_text(parent_record_id,'parent_record_id'),)).fetchone()
+        if parent is None or parent['status'] != 'acquired' or parent['source_ref'] != 'source:sec-edgar':
+            raise CoverageMissionConflict('annual report attachment requires the acquired SEC parent')
+        self.authorize_source_discovery(company_ref=parent['company_ref'],source_ref=parent['source_ref'],
+                                        requested_by=requested_by,mission_version_ref=parent['mission_version_ref'])
+        exact=verified_exhibit_source(self.store,spool,Path(state_dir),ticket_ref=parent['ticket_ref'],
+              parent_document_ref=parent['document_ref'],company_ref=parent['company_ref'],receipt_reader=receipt_reader)
+        if exact is None:return None
+        doc_ref=exact['document_ref']
+        record_id=_ref('mission-discovered-document',{'mission_version_ref':parent['mission_version_ref'],'document_ref':doc_ref})
+        now=_now()
+        with self._transaction() as cur:
+            prior=cur.execute('SELECT * FROM coverage_mission_discovered_documents WHERE mission_version_ref=? AND document_ref=?',
+                              (parent['mission_version_ref'],doc_ref)).fetchone()
+            if prior is None:
+                cur.execute('INSERT INTO coverage_mission_discovered_documents '
+                    '(record_id,mission_version_ref,company_ref,source_ref,document_ref,discovery_ref,status,ticket_ref,'
+                    'failure_reason,failure_retryable,created_at,updated_at,host) VALUES(?,?,?,?,?,?,?,?,?,?,?,?,?)',
+                    (record_id,parent['mission_version_ref'],parent['company_ref'],parent['source_ref'],doc_ref,
+                     parent['discovery_ref'],'acquired',parent['ticket_ref'],None,None,now,now,'www.sec.gov'))
+            else:
+                record_id=prior['record_id']
+                if any(prior[k]!=parent[k] for k in ('mission_version_ref','company_ref','source_ref','discovery_ref','ticket_ref')) or prior['status']!='acquired':
+                    raise CoverageMissionConflict('annual report attachment queue identity differs')
+        review=self.register_document_review(record_id,requested_by=requested_by)
+        return {'document_ref':doc_ref,'record_id':record_id,'review_id':review['review_id'],
+                'review_status':review['status'],'source_binding':exact['binding']}
+
     def backfill_document_reviews(
         self, mission_ref: str, *, limit: int = 100, deadline: float | None = None,
     ) -> list[dict[str, Any]]:
@@ -3588,7 +3812,7 @@ class CoverageMissionAuthority:
         for row in rows:
             if deadline is not None and time.monotonic() >= deadline:
                 break
-            mission = self.mission(row["mission_version_ref"])
+            mission = self._mission_record(row["mission_version_ref"])
             try:
                 review = self.register_document_review(
                     row["record_id"], requested_by=mission["autonomy"]["automation_principal"],
@@ -3687,7 +3911,7 @@ class CoverageMissionAuthority:
             ).fetchone()
             if owner is None:
                 raise CoverageMissionNotFound("document review was not found")
-            principal = self.mission(owner["mission_version_ref"])["autonomy"]["automation_principal"]
+            principal = self._mission_record(owner["mission_version_ref"])["autonomy"]["automation_principal"]
             if actor_ref != principal:
                 raise CoverageMissionValidationError(
                     "document review resolution requires a human or the review's mission principal"
@@ -3805,7 +4029,7 @@ class CoverageMissionAuthority:
             verified.append(item)
         # Where the review is carried if its version has been superseded.
         # Resolved before the transaction: the grant reads the store itself.
-        owner = self.mission(prior_row["mission_version_ref"])
+        owner = self._mission_record(prior_row["mission_version_ref"])
         current_pointer = self.connection.execute(
             "SELECT mission_version_id FROM coverage_mission_pointer WHERE mission_ref=?",
             (owner["mission_ref"],),
@@ -3819,7 +4043,7 @@ class CoverageMissionAuthority:
             # universe or a source no longer connected, as for a discovery.
             carry_grant = self.authorize_source_discovery(
                 company_ref=prior_row["company_ref"], source_ref=prior_row["source_ref"],
-                requested_by=self.mission(current_ref)["autonomy"]["automation_principal"],
+                requested_by=self._mission_record(current_ref)["autonomy"]["automation_principal"],
                 mission_version_ref=current_ref,
             )
         now = _now()
@@ -3987,7 +4211,7 @@ class CoverageMissionAuthority:
         ).fetchone()
         if owner_row is None:
             raise CoverageMissionNotFound("document review was not found")
-        owner = self.mission(owner_row["mission_version_ref"])
+        owner = self._mission_record(owner_row["mission_version_ref"])
         current_pointer = self.connection.execute(
             "SELECT mission_version_id FROM coverage_mission_pointer WHERE mission_ref=?",
             (owner["mission_ref"],),
@@ -3997,7 +4221,7 @@ class CoverageMissionAuthority:
         current_ref = current_pointer["mission_version_id"]
         carry_grant: dict[str, Any] | None = None
         if current_ref != owner["id"]:
-            current = self.mission(current_ref)
+            current = self._mission_record(current_ref)
             principal = current["autonomy"]["automation_principal"]
             if _HUMAN_RE.fullmatch(actor_ref) is None and actor_ref != principal:
                 raise CoverageMissionValidationError(
@@ -4021,7 +4245,7 @@ class CoverageMissionAuthority:
             if row["mission_version_ref"] != owner["id"]:
                 raise CoverageMissionConflict("document review changed concurrently")
             if _HUMAN_RE.fullmatch(actor_ref) is None:
-                principal = self.mission(row["mission_version_ref"])["autonomy"]["automation_principal"]
+                principal = self._mission_record(row["mission_version_ref"])["autonomy"]["automation_principal"]
                 if actor_ref != principal and carry_grant is None:
                     raise CoverageMissionValidationError(
                         "a subject re-evaluation reopen requires a human or the review's mission principal")
@@ -4161,12 +4385,25 @@ class CoverageMissionAuthority:
                 raise CoverageMissionConflict("discovered document state changed concurrently")
         new_review_id = _ref("mission-document-review", {
             "mission_version_ref": current_ref, "document_ref": review["document_ref"]})
+        # 2026-09-29: an open review whose document was nevertheless read to
+        # the end and admitted -- the close failed because the mission moved
+        # under it (DXC d50efc...: four Claims at 11:32 under v26, carried open
+        # to v27 and v28, read and admitted from again at 12:31) -- carries
+        # that conclusion, not an open review.
+        from .document_admission_scope import admission_outcome, carried_conclusion_rationale
+
+        admitted = None if keep_decision else admission_outcome(
+            cur, document_ref=review["document_ref"], company_ref=review["company_ref"])
         if keep_decision:
             if review["state"] == "awaiting_human_extraction":
                 raise CoverageMissionConflict("an open review has no decision to carry")
             state, candidate, rationale, updated_at = (
                 review["state"], review["candidate_claim_version_ref"], review["rationale"],
                 review["updated_at"])
+        elif admitted is not None:
+            state, candidate, rationale, updated_at = (
+                "extraction_staged", admitted["candidate_claim_ref"],
+                carried_conclusion_rationale(admitted), now)
         else:
             state, candidate, rationale, updated_at = "awaiting_human_extraction", None, None, now
         cur.execute(
@@ -4180,7 +4417,8 @@ class CoverageMissionAuthority:
              review["created_at"], updated_at),
         )
         return {"mission_version_ref": current_ref, "review_id": new_review_id,
-                "discovered_document_ref": record_id}
+                "discovered_document_ref": record_id, "state": state,
+                **({"carried_conclusion_of": admitted["review_id"]} if admitted is not None else {})}
 
     def subject_reevaluation_reopens_since(self, rule_ref: str, since: str) -> int:
         """How many reviews the subject rule ``rule_ref`` has reopened since ``since``."""
@@ -4265,7 +4503,7 @@ class CoverageMissionAuthority:
         for row in self.connection.execute(
             "SELECT mission_version_id FROM coverage_mission_pointer ORDER BY mission_ref"
         ).fetchall():
-            mission = self.mission(row["mission_version_id"])
+            mission = self._mission_record(row["mission_version_id"])
             member = next(
                 (item for item in mission["universe"] if item["company_ref"] == company_ref),
                 None,
@@ -4703,6 +4941,8 @@ class CoverageMissionAuthority:
                if spec.get("financial_statement_structure") else {}),
             **({"cash_flow_companion": spec["cash_flow_companion"]}
                if spec.get("cash_flow_companion") else {}),
+            **({"driver_formulas": spec["driver_formulas"]} if "driver_formulas" in spec else {}),
+            **({"fcf_definition": spec["fcf_definition"]} if "fcf_definition" in spec else {}),
             **({"cost_driver_template": spec["cost_driver_template"]}
                if "cost_driver_template" in spec else {}),
         }
@@ -4754,7 +4994,7 @@ class CoverageMissionAuthority:
             metadata = json.loads(metadata_json)
             if not isinstance(metadata, dict) or set(metadata) - {
                 "schema_version", "cost_driver_template", "financial_statement_structure",
-                "cash_flow_companion",
+                "cash_flow_companion", "driver_formulas", "fcf_definition",
             }:
                 raise CoverageMissionConflict("company model spec metadata is invalid")
             wire.update(metadata)
@@ -5049,6 +5289,16 @@ class CoverageMissionAuthority:
                 )
             normalized_lines = []
             for ordinal, line in enumerate(lines):
+                dimensions = line.get("dimensions")
+                if dimensions is not None:
+                    if (not isinstance(dimensions, Mapping)
+                            or any(not isinstance(k, str) or not k or not isinstance(v, str) or not v
+                                   for k, v in dimensions.items())
+                            or line.get("dimension_count") != len(dimensions)):
+                        raise CoverageMissionValidationError("statement dimensions must match the complete context count")
+                    axis, member = line.get("dimension_axis"), line.get("dimension_member")
+                    if axis is not None and dimensions.get(axis) != member:
+                        raise CoverageMissionValidationError("statement projected dimension differs from its complete context")
                 normalized_lines.append((
                     ordinal,
                     _vocabulary(line.get("statement"),
@@ -5061,6 +5311,7 @@ class CoverageMissionAuthority:
                     line.get("dimension_axis"), line.get("dimension_member"),
                     _optional_non_negative_int(line.get("dimension_count"),
                                                "dimension_count"),
+                    None if dimensions is None else canonical_json(dict(dimensions)),
                     line.get("period_start"),
                     _text(line.get("period_end"), "period_end"),
                     None if line.get("value") is None else str(line["value"]),
@@ -5116,18 +5367,18 @@ class CoverageMissionAuthority:
                 for normalized in item["lines"]:
                     (ordinal, statement, concept, label, level, parent_concept,
                      is_breakdown, dimension_axis, dimension_member,
-                     dimension_count, period_start, period_end, value, unit,
+                     dimension_count, dimensions_json, period_start, period_end, value, unit,
                      balance) = normalized
                     cur.execute(
                         "INSERT INTO coverage_mission_statement_lines"
                         "(line_id,ingest_id,statement,ordinal,concept,label,level,parent_concept,"
-                        "is_breakdown,dimension_axis,dimension_member,dimension_count,period_start,period_end,"
-                        "value,unit,balance) VALUES(?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?)",
+                        "is_breakdown,dimension_axis,dimension_member,dimension_count,dimensions_json,period_start,period_end,"
+                        "value,unit,balance) VALUES(?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?)",
                         (
                             f"{ingest_id}#{ordinal}", ingest_id,
                             statement, ordinal, concept, label, level,
                             parent_concept, is_breakdown, dimension_axis,
-                            dimension_member, dimension_count, period_start,
+                            dimension_member, dimension_count, dimensions_json, period_start,
                             period_end, value, unit, balance,
                         ),
                     )
@@ -5158,49 +5409,32 @@ class CoverageMissionAuthority:
                 for row in rows]
 
     def statement_lines(
-        self, ingest_id: str, *, statement: str | None = None
+        self, ingest_id: str, *, statement: str | None = None,
+        context_version_ref: str | None = None, latest_context: bool = True,
     ) -> list[dict[str, Any]]:
-        ingest_id = _text(ingest_id, "ingest_id")
-        if statement is None:
-            rows = self.connection.execute(
-                "SELECT * FROM coverage_mission_statement_lines WHERE ingest_id=? "
-                "ORDER BY ordinal", (ingest_id,),
-            ).fetchall()
-        else:
-            rows = self.connection.execute(
-                "SELECT * FROM coverage_mission_statement_lines "
-                "WHERE ingest_id=? AND statement=? ORDER BY ordinal",
-                (ingest_id, _vocabulary(statement, ("income", "balance", "cash"),
-                                        "statement")),
-            ).fetchall()
-        return [_statement_line_row(row) for row in rows]
+        from .statement_context import statement_rows
+        rows = statement_rows(self.connection, _text(ingest_id, "ingest_id"),
+                              version_id=context_version_ref, latest=latest_context)
+        if statement is not None:
+            wanted = _vocabulary(statement, ("income", "balance", "cash"), "statement")
+            rows = [row for row in rows if row["statement"] == wanted]
+        return rows
 
     def statement_series_lines(
         self, company_ref: str, concept: str, *, statement: str | None = None,
     ) -> list[dict[str, Any]]:
-        """Every filed line for one concept, across every filing held.
-
-        Carries ``filed`` and ``accession`` from the filing they came from,
-        because a series has to prefer the most recent statement of a restated
-        quarter and has to be able to name where each figure came from.
-        """
-
+        """One context version per filing, shared with statement/proof readers."""
         company_ref = _text(company_ref, "company_ref")
         concept = _text(concept, "concept")
-        query = (
-            "SELECT l.*, f.accession, f.filed, f.report_date, f.form AS filing_form "
-            "FROM coverage_mission_statement_lines l "
-            "JOIN coverage_mission_statement_filings f USING(ingest_id) "
-            "WHERE f.company_ref=? AND l.concept=?"
-        )
-        params: list[Any] = [company_ref, concept]
         if statement is not None:
-            query += " AND l.statement=?"
-            params.append(_vocabulary(statement, ("income", "balance", "cash"),
-                                      "statement"))
-        query += " ORDER BY f.filed, f.accession, l.ordinal"
-        return [_statement_line_row(row)
-                for row in self.connection.execute(query, params).fetchall()]
+            _vocabulary(statement, ("income", "balance", "cash"), "statement")
+        rows = []
+        for filing in sorted(self.statement_filings(company_ref), key=lambda f: (f["filed"], f["accession"])):
+            rows.extend({**row, "accession": filing["accession"], "filed": filing["filed"],
+                         "report_date": filing["report_date"], "filing_form": filing["form"]}
+                        for row in self.statement_lines(filing["ingest_id"], statement=statement)
+                        if row["concept"] == concept)
+        return rows
 
     def statement_coverage(self, company_ref: str) -> dict[str, Any]:
         """What statements this company already has, for the dispatcher to skip.
@@ -5535,7 +5769,7 @@ class CoverageMissionAuthority:
             )
             if duplicate is not None:
                 return duplicate
-            mission = self.mission(mission_version_ref)
+            mission = self._mission_record(mission_version_ref)
             if mission["content_hash"] != mission_version_hash:
                 raise CoverageMissionConflict("mission version hash binding failed")
             pointer = cur.execute(
@@ -5630,6 +5864,7 @@ class CoverageMissionAuthority:
         rationale: str,
         actor_ref: str,
         idempotency_key: str,
+        policy_automation: bool = False,
     ) -> dict[str, Any]:
         """Un-decide a decided gate, on one person's recorded say-so (ADR-0008).
 
@@ -5659,7 +5894,14 @@ class CoverageMissionAuthority:
         rationale = _text(rationale, "rationale")
         actor_ref = _actor(actor_ref)
         idempotency_key = _text(idempotency_key, "idempotency_key")
-        if not actor_ref.startswith("human:"):
+        # Owner decision 2026-10-09 (diagnosis item 4): a reopen decided by the
+        # redraft thresholds (``redraft_policy``) is written by the mission's
+        # automation principal.  Only that principal, and only for a
+        # ``gate_reopen`` decision recorded as ``decided_by: redraft_policy``
+        # (checked below, inside the transaction); every other reopen stays
+        # a person's.
+        if not actor_ref.startswith("human:") and not (
+                policy_automation and actor_ref.startswith("automation:")):
             raise CoverageMissionConflict(
                 "re-opening a decided gate is a human checkpoint (ADR-0008)"
             )
@@ -5682,7 +5924,7 @@ class CoverageMissionAuthority:
             )
             if duplicate is not None:
                 return duplicate
-            mission = self.mission(mission_version_ref)
+            mission = self._mission_record(mission_version_ref)
             if mission["content_hash"] != mission_version_hash:
                 raise CoverageMissionConflict("mission version hash binding failed")
             pointer = cur.execute(
@@ -5693,6 +5935,18 @@ class CoverageMissionAuthority:
                 raise CoverageMissionConflict("stage records must bind the active mission version")
             if company_ref not in {member["company_ref"] for member in mission["universe"]}:
                 raise CoverageMissionConflict("company is not in the mission universe")
+            if not actor_ref.startswith("human:"):
+                if actor_ref != (mission.get("autonomy") or {}).get("automation_principal"):
+                    raise CoverageMissionConflict("automation actor is not the mission principal")
+                decided = cur.execute(
+                    "SELECT record_json FROM gate_reopen_decisions WHERE decision_id=?",
+                    (reopen_decision_ref,),
+                ).fetchone() if cur.execute(
+                    "SELECT 1 FROM sqlite_master WHERE type='table' AND name='gate_reopen_decisions'"
+                ).fetchone() else None
+                if decided is None or json.loads(decided["record_json"]).get("decided_by") != "redraft_policy":
+                    raise CoverageMissionConflict(
+                        "an automated reopen must cite a gate_reopen decision made by the redraft policy")
             state = self._folded_statuses(cur, mission["mission_ref"], company_ref)
             folded = fold_stage_status(state[stage_ref])
             if folded != "gate_passed":
@@ -5742,7 +5996,7 @@ class CoverageMissionAuthority:
             }
             wire = dict(record)
             wire["content_hash"] = content_hash(record)
-            validate_mission_stage_reopen(wire)
+            validate_mission_stage_reopen(wire, policy_automation=policy_automation)
             cur.execute(
                 "INSERT INTO coverage_mission_stage_reopens"
                 "(record_id,mission_version_ref,company_ref,stage_ref,reopen_decision_ref,"
@@ -5974,7 +6228,7 @@ class CoverageMissionAuthority:
         return records
 
     def mission_progress(self, mission_ref: str) -> dict[str, Any]:
-        mission = self.active_mission(mission_ref)
+        mission = self._active_mission_record(mission_ref)
         companies = []
         for member in mission["universe"]:
             # P14-S: folded across every version of the mission_ref. Progress

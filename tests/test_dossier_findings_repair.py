@@ -1,7 +1,7 @@
 """WP-C2 on the dossier lane: a verdict a model can act on, and a cooldown.
 
 Live evidence, from
-``/Volumes/EveSSD/Dalton/legacy-state/dalton-core/company-dossier-runs/``:
+``<state-dir>/company-dossier-runs/``:
 
 * Accenture (``company:sec-cik:0001467373``) -- 50 summaries with
   ``dossier_status: "verification_failed"``, the last of them
@@ -117,7 +117,9 @@ class ConclusionThenCleanModel(_lane.FakeModel):
         payload = json.loads(result["text"])
         for slot in payload["slots"]:
             if "sentences" in slot:
-                slot["sentences"][0]["text"] += "我们给出买入评级。"
+                # Batch D: a view labelled as ours is allowed; an unowned
+                # verdict is still the finding.
+                slot["sentences"][0]["text"] += "建议买入。"
         text = json.dumps(payload, ensure_ascii=False)
         self.dirty = getattr(self, "dirty", {})
         self.dirty[found.group(1)] = text
@@ -225,9 +227,10 @@ class VerificationRepairTests(unittest.TestCase):
             max_units=1)
         rows = [row for row in summary["findings_repair"]
                 if row["status"] == "budget_refused"]
-        if rows:
-            self.assertIn("micros left", rows[0]["reason"])
-            self.assertEqual(model.repair_prompts, [])
+        self.assertTrue(rows, summary)
+        self.assertIn("micros left", rows[0]["reason"])
+        self.assertEqual(model.repair_prompts, [])
+        self.assertEqual(summary["budget"]["run_cost_micros"], 28_000_000)
 
 
 class OutputRubricRepairTests(unittest.TestCase):

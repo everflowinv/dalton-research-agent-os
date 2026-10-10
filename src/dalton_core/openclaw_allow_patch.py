@@ -54,7 +54,7 @@ RELOAD_INSTRUCTION = (
 # The two profile settings this does not read off the provider entry, because
 # the provider entry does not carry them.  Both match what every existing
 # broker profile in the live configuration uses.
-DEFAULT_TIMEOUT_MS = 600_000
+DEFAULT_TIMEOUT_MS = 900_000
 BACKUP_SUFFIX = "bak-dalton-allow"
 
 _SLUG_RE = re.compile(r"[^a-z0-9]+")

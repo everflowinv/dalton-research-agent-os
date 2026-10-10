@@ -1,0 +1,1218 @@
+{
+  "8793-goal": {
+    "captured_at": "2026-10-08T05:07:27-0400",
+    "url": "http://127.0.0.1:8793/",
+    "text_characters": 1047,
+    "scroll_height_px": 1854,
+    "scroll_width_px": 1120,
+    "instantiated_controls": 46
+  },
+  "8793-goal-expanded": {
+    "captured_at": "2026-10-08T05:07:27-0400",
+    "url": "http://127.0.0.1:8793/",
+    "text_characters": 6952,
+    "scroll_height_px": 8058,
+    "scroll_width_px": 1120,
+    "instantiated_controls": 46
+  },
+  "8793-workspace": {
+    "captured_at": "2026-10-08T05:07:29-0400",
+    "url": "http://127.0.0.1:8793/",
+    "text_characters": 516,
+    "scroll_height_px": 854,
+    "scroll_width_px": 1120,
+    "instantiated_controls": 11
+  },
+  "8793-workspace-expanded": {
+    "captured_at": "2026-10-08T05:07:30-0400",
+    "url": "http://127.0.0.1:8793/",
+    "text_characters": 516,
+    "scroll_height_px": 854,
+    "scroll_width_px": 1120,
+    "instantiated_controls": 11
+  },
+  "8793-steer": {
+    "captured_at": "2026-10-08T05:07:32-0400",
+    "url": "http://127.0.0.1:8793/",
+    "text_characters": 2146,
+    "scroll_height_px": 3693,
+    "scroll_width_px": 1120,
+    "instantiated_controls": 169
+  },
+  "8793-steer-expanded": {
+    "captured_at": "2026-10-08T05:07:32-0400",
+    "url": "http://127.0.0.1:8793/",
+    "text_characters": 4815,
+    "scroll_height_px": 10023,
+    "scroll_width_px": 1120,
+    "instantiated_controls": 169
+  },
+  "8793-log": {
+    "captured_at": "2026-10-08T05:07:34-0400",
+    "url": "http://127.0.0.1:8793/",
+    "text_characters": 12970,
+    "scroll_height_px": 21109,
+    "scroll_width_px": 1120,
+    "instantiated_controls": 66
+  },
+  "8793-log-expanded": {
+    "captured_at": "2026-10-08T05:07:35-0400",
+    "url": "http://127.0.0.1:8793/",
+    "text_characters": 12970,
+    "scroll_height_px": 21109,
+    "scroll_width_px": 1120,
+    "instantiated_controls": 66
+  },
+  "8793-ask": {
+    "captured_at": "2026-10-08T05:07:37-0400",
+    "url": "http://127.0.0.1:8793/",
+    "text_characters": 3171,
+    "scroll_height_px": 2871,
+    "scroll_width_px": 1120,
+    "instantiated_controls": 13
+  },
+  "8793-ask-expanded": {
+    "captured_at": "2026-10-08T05:07:38-0400",
+    "url": "http://127.0.0.1:8793/",
+    "text_characters": 3171,
+    "scroll_height_px": 2871,
+    "scroll_width_px": 1120,
+    "instantiated_controls": 13
+  },
+  "8793-approve": {
+    "captured_at": "2026-10-08T05:07:40-0400",
+    "url": "http://127.0.0.1:8793/",
+    "text_characters": 67,
+    "scroll_height_px": 244,
+    "scroll_width_px": 1120,
+    "instantiated_controls": 0
+  },
+  "8793-approve-expanded": {
+    "captured_at": "2026-10-08T05:07:40-0400",
+    "url": "http://127.0.0.1:8793/",
+    "text_characters": 2822,
+    "scroll_height_px": 2714,
+    "scroll_width_px": 1120,
+    "instantiated_controls": 30
+  },
+  "8793-sources": {
+    "captured_at": "2026-10-08T05:07:43-0400",
+    "url": "http://127.0.0.1:8793/",
+    "text_characters": 3532,
+    "scroll_height_px": 3544,
+    "scroll_width_px": 898,
+    "instantiated_controls": 5
+  },
+  "8793-sources-expanded": {
+    "captured_at": "2026-10-08T05:07:44-0400",
+    "url": "http://127.0.0.1:8793/",
+    "text_characters": 3532,
+    "scroll_height_px": 3544,
+    "scroll_width_px": 898,
+    "instantiated_controls": 5
+  },
+  "8793-models": {
+    "captured_at": "2026-10-08T05:07:46-0400",
+    "url": "http://127.0.0.1:8793/",
+    "text_characters": 48548,
+    "scroll_height_px": 23248,
+    "scroll_width_px": 898,
+    "instantiated_controls": 483
+  },
+  "8793-models-expanded": {
+    "captured_at": "2026-10-08T05:07:47-0400",
+    "url": "http://127.0.0.1:8793/",
+    "text_characters": 52490,
+    "scroll_height_px": 30448,
+    "scroll_width_px": 898,
+    "instantiated_controls": 483
+  },
+  "8793-reflection": {
+    "captured_at": "2026-10-08T05:07:50-0400",
+    "url": "http://127.0.0.1:8793/",
+    "text_characters": 1195,
+    "scroll_height_px": 1442,
+    "scroll_width_px": 898,
+    "instantiated_controls": 2
+  },
+  "8793-reflection-expanded": {
+    "captured_at": "2026-10-08T05:07:50-0400",
+    "url": "http://127.0.0.1:8793/",
+    "text_characters": 1195,
+    "scroll_height_px": 1442,
+    "scroll_width_px": 898,
+    "instantiated_controls": 2
+  },
+  "8793-ops": {
+    "captured_at": "2026-10-08T05:07:53-0400",
+    "url": "http://127.0.0.1:8793/",
+    "text_characters": 1525,
+    "scroll_height_px": 2050,
+    "scroll_width_px": 898,
+    "instantiated_controls": 104
+  },
+  "8793-ops-expanded": {
+    "captured_at": "2026-10-08T05:07:53-0400",
+    "url": "http://127.0.0.1:8793/",
+    "text_characters": 5242,
+    "scroll_height_px": 6619,
+    "scroll_width_px": 898,
+    "instantiated_controls": 104
+  },
+  "8793-trajectory": {
+    "captured_at": "2026-10-08T05:07:56-0400",
+    "url": "http://127.0.0.1:8793/",
+    "text_characters": 7332,
+    "scroll_height_px": 5380,
+    "scroll_width_px": 898,
+    "instantiated_controls": 7
+  },
+  "8793-ACN-0-概览": {
+    "captured_at": "2026-10-08T05:07:58-0400",
+    "url": "http://127.0.0.1:8793/",
+    "text_characters": 400,
+    "scroll_height_px": 816,
+    "scroll_width_px": 898,
+    "instantiated_controls": 8
+  },
+  "8793-ACN-1-证据": {
+    "captured_at": "2026-10-08T05:07:58-0400",
+    "url": "http://127.0.0.1:8793/",
+    "text_characters": 1048,
+    "scroll_height_px": 729,
+    "scroll_width_px": 898,
+    "instantiated_controls": 14
+  },
+  "8793-ACN-2-模型": {
+    "captured_at": "2026-10-08T05:08:01-0400",
+    "url": "http://127.0.0.1:8793/",
+    "text_characters": 12000,
+    "scroll_height_px": 3490,
+    "scroll_width_px": 898,
+    "instantiated_controls": 11
+  },
+  "8793-ACN-3-事件": {
+    "captured_at": "2026-10-08T05:08:01-0400",
+    "url": "http://127.0.0.1:8793/",
+    "text_characters": 2869,
+    "scroll_height_px": 1529,
+    "scroll_width_px": 898,
+    "instantiated_controls": 13
+  },
+  "8793-ACN-4-情景与触发": {
+    "captured_at": "2026-10-08T05:08:02-0400",
+    "url": "http://127.0.0.1:8793/",
+    "text_characters": 1740,
+    "scroll_height_px": 1728,
+    "scroll_width_px": 898,
+    "instantiated_controls": 29
+  },
+  "8793-ACN-5-回报归因": {
+    "captured_at": "2026-10-08T05:08:02-0400",
+    "url": "http://127.0.0.1:8793/",
+    "text_characters": 2137,
+    "scroll_height_px": 2573,
+    "scroll_width_px": 898,
+    "instantiated_controls": 11
+  },
+  "8793-ACN-6-产物": {
+    "captured_at": "2026-10-08T05:08:05-0400",
+    "url": "http://127.0.0.1:8793/",
+    "text_characters": 49822,
+    "scroll_height_px": 30231,
+    "scroll_width_px": 898,
+    "instantiated_controls": 41
+  },
+  "8793-ACN-claims": {
+    "captured_at": "2026-10-08T05:08:07-0400",
+    "url": "http://127.0.0.1:8793/",
+    "text_characters": 11432,
+    "scroll_height_px": 6719,
+    "scroll_width_px": 898,
+    "instantiated_controls": 107
+  },
+  "8793-CTSH-0-概览": {
+    "captured_at": "2026-10-08T05:08:09-0400",
+    "url": "http://127.0.0.1:8793/",
+    "text_characters": 365,
+    "scroll_height_px": 694,
+    "scroll_width_px": 898,
+    "instantiated_controls": 8
+  },
+  "8793-CTSH-1-证据": {
+    "captured_at": "2026-10-08T05:08:09-0400",
+    "url": "http://127.0.0.1:8793/",
+    "text_characters": 888,
+    "scroll_height_px": 709,
+    "scroll_width_px": 898,
+    "instantiated_controls": 14
+  },
+  "8793-CTSH-2-模型": {
+    "captured_at": "2026-10-08T05:08:12-0400",
+    "url": "http://127.0.0.1:8793/",
+    "text_characters": 9410,
+    "scroll_height_px": 3377,
+    "scroll_width_px": 898,
+    "instantiated_controls": 11
+  },
+  "8793-CTSH-3-事件": {
+    "captured_at": "2026-10-08T05:08:12-0400",
+    "url": "http://127.0.0.1:8793/",
+    "text_characters": 2870,
+    "scroll_height_px": 1439,
+    "scroll_width_px": 898,
+    "instantiated_controls": 13
+  },
+  "8793-CTSH-4-情景与触发": {
+    "captured_at": "2026-10-08T05:08:13-0400",
+    "url": "http://127.0.0.1:8793/",
+    "text_characters": 1973,
+    "scroll_height_px": 1830,
+    "scroll_width_px": 898,
+    "instantiated_controls": 31
+  },
+  "8793-CTSH-5-回报归因": {
+    "captured_at": "2026-10-08T05:08:13-0400",
+    "url": "http://127.0.0.1:8793/",
+    "text_characters": 2124,
+    "scroll_height_px": 2573,
+    "scroll_width_px": 898,
+    "instantiated_controls": 11
+  },
+  "8793-CTSH-6-产物": {
+    "captured_at": "2026-10-08T05:08:16-0400",
+    "url": "http://127.0.0.1:8793/",
+    "text_characters": 56361,
+    "scroll_height_px": 34349,
+    "scroll_width_px": 898,
+    "instantiated_controls": 35
+  },
+  "8793-CTSH-claims": {
+    "captured_at": "2026-10-08T05:08:18-0400",
+    "url": "http://127.0.0.1:8793/",
+    "text_characters": 14015,
+    "scroll_height_px": 7326,
+    "scroll_width_px": 898,
+    "instantiated_controls": 104
+  },
+  "8793-EPAM-0-概览": {
+    "captured_at": "2026-10-08T05:08:19-0400",
+    "url": "http://127.0.0.1:8793/",
+    "text_characters": 376,
+    "scroll_height_px": 791,
+    "scroll_width_px": 898,
+    "instantiated_controls": 8
+  },
+  "8793-EPAM-1-证据": {
+    "captured_at": "2026-10-08T05:08:20-0400",
+    "url": "http://127.0.0.1:8793/",
+    "text_characters": 1208,
+    "scroll_height_px": 503,
+    "scroll_width_px": 898,
+    "instantiated_controls": 8
+  },
+  "8793-EPAM-2-模型": {
+    "captured_at": "2026-10-08T05:08:23-0400",
+    "url": "http://127.0.0.1:8793/",
+    "text_characters": 9673,
+    "scroll_height_px": 2985,
+    "scroll_width_px": 898,
+    "instantiated_controls": 11
+  },
+  "8793-EPAM-3-事件": {
+    "captured_at": "2026-10-08T05:08:23-0400",
+    "url": "http://127.0.0.1:8793/",
+    "text_characters": 2840,
+    "scroll_height_px": 1419,
+    "scroll_width_px": 898,
+    "instantiated_controls": 13
+  },
+  "8793-EPAM-4-情景与触发": {
+    "captured_at": "2026-10-08T05:08:24-0400",
+    "url": "http://127.0.0.1:8793/",
+    "text_characters": 1919,
+    "scroll_height_px": 1870,
+    "scroll_width_px": 898,
+    "instantiated_controls": 31
+  },
+  "8793-EPAM-5-回报归因": {
+    "captured_at": "2026-10-08T05:08:24-0400",
+    "url": "http://127.0.0.1:8793/",
+    "text_characters": 2061,
+    "scroll_height_px": 2271,
+    "scroll_width_px": 898,
+    "instantiated_controls": 11
+  },
+  "8793-EPAM-6-产物": {
+    "captured_at": "2026-10-08T05:08:27-0400",
+    "url": "http://127.0.0.1:8793/",
+    "text_characters": 55866,
+    "scroll_height_px": 35423,
+    "scroll_width_px": 898,
+    "instantiated_controls": 37
+  },
+  "8793-EPAM-claims": {
+    "captured_at": "2026-10-08T05:08:29-0400",
+    "url": "http://127.0.0.1:8793/",
+    "text_characters": 11682,
+    "scroll_height_px": 6929,
+    "scroll_width_px": 898,
+    "instantiated_controls": 107
+  },
+  "8793-IBM-0-概览": {
+    "captured_at": "2026-10-08T05:08:30-0400",
+    "url": "http://127.0.0.1:8793/",
+    "text_characters": 376,
+    "scroll_height_px": 791,
+    "scroll_width_px": 898,
+    "instantiated_controls": 8
+  },
+  "8793-IBM-1-证据": {
+    "captured_at": "2026-10-08T05:08:31-0400",
+    "url": "http://127.0.0.1:8793/",
+    "text_characters": 1061,
+    "scroll_height_px": 537,
+    "scroll_width_px": 898,
+    "instantiated_controls": 9
+  },
+  "8793-IBM-2-模型": {
+    "captured_at": "2026-10-08T05:08:34-0400",
+    "url": "http://127.0.0.1:8793/",
+    "text_characters": 10073,
+    "scroll_height_px": 2756,
+    "scroll_width_px": 898,
+    "instantiated_controls": 11
+  },
+  "8793-IBM-3-事件": {
+    "captured_at": "2026-10-08T05:08:34-0400",
+    "url": "http://127.0.0.1:8793/",
+    "text_characters": 2709,
+    "scroll_height_px": 1419,
+    "scroll_width_px": 898,
+    "instantiated_controls": 13
+  },
+  "8793-IBM-4-情景与触发": {
+    "captured_at": "2026-10-08T05:08:35-0400",
+    "url": "http://127.0.0.1:8793/",
+    "text_characters": 1800,
+    "scroll_height_px": 1708,
+    "scroll_width_px": 898,
+    "instantiated_controls": 29
+  },
+  "8793-IBM-5-回报归因": {
+    "captured_at": "2026-10-08T05:08:35-0400",
+    "url": "http://127.0.0.1:8793/",
+    "text_characters": 1989,
+    "scroll_height_px": 2207,
+    "scroll_width_px": 898,
+    "instantiated_controls": 11
+  },
+  "8793-IBM-6-产物": {
+    "captured_at": "2026-10-08T05:08:38-0400",
+    "url": "http://127.0.0.1:8793/",
+    "text_characters": 51121,
+    "scroll_height_px": 28862,
+    "scroll_width_px": 898,
+    "instantiated_controls": 33
+  },
+  "8793-IBM-claims": {
+    "captured_at": "2026-10-08T05:08:40-0400",
+    "url": "http://127.0.0.1:8793/",
+    "text_characters": 13267,
+    "scroll_height_px": 7410,
+    "scroll_width_px": 898,
+    "instantiated_controls": 107
+  },
+  "8793-DXC-0-概览": {
+    "captured_at": "2026-10-08T05:08:41-0400",
+    "url": "http://127.0.0.1:8793/",
+    "text_characters": 388,
+    "scroll_height_px": 791,
+    "scroll_width_px": 898,
+    "instantiated_controls": 8
+  },
+  "8793-DXC-1-证据": {
+    "captured_at": "2026-10-08T05:08:42-0400",
+    "url": "http://127.0.0.1:8793/",
+    "text_characters": 1260,
+    "scroll_height_px": 749,
+    "scroll_width_px": 898,
+    "instantiated_controls": 14
+  },
+  "8793-DXC-2-模型": {
+    "captured_at": "2026-10-08T05:08:44-0400",
+    "url": "http://127.0.0.1:8793/",
+    "text_characters": 10658,
+    "scroll_height_px": 3196,
+    "scroll_width_px": 898,
+    "instantiated_controls": 11
+  },
+  "8793-DXC-3-事件": {
+    "captured_at": "2026-10-08T05:08:45-0400",
+    "url": "http://127.0.0.1:8793/",
+    "text_characters": 3267,
+    "scroll_height_px": 1610,
+    "scroll_width_px": 898,
+    "instantiated_controls": 13
+  },
+  "8793-DXC-4-情景与触发": {
+    "captured_at": "2026-10-08T05:08:45-0400",
+    "url": "http://127.0.0.1:8793/",
+    "text_characters": 1734,
+    "scroll_height_px": 1646,
+    "scroll_width_px": 898,
+    "instantiated_controls": 28
+  },
+  "8793-DXC-5-回报归因": {
+    "captured_at": "2026-10-08T05:08:46-0400",
+    "url": "http://127.0.0.1:8793/",
+    "text_characters": 2035,
+    "scroll_height_px": 2228,
+    "scroll_width_px": 898,
+    "instantiated_controls": 11
+  },
+  "8793-DXC-6-产物": {
+    "captured_at": "2026-10-08T05:08:49-0400",
+    "url": "http://127.0.0.1:8793/",
+    "text_characters": 51644,
+    "scroll_height_px": 30928,
+    "scroll_width_px": 898,
+    "instantiated_controls": 43
+  },
+  "8793-DXC-claims": {
+    "captured_at": "2026-10-08T05:08:51-0400",
+    "url": "http://127.0.0.1:8793/",
+    "text_characters": 12781,
+    "scroll_height_px": 7054,
+    "scroll_width_px": 898,
+    "instantiated_controls": 107
+  },
+  "8793-weekly-brief": {
+    "captured_at": "2026-10-08T05:08:54-0400",
+    "url": "http://127.0.0.1:8793/weekly-brief",
+    "text_characters": 431,
+    "scroll_height_px": 895,
+    "scroll_width_px": 792,
+    "instantiated_controls": 7
+  },
+  "8793-legacy": {
+    "captured_at": "2026-10-08T05:08:58-0400",
+    "url": "http://127.0.0.1:8793/legacy",
+    "text_characters": 87314,
+    "scroll_height_px": 53716,
+    "scroll_width_px": 1440,
+    "instantiated_controls": 218
+  },
+  "8793-legacy-review": {
+    "captured_at": "2026-10-08T05:08:58-0400",
+    "url": "http://127.0.0.1:8793/legacy",
+    "text_characters": 87139,
+    "scroll_height_px": 53490,
+    "scroll_width_px": 1120,
+    "instantiated_controls": 213
+  },
+  "8793-legacy-trajectory": {
+    "captured_at": "2026-10-08T05:08:59-0400",
+    "url": "http://127.0.0.1:8793/legacy",
+    "text_characters": 1164,
+    "scroll_height_px": 1271,
+    "scroll_width_px": 1120,
+    "instantiated_controls": 12
+  },
+  "8793-legacy-answer": {
+    "captured_at": "2026-10-08T05:08:59-0400",
+    "url": "http://127.0.0.1:8793/legacy",
+    "text_characters": 609,
+    "scroll_height_px": 482,
+    "scroll_width_px": 1120,
+    "instantiated_controls": 3
+  },
+  "8793-legacy-intent": {
+    "captured_at": "2026-10-08T05:09:00-0400",
+    "url": "http://127.0.0.1:8793/legacy",
+    "text_characters": 136,
+    "scroll_height_px": 416,
+    "scroll_width_px": 1120,
+    "instantiated_controls": 2
+  },
+  "8793-legacy-agenda": {
+    "captured_at": "2026-10-08T05:09:00-0400",
+    "url": "http://127.0.0.1:8793/legacy",
+    "text_characters": 24383,
+    "scroll_height_px": 19273,
+    "scroll_width_px": 1120,
+    "instantiated_controls": 150
+  },
+  "8794-goal": {
+    "captured_at": "2026-10-08T05:11:35-0400",
+    "url": "http://127.0.0.1:8794/",
+    "text_characters": 165,
+    "scroll_height_px": 501,
+    "scroll_width_px": 1120,
+    "instantiated_controls": 2
+  },
+  "8794-goal-expanded": {
+    "captured_at": "2026-10-08T05:11:36-0400",
+    "url": "http://127.0.0.1:8794/",
+    "text_characters": 165,
+    "scroll_height_px": 501,
+    "scroll_width_px": 1120,
+    "instantiated_controls": 2
+  },
+  "8794-workspace": {
+    "captured_at": "2026-10-08T05:11:38-0400",
+    "url": "http://127.0.0.1:8794/",
+    "text_characters": 516,
+    "scroll_height_px": 854,
+    "scroll_width_px": 1120,
+    "instantiated_controls": 11
+  },
+  "8794-workspace-expanded": {
+    "captured_at": "2026-10-08T05:11:38-0400",
+    "url": "http://127.0.0.1:8794/",
+    "text_characters": 516,
+    "scroll_height_px": 854,
+    "scroll_width_px": 1120,
+    "instantiated_controls": 11
+  },
+  "8794-steer": {
+    "captured_at": "2026-10-08T05:11:41-0400",
+    "url": "http://127.0.0.1:8794/",
+    "text_characters": 1434,
+    "scroll_height_px": 2984,
+    "scroll_width_px": 1120,
+    "instantiated_controls": 119
+  },
+  "8794-steer-expanded": {
+    "captured_at": "2026-10-08T05:11:41-0400",
+    "url": "http://127.0.0.1:8794/",
+    "text_characters": 3336,
+    "scroll_height_px": 7959,
+    "scroll_width_px": 1120,
+    "instantiated_controls": 119
+  },
+  "8794-log": {
+    "captured_at": "2026-10-08T05:11:43-0400",
+    "url": "http://127.0.0.1:8794/",
+    "text_characters": 85,
+    "scroll_height_px": 292,
+    "scroll_width_px": 1120,
+    "instantiated_controls": 8
+  },
+  "8794-log-expanded": {
+    "captured_at": "2026-10-08T05:11:44-0400",
+    "url": "http://127.0.0.1:8794/",
+    "text_characters": 85,
+    "scroll_height_px": 292,
+    "scroll_width_px": 1120,
+    "instantiated_controls": 8
+  },
+  "8794-ask": {
+    "captured_at": "2026-10-08T05:11:46-0400",
+    "url": "http://127.0.0.1:8794/",
+    "text_characters": 77,
+    "scroll_height_px": 520,
+    "scroll_width_px": 1120,
+    "instantiated_controls": 2
+  },
+  "8794-ask-expanded": {
+    "captured_at": "2026-10-08T05:11:46-0400",
+    "url": "http://127.0.0.1:8794/",
+    "text_characters": 77,
+    "scroll_height_px": 520,
+    "scroll_width_px": 1120,
+    "instantiated_controls": 2
+  },
+  "8794-approve": {
+    "captured_at": "2026-10-08T05:11:48-0400",
+    "url": "http://127.0.0.1:8794/",
+    "text_characters": 288,
+    "scroll_height_px": 634,
+    "scroll_width_px": 1120,
+    "instantiated_controls": 2
+  },
+  "8794-approve-expanded": {
+    "captured_at": "2026-10-08T05:11:49-0400",
+    "url": "http://127.0.0.1:8794/",
+    "text_characters": 288,
+    "scroll_height_px": 634,
+    "scroll_width_px": 1120,
+    "instantiated_controls": 2
+  },
+  "8794-trajectory": {
+    "captured_at": "2026-10-08T05:11:59-0400",
+    "url": "http://127.0.0.1:8794/",
+    "text_characters": 1860,
+    "scroll_height_px": 2508,
+    "scroll_width_px": 898,
+    "instantiated_controls": 6
+  },
+  "8794-weekly-brief": {
+    "captured_at": "2026-10-08T05:12:02-0400",
+    "url": "http://127.0.0.1:8794/weekly-brief",
+    "text_characters": 190,
+    "scroll_height_px": 737,
+    "scroll_width_px": 792,
+    "instantiated_controls": 7
+  },
+  "8794-legacy": {
+    "captured_at": "2026-10-08T05:12:06-0400",
+    "url": "http://127.0.0.1:8794/legacy",
+    "text_characters": 324,
+    "scroll_height_px": 740,
+    "scroll_width_px": 1440,
+    "instantiated_controls": 5
+  },
+  "8794-legacy-review": {
+    "captured_at": "2026-10-08T05:12:06-0400",
+    "url": "http://127.0.0.1:8794/legacy",
+    "text_characters": 149,
+    "scroll_height_px": 513,
+    "scroll_width_px": 1120,
+    "instantiated_controls": 0
+  },
+  "8794-legacy-trajectory": {
+    "captured_at": "2026-10-08T05:12:07-0400",
+    "url": "http://127.0.0.1:8794/legacy",
+    "text_characters": 79,
+    "scroll_height_px": 164,
+    "scroll_width_px": 1120,
+    "instantiated_controls": 0
+  },
+  "8794-legacy-answer": {
+    "captured_at": "2026-10-08T05:12:07-0400",
+    "url": "http://127.0.0.1:8794/legacy",
+    "text_characters": 131,
+    "scroll_height_px": 482,
+    "scroll_width_px": 1120,
+    "instantiated_controls": 3
+  },
+  "8794-legacy-intent": {
+    "captured_at": "2026-10-08T05:12:08-0400",
+    "url": "http://127.0.0.1:8794/legacy",
+    "text_characters": 136,
+    "scroll_height_px": 416,
+    "scroll_width_px": 1120,
+    "instantiated_controls": 2
+  },
+  "8794-legacy-agenda": {
+    "captured_at": "2026-10-08T05:12:08-0400",
+    "url": "http://127.0.0.1:8794/legacy",
+    "text_characters": 117,
+    "scroll_height_px": 164,
+    "scroll_width_px": 1120,
+    "instantiated_controls": 0
+  },
+  "8794-sources": {
+    "captured_at": "2026-10-08T05:11:52-0400",
+    "url": "http://127.0.0.1:8794/",
+    "text_characters": 776,
+    "scroll_height_px": 1526,
+    "scroll_width_px": 898,
+    "instantiated_controls": 1
+  },
+  "8794-sources-expanded": {
+    "captured_at": "2026-10-08T05:11:52-0400",
+    "url": "http://127.0.0.1:8794/",
+    "text_characters": 776,
+    "scroll_height_px": 1526,
+    "scroll_width_px": 898,
+    "instantiated_controls": 1
+  },
+  "8794-models": {
+    "captured_at": "2026-10-08T05:11:56-0400",
+    "url": "http://127.0.0.1:8794/",
+    "text_characters": 48020,
+    "scroll_height_px": 22174,
+    "scroll_width_px": 898,
+    "instantiated_controls": 477
+  },
+  "8794-models-expanded": {
+    "captured_at": "2026-10-08T05:11:56-0400",
+    "url": "http://127.0.0.1:8794/",
+    "text_characters": 51940,
+    "scroll_height_px": 29373,
+    "scroll_width_px": 898,
+    "instantiated_controls": 477
+  },
+  "8795-goal": {
+    "captured_at": "2026-10-08T05:12:11-0400",
+    "url": "http://127.0.0.1:8795/",
+    "text_characters": 1041,
+    "scroll_height_px": 1803,
+    "scroll_width_px": 1120,
+    "instantiated_controls": 44
+  },
+  "8795-goal-expanded": {
+    "captured_at": "2026-10-08T05:12:11-0400",
+    "url": "http://127.0.0.1:8795/",
+    "text_characters": 6853,
+    "scroll_height_px": 6695,
+    "scroll_width_px": 1120,
+    "instantiated_controls": 44
+  },
+  "8795-workspace": {
+    "captured_at": "2026-10-08T05:12:13-0400",
+    "url": "http://127.0.0.1:8795/",
+    "text_characters": 516,
+    "scroll_height_px": 854,
+    "scroll_width_px": 1120,
+    "instantiated_controls": 11
+  },
+  "8795-workspace-expanded": {
+    "captured_at": "2026-10-08T05:12:14-0400",
+    "url": "http://127.0.0.1:8795/",
+    "text_characters": 516,
+    "scroll_height_px": 854,
+    "scroll_width_px": 1120,
+    "instantiated_controls": 11
+  },
+  "8795-steer": {
+    "captured_at": "2026-10-08T05:12:16-0400",
+    "url": "http://127.0.0.1:8795/",
+    "text_characters": 1907,
+    "scroll_height_px": 3516,
+    "scroll_width_px": 1120,
+    "instantiated_controls": 163
+  },
+  "8795-steer-expanded": {
+    "captured_at": "2026-10-08T05:12:16-0400",
+    "url": "http://127.0.0.1:8795/",
+    "text_characters": 4540,
+    "scroll_height_px": 9846,
+    "scroll_width_px": 1120,
+    "instantiated_controls": 163
+  },
+  "8795-log": {
+    "captured_at": "2026-10-08T05:12:19-0400",
+    "url": "http://127.0.0.1:8795/",
+    "text_characters": 10136,
+    "scroll_height_px": 23674,
+    "scroll_width_px": 1120,
+    "instantiated_controls": 96
+  },
+  "8795-log-expanded": {
+    "captured_at": "2026-10-08T05:12:19-0400",
+    "url": "http://127.0.0.1:8795/",
+    "text_characters": 10136,
+    "scroll_height_px": 23674,
+    "scroll_width_px": 1120,
+    "instantiated_controls": 96
+  },
+  "8795-ask": {
+    "captured_at": "2026-10-08T05:12:21-0400",
+    "url": "http://127.0.0.1:8795/",
+    "text_characters": 77,
+    "scroll_height_px": 520,
+    "scroll_width_px": 1120,
+    "instantiated_controls": 2
+  },
+  "8795-ask-expanded": {
+    "captured_at": "2026-10-08T05:12:22-0400",
+    "url": "http://127.0.0.1:8795/",
+    "text_characters": 77,
+    "scroll_height_px": 520,
+    "scroll_width_px": 1120,
+    "instantiated_controls": 2
+  },
+  "8795-approve": {
+    "captured_at": "2026-10-08T05:12:24-0400",
+    "url": "http://127.0.0.1:8795/",
+    "text_characters": 2070,
+    "scroll_height_px": 2197,
+    "scroll_width_px": 1120,
+    "instantiated_controls": 22
+  },
+  "8795-approve-expanded": {
+    "captured_at": "2026-10-08T05:12:24-0400",
+    "url": "http://127.0.0.1:8795/",
+    "text_characters": 2070,
+    "scroll_height_px": 2197,
+    "scroll_width_px": 1120,
+    "instantiated_controls": 22
+  },
+  "8795-sources": {
+    "captured_at": "2026-10-08T05:12:27-0400",
+    "url": "http://127.0.0.1:8795/",
+    "text_characters": 3308,
+    "scroll_height_px": 3438,
+    "scroll_width_px": 898,
+    "instantiated_controls": 5
+  },
+  "8795-sources-expanded": {
+    "captured_at": "2026-10-08T05:12:28-0400",
+    "url": "http://127.0.0.1:8795/",
+    "text_characters": 3308,
+    "scroll_height_px": 3438,
+    "scroll_width_px": 898,
+    "instantiated_controls": 5
+  },
+  "8795-models": {
+    "captured_at": "2026-10-08T05:12:30-0400",
+    "url": "http://127.0.0.1:8795/",
+    "text_characters": 48163,
+    "scroll_height_px": 22886,
+    "scroll_width_px": 898,
+    "instantiated_controls": 481
+  },
+  "8795-models-expanded": {
+    "captured_at": "2026-10-08T05:12:31-0400",
+    "url": "http://127.0.0.1:8795/",
+    "text_characters": 52087,
+    "scroll_height_px": 30086,
+    "scroll_width_px": 898,
+    "instantiated_controls": 481
+  },
+  "8795-reflection": {
+    "captured_at": "2026-10-08T05:12:34-0400",
+    "url": "http://127.0.0.1:8795/",
+    "text_characters": 1299,
+    "scroll_height_px": 1470,
+    "scroll_width_px": 898,
+    "instantiated_controls": 2
+  },
+  "8795-reflection-expanded": {
+    "captured_at": "2026-10-08T05:12:34-0400",
+    "url": "http://127.0.0.1:8795/",
+    "text_characters": 1299,
+    "scroll_height_px": 1470,
+    "scroll_width_px": 898,
+    "instantiated_controls": 2
+  },
+  "8795-ops": {
+    "captured_at": "2026-10-08T05:12:37-0400",
+    "url": "http://127.0.0.1:8795/",
+    "text_characters": 180,
+    "scroll_height_px": 358,
+    "scroll_width_px": 898,
+    "instantiated_controls": 38
+  },
+  "8795-ops-expanded": {
+    "captured_at": "2026-10-08T05:12:37-0400",
+    "url": "http://127.0.0.1:8795/",
+    "text_characters": 1856,
+    "scroll_height_px": 2490,
+    "scroll_width_px": 898,
+    "instantiated_controls": 38
+  },
+  "8795-trajectory": {
+    "captured_at": "2026-10-08T05:12:40-0400",
+    "url": "http://127.0.0.1:8795/",
+    "text_characters": 6569,
+    "scroll_height_px": 5380,
+    "scroll_width_px": 898,
+    "instantiated_controls": 7
+  },
+  "8795-AMZN-0-概览": {
+    "captured_at": "2026-10-08T05:12:42-0400",
+    "url": "http://127.0.0.1:8795/",
+    "text_characters": 361,
+    "scroll_height_px": 675,
+    "scroll_width_px": 898,
+    "instantiated_controls": 8
+  },
+  "8795-AMZN-1-证据": {
+    "captured_at": "2026-10-08T05:12:42-0400",
+    "url": "http://127.0.0.1:8795/",
+    "text_characters": 1691,
+    "scroll_height_px": 1178,
+    "scroll_width_px": 898,
+    "instantiated_controls": 21
+  },
+  "8795-AMZN-2-模型": {
+    "captured_at": "2026-10-08T05:12:45-0400",
+    "url": "http://127.0.0.1:8795/",
+    "text_characters": 384,
+    "scroll_height_px": 649,
+    "scroll_width_px": 898,
+    "instantiated_controls": 9
+  },
+  "8795-AMZN-3-事件": {
+    "captured_at": "2026-10-08T05:12:45-0400",
+    "url": "http://127.0.0.1:8795/",
+    "text_characters": 2867,
+    "scroll_height_px": 1419,
+    "scroll_width_px": 898,
+    "instantiated_controls": 13
+  },
+  "8795-AMZN-4-情景与触发": {
+    "captured_at": "2026-10-08T05:12:46-0400",
+    "url": "http://127.0.0.1:8795/",
+    "text_characters": 118,
+    "scroll_height_px": 368,
+    "scroll_width_px": 898,
+    "instantiated_controls": 8
+  },
+  "8795-AMZN-5-回报归因": {
+    "captured_at": "2026-10-08T05:12:46-0400",
+    "url": "http://127.0.0.1:8795/",
+    "text_characters": 2031,
+    "scroll_height_px": 2432,
+    "scroll_width_px": 898,
+    "instantiated_controls": 11
+  },
+  "8795-AMZN-6-产物": {
+    "captured_at": "2026-10-08T05:12:49-0400",
+    "url": "http://127.0.0.1:8795/",
+    "text_characters": 22669,
+    "scroll_height_px": 16462,
+    "scroll_width_px": 898,
+    "instantiated_controls": 25
+  },
+  "8795-AMZN-claims": {
+    "captured_at": "2026-10-08T05:12:51-0400",
+    "url": "http://127.0.0.1:8795/",
+    "text_characters": 8028,
+    "scroll_height_px": 5964,
+    "scroll_width_px": 898,
+    "instantiated_controls": 107
+  },
+  "8795-GOOGL-0-概览": {
+    "captured_at": "2026-10-08T05:12:53-0400",
+    "url": "http://127.0.0.1:8795/",
+    "text_characters": 381,
+    "scroll_height_px": 700,
+    "scroll_width_px": 898,
+    "instantiated_controls": 8
+  },
+  "8795-GOOGL-1-证据": {
+    "captured_at": "2026-10-08T05:12:53-0400",
+    "url": "http://127.0.0.1:8795/",
+    "text_characters": 1086,
+    "scroll_height_px": 579,
+    "scroll_width_px": 898,
+    "instantiated_controls": 10
+  },
+  "8795-GOOGL-2-模型": {
+    "captured_at": "2026-10-08T05:12:56-0400",
+    "url": "http://127.0.0.1:8795/",
+    "text_characters": 6887,
+    "scroll_height_px": 2266,
+    "scroll_width_px": 898,
+    "instantiated_controls": 11
+  },
+  "8795-GOOGL-3-事件": {
+    "captured_at": "2026-10-08T05:12:56-0400",
+    "url": "http://127.0.0.1:8795/",
+    "text_characters": 112,
+    "scroll_height_px": 312,
+    "scroll_width_px": 898,
+    "instantiated_controls": 8
+  },
+  "8795-GOOGL-4-情景与触发": {
+    "captured_at": "2026-10-08T05:12:57-0400",
+    "url": "http://127.0.0.1:8795/",
+    "text_characters": 123,
+    "scroll_height_px": 368,
+    "scroll_width_px": 898,
+    "instantiated_controls": 8
+  },
+  "8795-GOOGL-5-回报归因": {
+    "captured_at": "2026-10-08T05:12:57-0400",
+    "url": "http://127.0.0.1:8795/",
+    "text_characters": 2147,
+    "scroll_height_px": 2324,
+    "scroll_width_px": 898,
+    "instantiated_controls": 11
+  },
+  "8795-GOOGL-6-产物": {
+    "captured_at": "2026-10-08T05:13:00-0400",
+    "url": "http://127.0.0.1:8795/",
+    "text_characters": 9347,
+    "scroll_height_px": 9314,
+    "scroll_width_px": 898,
+    "instantiated_controls": 20
+  },
+  "8795-GOOGL-claims": {
+    "captured_at": "2026-10-08T05:13:02-0400",
+    "url": "http://127.0.0.1:8795/",
+    "text_characters": 9670,
+    "scroll_height_px": 6362,
+    "scroll_width_px": 898,
+    "instantiated_controls": 107
+  },
+  "8795-META-0-概览": {
+    "captured_at": "2026-10-08T05:13:04-0400",
+    "url": "http://127.0.0.1:8795/",
+    "text_characters": 346,
+    "scroll_height_px": 636,
+    "scroll_width_px": 898,
+    "instantiated_controls": 8
+  },
+  "8795-META-1-证据": {
+    "captured_at": "2026-10-08T05:13:04-0400",
+    "url": "http://127.0.0.1:8795/",
+    "text_characters": 1775,
+    "scroll_height_px": 1198,
+    "scroll_width_px": 898,
+    "instantiated_controls": 21
+  },
+  "8795-META-2-模型": {
+    "captured_at": "2026-10-08T05:13:07-0400",
+    "url": "http://127.0.0.1:8795/",
+    "text_characters": 7662,
+    "scroll_height_px": 2419,
+    "scroll_width_px": 898,
+    "instantiated_controls": 12
+  },
+  "8795-META-3-事件": {
+    "captured_at": "2026-10-08T05:13:07-0400",
+    "url": "http://127.0.0.1:8795/",
+    "text_characters": 2486,
+    "scroll_height_px": 1318,
+    "scroll_width_px": 898,
+    "instantiated_controls": 13
+  },
+  "8795-META-4-情景与触发": {
+    "captured_at": "2026-10-08T05:13:08-0400",
+    "url": "http://127.0.0.1:8795/",
+    "text_characters": 1598,
+    "scroll_height_px": 1545,
+    "scroll_width_px": 898,
+    "instantiated_controls": 27
+  },
+  "8795-META-5-回报归因": {
+    "captured_at": "2026-10-08T05:13:08-0400",
+    "url": "http://127.0.0.1:8795/",
+    "text_characters": 2071,
+    "scroll_height_px": 2170,
+    "scroll_width_px": 898,
+    "instantiated_controls": 11
+  },
+  "8795-META-6-产物": {
+    "captured_at": "2026-10-08T05:13:11-0400",
+    "url": "http://127.0.0.1:8795/",
+    "text_characters": 62636,
+    "scroll_height_px": 28983,
+    "scroll_width_px": 898,
+    "instantiated_controls": 32
+  },
+  "8795-META-claims": {
+    "captured_at": "2026-10-08T05:13:13-0400",
+    "url": "http://127.0.0.1:8795/",
+    "text_characters": 8177,
+    "scroll_height_px": 5922,
+    "scroll_width_px": 898,
+    "instantiated_controls": 107
+  },
+  "8795-MSFT-0-概览": {
+    "captured_at": "2026-10-08T05:13:14-0400",
+    "url": "http://127.0.0.1:8795/",
+    "text_characters": 359,
+    "scroll_height_px": 662,
+    "scroll_width_px": 898,
+    "instantiated_controls": 8
+  },
+  "8795-MSFT-1-证据": {
+    "captured_at": "2026-10-08T05:13:15-0400",
+    "url": "http://127.0.0.1:8795/",
+    "text_characters": 1016,
+    "scroll_height_px": 482,
+    "scroll_width_px": 898,
+    "instantiated_controls": 8
+  },
+  "8795-MSFT-2-模型": {
+    "captured_at": "2026-10-08T05:13:18-0400",
+    "url": "http://127.0.0.1:8795/",
+    "text_characters": 153,
+    "scroll_height_px": 368,
+    "scroll_width_px": 898,
+    "instantiated_controls": 8
+  },
+  "8795-MSFT-3-事件": {
+    "captured_at": "2026-10-08T05:13:18-0400",
+    "url": "http://127.0.0.1:8795/",
+    "text_characters": 110,
+    "scroll_height_px": 312,
+    "scroll_width_px": 898,
+    "instantiated_controls": 8
+  },
+  "8795-MSFT-4-情景与触发": {
+    "captured_at": "2026-10-08T05:13:19-0400",
+    "url": "http://127.0.0.1:8795/",
+    "text_characters": 121,
+    "scroll_height_px": 368,
+    "scroll_width_px": 898,
+    "instantiated_controls": 8
+  },
+  "8795-MSFT-5-回报归因": {
+    "captured_at": "2026-10-08T05:13:19-0400",
+    "url": "http://127.0.0.1:8795/",
+    "text_characters": 1634,
+    "scroll_height_px": 2009,
+    "scroll_width_px": 898,
+    "instantiated_controls": 11
+  },
+  "8795-MSFT-6-产物": {
+    "captured_at": "2026-10-08T05:13:22-0400",
+    "url": "http://127.0.0.1:8795/",
+    "text_characters": 9002,
+    "scroll_height_px": 8666,
+    "scroll_width_px": 898,
+    "instantiated_controls": 20
+  },
+  "8795-MSFT-claims": {
+    "captured_at": "2026-10-08T05:13:24-0400",
+    "url": "http://127.0.0.1:8795/",
+    "text_characters": 13076,
+    "scroll_height_px": 5943,
+    "scroll_width_px": 898,
+    "instantiated_controls": 54
+  },
+  "8795-weekly-brief": {
+    "captured_at": "2026-10-08T05:13:28-0400",
+    "url": "http://127.0.0.1:8795/weekly-brief",
+    "text_characters": 190,
+    "scroll_height_px": 737,
+    "scroll_width_px": 792,
+    "instantiated_controls": 7
+  },
+  "8795-legacy": {
+    "captured_at": "2026-10-08T05:13:31-0400",
+    "url": "http://127.0.0.1:8795/legacy",
+    "text_characters": 91415,
+    "scroll_height_px": 54943,
+    "scroll_width_px": 1440,
+    "instantiated_controls": 253
+  },
+  "8795-legacy-review": {
+    "captured_at": "2026-10-08T05:13:31-0400",
+    "url": "http://127.0.0.1:8795/legacy",
+    "text_characters": 91240,
+    "scroll_height_px": 54717,
+    "scroll_width_px": 1120,
+    "instantiated_controls": 248
+  },
+  "8795-legacy-trajectory": {
+    "captured_at": "2026-10-08T05:13:32-0400",
+    "url": "http://127.0.0.1:8795/legacy",
+    "text_characters": 79,
+    "scroll_height_px": 164,
+    "scroll_width_px": 1120,
+    "instantiated_controls": 0
+  },
+  "8795-legacy-answer": {
+    "captured_at": "2026-10-08T05:13:32-0400",
+    "url": "http://127.0.0.1:8795/legacy",
+    "text_characters": 377,
+    "scroll_height_px": 482,
+    "scroll_width_px": 1120,
+    "instantiated_controls": 3
+  },
+  "8795-legacy-intent": {
+    "captured_at": "2026-10-08T05:13:33-0400",
+    "url": "http://127.0.0.1:8795/legacy",
+    "text_characters": 136,
+    "scroll_height_px": 416,
+    "scroll_width_px": 1120,
+    "instantiated_controls": 2
+  },
+  "8795-legacy-agenda": {
+    "captured_at": "2026-10-08T05:13:33-0400",
+    "url": "http://127.0.0.1:8795/legacy",
+    "text_characters": 117,
+    "scroll_height_px": 164,
+    "scroll_width_px": 1120,
+    "instantiated_controls": 0
+  }
+}

@@ -38,6 +38,7 @@ import hashlib
 import json
 import os
 import sqlite3
+import tempfile
 from datetime import datetime, timezone
 from pathlib import Path
 from typing import Any, Mapping
@@ -79,35 +80,59 @@ class PendingSettlements:
         digest = hashlib.sha256(key.encode("utf-8")).hexdigest()[:40]
         return self.directory / f"{digest}.json"
 
-    def _write(self, key: str, value: Mapping[str, Any]) -> bool:
+    def _write(self, key: str, value: Mapping[str, Any], *, immutable: bool = False) -> bool:
         if self.directory is None:
             return False
+        temporary = None
         try:
             self.directory.mkdir(mode=0o700, parents=True, exist_ok=True)
             target = self._path(key)
-            temporary = target.with_name(f".{target.name}.{os.getpid()}.tmp")
-            descriptor = os.open(temporary, os.O_WRONLY | os.O_CREAT | os.O_TRUNC, 0o600)
-            try:
-                os.write(descriptor, (json.dumps(dict(value), sort_keys=True) + "\n")
-                         .encode("utf-8"))
-                os.fsync(descriptor)
-            finally:
-                os.close(descriptor)
-            os.replace(temporary, target)
+            descriptor, name = tempfile.mkstemp(prefix=f".{target.name}.", dir=self.directory)
+            temporary = Path(name)
+            with os.fdopen(descriptor, "wb") as stream:
+                stream.write((json.dumps(dict(value), sort_keys=True) + "\n").encode("utf-8"))
+                stream.flush()
+                os.fsync(stream.fileno())
+            if immutable:
+                try:
+                    # Exclusive publication also protects concurrent threads:
+                    # each writer owns a separate temporary inode.
+                    os.link(temporary, target)
+                except FileExistsError:
+                    existing = json.loads(target.read_text(encoding="utf-8"))
+                    fields = ("schema_version", "kind", "admission_id", "actual_micros",
+                              "work_order_ref", "attempt_number", "usage_entry_ref")
+                    if not (isinstance(existing, dict) and all(
+                            existing.get(k) == value.get(k) for k in fields)):
+                        return False
+            else:
+                os.replace(temporary, target)
+            # The file and both directory entries must survive a crash before
+            # the caller may proceed to normal Scheduler completion.
+            for directory in (self.directory, self.directory.parent):
+                fd = os.open(directory, os.O_RDONLY)
+                try:
+                    os.fsync(fd)
+                finally:
+                    os.close(fd)
             return True
-        except OSError:
+        except (OSError, ValueError):
             return False
+        finally:
+            if temporary is not None:
+                temporary.unlink(missing_ok=True)
 
     def record_settlement(self, *, admission_id: str, actual_micros: int,
                           work_order_ref: str | None = None,
                           attempt_number: int | None = None,
-                          reason: str = "") -> bool:
+                          reason: str = "", usage_entry_ref: str | None = None) -> bool:
         return self._write(admission_id, {
             "schema_version": SCHEMA_VERSION, "kind": KIND_SETTLE,
             "admission_id": admission_id, "actual_micros": int(actual_micros),
             "work_order_ref": work_order_ref, "attempt_number": attempt_number,
             "reason": reason[:300], "recorded_at": _now(), "pid": os.getpid(),
-        })
+            **({"usage_entry_ref": usage_entry_ref} if usage_entry_ref is not None else {}),
+        }, immutable=True)
 
     def record_unconfirmed_admission(self, *, work_order_ref: str, attempt_number: int,
                                      phase: str, reason: str = "") -> bool:
@@ -148,6 +173,12 @@ class PendingSettlements:
                                 "error": f"{type(exc).__name__}: {exc}"})
                 continue
             except ThesisImpactBudgetError as exc:
+                if record.get("usage_entry_ref") is not None:
+                    # Paid usage-bound records are not disposable conflicts.
+                    # Preserve the exact evidence for a governed reconciliation.
+                    results.append({"record": path.name, "status": "kept",
+                                    "error": f"{type(exc).__name__}: {exc}"})
+                    continue
                 # Settled since at another amount, or nothing to settle:
                 # the ledger's own answer stands and the record is done.
                 outcome = {"status": "superseded", "error": str(exc)}
@@ -164,7 +195,9 @@ class PendingSettlements:
     def _replay(budget: Any, record: Mapping[str, Any]) -> dict[str, Any]:
         if record.get("kind") == KIND_SETTLE:
             settled = budget.settle(str(record["admission_id"]),
-                                    actual_micros=int(record["actual_micros"]))
+                                    actual_micros=int(record["actual_micros"]),
+                                    **({"usage_entry_ref": record["usage_entry_ref"]}
+                                       if "usage_entry_ref" in record else {}))
             return {"status": "settled" if settled.get("status") != "duplicate"
                     else "already_settled",
                     "admission_id": record["admission_id"],

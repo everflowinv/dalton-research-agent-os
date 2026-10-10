@@ -57,8 +57,14 @@ def _recovery_request_id(trace: Mapping[str, Any], suffix: str) -> str:
 
 
 def _already_consumed(connection: Any, request_id: str) -> bool:
+    # Narrowed by ``scheduler_work_orders_request_id`` (``migrations``): the
+    # unfiltered read parsed every work order ever enqueued on each call.  The
+    # Python checks below still decide; SQL only stops handing over the rows
+    # that cannot match.
     rows = connection.execute(
-        "SELECT work_order_json,work_order_hash FROM scheduler_work_orders"
+        "SELECT work_order_json,work_order_hash FROM scheduler_work_orders "
+        "WHERE json_extract(work_order_json,'$.metadata.request_id')=?",
+        (request_id,),
     ).fetchall()
     for row in rows:
         try:

@@ -43,7 +43,7 @@ Usage
 -----
 
     PY=.venv/bin/python
-    W=/Volumes/EveSSD/Dalton/workspaces/ws-7d894366d1132e2930475a60/state/dalton-core
+    W=<state-dir>
 
     # read-only: before/after, the three records that would be published
     $PY scripts/sign_research_plan_auto_start.py --state-dir "$W"

@@ -125,10 +125,24 @@ def _call_budget_view(state_dir: str | Path, purpose: str, *,
         return {"editable": False, "source": source, "reason": "此环节没有独立的每轮预算配置"}
     validate = validate_budget_overrides if kind == "call" else validate_run_budget_overrides
     consumer_defaults = _consumer_call_defaults(purpose)
+    product_calls = None
+    if kind == "run" and purpose in {"investment_memo", "dossier", "debate_map"}:
+        verifier_purpose = purpose + "_verifier"
+        verifier_binding = _bindings(state_dir, cockpit_model_config_path).get(verifier_purpose, {})
+        verifier_source = verifier_binding.get("source", "")
+        verifier_config = config
+        if verifier_binding.get("status") == "configured" and verifier_source and "#" not in verifier_source:
+            verifier_config = json.loads(Path(verifier_source).read_text(encoding="utf-8"))
+        product_calls = {
+            purpose: resolve_call_budget(config, purpose, defaults=default_call_budget(purpose)),
+            verifier_purpose: resolve_call_budget(verifier_config, verifier_purpose,
+                                                 defaults=default_call_budget(verifier_purpose)),
+        }
     effective = ((resolve_call_budget(
                       config, purpose,
                       defaults=(consumer_defaults or default_call_budget(purpose)))
-                  if kind == "call" else resolve_run_budget(config, purpose, defaults=defaults_wire["purposes"][purpose]))
+                  if kind == "call" else resolve_run_budget(config, purpose, defaults=defaults_wire["purposes"][purpose],
+                                                           call_budgets=product_calls))
                  if has_defaults or (kind == "call" and consumer_defaults is not None)
                  else None)
     if effective is None and kind == "call" and shared_policy is not None:

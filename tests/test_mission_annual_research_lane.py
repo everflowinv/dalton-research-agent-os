@@ -496,6 +496,38 @@ class MissionAnnualResearchLaneTests(unittest.TestCase):
         self.assertTrue(holds["holds"][admission["id"]]["reason"].startswith(
             REENTRY_ESCALATED_REASON))
 
+    def test_a_repeated_pre_claim_refusal_escalates_instead_of_looping(self) -> None:
+        from dalton_core.document_recovery_cli import OPERATION, door_for
+        from dalton_core.lane_child_launcher import LaneChildRejected
+        from dalton_core.mission_annual_research_lane import REENTRY_ESCALATED_REASON
+
+        admission = self.store.add(1)
+        self.store.started(admission["id"])
+        self._scheduler_work(admission)
+        ticket_ref = "mission-annual-research:" + "7" * 24
+        self.launcher.tickets[ticket_ref] = {
+            "id": ticket_ref, "status": "orphaned",
+            "admission_ref": admission["id"],
+            "admission_hash": admission["content_hash"],
+        }
+        _write_latest(self.lane.latest_path, admission, ticket_ref)
+        self.lane._execution_state = lambda _admission: {
+            "action": "resume", "reason": "typed_recovery_due",
+            "work_order_ref": "work:resumable",
+        }
+        self.launcher.resume_error = LaneChildRejected("controlled reentry ticket is unavailable")
+        unavailable = "controlled_reentry_unavailable:controlled reentry ticket is unavailable"
+
+        self.lane.dispatch_once()
+        holds = json.loads(self.lane.holds_path.read_text(encoding="utf-8"))
+        self.assertEqual(holds["holds"][admission["id"]]["reason"], unavailable)
+        for _tick in range(2):
+            self.lane.dispatch_once()
+            holds = json.loads(self.lane.holds_path.read_text(encoding="utf-8"))
+            reason = holds["holds"][admission["id"]]["reason"]
+            self.assertEqual(reason, f"{REENTRY_ESCALATED_REASON}:{unavailable}")
+        self.assertEqual(door_for(reason), OPERATION)
+
     def test_proved_capacity_terminal_is_visible_as_recovery_required(self) -> None:
         admission = self.store.add(1)
         self.store.started(admission["id"])

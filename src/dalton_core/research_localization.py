@@ -10,7 +10,7 @@ import copy
 import json
 import re
 from collections import Counter
-from decimal import Decimal, ROUND_HALF_UP
+from decimal import Decimal, InvalidOperation, ROUND_HALF_UP
 from hashlib import sha256
 from typing import Any, Mapping, Sequence
 
@@ -22,7 +22,10 @@ SCHEMA_VERSION = "research-localization:0.1"
 TARGET_LOCALE = "zh-CN"
 LEGACY_FINAL_TEXT_RULES_VERSIONS = frozenset({"simplified-chinese-research-prose:0.2"})
 VERIFIER_PURPOSE = register_purpose("research_localization_verifier")
-_NUMBER = re.compile(r"[+-]?(?:\d{1,3}(?:,\d{3})+|\d+)(?:\.\d+)?%?")
+# A sign only where a sign can stand: "mid-2026" and "2025-2026" carry a
+# hyphen, not a negative 2026 (2026-10-09, a UI batch blocked six times on
+# 「2026 年中」 losing a "-2026" it never had).
+_NUMBER = re.compile(r"(?:(?<![A-Za-z0-9])[+-])?(?:\d{1,3}(?:,\d{3})+|\d+)(?:\.\d+)?%?")
 _ISO_DATE = re.compile(r"(?<!\d)(\d{4})-(\d{2})-(\d{2})(?!\d)")
 _ISO_YEAR_MONTH = re.compile(r"(?<!\d)(\d{4})-(\d{2})(?![-\d])")
 _SAME_YEAR_ISO_RANGE = re.compile(
@@ -47,7 +50,15 @@ _OPAQUE_ID = re.compile(
     r"\b(?:claim|claim-version|dossier|dossier-version|memo|memo-version|"
     r"debate|debate-map|forecast-model-version|company-model-spec|mission|"
     r"mission-version|thesis|thesis-version|event|document|document-version)"
-    r":[A-Za-z0-9:._-]+|\b[0-9a-f]{64}\b|(?<![A-Za-z0-9])[ST][0-9]+(?![A-Za-z0-9])|\bcausal_chain:[0-9]+\b|因果链[0-9]+",
+    r":[A-Za-z0-9:._-]+|\b[0-9a-f]{64}\b|(?<![A-Za-z0-9])[ST][0-9]+(?![A-Za-z0-9])|\bcausal_chain:[0-9]+\b|因果链[0-9]+"
+    # 2026-10-08 (batch w): an SEC accession number is a source locator, not
+    # a value -- the drafting prompt says not to reproduce source refs, and on
+    # 10-07 most UI-text drafts that obeyed failed here on ``1467373``,
+    # ``-24`` and ``-196``.  (The XBRL row, "第 275 行", is handled in
+    # ``_consume_unit_conversions``: it may be dropped, not changed.)
+    r"|(?<![0-9])[0-9]{10}-[0-9]{2}-[0-9]{6}(?![0-9])"
+    # ... and so is a filing's form name: "10-Q" carries no value.
+    r"|(?<![A-Za-z0-9])(?:10-K|10-Q|8-K|20-F|6-K|40-F)(?:/A)?(?![A-Za-z0-9])",
     re.IGNORECASE,
 )
 _HAN = re.compile(r"[\u3400-\u9fff]")
@@ -96,6 +107,8 @@ def _numeric_text(value: str) -> str:
 
     cleaned = _OPAQUE_ID.sub("", value)
     cleaned = re.sub(r"(?i)(?<![A-Za-z])pre-(20\d{2})", r"pre \1", cleaned)
+    # 2026-10-08: "mid-2026" / "late-2025" is a year, not minus 2026.
+    cleaned = re.sub(r"(?i)(?<![A-Za-z])(mid|early|late|end|year|fy)-(\d)", r"\1 \2", cleaned)
     cleaned = _SAME_YEAR_ISO_RANGE.sub(r"\1 \2 \3 \4 \5", cleaned)
     cleaned = _ISO_DATE.sub(r"\1 \2 \3", cleaned)
     cleaned = _ISO_YEAR_MONTH.sub(r"\1 \2", cleaned)
@@ -417,7 +430,268 @@ def _number_differences(source_values: Sequence[str], target_values: Sequence[st
     for value, count in _written_small_counts(target_joined_raw).items():
         if missing_counter[value]:
             missing_counter[value] -= min(count, missing_counter[value])
+    _consume_unit_conversions(source_values, target_values, missing_counter, added)
+    _consume_display_rounding(missing_counter, added)
     return sorted(missing_counter.elements()), sorted(added.elements())
+
+
+#: 2026-10-08 (batch w).  Scale words a display may state right after a
+#: number.  Longest first, so 万亿 is not read as 万 and 十亿 not as 亿.
+_SCALE_WORDS: tuple[tuple[str, Decimal], ...] = (
+    ("万亿", Decimal("1000000000000")), ("千亿", Decimal("100000000000")),
+    ("百亿", Decimal("10000000000")), ("十亿", Decimal("1000000000")),
+    ("千万", Decimal("10000000")), ("百万", Decimal("1000000")),
+    ("亿", Decimal("100000000")), ("万", Decimal("10000")),
+    ("trillion", Decimal("1000000000000")), ("billion", Decimal("1000000000")),
+    ("million", Decimal("1000000")), ("thousand", Decimal("1000")),
+    ("bn", Decimal("1000000000")), ("mn", Decimal("1000000")),
+)
+_SCALED_NUMBER = re.compile(
+    r"(?<![\d.])([+-]?(?:\d{1,3}(?:,\d{3})+|\d+)(?:\.\d+)?)\s*("
+    + "|".join(re.escape(word) for word, _ in _SCALE_WORDS)
+    + r")(?![A-Za-z])", re.IGNORECASE)
+_SCALE_OF = {word.lower(): factor for word, factor in _SCALE_WORDS}
+_RESTATED_VALUE = re.compile(
+    r"\bwas\b[^。]*?\((?:currency|percent|per\s*cent|ratio|number|count|shares?)\)",
+    re.IGNORECASE)
+_DECLARED_UNIT = re.compile(
+    r"单位\s*[:：为是]?\s*(万亿|十亿|百万|亿|万)"
+    r"|[（(]\s*(万亿|十亿|百万|亿|万)\s*(?:美元|元|人民币)\s*[）)]")
+#: A rounded display must keep at least this many significant digits: 1.05 亿
+#: for 104,863,000 is a display, 1 亿 is a different number.
+_MIN_CONVERSION_SIGNIFICANT_DIGITS = 3
+
+
+def _scaled_occurrences(values: Sequence[str]) -> list[tuple[str, Decimal, Decimal]]:
+    """``(token, scaled value, scale)`` for each number followed by a scale word."""
+
+    found = []
+    for value in values:
+        for match in _SCALED_NUMBER.finditer(_numeric_text(value)):
+            token = _canonical_number(match.group(1))
+            try:
+                number = Decimal(token)
+            except InvalidOperation:
+                continue
+            scale = _SCALE_OF[match.group(2).lower()]
+            found.append((token, number * scale, scale))
+    return found
+
+
+def _faithful_conversion(exact: Decimal, shown_token: str, scale: Decimal) -> bool:
+    """Whether ``shown_token`` x ``scale`` is ``exact`` written in that unit.
+
+    Exactly equal, or ``exact / scale`` rounded half-up to the shown number's
+    own decimals with at least three significant digits kept.
+    """
+
+    try:
+        shown = Decimal(shown_token)
+    except InvalidOperation:
+        return False
+    if shown * scale == exact:
+        return True
+    decimals = len(shown_token.lstrip("+-").partition(".")[2])
+    if decimals > 8:
+        return False
+    digits = shown_token.lstrip("+-").replace(".", "").lstrip("0")
+    if len(digits) < _MIN_CONVERSION_SIGNIFICANT_DIGITS:
+        return False
+    places = Decimal(1).scaleb(-decimals)
+    return (exact / scale).quantize(places, rounding=ROUND_HALF_UP) == shown
+
+
+def _consume_unit_conversions(source_values: Sequence[str], target_values: Sequence[str],
+                              missing: Counter[str], added: Counter[str]) -> None:
+    """Pair a source value with the same value restated in a stated unit.
+
+    2026-10-08, live: 158 localizations on 10-07 and 34 blocked UI-text
+    batches failed on ``104863000`` shown as ``1.04863 亿美元``, or
+    ``2707409432.42`` as ``27.07 亿``.  A missing source number is accounted
+    for by one *added* target number only when the target names the unit right
+    after it (万, 亿, 百万, 十亿, million, billion ...) and that number times
+    the unit is the source value -- exactly, or rounded half-up to the shown
+    decimals with three or more significant digits.  A source number that
+    itself carries a scale word is compared at its full value.  The unit must
+    be stated: a bare ``1.04863`` stays a changed number, and so does a
+    different one (``1.06 亿``).  One to one; the verifier still reads it.
+    """
+
+    joined_source = " ".join(_numeric_text(value) for value in source_values)
+    # The XBRL row a figure was read from ("XBRL 行 ...（Americas，第 322 行）")
+    # is a locator like the accession number: a draft may leave it out.
+    if "XBRL" in joined_source:
+        for match in re.finditer(r"第\s*([0-9]+)\s*行", joined_source):
+            token = _canonical_number(match.group(1))
+            if missing[token] > 0:
+                missing[token] -= 1
+    # "7.7 (percent)" is 7.7%: the source names the unit in words.
+    for token in sorted(missing):
+        if token.endswith("%") or not added[token + "%"]:
+            continue
+        if re.search(rf"(?<![\d.]){re.escape(token)}\s*\(?\s*(?:percent|per\s*cent|pct)\b",
+                     joined_source, re.I):
+            take = min(missing[token], added[token + "%"])
+            missing[token] -= take
+            added[token + "%"] -= take
+    # A scaled target number may also be one the source happens to contain
+    # elsewhere ("3 亿美元" beside "2023-03-31"): it is free for pairing when
+    # the target holds it more often than the source does.
+    source_count = Counter(_numbers(*source_values))
+    target_count = Counter(_numbers(*target_values))
+    spare = Counter({token: target_count[token] - source_count[token]
+                     for token in target_count
+                     if target_count[token] > source_count[token] and not added[token]})
+
+    def available(token: str) -> bool:
+        return added[token] > 0 or spare[token] > 0
+
+    def take(token: str) -> None:
+        if added[token] > 0:
+            added[token] -= 1
+        else:
+            spare[token] -= 1
+
+    targets = [row for row in _scaled_occurrences(target_values) if available(row[0])]
+    # A table or list that declares its unit once ("收入（单位：亿美元）",
+    # "营业收入（亿美元）") states it for its bare numbers too.
+    declared = _DECLARED_UNIT.search(" ".join(target_values))
+    if declared is not None:
+        scale = _SCALE_OF[(declared.group(1) or declared.group(2)).lower()]
+        scaled_tokens = {row[0] for row in targets}
+        for token in sorted(added):
+            if token.endswith("%") or token in scaled_tokens or added[token] <= 0:
+                continue
+            try:
+                number = Decimal(token)
+            except InvalidOperation:
+                continue
+            targets.extend([(token, number * scale, scale)] * added[token])
+    source_scaled: dict[str, list[Decimal]] = {}
+    for token, value, _scale in _scaled_occurrences(source_values):
+        source_scaled.setdefault(token, []).append(value)
+    converted: set[str] = set()
+    for token in sorted(missing.elements()):
+        if token.endswith("%") or missing[token] <= 0:
+            continue
+        try:
+            plain = Decimal(token)
+        except InvalidOperation:
+            continue
+        candidates = [*source_scaled.get(token, ()), plain]
+        for index, (shown, _value, scale) in enumerate(targets):
+            if not available(shown):
+                continue
+            if any(_faithful_conversion(exact, shown, scale) for exact in candidates):
+                missing[token] -= 1
+                take(shown)
+                converted.add(token)
+                targets.pop(index)
+                break
+    # A restatement next to a value the target kept ("65543000美元（约合
+    # 6554.3万美元）") adds a display, not a number: it may stand for any
+    # source value it faithfully converts, missing or not.
+    if any(count > 0 for count in added.values()):
+        values = []
+        for token in _numbers(*source_values):
+            if token.endswith("%"):
+                continue
+            try:
+                values.append(Decimal(token))
+            except InvalidOperation:
+                continue
+        values.extend(value for rows in source_scaled.values() for value in rows)
+        for shown, _value, scale in targets:
+            if added[shown] > 0 and any(
+                    _faithful_conversion(exact, shown, scale) for exact in values):
+                added[shown] -= 1
+    # One generated sentence that restates its own value ("$1.5 billion ...
+    # was USD 1.5 billion (currency), as published ...") may say it once,
+    # provided the target keeps it.
+    kept = Counter(_numbers(*target_values))
+    shown_scaled = _scaled_occurrences(target_values)
+    worded = re.sub(r"(?<![\d.])(\d+(?:\.\d+)?)\s*\(?\s*(?:percent|per\s*cent|pct)\b\)?",
+                    r"\1% (percent)", joined_source, flags=re.I)
+
+    def represented(token: str) -> bool:
+        if kept[token] or token in converted:
+            return True
+        try:
+            exact = [Decimal(token), *source_scaled.get(token, ())]
+        except InvalidOperation:
+            return False
+        return any(_faithful_conversion(value, shown, scale)
+                   for shown, _value, scale in shown_scaled for value in exact)
+
+    for token in sorted(missing):
+        if missing[token] <= 0:
+            continue
+        # "11.2% ... was 11.2 (percent)" states one value twice.
+        forms = [form for form in (token, token + "%")
+                 if (form == token or not token.endswith("%")) and represented(form)]
+        for sentence in re.split(r"(?<!\d)[.!?](?!\d)|[。！？；;\n]", worded):
+            if missing[token] <= 0:
+                break
+            # Only the generated restatement "<quote> was <value> (<unit>), as
+            # published ..." -- two different facts that share a value must
+            # both survive.
+            if not _RESTATED_VALUE.search(sentence):
+                continue
+            numbers = Counter(_numbers(sentence))
+            repeats = max((numbers[form] for form in forms), default=0)
+            if repeats > 1:
+                missing[token] -= min(missing[token], repeats - 1)
+    for counter in (missing, added):
+        for key in [key for key, count in counter.items() if count <= 0]:
+            del counter[key]
+
+
+#: A source decimal with at least this many fractional digits is a machine
+#: value (a float written out whole), not a figure anyone chose to state.
+_MACHINE_PRECISION_DIGITS = 4
+
+
+def _consume_display_rounding(missing: Counter[str], added: Counter[str]) -> None:
+    """Pair a machine-precision source value with its display rounding.
+
+    2026-10-07, live: the DXC dossier v21 never published because a unit
+    carried ``2707409432.42083940`` and every draft showed it as
+    ``2707409432.42`` -- exactly the "normal display rounding" the drafting
+    prompt allows, refused by this check.  A source token with four or more
+    decimals may be matched by one target token that is that value rounded
+    half-up to the target's own zero to two decimals.  Nothing else changes:
+    every other value still has to survive exactly, the pairing is one to one,
+    and the semantic verifier still reads the sentence.
+    """
+
+    for token in sorted(missing.elements()):
+        if token.endswith("%") or not missing[token]:
+            continue
+        fraction = token.lstrip("+-").partition(".")[2]
+        if len(fraction) < _MACHINE_PRECISION_DIGITS:
+            continue
+        try:
+            exact = Decimal(token)
+        except InvalidOperation:
+            continue
+        for candidate in sorted(added.elements()):
+            if candidate.endswith("%") or not added[candidate]:
+                continue
+            shown_fraction = candidate.lstrip("+-").partition(".")[2]
+            if len(shown_fraction) > 2:
+                continue
+            try:
+                shown = Decimal(candidate)
+            except InvalidOperation:
+                continue
+            places = Decimal(1).scaleb(-len(shown_fraction))
+            if exact.quantize(places, rounding=ROUND_HALF_UP) == shown:
+                missing[token] -= 1
+                added[candidate] -= 1
+                break
+    for counter in (missing, added):
+        for key in [key for key, count in counter.items() if count <= 0]:
+            del counter[key]
 
 
 # Small counts a Chinese draft may write out: "4 家" -> "四家".  Live
@@ -457,9 +731,46 @@ def _written_small_counts(text: str) -> Counter[str]:
     return counts
 
 
+def localization_blockers(product: Mapping[str, Any]) -> list[dict[str, Any]]:
+    """Refuse missing research chapters without mistaking typed UI fields for chapters.
+
+    Empty bodies and placeholders still fail. Only the trusted projector's
+    closed field contract exempts labels, formal absence states and gap notes
+    from the narrative substance check; required research sections stay strict.
+    """
+
+    from .product_substance import publication_blockers
+
+    sections = list(product.get("sections") or [])
+    blockers = [{"code": "empty_source_section", "title": str(row.get("title") or "")}
+                for row in sections if isinstance(row, Mapping) and not str(row.get("body") or "").strip()]
+    from .research_source_projection import legacy_projection, section_role
+    try:
+        legacy_projection(product)  # Closed marker/state/hash proof, not body self-declaration.
+        for row in sections:
+            if not isinstance(row,Mapping): continue
+            role = section_role(product,row)
+            found = publication_blockers([row])
+            if role != "narrative":
+                # Labels, exact formal absence states and source gap annotations
+                # are not required research chapters. Still reject placeholders.
+                found = [item for item in found if item["code"] not in {"empty","heading_only","gap_only"}]
+            blockers += [item for item in found if item["code"] != "empty"]
+    except ValueError as exc:
+        blockers.append({"code":"unproved_projection","title":"正文","reason":str(exc)})
+    if not sections:
+        blockers.append({"code":"missing_section","title":"正文"})
+    return blockers
+
+
 def build_prompt(product: Mapping[str, Any]) -> str:
     """Build a translation/edit prompt without granting new research work."""
 
+    blockers = localization_blockers(product)
+    if blockers:
+        raise ResearchLocalizationError(
+            "a product with a failed section is not localised: "
+            + "；".join(f"{item['title']}（{item['code']}）" for item in blockers[:5]))
     sections = [
         {"index": i, "title": str(row.get("title") or ""),
          "body": str(row.get("body") or ""),
@@ -517,7 +828,11 @@ def build_verifier_prompt(product: Mapping[str, Any], localized: Mapping[str, An
         "explicitly marks a direct quotation.",
         "Return raw JSON only: "
         '{"verdict":"pass|reject","faithful":true,"no_new_facts":true,'
-        '"meaning_preserved":true,"findings":["具体问题"]}',
+        '"meaning_preserved":true,"findings":[{"section_index":0,"source_quote":"原文中的唯一原句",'
+        '"candidate_quote":"译稿中的唯一被拒句","code":"changed_fact|changed_number|new_fact|missing_fact","reason":"具体差异"}]}',
+        "For pass, findings must be empty. A rejection must anchor every finding to exact unique "
+        "body quotations and a section index. Only new_fact may have an empty source_quote; only "
+        "missing_fact may have an empty candidate_quote. Unanchored criticism cannot authorize repair.",
         "Source refs, numbers, status, version and approval remain bound by the source product "
         "outside this presentation attachment. Display unit conversion does not change the original "
         "numeric data. This verifier checks semantic fidelity, not sentence-level language style.",

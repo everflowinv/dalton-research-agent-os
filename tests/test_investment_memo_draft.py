@@ -1,9 +1,12 @@
 import json
+import tempfile
 import unittest
+from pathlib import Path
+from types import SimpleNamespace
 from unittest.mock import patch
 
-from dalton_core.investment_memo_cli import collect_frozen_input, run_memo
-from dalton_core.investment_memo_contract import CHECK_REFS
+from dalton_core.investment_memo_cli import collect_frozen_input, run, run_memo
+from dalton_core.investment_memo_contract import CHECK_REFS_V2 as CHECK_REFS
 from dalton_core.investment_memo_draft import (
     GROUPS, InvestmentMemoDraftError, build_group_prompt, parse_group_output, verify_memo,
 )
@@ -19,9 +22,26 @@ TITLES = ["Key Information", "Executive Summary", "S1 company", "S2 industry",
 QUESTIONS = [f"playbook question {i}" for i in range(1, 13)]
 
 
+# Batch D: a section needs substance (an empty / heading-only / gap-only body
+# refuses the memo) and Key Information states the labelled recommendation.
+BODY = ("需求改善来自大型客户的转型项目，订单结构向多年期托管服务倾斜，利润率随交付效率提升；"
+        "下一季度的订单转化是验证这一判断的关键观察点。")
+KEY_INFORMATION = ("建议（研究建议）：方向：多；仓位区间：标准仓（组合权重 1 至 3 个百分点）；期限：6 至 12 个月。"
+                   "理由是需求改善来自大型客户的转型项目。30 日 ADV：暂不可得（行情序列没有成交量），"
+                   "已发起 material-request:memo-adv。")
+ADV_GAP = {"kind": "not_acquired", "need": "30 日 ADV", "request_ref": "material-request:memo-adv",
+           "tried": "已尝试：行情序列"}
+
+
+def _section(title):
+    if title.startswith("Key Information"):
+        return {"title": title, "body": KEY_INFORMATION, "claim_refs": ["claim-version:1"],
+                "numbers": [], "gaps": [], "gap_items": [dict(ADV_GAP)]}
+    return {"title": title, "body": BODY, "claim_refs": ["claim-version:1"], "numbers": [], "gaps": []}
+
+
 def group_payload(section_titles, questions):
-    return {"sections": [{"title": title, "body": "supported prose", "claim_refs": ["claim-version:1"],
-                          "numbers": [], "gaps": []} for title in section_titles],
+    return {"sections": [_section(title) for title in section_titles],
             "key_questions": [{"question_ref": q["question_ref"], "question": q["question"],
                                "answer": "supported answer", "refs": ["claim-version:1"],
                                "unknown": False, "falsifier": "a contrary filing"} for q in questions]}
@@ -249,7 +269,7 @@ class InvestmentMemoDraftTests(unittest.TestCase):
             verifier.responses = iter([{**json.loads(contract_line), "verdict": "pass", "finding_codes": []}])
             return original(**kwargs)
         verifier.call = bound_call
-        authority_type.return_value.publish.return_value = {"status": "fresh", "id": "memo:v1", "content_hash": "f" * 64}
+        authority_type.return_value.publish.side_effect = lambda **kw: {**kw, "status": "fresh", "id": "memo:v1", "content_hash": "f" * 64}
         mission = {"id": "mission:1", "content_hash": "a" * 64,
                    "autonomy": {"automation_principal": "automation:mission"}}
         playbook = {"id": "playbook:1", "content_hash": "b" * 64,
@@ -258,9 +278,27 @@ class InvestmentMemoDraftTests(unittest.TestCase):
                   "company": {"company_ref": "company:ACN", "ticker": "ACN"},
                   "material": [{"ref": "claim-version:1", "hash": "c" * 64,
                                 "kind": "claim", "text": "source"}],
-                  "input_bindings": [{"ref": "claim-version:1", "hash": "c" * 64, "kind": "claim"}]}
-        result = run_memo(store=object(), frozen=frozen, model=producer, verifier_model=verifier)
+                  "input_bindings": [{"ref": "claim-version:1", "hash": "c" * 64, "kind": "claim"}],
+                  "material_pack_record": {"schema_version": "material-pack:0.1", "product": "investment_memo",
+                                           "watermark": {"arrival_id": 7}}}
+        with tempfile.TemporaryDirectory() as directory:
+            root = Path(directory)
+            producer_path, verifier_path = root / "producer.json", root / "verifier.json"
+            producer_path.write_text(json.dumps({"run_budget": {"max_cost_usd": 6},
+                "purpose_call_budgets": {"investment_memo": {"max_cost_usd": 1}}}))
+            verifier_path.write_text(json.dumps({
+                "purpose_call_budgets": {"investment_memo_verifier": {"max_cost_usd": 1}}}))
+            with patch("dalton_core.investment_memo_cli.DaltonStore", return_value=SimpleNamespace(connection=None)), \
+                    patch("dalton_core.investment_memo_cli.collect_frozen_input", return_value=frozen):
+                result = run(state_dir=root, model_config_path=producer_path,
+                    verifier_model_config_path=verifier_path, model_factory=lambda: producer,
+                    verifier_model_factory=lambda: verifier)
         self.assertEqual(result["status"], "succeeded", result)
+        self.assertEqual(result["budget"]["run"]["max_cost_usd"], 70)
+        self.assertEqual(result["budget"]["max_repairs"], 0)
+        # Batch C2: the memo version stores the pack's record like the initial screen.
+        self.assertEqual(authority_type.return_value.publish.call_args.kwargs["material_pack"],
+                         frozen["material_pack_record"])
         self.assertEqual(len(producer.calls), 4)
         self.assertEqual(len(verifier.calls), 1)
         self.assertEqual(result["cost_micros"], 50)
@@ -331,3 +369,21 @@ class InvestmentMemoDraftTests(unittest.TestCase):
         stored = MissionDeliverableAuthority(store).latest(
             "mission-deliverable:investment_memo:" + mission["universe"][0]["company_ref"].rsplit(":", 1)[-1])
         self.assertEqual(stored["gate"]["verified_body_hash"], result["gate"]["verified_body_hash"])
+
+
+class MaterialPackRecordTests(unittest.TestCase):
+    def test_bound_pack_returns_its_record(self):
+        from pathlib import Path
+        from unittest.mock import patch as _patch
+
+        from dalton_core import investment_memo_cli as imc
+
+        store = type("S", (), {"path": "/tmp/nowhere/core.sqlite"})()
+        pack = {"tags": {}, "text": "", "json": {}, "record": {"product": "investment_memo", "content_hash": "x"}}
+        with _patch("dalton_core.product_contract.build_pack", return_value=pack) as build:
+            rows, reason, record = imc.material_pack_bound(store, "company:ACN")
+        build.assert_called_once_with(Path("/tmp/nowhere"), "company:ACN", "investment_memo")
+        self.assertEqual((rows, reason), ([], None))
+        self.assertEqual(record, {"product": "investment_memo", "content_hash": "x"})
+        with _patch("dalton_core.product_contract.build_pack", side_effect=RuntimeError("boom")):
+            self.assertEqual(imc.material_pack_rows(store, "company:ACN")[0], [])

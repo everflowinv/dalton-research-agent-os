@@ -73,10 +73,11 @@ _SCHEMA_PATH = Path(__file__).with_name("research_quality_schema.sql")
 # identity, so a rescore after a scorer change is a new version rather than a
 # duplicate -- otherwise a fixed check could never be applied to a document
 # that had already been scored by the broken one.
-SCORER_VERSION = "0.1"
+SCORER_VERSION = "0.4"
 
 ARTEFACT_KINDS: tuple[str, ...] = (
     "initial_screen", "ask_answer", "company_dossier", "weekly_brief",
+    "debate_map", "investment_memo", "event_judgement",
 )
 
 # P14-0 registry: a lane names its own purpose from its own module rather than
@@ -169,21 +170,39 @@ def _text(value: Any, name: str, *, maximum: int = 2000, minimum: int = 1) -> st
 # ---------------------------------------------------------------------------
 
 
+#: Batch D number provenance fields an artefact keeps when a figure has them.
+_NUMBER_EXTRA_FIELDS = ("passage_ref", "number_ref", "derivation", "estimate", "cell",
+                        "metric", "unit", "display", "source_text", "company_ref",
+                        "period_kind", "value_kind", "source_kind", "basis")
+
+
+def _number(item: Mapping[str, Any]) -> dict[str, Any]:
+    out = {
+        "text": str(item.get("text") or ""),
+        "claim_version_ref": str(item.get("claim_version_ref") or ""),
+        "period": item.get("period"),
+    }
+    # Present only when the figure has them, so a legacy artefact -- and the
+    # golden cases pinned on it -- reads exactly as before.
+    for key in _NUMBER_EXTRA_FIELDS:
+        if item.get(key) is not None:
+            out[key] = item[key]
+    return out
+
+
 def _section(value: Mapping[str, Any]) -> dict[str, Any]:
-    return {
+    out = {
         "title": str(value.get("title") or ""),
         "body": str(value.get("body") or ""),
         "claim_refs": [str(ref) for ref in (value.get("claim_refs") or [])],
-        "numbers": [
-            {
-                "text": str(item.get("text") or ""),
-                "claim_version_ref": str(item.get("claim_version_ref") or ""),
-                "period": item.get("period"),
-            }
-            for item in (value.get("numbers") or [])
-        ],
+        "numbers": [_number(item) for item in (value.get("numbers") or [])],
         "gaps": [str(gap) for gap in (value.get("gaps") or [])],
     }
+    if value.get("source_refs"):
+        out["source_refs"] = [dict(item) for item in value["source_refs"]]
+    if value.get("gap_items"):
+        out["gap_items"] = [dict(item) for item in value["gap_items"]]
+    return out
 
 
 def artefact(
@@ -201,6 +220,7 @@ def artefact(
     confidence: str | None = None,
     question: str | None = None,
     prior: Mapping[str, Any] | None = None,
+    contract: Mapping[str, Any] | None = None,
 ) -> dict[str, Any]:
     """The common shape every check reads."""
 
@@ -208,7 +228,7 @@ def artefact(
         raise ResearchQualityValidationError(
             f"artefact_kind must be one of {list(ARTEFACT_KINDS)}"
         )
-    return {
+    out = {
         "artefact_kind": artefact_kind,
         "ref": _text(ref, "ref", maximum=512),
         "hash": _text(hash, "hash", maximum=128),
@@ -225,6 +245,24 @@ def artefact(
             "sections": [_section(item) for item in (prior.get("sections") or [])],
         },
     }
+    if contract is not None:
+        out["contract"] = json.loads(json.dumps(dict(contract), ensure_ascii=False, default=str))
+    return out
+
+
+def strl_artefact(*, ref: str, hash: str, sections: Sequence[Mapping[str, Any]],
+                  subject_ref: str | None = None,
+                  contract: Mapping[str, Any] | None = None) -> dict[str, Any]:
+    """An STRL-contract Initial Screen (draft or published) as an artefact."""
+
+    from .research_quality_rubrics import STRL_SECTIONS
+
+    return artefact(
+        artefact_kind="initial_screen", ref=ref, hash=hash, sections=sections,
+        subject_ref=subject_ref, expected_sections=list(STRL_SECTIONS), contract=contract,
+        gaps=[f"{item.get('kind')}：{item.get('need')}" for section in sections
+              for item in section.get("gap_items") or ()],
+    )
 
 
 def artefact_from_deliverable(
@@ -232,14 +270,21 @@ def artefact_from_deliverable(
 ) -> dict[str, Any]:
     """A published ``mission_deliverable`` version as a scoreable artefact."""
 
-    expected: Sequence[str] | None = INITIAL_SCREEN_SECTIONS
+    if str(record.get("template_ref") or "").startswith("contract:initial-screen-contract:strl"):
+        return strl_artefact(
+            ref=str(record["id"]), hash=str(record["content_hash"]),
+            sections=record.get("sections") or (), subject_ref=record.get("subject_ref"),
+            contract=record.get("contract"))
     kind = str(record.get("kind") or "initial_screen")
+    expected: Sequence[str] | None = INITIAL_SCREEN_SECTIONS if kind == "initial_screen" else None
+    if kind not in {"initial_screen", "investment_memo"}:
+        raise ResearchQualityValidationError(f"no deliverable rubric adapter for {kind}")
     if playbook is not None:
         titles = (playbook.get("deliverable_templates") or {}).get(kind)
         if isinstance(titles, list) and titles:
             expected = [str(title) for title in titles]
     return artefact(
-        artefact_kind="initial_screen",
+        artefact_kind=kind,
         ref=str(record["id"]),
         hash=str(record["content_hash"]),
         title=str(record.get("deliverable_ref") or ""),
@@ -599,24 +644,27 @@ def check_duplicate_parallel_citations(art: Mapping[str, Any], context: CheckCon
 
 
 def check_required_sections_present(art: Mapping[str, Any], context: CheckContext) -> dict[str, Any]:
+    """Every template section present *and substantive* (batch ap 1).
+
+    A section that is empty, only a heading, or only gap sentences fails --
+    the old check let an empty body with a gap note pass, which is how IBM's
+    empty S6 counted as written.
+    """
+
+    from .product_substance import required_sections_findings
+
     expected = art.get("expected_sections")
     if not expected:
         return _result("required_sections_present", status="skipped",
                        detail="没有给出模板章节，无法比对")
-    written = [section["title"] for section in art["sections"]]
-    findings = []
-    for title in expected:
-        if title not in written:
-            findings.append({"code": "missing_section", "title": title})
-    for section in art["sections"]:
-        if not section["body"].strip() and not section["gaps"]:
-            findings.append({"code": "empty_shell", "title": section["title"]})
+    findings = required_sections_findings(art["sections"], expected,
+                                          allow_unanswered=bool(art.get("allows_unanswered")))
     return _result(
         "required_sections_present",
         status="fail" if findings else "pass",
         findings=findings,
-        detail=(f"{len(expected)} 节齐备，没有空壳" if not findings
-                else f"{len(findings)} 个章节缺失或是空壳"),
+        detail=(f"{len(expected)} 节齐备且都有实质内容" if not findings
+                else f"{len(findings)} 个章节缺失、为空、只有标题或只有缺口说明"),
     )
 
 
@@ -908,6 +956,585 @@ def check_weekly_brief_capability_gate(
     )
 
 
+# ---------------------------------------------------------------------------
+# Batch H: the STRL-contract checks (rubric:initial-screen-strl)
+# ---------------------------------------------------------------------------
+
+_STRL_STANCE_RE = re.compile(r"(?:看多|看空|中性|观察)(?!价)")
+_STRL_WATCH_RE = re.compile(r"观察价[^。；\n]{0,20}?\d")
+_STRL_WATCH_NONE_RE = re.compile(r"观察价[：:]\s*暂无法给出（([^）]{2,})）")
+
+
+def _strl_section(art: Mapping[str, Any], title: str) -> Mapping[str, Any]:
+    return next((section for section in art["sections"] if section["title"] == title),
+                {"title": title, "body": "", "numbers": [], "gaps": []})
+
+
+def _sourced_tokens(section: Mapping[str, Any]) -> set[str]:
+    from .mission_deliverable import _normalise_number, _sourced_value_set
+
+    found: set[str] = set()
+    for item in section.get("numbers") or ():
+        for token in _sourced_value_set(str(item.get("text") or "")):
+            found.add(_normalise_number(token))
+            found.add(_normalise_number(token).lstrip("$€£¥").rstrip("%"))
+    return found
+
+
+def _sourced_sentences(section: Mapping[str, Any]) -> list[str]:
+    """Sentences whose every figure is accounted for by the section's citations."""
+
+    from .product_contract import sentences
+
+    numbers = _replayed_numbers(section)
+    out = []
+    for sentence in sentences(str(section.get("body") or "")):
+        # The publication contract already understands dates, exact decimal
+        # equivalence and locally replayed equations. In particular a percent
+        # conversion's 100 is evidence in that equation, never in other prose.
+        if value_tokens(sentence) and not unsourced_numbers(sentence, numbers):
+            out.append(sentence)
+    return out
+
+
+def _replayed_numbers(section: Mapping[str, Any]) -> list[Mapping[str, Any]]:
+    """Retain accepted citations and replay the two local numeric proofs.
+
+    Do not source arithmetic from another unproved result or from a forged
+    display. Source authority itself remains the publication reader's job.
+    """
+    from .mission_deliverable import (MissionDeliverableError,
+                                     validate_derived_number, validate_number_display)
+
+    trusted = []
+    pending = []
+    for item in section.get("numbers") or ():
+        if item.get("derivation"):
+            pending.append(item)
+            continue
+        if not any(item.get(k) for k in ("claim_version_ref", "passage_ref", "number_ref", "cell", "estimate")):
+            continue
+        if item.get("display") is not None:
+            try:
+                validate_number_display(item, str(item.get("source_text") or ""))
+            except (MissionDeliverableError, KeyError, TypeError, ValueError):
+                continue
+        trusted.append(item)
+    proven = []
+    while pending:
+        progress = False
+        for item in list(pending):
+            try:
+                validate_derived_number(item, [*trusted, *proven], check_stray=False)
+            except (MissionDeliverableError, KeyError, TypeError, ValueError):
+                continue
+            proven.append({"text": str(item["derivation"]["result"])})
+            pending.remove(item)
+            progress = True
+        if not progress:
+            break
+    # Range wording may mention a peer's already-proven result; only those
+    # scalar results, rather than peer prose, can source the final check.
+    for item in section.get("numbers") or ():
+        if not item.get("derivation") or item in pending:
+            continue
+        try:
+            validate_derived_number(item, [*trusted, *proven])
+        except (MissionDeliverableError, KeyError, TypeError, ValueError):
+            continue
+        trusted.append(item)
+    return trusted
+
+
+def check_stance_and_watch_price(art: Mapping[str, Any], context: CheckContext) -> dict[str, Any]:
+    from .research_quality_rubrics import STRL_SECTIONS
+
+    body = str(_strl_section(art, STRL_SECTIONS[0])["body"])
+    head = body[:240]
+    findings = []
+    if not _STRL_STANCE_RE.search(head):
+        findings.append({"code": "stance_missing", "detail": "首段没有封闭词表内的立场"})
+    unavailable = _STRL_WATCH_NONE_RE.search(body)
+    if not (_STRL_WATCH_RE.search(body) or unavailable):
+        findings.append({"code": "watch_price_missing", "detail": "没有观察价，也没有写明无法给出的原因"})
+    contract = art.get("contract") or {}
+    if contract.get("stance") and contract["stance"] not in ("看多", "看空", "中性", "观察"):
+        findings.append({"code": "contract_stance_not_in_vocabulary", "detail": str(contract["stance"])})
+    return _result("stance_and_watch_price", status="fail" if findings else "pass", findings=findings,
+                   detail=("立场与观察价（或无法给出的原因）都在" if not findings else "缺立场或观察价"))
+
+
+def check_sourced_quantitative_statements(art: Mapping[str, Any], context: CheckContext) -> dict[str, Any]:
+    from .research_quality_rubrics import STRL_THRESHOLDS
+
+    per = {section["title"]: len(_sourced_sentences(section)) for section in art["sections"]}
+    total = sum(per.values())
+    findings = []
+    if total < STRL_THRESHOLDS["sourced_quantitative_statements_total"]:
+        findings.append({"code": "too_few_sourced_statements", "count": total,
+                         "minimum": STRL_THRESHOLDS["sourced_quantitative_statements_total"]})
+    for title in STRL_THRESHOLDS["core_sections"]:
+        # 矛盾 1: when the valuation chain is unavailable and the section says
+        # why, its numeric floor does not apply -- the reason is the content.
+        if _STRL_WATCH_NONE_RE.search(str(_strl_section(art, title).get("body") or "")):
+            continue
+        if per.get(title, 0) < STRL_THRESHOLDS["sourced_quantitative_statements_per_core_section"]:
+            findings.append({"code": "core_section_thin", "section": title, "count": per.get(title, 0)})
+    return _result("sourced_quantitative_statements", status="fail" if findings else "pass",
+                   findings=findings, detail=f"带出处量化陈述共 {total} 句：" + "、".join(
+                       f"{title} {count}" for title, count in per.items()))
+
+
+def check_ours_vs_consensus(art: Mapping[str, Any], context: CheckContext) -> dict[str, Any]:
+    from .research_quality_rubrics import STRL_SECTIONS
+
+    section = _strl_section(art, STRL_SECTIONS[3])
+    hits = [sentence for sentence in _sourced_sentences(section)
+            if re.search(r"我们", sentence) and re.search(r"一致预期|consensus", sentence, re.IGNORECASE)
+            and re.search(r"\d+(?:\.\d+)?\s*%", sentence)
+            and re.search(r"FY\s?\d{2,4}|20\d\d|\d{2}E", sentence)]
+    derived = [item for item in section.get("numbers") or () if item.get("derivation")]
+    findings = []
+    if not hits:
+        findings.append({"code": "no_ours_vs_consensus_percent",
+                         "detail": "盈利预测节没有「我们 vs 一致预期 + 年度 + 差异 %」的已溯源句子"})
+    if not derived:
+        findings.append({"code": "difference_without_expression"})
+    return _result("ours_vs_consensus", status="fail" if findings else "pass", findings=findings,
+                   detail=f"{len(hits)} 句我们 vs 一致预期的差异，{len(derived)} 个声明算式")
+
+
+_VALUATION_ELEMENTS: tuple[tuple[str, str], ...] = (
+    ("multiple", r"\d+(?:\.\d+)?\s*(?:x|倍)|P/E|EV/EBITDA|市盈率"),
+    ("eps", r"EPS|每股收益"),
+    ("watch_price", r"观察价[^。；\n]{0,20}?\d"),
+    ("current_price", r"现价|当前股价|当前价格"),
+    ("implied_return", r"(?:空间|隐含|上行|下行|回报)[^。；\n]{0,12}?\d+(?:\.\d+)?\s*%|\d+(?:\.\d+)?\s*%\s*的?(?:空间|上行|下行)"),
+    ("multiple_rationale", r"历史[^。；]{0,10}(?:分位|中位|区间)|同业|业务属性"),
+)
+
+
+def check_valuation_six_elements(art: Mapping[str, Any], context: CheckContext) -> dict[str, Any]:
+    from .research_quality_rubrics import STRL_SECTIONS
+
+    section = _strl_section(art, STRL_SECTIONS[4])
+    body = str(section["body"])
+    unavailable = _STRL_WATCH_NONE_RE.search(body)
+    if unavailable:
+        reference = re.search(r"一致预期|consensus|卖方|券商|目标价", body, re.IGNORECASE)
+        findings = [] if reference else [{"code": "unavailable_without_reference",
+                                          "detail": "无法给出观察价时须列一致预期与卖方目标价作参照"}]
+        return _result("valuation_six_elements", status="fail" if findings else "pass", findings=findings,
+                       detail=f"观察价暂无法给出（{unavailable.group(1)[:60]}）" + ("，已列参照" if reference else ""))
+    findings = [{"code": f"missing_{name}"} for name, pattern in _VALUATION_ELEMENTS
+                if not (_bound_implied_return(section) if name == "implied_return"
+                        else re.search(pattern, body, re.IGNORECASE))]
+    return _result("valuation_six_elements", status="fail" if findings else "pass", findings=findings,
+                   detail=("六要素齐全" if not findings else f"缺 {len(findings)} 项"))
+
+
+def _bound_implied_return(section: Mapping[str, Any]) -> bool:
+    """A return and its proof must occur in one sentence, however long it is."""
+    from .mission_deliverable import _normalise_number
+
+    numbers = _replayed_numbers(section)
+    for sentence in _sourced_sentences(section):
+        if not re.search(r"空间|隐含|上行|下行|回报", sentence):
+            continue
+        percents = {_normalise_number(t) for t in value_tokens(sentence) if t.strip().endswith("%")}
+        if not percents:
+            continue
+        compact = re.sub(r"\s", "", sentence).replace("−", "-").replace("×", "*").replace("÷", "/")
+        for item in numbers:
+            if str(item.get("unit") or "").casefold() not in {"%", "percent", "百分比"}:
+                continue
+            derivation = item.get("derivation") or {}
+            expression = re.sub(r"\s", "", str(derivation.get("expression") or ""))
+            result = str(derivation.get("result") or "")
+            if expression and expression in compact and result + "%" in percents:
+                return True
+            # A shorter statement can cite a held derived return directly;
+            # a source somewhere else in the section is not such a binding.
+            if (re.search(r"空间|隐含|上行|下行|回报", str(item.get("metric") or ""))
+                    and percents.intersection(_sourced_tokens({"numbers": [item]}))):
+                return True
+    return False
+
+
+def _source_refs(art: Mapping[str, Any]) -> list[Mapping[str, Any]]:
+    return [item for section in art["sections"] for item in section.get("source_refs") or ()]
+
+
+def check_source_kind_diversity(art: Mapping[str, Any], context: CheckContext) -> dict[str, Any]:
+    from .research_quality_rubrics import STRL_THRESHOLDS
+
+    kinds = sorted({str(item.get("source_kind") or "") for item in _source_refs(art)} - {"", "ours"})
+    minimum = STRL_THRESHOLDS["source_kinds_min"]
+    findings = [] if len(kinds) >= minimum else [{"code": "too_few_source_kinds", "kinds": kinds,
+                                                  "minimum": minimum}]
+    return _result("source_kind_diversity", status="fail" if findings else "pass", findings=findings,
+                   detail=f"{len(kinds)} 类来源：" + "、".join(kinds))
+
+
+_PASSAGE_DOC_RE = re.compile(r"^doc-passage:(?P<doc>\S+):\d+-\d+:[0-9a-f]{12}$")
+
+
+def check_latest_transcript_and_release_cited(art: Mapping[str, Any], context: CheckContext) -> dict[str, Any]:
+    """The newest call transcript and results release the pack held are both cited.
+
+    Inputs are the pack's own (batch C: ``{kind: document, ref: <document>,
+    date, doc_kind}``); a cited ``doc-passage:`` ref cites its document.
+    """
+
+    from .product_contract import DOC_KIND_SOURCE
+
+    cited: set[str] = set()
+    for item in _source_refs(art):
+        ref = str(item.get("ref"))
+        cited.add(ref)
+        match = _PASSAGE_DOC_RE.match(ref)
+        if match:
+            cited.add(match.group("doc"))
+    inputs = ((art.get("contract") or {}).get("pack") or {}).get("inputs") or []
+    findings = []
+    for kind, label in (("transcript", "最新电话会纪要"), ("release", "最新业绩发布稿")):
+        held = sorted((item for item in inputs if isinstance(item, Mapping)
+                       and (str(item.get("source_kind") or "")
+                            or DOC_KIND_SOURCE.get(str(item.get("doc_kind") or ""), "")) == kind),
+                      key=lambda item: str(item.get("as_of") or item.get("date") or ""))
+        if held:
+            latest = str(held[-1].get("ref"))
+            if latest not in cited:
+                findings.append({"code": f"latest_{kind}_not_cited", "ref": latest, "detail": label})
+        elif not any(str(item.get("source_kind")) == kind for item in _source_refs(art)):
+            findings.append({"code": f"no_{kind}_cited", "detail": label})
+    return _result("latest_transcript_and_release_cited", status="fail" if findings else "pass",
+                   findings=findings, detail=("引用了最新纪要与发布稿" if not findings
+                                              else "、".join(item["detail"] for item in findings) + "未被引用"))
+
+
+def check_material_missing_bound(art: Mapping[str, Any], context: CheckContext) -> dict[str, Any]:
+    from .product_contract import material_missing_count, material_missing_findings
+    from .research_quality_rubrics import STRL_THRESHOLDS
+
+    findings: list[dict[str, Any]] = []
+    total = 0
+    for section in art["sections"]:
+        total += material_missing_count(section["body"])
+        findings.extend({**item, "section": section["title"]}
+                        for item in material_missing_findings(section["body"], section.get("gap_items") or ()))
+    if total > STRL_THRESHOLDS["material_missing_max"]:
+        findings.append({"code": "material_missing_over_limit", "count": total})
+    return _result("material_missing_bound", status="fail" if findings else "pass", findings=findings,
+                   detail=f"「材料缺少」{total} 处")
+
+
+def check_gap_classification(art: Mapping[str, Any], context: CheckContext) -> dict[str, Any]:
+    from .product_contract import ProductContractError, validate_gap_item
+
+    findings = []
+    count = 0
+    for section in art["sections"]:
+        for item in section.get("gap_items") or ():
+            count += 1
+            try:
+                validate_gap_item(item)
+            except ProductContractError as exc:
+                findings.append({"code": "gap_item_invalid", "section": section["title"], "detail": str(exc)})
+    if art.get("expected_sections") and count == 0:
+        findings.append({"code": "no_classified_gaps", "detail": "附录没有分类的缺口条目"})
+    return _result("gap_classification", status="fail" if findings else "pass", findings=findings,
+                   detail=f"{count} 条缺口，分类为 company_not_disclosed / not_acquired")
+
+
+def check_fact_repetition(art: Mapping[str, Any], context: CheckContext) -> dict[str, Any]:
+    from .research_quality_rubrics import STRL_THRESHOLDS
+
+    where: dict[tuple[str, ...], set[str]] = {}
+    evidence: dict[tuple[str, ...], set[str]] = {}
+    for section in art["sections"]:
+        for item in _replayed_numbers(section):
+            identity = _fact_identity(item, art, section)
+            if identity is None or not _number_appears(item, section["body"]):
+                continue
+            where.setdefault(identity, set()).add(section["title"])
+            evidence.setdefault(identity, set()).add(_number_binding(item))
+    limit = STRL_THRESHOLDS["fact_sections_max"]
+    findings = [{"code": "fact_in_too_many_sections", "fact_identity": list(identity),
+                 "bindings": sorted(evidence[identity]), "sections": sorted(titles)}
+                for identity, titles in sorted(where.items()) if len(titles) > limit]
+    return _result("fact_repetition", status="fail" if findings else "pass", findings=findings,
+                   detail=("已绑定事实未发现跨三节重复；缺身份的数字由来源和元数据检查处理" if not findings
+                           else f"{len(findings)} 个同一事实出现在三节以上"))
+
+
+def _number_binding(item: Mapping[str, Any]) -> str:
+    for key in ("number_ref", "claim_version_ref", "passage_ref"):
+        if item.get(key):
+            return str(item[key])
+    if item.get("cell"):
+        return json.dumps(item["cell"], sort_keys=True)
+    if item.get("estimate"):
+        return str(item["estimate"].get("assumption_ref") or "")
+    if item.get("derivation"):
+        return json.dumps(item["derivation"], sort_keys=True)
+    return ""
+
+
+def _number_appears(item: Mapping[str, Any], body: str) -> bool:
+    from .mission_deliverable import _normalise_number, _sourced_value_set
+    # Preserve percent/currency distinctions. 3 months cannot be a 3% fact.
+    text = str(item.get("text") or "")
+    unit = str(item.get("unit") or "").casefold()
+    cited = {_normalise_number(x) for x in _sourced_value_set(text)}
+    # A cited equation may name price, EPS and multiple together. An estimate
+    # of a multiple does not turn every operand or result into that estimate.
+    printed_unit = {"percent": "%", "百分比": "%", "usd": "美元"}.get(unit, unit)
+    if printed_unit:
+        explicit = re.findall(r"([$€£¥]?\s?\d[\d,]*(?:\.\d+)?\s?%?)\s*" + re.escape(printed_unit), text)
+        if explicit:
+            cited = {_normalise_number(x) for x in explicit}
+    if unit in {"%", "percent", "百分比"}:
+        cited = {x if x.endswith("%") else x + "%" for x in cited if not x.startswith(("$", "€", "£", "¥"))}
+    shown = {_normalise_number(x) for x in value_tokens(body, include_small=True)}
+    return bool(cited.intersection(shown))
+
+
+def _fact_identity(item: Mapping[str, Any], art: Mapping[str, Any],
+                   section: Mapping[str, Any]) -> tuple[str, ...] | None:
+    metric, period, unit = (str(item.get(k) or "").strip() for k in ("metric", "period", "unit"))
+    binding = _number_binding(item)
+    if not all((metric, period, unit, binding)):
+        # Equal digits with unknown semantics are not proof of equal facts.
+        # Missing metadata is scored separately, never guessed from a year.
+        return None
+    issuer = item.get("company_ref")
+    if not issuer:
+        issuer = next((s.get("company_ref") for s in section.get("source_refs") or ()
+                       if s.get("ref") == item.get("passage_ref") or s.get("ref") == binding), None)
+    issuer = str(issuer or art.get("subject_ref") or "")
+    # Exact pack/cell/assumption bindings identify a scalar even if its label
+    # or display precision differs between sections. A passage can contain
+    # several metrics, so its metric/period/unit remain part of the identity.
+    if binding.startswith(("pack-json:", "forecast-cell:", "assumption:")) or item.get("cell"):
+        metric = binding
+    return (issuer, metric, period, unit, str(item.get("basis") or ""), binding)
+
+
+def check_indirect_placeholders(art: Mapping[str, Any], context: CheckContext) -> dict[str, Any]:
+    from .product_contract import placeholder_findings
+
+    findings = [{**item, "section": section["title"]} for section in art["sections"]
+                for item in placeholder_findings(section["body"])]
+    return _result("indirect_placeholders", status="fail" if findings else "pass", findings=findings,
+                   detail=("没有间接占位符" if not findings else f"{len(findings)} 处间接占位符"))
+
+
+def check_number_display_rounding(art: Mapping[str, Any], context: CheckContext) -> dict[str, Any]:
+    from .product_substance import display_rounding_findings
+
+    findings = [{**item, "section": section["title"]} for section in art["sections"]
+                for item in display_rounding_findings(section["body"])]
+    return _result("number_display_rounding", status="fail" if findings else "pass", findings=findings,
+                   detail=("数字按量级显示" if not findings else f"{len(findings)} 个机器精度数字"))
+
+
+def check_number_metadata(art: Mapping[str, Any], context: CheckContext) -> dict[str, Any]:
+    from .product_substance import number_metadata_findings
+
+    sections = [{**section, "_strict_numbers": True} for section in art["sections"]]
+    findings = number_metadata_findings(sections)
+    # Arithmetic establishes a value, not its fiscal or investment period.
+    # A timeless result cannot silently bypass both identity and provenance
+    # checks merely because the publication contract permits a derivation.
+    for section in sections:
+        for item in section.get("numbers") or ():
+            if item.get("derivation") and not item.get("period"):
+                findings.append({"code": "derived_period_unverified", "section": section["title"],
+                                 "text": str(item.get("text") or "")[:80], "missing": ["period"],
+                                 "detail": "算式只证明数值，尚未绑定该指标的期间"})
+    return _result("number_metadata", status="fail" if findings else "pass", findings=findings,
+                   detail=("每个数字带指标/期间/单位/来源" if not findings
+                           else f"{len(findings)} 个数字缺指标、期间、单位或来源"))
+
+
+def check_reasoning_lint(art: Mapping[str, Any], context: CheckContext) -> dict[str, Any]:
+    from .research_reasoning_lint import lint_text
+
+    findings = []
+    for section in art["sections"]:
+        kinds = {str(item.get("source_kind") or "") for item in section.get("source_refs") or ()}
+        findings.extend(lint_text(section["body"], source_kinds=kinds, section=section["title"]))
+    return _result("reasoning_lint", status="fail" if findings else "pass", findings=findings,
+                   detail=("推理 lint 无命中" if not findings else f"{len(findings)} 处推理 lint 命中"))
+
+
+_EXTERNAL_KINDS = {"industry", "peers", "market", "consensus", "valuation", "sell_side_note", "ours"}
+
+
+def check_issuer_attribution(art: Mapping[str, Any], context: CheckContext) -> dict[str, Any]:
+    subject = art.get("subject_ref")
+    findings = []
+    if not any(item.get("company_ref") or item.get("company_refs") for item in _source_refs(art)):
+        return _result("issuer_attribution", status="skipped",
+                       detail="所引材料没有标注发行人（company_ref），无法核对归属")
+    for section in art["sections"]:
+        for item in section.get("source_refs") or ():
+            owner = item.get("company_ref")
+            other = set(item.get("company_refs") or ()) - {subject}
+            mismatch = (subject and owner and owner != subject) or (subject and other)
+            if mismatch and str(item.get("source_kind")) not in _EXTERNAL_KINDS:
+                kind = str(item.get("source_kind") or "")
+                unverified = kind in {"expert_call", "sales_note"}
+                findings.append({"code": "issuer_binding_unverified" if unverified else "foreign_issuer_material",
+                                 "section": section["title"], "ref": item.get("ref"),
+                                 "subject_ref": subject, "company_ref": owner, "company_refs": sorted(other),
+                                 **({"detail": "材料包含研究对象以外的公司；当前记录没有引用句与主体的绑定，仍需核对引用句所指公司"} if unverified else {})})
+    return _result("issuer_attribution", status="fail" if findings else "pass", findings=findings,
+                   detail=("所引公司材料都属于本公司" if not findings else f"{len(findings)} 条材料归属不匹配或引用句归属尚未证明"))
+
+
+_FORWARD_RE = re.compile(r"FY\s?(?:20)?\d{2}\s?E\b|\b\d{2}E\b|FY\+\d|20\d{2}\s*E\b|预测|预计|共识认为|forecast|estimate", re.IGNORECASE)
+_FORWARD_LABEL_RE = re.compile(r"我们|一致预期|consensus|指引|guidance|预计|预测|估计|券商|卖方|假设|目标",
+                               re.IGNORECASE)
+
+
+def _forecast_model_year_number(item: Mapping[str, Any]) -> bool:
+    # material_pack.our_model_years exports these two exact scalar paths only
+    # from forecast_eps / FY E or A/E projections, or four estimate cells.
+    # It never exports historical EPS as this value. The publication reader
+    # resolves number_ref against that held pack; no calendar year is guessed.
+    return bool(re.fullmatch(r"pack-json:/our_model/years/\d+/(?:revenue|eps)/value",
+                             str(item.get("number_ref") or "")))
+
+
+def check_actual_vs_estimate_labelling(art: Mapping[str, Any], context: CheckContext) -> dict[str, Any]:
+    from .product_contract import sentences
+
+    findings = []
+    for section in art["sections"]:
+        for sentence in sentences(section["body"]):
+            bound = [item for item in section.get("numbers") or () if _number_appears(item, sentence)]
+            forward = bool(_FORWARD_RE.search(sentence)) or any(
+                item.get("estimate") or (item.get("cell") or {}).get("kind") == "forecast_cell"
+                or item.get("period_kind") == "forecast" or item.get("value_kind") == "forecast"
+                or _forecast_model_year_number(item)
+                for item in bound)
+            # An explicit plan with a same-issuer guidance passage identifies
+            # whose forward figure it is. A bare FY year proves neither kind.
+            plan_bound = re.search(r"计划", sentence) and any(
+                s.get("ref") == item.get("passage_ref") and s.get("company_ref") == art.get("subject_ref")
+                and s.get("source_kind") in {"guidance", "release", "transcript"}
+                for item in bound for s in section.get("source_refs") or ())
+            if forward and value_tokens(_FORWARD_RE.sub("", sentence)) \
+                    and not plan_bound \
+                    and not _FORWARD_LABEL_RE.search(sentence):
+                findings.append({"code": "forward_figure_unlabelled", "section": section["title"],
+                                 "excerpt": sentence[:120]})
+    return _result("actual_vs_estimate_labelling", status="fail" if findings else "pass", findings=findings,
+                   detail=("已识别的预测数字未发现来源标签缺失；未凭年份判定实际或预测" if not findings
+                           else f"{len(findings)} 句前瞻数字没有标明是谁的数"))
+
+
+_ONE_OFF_RE = re.compile(r"一次性|非经常|重组费用|减值|one-?off|non-?recurring|restructuring", re.IGNORECASE)
+_NORMALISED_RE = re.compile(r"调整后|剔除|正常化|扣除|non-?GAAP|adjusted|normali[sz]ed", re.IGNORECASE)
+_ACCOUNTING_RE = re.compile(r"利润|损益|盈利|收益|费用|成本|税项|减值|重组|gain|profit|income|earnings|expense|charge|impairment|restructuring", re.IGNORECASE)
+_NORMALISATION_CONTINUATION_RE = re.compile(
+    r"^(?:按(?:调整后|正常化)口径[，,\s]*(?:剔除|扣除)(?:后|该项|这项|该笔|上述|前述)"
+    r"|(?:剔除|扣除)(?:后|该项|这项|该笔|上述|前述)"
+    r"|(?:将|把)(?:该项|这项|该笔|上述|前述)[^。；]*?(?:剔除|扣除)"
+    r"|(?:该|这项|该项|上述|前述)(?:费用|收益|损益|项目|税项)[^。；]*?(?:剔除|扣除))")
+_ONE_OFF_QUESTION_RE = re.compile(r"^(?:是否|有没有|尚不清楚是否|不清楚是否|尚未确定是否)")
+
+
+def _normalises_previous_item(continuation: str) -> bool:
+    return bool(_NORMALISATION_CONTINUATION_RE.search(continuation)
+                and not _ONE_OFF_RE.search(continuation))
+
+
+def check_one_off_normalisation(art: Mapping[str, Any], context: CheckContext) -> dict[str, Any]:
+    from .product_contract import sentences
+    findings = []
+    for section in art["sections"]:
+        for paragraph in re.split(r"\n\s*\n", section["body"]):
+            rows = sentences(paragraph)
+            for index, sentence in enumerate(rows):
+                if _ONE_OFF_QUESTION_RE.search(sentence):
+                    continue
+                accounting = bool(_ACCOUNTING_RE.search(sentence))
+                if (not accounting and re.match(r"^(?:其中|该项|这项|该笔|上述)", sentence)
+                        and index > 0 and _ACCOUNTING_RE.search(rows[index - 1])):
+                    accounting = True
+                if not (_ONE_OFF_RE.search(sentence) and accounting):
+                    continue
+                clauses = re.split(r"[，,](?!\d)", sentence)
+                one_off_clauses = [i for i, clause in enumerate(clauses) if _ONE_OFF_RE.search(clause)]
+                local = all(_NORMALISED_RE.search(clauses[i]) or (
+                    i + 1 < len(clauses) and _normalises_previous_item(clauses[i + 1]))
+                    for i in one_off_clauses)
+                if local:
+                    continue
+                # A same-paragraph next sentence can explicitly continue this
+                # item's normalisation. No earlier, remote, or new charge can
+                # clear it; a generic adjusted EPS sentence is not a bridge.
+                following = rows[index + 1] if index + 1 < len(rows) else ""
+                if _normalises_previous_item(following):
+                    continue
+                findings.append({"code": "one_off_without_normalisation", "section": section["title"],
+                                 "excerpt": sentence[:120]})
+    return _result("one_off_normalisation", status="fail" if findings else "pass", findings=findings,
+                   detail=("一次性项目都说明了口径" if not findings else "提到一次性项目但没有说明正常化口径"))
+
+
+_CASH_RE = re.compile(r"自由现金流|FCF|现金转化|经营现金流|cash conversion", re.IGNORECASE)
+
+
+def check_cash_bridge_consistency(art: Mapping[str, Any], context: CheckContext) -> dict[str, Any]:
+    from .product_contract import sentences
+
+    statements = 0
+    findings = []
+    for section in art["sections"]:
+        sourced = set(_sourced_sentences(section))
+        for sentence in sentences(section["body"]):
+            if not _CASH_RE.search(sentence) or not value_tokens(sentence):
+                continue
+            statements += 1
+            if sentence not in sourced:
+                findings.append({"code": "cash_figure_unsourced", "section": section["title"],
+                                 "excerpt": sentence[:120]})
+            elif re.search(r"转化率|conversion", sentence, re.IGNORECASE) and not any(
+                    item.get("derivation") for item in section.get("numbers") or ()):
+                findings.append({"code": "cash_conversion_without_expression", "section": section["title"]})
+    if not statements:
+        return _result("cash_bridge_consistency", status="skipped",
+                       detail="没有现金流数字陈述，不适用")
+    return _result("cash_bridge_consistency", status="fail" if findings else "pass", findings=findings,
+                   detail=f"{statements} 句现金流陈述")
+
+
+def check_cross_product_consistency(art: Mapping[str, Any], context: CheckContext) -> dict[str, Any]:
+    """Placeholder until batch an's ``product_consistency`` conflicts table.
+
+    When that module is installed and returns conflicts for this artefact, they
+    are findings; until then the check is published as skipped with the
+    reason, never as a pass.
+    """
+
+    try:
+        from . import product_consistency  # type: ignore[attr-defined]
+    except ImportError:
+        return _result("cross_product_consistency", status="skipped",
+                       detail="跨产物一致性（batch an product_consistency）尚未落地；占位，不计分")
+    conflicts_for = getattr(product_consistency, "conflicts_for", None)
+    if conflicts_for is None or context.get("core") is None:
+        return _result("cross_product_consistency", status="skipped",
+                       detail="没有 Core 连接或 conflicts_for 接口，无法比对")
+    findings = [dict(item) for item in conflicts_for(context["core"], art) or ()]
+    return _result("cross_product_consistency", status="fail" if findings else "pass", findings=findings,
+                   detail=("与本所其他产品一致" if not findings else f"{len(findings)} 处跨产物冲突"))
+
+
 CHECKS: Mapping[str, Callable[[Mapping[str, Any], CheckContext], dict[str, Any]]] = {
     "numbers_without_refs": check_numbers_without_refs,
     "residual_citation_artefacts": check_residual_citation_artefacts,
@@ -920,6 +1547,24 @@ CHECKS: Mapping[str, Callable[[Mapping[str, Any], CheckContext], dict[str, Any]]
     "new_version_cites_new_refs": check_new_version_cites_new_refs,
     "restatement_drift": check_restatement_drift,
     "weekly_brief_capability_gate": check_weekly_brief_capability_gate,
+    "stance_and_watch_price": check_stance_and_watch_price,
+    "sourced_quantitative_statements": check_sourced_quantitative_statements,
+    "ours_vs_consensus": check_ours_vs_consensus,
+    "valuation_six_elements": check_valuation_six_elements,
+    "source_kind_diversity": check_source_kind_diversity,
+    "latest_transcript_and_release_cited": check_latest_transcript_and_release_cited,
+    "material_missing_bound": check_material_missing_bound,
+    "gap_classification": check_gap_classification,
+    "fact_repetition": check_fact_repetition,
+    "indirect_placeholders": check_indirect_placeholders,
+    "number_display_rounding": check_number_display_rounding,
+    "number_metadata": check_number_metadata,
+    "reasoning_lint": check_reasoning_lint,
+    "issuer_attribution": check_issuer_attribution,
+    "actual_vs_estimate_labelling": check_actual_vs_estimate_labelling,
+    "one_off_normalisation": check_one_off_normalisation,
+    "cash_bridge_consistency": check_cash_bridge_consistency,
+    "cross_product_consistency": check_cross_product_consistency,
 }
 
 
@@ -959,7 +1604,7 @@ def run_deterministic(
     context: CheckContext = {"core": core, "rubric": rubric, "mission_ref": mission_ref}
     results = [CHECKS[name](art, context) for name in rubric.deterministic_checks]
     failed = [item["check"] for item in results if item["status"] == "fail"]
-    return {
+    out = {
         "scorer_version": SCORER_VERSION,
         "rubric_ref": rubric.rubric_ref,
         "rubric_hash": rubric.content_hash,
@@ -969,6 +1614,21 @@ def run_deterministic(
         "failed_checks": failed,
         "passed": not failed,
     }
+    if rubric.rubric_ref == "rubric:initial-screen-strl":
+        # Version binding (batch H): the score names every standard it ran,
+        # not only the rubric -- the lint registry, the product contract, the
+        # substance rules, and the contract the artefact was drafted under.
+        from .product_contract import contract_fingerprint
+        from .product_substance import SUBSTANCE_VERSION
+        from .research_reasoning_lint import lint_fingerprint
+
+        out["bindings"] = {
+            "lint": lint_fingerprint(), "product_contract": contract_fingerprint(),
+            "substance": SUBSTANCE_VERSION,
+            "artefact_contract": str((art.get("contract") or {}).get("version") or ""),
+            "artefact_lint": str((art.get("contract") or {}).get("lint") or ""),
+        }
+    return out
 
 
 # ---------------------------------------------------------------------------
@@ -1513,6 +2173,12 @@ class ScoringIdentity:
         })
 
 
+def _score_bindings(target_ref: str, target_hash: str) -> list[dict[str, Any]]:
+    from .product_consistency import upstream_bindings
+
+    return upstream_bindings([{"ref": target_ref, "role": "target", "content_hash": target_hash}])
+
+
 class QualityScoreAuthority:
     """Append-only quality scores, one version chain per artefact and rubric."""
 
@@ -1524,7 +2190,35 @@ class QualityScoreAuthority:
         self.clock = clock or _now
         self._authorization_flag = authorization_flag(
             self.connection, "dalton_research_quality_authorized")
+        self._migrate_product_kinds()
         self.connection.executescript(_SCHEMA_PATH.read_text(encoding="utf-8"))
+
+    def _migrate_product_kinds(self) -> None:
+        row = self.connection.execute("SELECT sql FROM sqlite_master WHERE type='table' "
+                                      "AND name='research_quality_score_versions'").fetchone()
+        if row is None or "'event_judgement'" in row[0]:
+            return
+        if self.connection.in_transaction:
+            raise ResearchQualityConflict("quality product migration requires no open transaction")
+        schema = _SCHEMA_PATH.read_text(encoding="utf-8")
+        start = schema.index("CREATE TABLE IF NOT EXISTS research_quality_score_versions")
+        end = schema.index("\n);", start) + 3
+        table = schema[start:end].replace("CREATE TABLE IF NOT EXISTS research_quality_score_versions",
+                                        "CREATE TABLE research_quality_score_versions_expanded", 1)
+        foreign_keys = self.connection.execute("PRAGMA foreign_keys").fetchone()[0]
+        self.connection.execute("PRAGMA foreign_keys=OFF")
+        try:
+            self.connection.executescript("BEGIN IMMEDIATE;\n" + table + "\n"
+                "INSERT INTO research_quality_score_versions_expanded SELECT * FROM research_quality_score_versions;\n"
+                "DROP TABLE research_quality_score_versions;\n"
+                "ALTER TABLE research_quality_score_versions_expanded RENAME TO research_quality_score_versions;\n"
+                + schema + "\nCOMMIT;")
+        except Exception:
+            if self.connection.in_transaction:
+                self.connection.rollback()
+            raise
+        finally:
+            self.connection.execute(f"PRAGMA foreign_keys={int(foreign_keys)}")
 
     @contextmanager
     def _transaction(self) -> Iterator[sqlite3.Cursor]:
@@ -1661,6 +2355,10 @@ class QualityScoreAuthority:
             "deterministic": dict(deterministic),
             "judge": None if judge_layer is None else dict(judge_layer),
             "verifier": None if verifier_layer is None else dict(verifier_layer),
+            # Batch an (binding metadata only): the exact artefact version
+            # scored; a newer version of it (or a new rubric hash) makes this
+            # score stale in product_consistency, never a current score.
+            "upstream_bindings": _score_bindings(target_ref, target_hash),
             "actor_ref": actor_ref,
             "created_at": self.clock(),
         }
@@ -1801,6 +2499,7 @@ __all__ = [
     "artefact_from_deliverable",
     "artefact_from_dossier",
     "artefact_from_weekly_brief",
+    "strl_artefact",
     "build_judge_prompt",
     "build_verifier_prompt",
     "judge",

@@ -1,0 +1,224 @@
+{
+  "date": "2026-10-08",
+  "source_commit": "7bb705ebad24034e4490c2f2d0945ab8370d0cd1",
+  "notes": [
+    "All non-read service submissions were blocked. Tests marked isolated construct local UI state or intercept requests.",
+    "Financial content is UI evidence, not independently verified investment analysis."
+  ],
+  "browser_checks": {
+    "goal_empty": "请先写下研究目标",
+    "ask_empty": "请先写下问题",
+    "workspace_empty": "请先填写研究环境名称",
+    "rename_cancel": [
+      {
+        "type": "prompt",
+        "message": "研究环境的新名称"
+      }
+    ],
+    "empty_validations": {
+      "steer-status": "请先写下调整方向",
+      "lever-status": "请先写理由",
+      "cov-status": "请先写理由"
+    },
+    "emergency_cancel": [
+      {
+        "type": "confirm",
+        "message": "紧急停机：系统将不再接新任务、不再发起新的付费模型调用，直到你按「恢复全部运行」。确定？"
+      }
+    ],
+    "template_empty": "请先在上方写理由",
+    "template_export": {
+      "name": "Dalton_ACN_财务模型_2026-10-08.xlsx",
+      "failure": null,
+      "bytes": 33017
+    },
+    "navigation_scroll": {
+      "before": 3366,
+      "after": 2069,
+      "url": "http://127.0.0.1:8793/"
+    },
+    "export_html": {
+      "name": "Dalton_ACN_研究报告_2026-10-08.html",
+      "failure": null,
+      "bytes": 215371
+    },
+    "export_xlsx": {
+      "name": "Dalton_ACN_财务模型_2026-10-08.xlsx",
+      "failure": null,
+      "bytes": 33018
+    },
+    "nested_claims": {
+      "head": "已核实的结论",
+      "buttons": [
+        "关闭",
+        "已合并重复（点击展开全部）",
+        "上一页",
+        "下一页"
+      ]
+    },
+    "claims_下一页": "上一页\n本页 50 条 · 共 2086 条\n下一页",
+    "claims_上一页": "上一页\n本页 50 条 · 共 2086 条\n下一页",
+    "claims_expand_all": "共 2312 条 · 含重复版本（与公司卡片和总览的计数口径相同）",
+    "nested_close": {
+      "reader_open": "reader",
+      "active": "<button class=\"company-launch\" aria-label=\"打开 Accenture 研究详情\" data-company-ref=\"company:sec-cik:0001467373\"><span>ACN · Accenture</span><small>公司模型</small></button>"
+    },
+    "scenario_cancel": [
+      {
+        "type": "prompt",
+        "message": "把「订单温和、增速维持中个位数，AI 兑现偏慢」的概率改成多少？（0-100）"
+      }
+    ],
+    "unsaved_model_close": {
+      "changed": true,
+      "reader_closed": true,
+      "dialog_count": 3
+    },
+    "unsaved_model_reopen": {
+      "restored_original": true
+    },
+    "responsive_1280": {
+      "window": 1280,
+      "body": 1292,
+      "nav": 231,
+      "navClient": 231,
+      "company": 920,
+      "companyClient": 920,
+      "main": 1060
+    },
+    "responsive_1024": {
+      "window": 1024,
+      "body": 1292,
+      "nav": 231,
+      "navClient": 231,
+      "company": 920,
+      "companyClient": 920,
+      "main": 1060
+    },
+    "responsive_768": {
+      "window": 768,
+      "body": 1060,
+      "nav": 1059,
+      "navClient": 1059,
+      "company": 920,
+      "companyClient": 920,
+      "main": 1060
+    },
+    "responsive_390": {
+      "window": 390,
+      "body": 390,
+      "nav": 910,
+      "navClient": 390,
+      "company": 840,
+      "companyClient": 322,
+      "main": 390
+    },
+    "keyboard_targets": [
+      {
+        "text": "13/48\n任务运行情况\n13 项执行中，23 项待命，10 项受阻，2 项状态未归类\n查看各项任务 ↓",
+        "tag": "DIV",
+        "role": null,
+        "tabIndex": -1
+      },
+      {
+        "text": "1345\n待补齐资料缺口\n行业框架还缺 3 项；1342 份资料还没读\n查看数据源能力 →",
+        "tag": "DIV",
+        "role": null,
+        "tabIndex": -1
+      },
+      {
+        "text": "27\n当前受阻任务\n模型调用预算：20 项等待处理，模型服务：7 项等待处理\n查看系统待办 →",
+        "tag": "DIV",
+        "role": null,
+        "tabIndex": -1
+      },
+      {
+        "text": "0\n上周交付物验收\n上周没有研究产出完成质量评估\n2026-W40 · 查看每周复盘 →",
+        "tag": "DIV",
+        "role": null,
+        "tabIndex": -1
+      },
+      {
+        "text": "全部动态",
+        "tag": "SPAN",
+        "role": null,
+        "tabIndex": -1
+      },
+      {
+        "text": "资料检索",
+        "tag": "SPAN",
+        "role": null,
+        "tabIndex": -1
+      },
+      {
+        "text": "资料采集",
+        "tag": "SPAN",
+        "role": null,
+        "tabIndex": -1
+      },
+      {
+        "text": "阅读与提取",
+        "tag": "SPAN",
+        "role": null,
+        "tabIndex": -1
+      },
+      {
+        "text": "新增结论",
+        "tag": "SPAN",
+        "role": null,
+        "tabIndex": -1
+      },
+      {
+        "text": "操作记录",
+        "tag": "SPAN",
+        "role": null,
+        "tabIndex": -1
+      },
+      {
+        "text": "运行问题",
+        "tag": "SPAN",
+        "role": null,
+        "tabIndex": -1
+      }
+    ],
+    "model_table_dimensions": {
+      "width": 798,
+      "scroll": 1386,
+      "font": "12px"
+    },
+    "models_read_error": "读取模型配置暂时未完成，请稍后重试。\n技术详情",
+    "weekly_invalid_input": {
+      "status": "没有保存：Failed to fetch",
+      "blocked": [
+        {
+          "url": "http://127.0.0.1:8793/v1/cockpit/weekly_brief_plan",
+          "body": "{\"weekday\":2,\"hour\":99,\"minute\":0,\"timezone\":\"America/New_York\",\"destination_ref\":null,\"expected_plan_hash\":null}"
+        }
+      ]
+    }
+  },
+  "isolated_state_checks": {
+    "goal_draft_refresh": {
+      "before": "界面状态检查（没有提交）\n\n标题\n草稿保留检查\n目标\n检查自动刷新是否删除草稿\n研究问题\n界面状态检查\n确认后会发布为新一版研究目标，系统从下一轮开始按新目标搜集和阅读；已有的结论保留。覆盖的公司名单不会在这里改变。\n确认发布目标\n放弃",
+      "after": ""
+    },
+    "coverage_selection_refresh": {
+      "before": 1,
+      "after": 0
+    },
+    "dialog_reverse_tab": {
+      "active": "<button class=\"ghost close\" aria-label=\"关闭公司详情\">关闭</button>",
+      "in_dialog": true
+    },
+    "trajectory_scroll": {
+      "overlay": 700,
+      "sheet": 0,
+      "follow": true
+    },
+    "stage_future_style": {
+      "color": "rgb(135, 146, 163)",
+      "background": "rgba(0, 0, 0, 0)",
+      "font": "12px"
+    }
+  }
+}

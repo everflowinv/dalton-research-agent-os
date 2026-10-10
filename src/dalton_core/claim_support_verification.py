@@ -9,8 +9,9 @@ cited an exact sentence, named the company, and still said something the
 sentence does not say.  Or it has filed CoreWeave's customer concentration
 under AMZN because AMZN is named in the same sentence.
 
-So before the mission admits a morning-note or AlphaEngine statement, one
-more model reads it -- **one call per window**, every statement of the window
+So before the mission admits a qualitative statement from a covered source
+(morning notes and AlphaEngine since 2026-09-24; fetched web pages, SEC
+filings and Guidepoint interviews since 2026-09-29), one more model reads it -- **one call per window**, every statement of the window
 together -- and answers two closed questions per statement:
 
 * ``support``: does the cited text state or directly imply the statement
@@ -93,7 +94,14 @@ _SCHEMA_PATH = Path(__file__).with_name("claim_support_schema.sql")
 # the line labels and treats a numbered label as no speaker, and the question
 # says an absent speaker is unknown, never another party: only a speaker the
 # text or facts positively show makes an attribution not_supported.
-CONTRACT_REF = "claim-support-verification:v4"
+# v5 (2026-09-29): who is asking in an expert interview.  Guidepoint excerpts
+# are ``Q: ... / A: ...`` turns and read no speaker, so ws-7d's "受访者表示
+# Copilot 在中国因合规问题无法广泛使用" -- the interviewer's premise, the
+# question at offset 0 -- went in as the respondent's view, unchecked.
+# ``speaker_at`` now names the turn ("interviewer (asking the question)" /
+# "expert (answering)"), and the question says a question's premise is the
+# interviewer's, never the expert's (b3).
+CONTRACT_REF = "claim-support-verification:v5"
 # Before admission, and after it for the Claims admitted before this existed.
 # Two purposes rather than one so the day ledger, the model page and the caps
 # can tell a morning's admissions from the backlog being worked down.
@@ -104,30 +112,67 @@ for _purpose in (PURPOSE, BACKFILL_PURPOSE):
     # with the cockpit model registry as well.
     register_purpose_tier(_purpose, TIER_VERIFIER)
 
-# Which sources' statements are checked: the morning sales notes and
-# AlphaEngine's broker documents -- the two whose prose is dense with other
-# companies and other houses' views.  A filing, a transcript and a web page are
-# admitted exactly as before.
-VERIFIED_SOURCE_REFS = frozenset({"source:sales-notes", "source:alphaengine"})
+# Which sources' statements are checked.  2026-09-24: the morning sales notes
+# and AlphaEngine's broker documents -- the two whose prose is dense with other
+# companies and other houses' views.
+#
+# 2026-09-29: and fetched web pages, SEC filings and Guidepoint interviews.  In
+# the first 1.5 hours after batch g legacy admitted 129 public-web and 29
+# Guidepoint statements with no second reading, and the two kinds of error the
+# check exists for went straight in: an interviewer's question filed as what
+# the respondent said (ws-7d, MSFT Copilot in China), and a former insider's
+# account of the Gainwell/HMS merger filed under DXC as its own post-merger
+# layoffs.  A review's source is ``source:web-search`` for a fetched page and
+# ``source:sec-edgar`` for a filing (the reading path), and the Evidence it
+# becomes says ``source:public-web`` for both (the recheck reads that), so all
+# four refs are listed.
+VERIFIED_SOURCE_REFS = frozenset({
+    "source:sales-notes", "source:alphaengine",
+    "source:web-search", "source:public-web", "source:sec-edgar", "source:guidepoint",
+})
 
 SETTINGS_FILENAME = "claim-support-verification.json"
 # The daily ceilings, per purpose.  Forward: the two workspaces admitted 60 to
 # 110 morning-note and AlphaEngine statements a day this week, from a few dozen
 # windows, and one cheap-tier call over a window's statements is a few KB in
 # and a few hundred tokens out -- a tenth of a cent metered, up to half a cent
-# where the served link is settled at its route estimate.  Expected well under
-# a dime; the ceiling is half again above it, and a day that needs more waits
-# for tomorrow rather than going unverified.  The backfill's is what drains the
-# admitted backlog in a few days without crowding the coverage pool.
+# where the served link is settled at its route estimate.  The backfill's is
+# what drains the admitted backlog in a few days without crowding the coverage
+# pool.
+#
+# 2026-09-29, with web pages, filings and Guidepoint covered.  What a
+# statement costs under v4, from the day ledger and the Scheduler's prompts
+# (settled calls, 2026-09-29, both workspaces): a forward call carries 10
+# statements on average and settles at $0.0042 (max $0.0052), $0.00043 a
+# statement; a backfill call carries 20 and settles at $0.013 (max $0.0146),
+# $0.00065 a statement.  Budget $0.001 a statement for the forward check --
+# twice the measured figure, for windows with one or two statements (the fixed
+# ~4.5 KB question weighs more), Guidepoint's longer Q&A passages, and the
+# second family asked about a first rejection.  Supply: legacy admitted 208
+# public-web and Guidepoint statements on 2026-09-29 and ws-7d 91, on top of
+# 5-15 notes and AlphaEngine; the bursts after a deploy or a mission version
+# reached 300-1,400 a day on legacy (09-15, 09-17, 09-25), 79 of one of them
+# from one 10-K -- which the per-document cap (``document_admission_scope``)
+# now holds to 12.  So a normal day is ~300 statements, ~$0.30; a burst day
+# ~600 after the cap, ~$0.60.  The forward ceiling is $0.60: the burst fits,
+# nothing above a burst is spent, and a day that needs more waits for tomorrow
+# (the window stays open; its draft replays free) rather than going
+# unverified.  The backfill keeps $0.50 (about 37 calls, 740 statements a day
+# at the measured rate, per environment): with public-web and Guidepoint added
+# it has 5,673 unchallenged legacy Claims and 1,049 ws-7d ones to read (read
+# only, 2026-09-29) -- about eight days and two -- and a person reads what it
+# rejects before ``backfill_batches_per_run`` is raised.
 DEFAULT_SETTINGS: Mapping[str, Any] = {
-    "daily_cap_usd": 0.15,
+    "daily_cap_usd": 0.60,
     "backfill_daily_cap_usd": 0.50,
     # One call of twenty a run to start with: a retirement is append-only and
     # nothing restores it automatically, so the backlog is worked down slowly
     # until a person has read what the check rejects.  See ``load_settings``.
     "backfill_batches_per_run": 1,
     "backfill_items_per_batch": 20,
-    "backfill_claim_sources": ["sales_notes", "alphaengine"],
+    # ``claim:<source>:`` prefixes.  A fetched page and a filing read as a
+    # page both mint ``claim:public_web:``; Guidepoint mints ``claim:guidepoint:``.
+    "backfill_claim_sources": ["sales_notes", "alphaengine", "public_web", "guidepoint"],
     # 2026-09-27: a first answer that does not admit a statement is put to a
     # model of another family before it counts (``ClaimSupportVerifier``).
     # Same purpose, so the same daily ceiling.  Needs a second
@@ -235,11 +280,11 @@ def load_settings(state_dir: str | Path | None) -> dict[str, Any]:
     The file is ``<state>/claim-support-verification.json`` and every key is
     optional; absent keys keep the defaults in ``DEFAULT_SETTINGS``::
 
-        {"daily_cap_usd": 0.15,            # admission-time check, USD per UTC day
+        {"daily_cap_usd": 0.60,            # admission-time check, USD per UTC day
          "backfill_daily_cap_usd": 0.50,   # backfill, USD per UTC day
          "backfill_batches_per_run": 1,    # calls per extraction run
          "backfill_items_per_batch": 20,   # statements per call (max 20)
-         "backfill_claim_sources": ["sales_notes", "alphaengine"],
+         "backfill_claim_sources": ["sales_notes", "alphaengine", "public_web", "guidepoint"],
          "second_opinion_on_rejection": true}  # a rejection needs two families
 
     The backfill starts slow on purpose (one call of twenty statements per
@@ -363,7 +408,13 @@ def build_prompt(items: Sequence[Mapping[str, Any]]) -> str:
         "carry no label or only an anonymous number), never that somebody else spoke -- then "
         "'the CFO said', 'management said' or 'DXC's Rob Del Bene said' is judged on what was said "
         "alone, and so is a role (CFO, CEO) given to a named document.speaker when neither the "
-        "cited_text nor the facts give that speaker a different role; (c) paraphrase, synonyms, translation, "
+        "cited_text nor the facts give that speaker a different role; (b3) in an expert interview "
+        "document.speaker says whose turn the cited_text is: 'interviewer (asking the question)' or "
+        "'expert (answering)'. A question -- every premise it states included ('Since X, do you "
+        "think ...', 'many feel that ...') -- is the interviewer's words, never the expert's, "
+        "respondent's, interviewee's or source's view: a statement that attributes to the expert "
+        "what only the question says is not_supported; what the expert's answer itself says or "
+        "adopts ('I agree', 'yes, absolutely') is the expert's; (c) paraphrase, synonyms, translation, "
         "and condensation or summary that keeps the meaning; (d) a conclusion that one passage of the "
         "cited_text states in other words, or that follows from that passage with no further premise, "
         "e.g. text 'Software and high tech experienced project ramp downs concentrated in non-AI "

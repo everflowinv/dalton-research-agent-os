@@ -444,7 +444,8 @@ class ThesisImpactAuthority:
             wire = ThesisVersion.from_dict(wire).to_dict()
         except Exception as exc:
             raise ThesisImpactConflict("ThesisVersion is invalid") from exc
-        payload = {field: wire[field] for field in _THESIS_CONTENT_FIELDS}
+        from .thesis_question_model import thesis_payload
+        payload = thesis_payload(wire)
         if wire["schema_version"] == "0.1":
             authority_matches = (
                 wire["verification_ref"] == row["verification_id"]

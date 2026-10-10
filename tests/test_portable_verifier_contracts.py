@@ -43,6 +43,14 @@ class PortableVerifierContractTests(unittest.TestCase):
             with self.subTest(schema=path.name):
                 assert_portable(self, json.loads(path.read_text(encoding="utf-8")))
 
+    def test_numeric_version_stays_exact_with_portable_enum(self) -> None:
+        schema = json.loads((ROOT / "src" / "dalton_core" /
+            "mission-document-numeric-verifier-provider-output-v0.1.schema.json").read_text())
+        self.assertEqual(schema["properties"]["schema_version"], {"enum": ["0.1"]})
+        with self.assertRaises(AssertionError):
+            assert_portable(self, {"type": "object", "properties": {
+                "schema_version": {"const": "0.1"}}})
+
     def test_every_schema_crosses_the_installed_google_validator(self) -> None:
         named = os.environ.get("DALTON_TEST_OPENCLAW_INSTALL_ROOT")
         if not named:
@@ -66,7 +74,7 @@ let validated = false;
 const controls = {mode:"google-generative-ai-count-tokens-v1",maxInputTokens:100,
  maxOutputTokens:10,maxTotalTokens:110,maxCostUsd:1,structuredOutput:{schemaName:"dalton_test",schemaHash:hash,jsonSchema:schema},
  rateCard:{model:"google/gemini-test",serviceTier:"default",inputUsdPerMillion:1,cachedInputUsdPerMillion:1,cacheWriteUsdPerMillion:1,outputUsdPerMillion:1,verifiedAt:new Date(now-1000).toISOString(),expiresAt:new Date(now+60000).toISOString()}};
-try { await mod.r({model:{provider:"google",api:"google-generative-ai",id:"gemini-test"},
+try { await mod.i({model:{provider:"google",api:"google-generative-ai",id:"gemini-test"},
  createClient:()=>({models:{countTokens:async()=>{validated=true; throw new Error("VALIDATED_SENTINEL")}}}),
  buildParams:()=>({contents:[]}),output:{},options:{providerControls:controls}}); }
 catch (error) { if (validated) process.exit(0); console.error(error.message); process.exit(2); }

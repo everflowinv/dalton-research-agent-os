@@ -308,7 +308,14 @@ class NewWorkspaceCanaryTests(unittest.TestCase):
         self.addCleanup(harness.close)
         self.harness = harness
         self.missions = CoverageMissionAuthority(harness.core)
-        plan = load_discovery_plan(_alphaengine_discovery_plan(state))
+        # 2026-10-06: the approved file holds governed fields only (0.7); the
+        # writer renders it with the code-owned forms, exactly as here.
+        from dalton_core.writer_server import _rendered_alphaengine_plan
+
+        approved = load_discovery_plan(_alphaengine_discovery_plan(state))
+        self.assertEqual(approved["schema_version"], "0.7")
+        self.assertTrue(all("query_variants" not in spec for spec in approved["specs"]))
+        plan, query_forms = _rendered_alphaengine_plan(_alphaengine_discovery_plan(state))
         self.assertEqual(set(plan["companies"]), {WDGT, GZMO})
         self.search = FakeSearchLauncher(harness, self.missions, plan)
         self.acquisitions = Acquisitions(harness, state)
@@ -317,17 +324,65 @@ class NewWorkspaceCanaryTests(unittest.TestCase):
             store=harness.core, missions=self.missions, plan=plan,
             search_launcher=self.search, acquisition_launcher=self.acquisitions,
             selection_launcher=self.selection, spool_dir=state / "spool",
-            clock=harness.clock)
+            clock=harness.clock, query_forms=query_forms)
         ticks = []
         for _ in range(12):
             ticks.append(self.coordinator.dispatch_once())
             self.acquisitions.finish()
+        self.assert_first_search_is_current(plan, ticks)
         mission = self.missions.active_mission(plan["mission_ref"])
         reviews = self.missions.document_reviews(mission["id"])
         self.assertEqual(sorted(r["document_ref"] for r in reviews), [DOC_A, DOC_B],
                          json.dumps(ticks, indent=1, default=str)[-3000:])
         self.assertEqual(sorted(self.acquisitions.calls), [DOC_A, DOC_B])
         return mission, reviews
+
+    def assert_first_search_is_current(self, plan, ticks) -> None:
+        """2026-10-04: a new workspace searches on its first tick, in the current form.
+
+        ws-7d approved the "{name} {quarter_label}" transcript query and then
+        sat sixteen hours without trying it; a brand-new workspace must render
+        the form the setup generator writes today and search on the first
+        tick where a search is due, and its ledger must say where the tick
+        went.
+        """
+
+        from dalton_core.mission_source_discovery import (
+            build_discovery_parameters, discovery_coordinator_state, quarter_title_label,
+        )
+        from dalton_core.alphaengine_query_forms import code_query_variants
+
+        for spec in plan["specs"]:
+            self.assertEqual(spec["query_variants"],
+                             code_query_variants(spec["spec_ref"], spec["document_type"]))
+        self.assertEqual(plan["specs"][0]["spec_ref"], "earnings-call-transcripts")
+        self.assertEqual(plan["specs"][0]["query_variants"][0]["query_template"],
+                         "{name} {quarter_label}")
+        first = ticks[0]
+        self.assertEqual(first["discovery"]["status"], "launched",
+                         json.dumps(first["discovery"], default=str)[:2000])
+        start = self.search.starts[0]
+        self.assertEqual((start["spec_ref"], start["variant_index"], start["cursor"]),
+                         ("earnings-call-transcripts", 0, None))
+        company_ref = start["authorization"]["company_ref"]
+        compiled = build_discovery_parameters(
+            plan, spec_ref="earnings-call-transcripts", company_ref=company_ref,
+            as_of=start["as_of"], variant_index=0, missing_periods=start["missing_periods"])
+        name = plan["companies"][company_ref]["name"]
+        expected = " ".join(
+            [name, *([quarter_title_label(start["missing_periods"][0])]
+                     if start["missing_periods"] else [])])
+        self.assertEqual(compiled["query"], expected)
+        self.assertNotIn("earnings call transcript", compiled["query"])
+        state = discovery_coordinator_state(first)
+        for step in ("settle", "carry", "held", "acquire", "search"):
+            self.assertIn(f"{step}_seconds", state)
+        self.assertNotIn("search_blocked_reason", state)
+        # The first tick's ledger says which form set the plan renders, once.
+        self.assertEqual(state["query_forms"], "code")
+        self.assertEqual(state["query_forms_hash"], plan["content_hash"])
+        self.assertNotIn("ignored", state["query_forms_note"])
+        self.assertNotIn("query_forms", discovery_coordinator_state(ticks[1]))
 
     # -- stages 2-4: extraction, claim-support check, ledger commit ------------------
 
@@ -624,12 +679,13 @@ class NewWorkspaceCanaryTests(unittest.TestCase):
                 if not index[-1].get("pending"):
                     break
         drafter = DossierModel()
+        self.last_dossier_verifier = DossierModel(route="route:verify")
         dossier = run_dossier(
             state_dir=state, model_config_path=config,
             summary_dir=state / "company-dossier-runs" / f"canary-{run}",
             policy_path=state / "p12a-dossier-policy-v1.json",
             model_factory=lambda: drafter,
-            verifier_model_factory=lambda: DossierModel(route="route:verify"),
+            verifier_model_factory=lambda: self.last_dossier_verifier,
             family_resolver=resolver)
         return index, dossier, drafter
 
@@ -648,19 +704,28 @@ class NewWorkspaceCanaryTests(unittest.TestCase):
                      "title": None, "host": None},
             mission=mission, actor_ref=AUTOMATION)
 
-    def judge(self, state: Path, *, run: str):
+    def judge(self, state: Path, *, run: str, triage=None):
+        """One judgement run, with the cheap screen (event_triage) in front.
+
+        ``triage`` is the screen's replies; by default it flags the group, so
+        the judge sees it exactly as it did before the screen existed.
+        """
+
         from dalton_core.event_judgement_cli import run_judgement
         from tests.test_event_judgement import (
             JUDGE_ROUTE, PASS, VERIFIER_ROUTE, FakeModel, decision, resolver,
         )
+        from tests.test_event_triage import FLAG, TRIAGE_ROUTE
 
         judge_model = FakeModel([decision(), decision()], route=JUDGE_ROUTE)
+        self.triage_model = FakeModel(list(triage if triage is not None else [FLAG, FLAG]),
+                                      route=TRIAGE_ROUTE, cost_micros=1_500)
         summary = run_judgement(
             state_dir=state, summary_dir=state / "event-judgement-runs" / f"canary-{run}",
             policy_path=state / "tracking-policy.json", now=datetime.now(timezone.utc),
             judge_model=judge_model,
             verifier_model=FakeModel([PASS, PASS], route=VERIFIER_ROUTE),
-            family_resolver=resolver())
+            family_resolver=resolver(), triage_model=self.triage_model)
         return summary, judge_model
 
     def judged(self) -> int:
@@ -761,6 +826,110 @@ class NewWorkspaceCanaryTests(unittest.TestCase):
         return self.harness.core.connection.execute(
             "SELECT COUNT(*) FROM claim_versions").fetchone()[0]
 
+    def test_a_created_workspace_has_the_code_owned_sec_specs_and_the_release_ledger(self) -> None:
+        import sqlite3
+
+        from dalton_core.alphaengine_query_forms import effective_discovery_plan
+        from dalton_core.macos_launchagent import _sec_discovery_plan
+        from dalton_core.mission_source_discovery import load_discovery_plan
+        from dalton_core.sec_plan_specs import SEC_PLAN_SPECS, sec_plan_report
+        from dalton_core.workspace_health_parity import Environment, sec_plan_spec_rows
+
+        workspace, _ = self.create_workspace()
+        state = workspace.state_dir
+        approved = load_discovery_plan(_sec_discovery_plan(state))
+        # The file the generator wrote is already the code's set: no drift,
+        # nothing re-rendered, so nothing re-searched for nothing.
+        self.assertEqual([spec["spec_ref"] for spec in approved["specs"]],
+                         [spec["spec_ref"] for spec in SEC_PLAN_SPECS])
+        self.assertEqual(effective_discovery_plan(approved)["content_hash"], approved["content_hash"])
+        report = sec_plan_report(approved)
+        self.assertEqual({row["drift"] for row in report["specs"]}, {"none"})
+        env = Environment("canary", state)
+        self.addCleanup(lambda: env.core is not None and env.core.close())
+        rows = sec_plan_spec_rows(env)
+        self.assertEqual({row["status"] for row in rows}, {"ok"})
+        connection = sqlite3.connect(f"file:{state / 'core.sqlite'}?mode=ro", uri=True)
+        try:
+            tables = {row[0] for row in connection.execute(
+                "SELECT name FROM sqlite_master WHERE type='table'")}
+        finally:
+            connection.close()
+        self.assertTrue({"earnings_release_reads", "preliminary_actuals"} <= tables)
+
+    def test_an_old_style_plan_renders_the_same_forms_as_a_new_workspace(self) -> None:
+        """2026-10-06 (owner decision A): one form set, whatever the approved file says.
+
+        The new workspace's approved plan is governed fields only; an
+        environment still on a plan file with its own forms (legacy's v2:
+        three transcript phrasings, none the title form) keeps its approval
+        and renders exactly the forms the new workspace renders.
+        """
+
+        from datetime import date
+
+        from dalton_core.macos_launchagent import (
+            ALPHAENGINE_PLAN_SELECTOR, _alphaengine_discovery_plan,
+        )
+        from dalton_core.mission_source_discovery import (
+            build_discovery_parameters, build_discovery_plan, load_discovery_plan,
+        )
+        from dalton_core.workspace_health_parity import Environment, alphaengine_query_form_rows
+        from dalton_core.writer_server import _rendered_alphaengine_plan
+
+        workspace, _ = self.create_workspace()
+        state = workspace.state_dir
+        new_path = _alphaengine_discovery_plan(state)
+        new_approved = load_discovery_plan(new_path)
+        new_plan, new_note = _rendered_alphaengine_plan(new_path)
+        self.assertEqual(new_note["query_forms"], "code")
+
+        old_state = self.root / "old-style" / "state"
+        (old_state / "discovery-plans").mkdir(parents=True)
+        legacy_forms = {
+            "earnings-call-transcripts": ["{name} {quarter} earnings call transcript",
+                                          "{ticker} {quarter} results webcast transcript",
+                                          "{name} quarterly earnings conference call"],
+            "sell-side-reports": ["{name} equity research report", "{ticker} analyst report"],
+        }
+        old = build_discovery_plan(
+            plan_id="discovery-plan:old-style:alphaengine:2-candidate",
+            created_at="2026-09-11T00:00:00.000000+00:00",
+            mission_ref=new_approved["mission_ref"], source_ref="source:alphaengine",
+            max_calls_24h=130, companies=new_approved["companies"],
+            specs=[{**spec, "query_variants": [
+                {"query_template": form, "filters": {}}
+                for form in legacy_forms[spec["spec_ref"]]]}
+                for spec in new_approved["specs"]])
+        self.assertEqual(old["schema_version"], "0.6")
+        _write_json(old_state / "discovery-plans" / "old-v2.json", old)
+        body = {"schema_version": "alphaengine-discovery-plan-selection-0.1",
+                "id": "alphaengine-plan-selection:old-style:2", "status": "approved",
+                "source_ref": "source:alphaengine", "plan_ref": old["id"],
+                "plan_hash": old["content_hash"], "plan_path": "old-v2.json"}
+        _write_json(old_state / "discovery-plans" / ALPHAENGINE_PLAN_SELECTOR,
+                    {**body, "content_hash": content_hash(body)})
+        old_plan, old_note = _rendered_alphaengine_plan(_alphaengine_discovery_plan(old_state))
+        self.assertIn("ignored", old_note["query_forms_note"])
+        self.assertEqual([spec["query_variants"] for spec in old_plan["specs"]],
+                         [spec["query_variants"] for spec in new_plan["specs"]])
+        self.assertEqual(old_plan["budget"], {"max_calls_24h": 130})
+        for company_ref in new_plan["companies"]:
+            for spec in new_plan["specs"]:
+                kwargs = dict(spec_ref=spec["spec_ref"], company_ref=company_ref,
+                              as_of=date(2026, 10, 6), missing_periods=["FY2026-Q2"])
+                self.assertEqual(build_discovery_parameters(old_plan, **kwargs),
+                                 build_discovery_parameters(new_plan, **kwargs))
+        # Parity: the old file's forms are information, the new file's are ok.
+        for directory, expected in ((old_state, "info"), (state, "ok")):
+            env = Environment("canary", directory)
+            try:
+                statuses = {row["status"] for row in alphaengine_query_form_rows(env)
+                            if row["check"] != "alphaengine.query_forms.names"}
+            finally:
+                env.close()
+            self.assertEqual(statuses, {expected}, directory)
+
     def test_a_created_workspace_runs_the_whole_loop_and_survives_an_upgrade(self) -> None:
         workspace, mission = self.create_workspace()
         self.assertEqual({m["company_ref"] for m in mission["universe"]}, {WDGT, GZMO})
@@ -815,6 +984,11 @@ class NewWorkspaceCanaryTests(unittest.TestCase):
                          json.dumps(judgement, indent=1, default=str)[-3000:])
         self.assertEqual(len(judge_model.prompts), 1)
         self.assertEqual(self.judged(), 1)
+        # ADR-0010: the follow-up sweep runs on a real workspace Core, before
+        # anything is paid for, and a NO_CHANGE ledger owes it nothing.
+        sweep = judgement["followup_sweep"]
+        self.assertEqual((sweep["status"], sweep["mode"], sweep["owed"], sweep["errors"]),
+                         ("ok", "apply", [], []), sweep)
 
         # ---- mission upgrade: policy -> constitution -> mission ----
         claims_before_upgrade = self.claim_count()
@@ -908,12 +1082,47 @@ class NewWorkspaceCanaryTests(unittest.TestCase):
         self.assert_fourth_quarter_is_derived(state, v2)
         self.assertEqual(self.claim_count() - claims_before_upgrade, extraction_claims + 2)
 
-        # Dossier under v2: nothing new from SEC, so it may redraw or stay, but not fail.
-        index2, dossier2, _ = self.index_and_dossier(state, run="v2")
+        # V2 changes the actual governance bindings, so it permits one new
+        # verified read. Unchanged citations do not create a formal version.
+        def dossier_rows():
+            return list(self.harness.core.connection.execute(
+                "SELECT version_id,content_hash FROM company_dossier_versions ORDER BY version_id"))
+        dossiers_before = dossier_rows()
+        claims_before_dossier = self.claim_count()
+        index2, dossier2, dossier_model = self.index_and_dossier(state, run="v2")
         self.assertNotIn("refused", [item["index_status"] for item in index2], index2)
-        self.assertNotIn(dossier2["status"], {"failed"}, json.dumps(dossier2, indent=1, default=str)[-3000:])
-        self.assertIn(dossier2["dossier_status"], {"nothing_new", "published", "partial_published"},
-                      dossier2)
+        self.assertEqual((dossier2["status"], dossier2["dossier_status"]),
+                         ("succeeded", "no_new_evidence"), dossier2)
+        self.assertEqual(dossier2["verification"]["status"], "verified")
+        self.assertTrue(dossier2["verification"]["independent"])
+        self.assertTrue(dossier_model.prompts)
+        self.assertEqual(len(self.last_dossier_verifier.prompts), 1)
+        self.assertIsNone(dossier2["version_ref"])
+        self.assertEqual(dossier2["formal_authority_writes"], 0)
+        self.assertEqual(dossier_rows(), dossiers_before)
+        self.assertEqual(self.claim_count(), claims_before_dossier)
+        self.assertEqual(set(dossier2["input_consumption"]), set(dossier2["units_drafted"]))
+        from dalton_core import research_product_consumption as consumption
+        receipts = {}
+        for unit, digest in dossier2["input_consumption"].items():
+            binding = consumption.scope("dossier", WDGT, unit, [WDGT])
+            receipt = consumption.latest(state, binding)
+            self.assertEqual(receipt["content_hash"], digest)
+            self.assertEqual(receipt["result"], "verified_no_new_evidence")
+            self.assertEqual(receipt["schema_version"], "verified-unit-input-consumption:0.1")
+            receipts[unit] = receipt
+        receipt_bytes = (state / consumption.JOURNAL).read_bytes()
+        _, unchanged, unchanged_model = self.index_and_dossier(state, run="v2-dossier-replay")
+        self.assertEqual(unchanged["dossier_status"], "nothing_new", unchanged)
+        self.assertEqual(unchanged_model.prompts, [])
+        self.assertEqual(self.last_dossier_verifier.prompts, [])
+        self.assertEqual(unchanged["cost_micros"], 0)
+        self.assertEqual(dossier_rows(), dossiers_before)
+        self.assertEqual(self.claim_count(), claims_before_dossier)
+        self.assertEqual((state / consumption.JOURNAL).read_bytes(), receipt_bytes)
+        for unit, receipt in receipts.items():
+            self.assertEqual(consumption.latest(state,
+                consumption.scope("dossier", WDGT, unit, [WDGT])), receipt)
 
         # Event judgement: the v1 event is not judged again; a v2 event is judged.
         again, judge_model = self.judge(state, run="v2-replay")
@@ -923,6 +1132,23 @@ class NewWorkspaceCanaryTests(unittest.TestCase):
         fresh, _ = self.judge(state, run="v2")
         self.assertEqual((fresh["status"], fresh["judged"]), ("succeeded", 1), fresh)
         self.assertEqual(self.judged(), 2)
+        self.assertEqual(fresh["triage"]["routes"], {"escalated:triage": 1}, fresh["triage"])
+        # The screen in front of the judge: a group it does not flag (and the
+        # audit sample does not pick) is settled without a judgement, and
+        # without the judge's call.
+        from dalton_core.event_triage import triage_for
+        from tests.test_event_triage import QUIET
+
+        quiet = self.record_news(v2, "alphaengine-doc:canary-boilerplate")
+        with patch("dalton_core.event_triage.AUDIT_SHARE", 0):
+            screened, judge_model = self.judge(state, run="v2-screened", triage=[QUIET])
+        self.assertEqual((screened["status"], screened["judgement_status"]),
+                         ("succeeded", "screened_out"), screened)
+        self.assertEqual(judge_model.prompts, [])
+        self.assertEqual(self.triage_model.purposes, ["event_triage"])
+        self.assertEqual(self.judged(), 2)
+        self.assertEqual(triage_for(self.harness.core.connection, quiet["id"])["outcome"],
+                         "screened_out")
 
         # ---- maintenance with the extraction queue empty ----
         # Nothing is open under v2 any more.  The claim-support checks and the
@@ -934,6 +1160,23 @@ class NewWorkspaceCanaryTests(unittest.TestCase):
 
         # ---- the discovery tick shares its budget ----
         self.assert_discovery_budget_is_shared(workspace)
+
+        # A later real mission binding is a distinct input, and can be read
+        # again even though the last formal dossier still binds v1.
+        v3 = self.republish_mission()
+        self.assertNotEqual(v3["content_hash"], v2["content_hash"])
+        _, changed_binding, changed_model = self.index_and_dossier(state, run="v3-dossier")
+        self.assertTrue(changed_model.prompts)
+        self.assertTrue(self.last_dossier_verifier.prompts)
+        self.assertEqual(changed_binding["verification"]["status"], "verified")
+        self.assertEqual(changed_binding["dossier_status"], "no_new_evidence")
+        for unit in changed_binding["input_consumption"]:
+            receipt = consumption.latest(state, consumption.scope("dossier", WDGT, unit, [WDGT]))
+            self.assertNotEqual(receipt["snapshot"]["input_hash"], receipts[unit]["snapshot"]["input_hash"])
+        _, v3_replay, v3_model = self.index_and_dossier(state, run="v3-dossier-replay")
+        self.assertEqual(v3_replay["dossier_status"], "nothing_new", v3_replay)
+        self.assertEqual(v3_model.prompts, [])
+        self.assertEqual(self.last_dossier_verifier.prompts, [])
 
     def assert_discovery_budget_is_shared(self, workspace) -> None:
         """A slow AlphaEngine coordinator must not starve SEC and web search.
@@ -1008,8 +1251,12 @@ class NewWorkspaceCanaryTests(unittest.TestCase):
                     if row["check"].startswith("mission_source_discovery.")}
         finally:
             env.close()
-        self.assertEqual(set(rows), {f"mission_source_discovery.{key}.deferred"
-                                     for key in ("alphaengine", "sec_filings_index", "web_search")})
+        self.assertEqual({key for key in rows if key.endswith(".deferred")},
+                         {f"mission_source_discovery.{key}.deferred"
+                          for key in ("alphaengine", "sec_filings_index", "web_search")})
+        # The searches that ran all succeeded, and nothing held the queue.
+        self.assertEqual(rows["mission_source_discovery.alphaengine.searches"]["status"], "ok", rows)
+        self.assertFalse([key for key in rows if key.endswith(".selection")], rows)
         for key in ("sec_filings_index", "web_search"):
             self.assertEqual(rows[f"mission_source_discovery.{key}.deferred"]["status"], "ok",
                              rows)
@@ -1069,6 +1316,370 @@ class NewWorkspaceCanaryTests(unittest.TestCase):
     # retirement stands -- and the refusal is remembered, so the next tick
     # reads nothing again.  A covered company named as the other subject is
     # refused before anything else.
+
+    def test_a_created_workspace_planner_sees_what_is_settled_and_reopened(self) -> None:
+        """2026-10-01: legacy's 27 withdrawals moved nothing the planner hashed.
+
+        A workspace created by the formal flow must carry the settlement in
+        its very first planner state and coordinator signature: available,
+        nothing settled, nothing reopened -- not an unavailable read on a Core
+        that never had a directed read.
+        """
+
+        from dalton_core.coverage_mission import CoverageMissionAuthority
+        from dalton_core.research_planner_cli import build_state
+        from dalton_core.research_planner_launcher import ResearchPlannerCoordinator
+        from dalton_core.research_state import planning_settlement_hash
+
+        workspace, mission = self.create_workspace()
+        state = workspace.state_dir
+        with DaltonStore(state / "core.sqlite") as store:
+            built = build_state(store, CoverageMissionAuthority(store), mission,
+                                plans_dir=state / "discovery-plans",
+                                as_of="2026-10-01T00:00:00+00:00")
+            signature = ResearchPlannerCoordinator(store=store, launcher=None)._signature()
+        settlement = built["document_research_settlement"]
+        self.assertEqual(settlement["status"], "available", settlement)
+        self.assertEqual((settlement["admissions"], settlement["settled"],
+                          settlement["withdrawn"]), (0, 0, 0))
+        self.assertEqual(len(planning_settlement_hash(built)), 64)
+        self.assertEqual({c["company_ref"] for c in built["companies"]}, {WDGT, GZMO})
+        for company in built["companies"]:
+            self.assertEqual(company["document_research_reopened"], [])
+        self.assertEqual(len(signature["document_research_settlement"]), 64)
+
+    def test_a_created_workspace_walks_the_stage_ledger_and_says_what_each_gate_waits_on(self) -> None:
+        """ADR-0011: the stage bridge and the memo lane on a Core nobody patched.
+
+        Live, the industry_model gate waited from 2026-09-30 on every company
+        for a reason nobody could read: the packaged module looked for a
+        repository file beside site-packages.  On a brand-new workspace the
+        same tick must run, enter the Deep Insight Gate when a draft exists,
+        keep the human gate human, and name -- in Chinese -- the input each
+        model gate is still missing.
+        """
+
+        from dalton_core.coverage_mission import CoverageMissionAuthority
+        from dalton_core.investment_memo_cli import collect_frozen_input
+        from dalton_core.mission_model_stage_lane import advance_once
+
+        workspace, mission = self.create_workspace()
+        state = workspace.state_dir
+        with DaltonStore(state / "core.sqlite") as store:
+            missions = CoverageMissionAuthority(store)
+            mission = missions.mission(mission["id"])
+            self.assertEqual(advance_once(missions, store.connection, mission)["status"], "idle")
+            for status in ("entered", "gate_passed"):
+                missions.record_stage(
+                    mission_version_ref=mission["id"],
+                    mission_version_hash=mission["content_hash"], company_ref=WDGT,
+                    stage_ref="initial_screen", status=status, evidence_refs=[mission["id"]],
+                    rationale="canary screen", actor_ref=AUTOMATION,
+                    idempotency_key=f"canary-screen:{status}")
+            # Passed the screen, no gate draft yet: nothing to enter.
+            self.assertEqual(advance_once(missions, store.connection, mission)["status"], "idle")
+            with patch("dalton_core.mission_model_stage_lane.latest_gate_draft",
+                       return_value="deep-insight-gate-version:canary:1"):
+                entered = advance_once(missions, store.connection, mission)
+            self.assertEqual((entered["status"], entered["stage_ref"]),
+                             ("entered", "deep_insight_gate"), entered)
+            ladder = missions.current_stage_state(mission["mission_ref"], WDGT)
+            self.assertEqual((ladder["current_stage"], ladder["current_status"]),
+                             ("deep_insight_gate", "entered"))
+            # Passing it stays human: the automation tick leaves it entered.
+            with patch("dalton_core.mission_model_stage_lane.latest_gate_draft",
+                       return_value="deep-insight-gate-version:canary:1"):
+                self.assertEqual(
+                    advance_once(missions, store.connection, mission)["status"], "idle")
+            missions.record_stage(
+                mission_version_ref=mission["id"], mission_version_hash=mission["content_hash"],
+                company_ref=WDGT, stage_ref="deep_insight_gate", status="gate_passed",
+                evidence_refs=["deep-insight-gate-version:canary:1"], rationale="owner approved",
+                actor_ref=OWNER, idempotency_key="canary-gate:approve")
+            waiting = advance_once(missions, store.connection, mission)
+            self.assertEqual((waiting["status"], waiting["stage_ref"]),
+                             ("waiting", "industry_model"), waiting)
+            self.assertEqual(waiting["waiting:WDGT"], "行业模型缺：还没有行业框架")
+            self.assertNotIn("读取依据失败", waiting["reason"])
+            memo = collect_frozen_input(store)
+        self.assertEqual(memo["status"], "idle", memo)
+        self.assertIn("WDGT 停在行业模型（进行中），等深度模型构建通过审核", memo["reason"])
+
+    def test_a_read_the_mission_moved_under_is_carried_with_its_conclusion(self) -> None:
+        """2026-09-29, DXC's Guidepoint excerpt d50efc...: read twice across two upgrades.
+
+        11:32 under v26: four Claims admitted, then the close failed because
+        the mission had moved ("completion proof failed: source discovery must
+        bind the active mission version"); the open review was carried to v27
+        and v28 and read again at 12:31, three more Claims on exactly the same
+        spans.  Here: the read and the failed close under v1; a carry that ran
+        before the conclusion was written (v2, the DXC v27 shape); a second
+        upgrade whose carry finds the conclusion and carries it (v3); and the
+        other document -- the same bytes, the same cited span -- is the Claim
+        already admitted, not a second one.
+        """
+
+        from dalton_core import document_admission_scope
+        from dalton_core.coverage_mission import CoverageMissionConflict
+        from dalton_core.document_extraction_launcher import DocumentExtractionCoordinator
+        from dalton_core.document_read_completion import DocumentReadCompletionAuthority
+
+        workspace, mission = self.create_workspace()
+        state = workspace.state_dir
+        mission, reviews = self.discover(state)
+        self.prepare_extraction(state)
+        quote = self.quote_of(reviews[0])
+        before = self.claim_count()
+
+        def mission_moved(*args, **kwargs):
+            raise CoverageMissionConflict("source discovery must bind the active mission version")
+
+        with patch.object(DocumentReadCompletionAuthority, "record", mission_moved):
+            summary, verifier = self.extract(state, quote_id=quote, run="moved-v1")
+        [admitted] = [item for item in summary["admitted"] if item["status"] == "admitted"]
+        self.assertEqual(self.claim_count(), before + 1)
+        self.assertEqual(len(verifier.calls), 1)
+        [held] = summary["resolved_reviews"]
+        self.assertIn("completion proof failed", held["reason"])
+        by_review = {r["review_id"]: r["document_ref"] for r in self.missions.document_reviews(mission["id"])}
+        read_doc = by_review[admitted["review_id"]]
+        [other_doc] = [ref for ref in by_review.values() if ref != read_doc]
+        self.assertEqual(self.awaiting_in_active_version(), 2)  # the close failed: both open
+        outcome = document_admission_scope.admission_outcome(
+            self.harness.core.connection, document_ref=read_doc, company_ref=WDGT)
+        self.assertEqual((outcome["admitted"], outcome["claim_version_refs"]),
+                         (1, [admitted["claim_version_ref"]]))
+
+        tick = object.__new__(DocumentExtractionCoordinator)
+        tick.missions = self.missions
+        # v2: the carry ran before the conclusion could be read (DXC's v27).
+        self.upgrade_mission()
+        with patch.object(document_admission_scope, "admission_outcome", lambda *a, **k: None):
+            carried = tick._carry_awaiting()
+        self.assertEqual({item["carried_to"]["state"] for item in carried}, {"awaiting_human_extraction"})
+        # v3: this carry finds it, and the read document is not opened again.
+        v3 = self.republish_mission()
+        carried = {item["document_ref"]: item["carried_to"] for item in tick._carry_awaiting()}
+        self.assertEqual(carried[read_doc]["state"], "extraction_staged")
+        self.assertEqual(carried[read_doc]["carried_conclusion_of"], admitted["review_id"])
+        self.assertEqual(carried[other_doc]["state"], "awaiting_human_extraction")
+        self.assertEqual(self.awaiting_in_active_version(), 1)
+        staged = next(r for r in self.missions.document_reviews(v3["id"]) if r["document_ref"] == read_doc)
+        self.assertEqual(staged["candidate_claim_version_ref"], admitted["candidate_claim_ref"])
+        self.assertIn("is not read again", staged["rationale"])
+
+        # v3 extraction: only the other document is read, and its statement
+        # cites the same bytes at the same span as the Claim already admitted.
+        summary, verifier = self.extract(state, quote_id=quote, run="moved-v3", max_windows=4)
+        self.assertEqual(self.claim_count(), before + 1, json.dumps(summary, default=str)[-3000:])
+        self.assertEqual(len(verifier.calls), 0)
+        [duplicate] = summary["admitted"]
+        self.assertEqual((duplicate["status"], duplicate["claim_version_ref"], duplicate["scope"]["basis"]),
+                         ("duplicate", admitted["claim_version_ref"], "same_span"))
+        self.assertEqual(summary["admission_scope"]["duplicates_of_ledger"], 1)
+        self.assertEqual(self.awaiting_in_active_version(), 0)
+
+    def test_an_overlong_companies_tag_neither_stalls_the_queue_nor_hides_the_company(self) -> None:
+        """2026-09-29: one candidate tagged with 24-193 issuers held every
+        AlphaEngine acquisition on both environments behind
+        ``selection_pending: CandidateSelectionError: candidate companies is
+        invalid``.  In a created workspace the long tag list is truncated with
+        the covered company kept, a page the selector still refuses is
+        quarantined without holding the pages behind it, and the owner can
+        release it."""
+
+        from dalton_core.coverage_mission import CoverageMissionAuthority
+        from dalton_core.discovery_candidate_selection import (
+            SELECTION_RULES_VERSION, CandidateSelectionError,
+        )
+        from dalton_core.discovery_selection_quarantine import DiscoverySelectionQuarantine
+        from dalton_core.macos_launchagent import _alphaengine_discovery_plan
+        from dalton_core.mission_source_discovery import (
+            MissionSourceDiscoveryCoordinator, discovery_coordinator_state, load_discovery_plan,
+        )
+        from tests.test_mission_source_discovery import FakeSearchLauncher, SearchHarness
+
+        workspace, _ = self.create_workspace()
+        state = workspace.state_dir
+        crowd = [f"Unrelated Issuer {index} Inc." for index in range(36)] + ["Widget Robotics Inc."]
+        poisoned_page = [{"doc_id": "990000000000011"}, {"doc_id": "990000000000012"}]
+        crowded_page = [{"doc_id": "990000000000021", "title": "Daily research highlights",
+                         "companies": crowd},
+                        {"doc_id": "990000000000022", "companies": ["Gizmo Motion Corp."]}]
+        harness = SearchHarness(state, poisoned_page)
+        self.addCleanup(harness.close)
+        self.harness = harness
+        missions = CoverageMissionAuthority(harness.core)
+        plan = load_discovery_plan(_alphaengine_discovery_plan(state))
+        # 2026-10-02: the generated plan names each company by its registered
+        # name, not its ticker only (the ws-7d transcript stall).
+        self.assertEqual(plan["companies"][WDGT]["name"], "Widget Robotics")
+        self.assertEqual(plan["companies"][WDGT]["ticker"], "WDGT")
+
+        class Refusing(Selection):
+            """Refuses the first page it is shown, as ``selection_prompt`` does."""
+
+            def __init__(self) -> None:
+                super().__init__()
+                self.state = state
+                self.quarantine = DiscoverySelectionQuarantine(
+                    state / "discovery-selections" / "quarantine")
+                self.poisoned: set[str] = set()
+                self.views: dict[str, dict] = {}
+
+            def start(self, *, discovery_ref, view, **kwargs):
+                if not self.started and not self.poisoned:
+                    self.poisoned.add(discovery_ref)
+                if discovery_ref in self.poisoned:
+                    raise CandidateSelectionError("company selection identity is invalid")
+                self.views[discovery_ref] = view
+                return super().start(discovery_ref=discovery_ref, view=view, **kwargs)
+
+        selection = Refusing()
+        self.acquisitions = Acquisitions(harness, state)
+        coordinator = MissionSourceDiscoveryCoordinator(
+            store=harness.core, missions=missions, plan=plan,
+            search_launcher=FakeSearchLauncher(harness, missions, plan),
+            acquisition_launcher=self.acquisitions, selection_launcher=selection,
+            spool_dir=state / "spool", clock=harness.clock)
+        ticks = [coordinator.dispatch_once()]
+        harness.handle.results = [dict(item) for item in crowded_page]
+        for _ in range(8):
+            ticks.append(coordinator.dispatch_once())
+            self.acquisitions.finish()
+        dump = json.dumps(ticks, indent=1, default=str)[-4000:]
+
+        # The refused page is set aside, audibly, and nothing else waits on it.
+        [poisoned] = sorted(selection.poisoned)
+        record = selection.quarantine.record(poisoned)
+        self.assertEqual(record["status"], "quarantined")
+        self.assertEqual(record["rules_version"], SELECTION_RULES_VERSION)
+        self.assertIn("company selection identity is invalid", record["reason"])
+        self.assertEqual(selection.quarantine.active(rules_version=SELECTION_RULES_VERSION),
+                         [poisoned])
+        self.assertIn("alphaengine-doc:990000000000021", self.acquisitions.calls, dump)
+        self.assertIn("alphaengine-doc:990000000000022", self.acquisitions.calls, dump)
+        self.assertNotIn("alphaengine-doc:990000000000011", self.acquisitions.calls, dump)
+        quarantined_tick = next(tick for tick in ticks if tick.get("selection_quarantined_now"))
+        self.assertEqual(quarantined_tick["selection_quarantined_now"], [poisoned])
+        self.assertEqual(discovery_coordinator_state(ticks[-1])["selection_quarantined"], 1)
+
+        # The overlong tag list is truncated, and the covered company -- known
+        # to the plan only as WDGT -- is the one kept first.
+        crowded = [view["candidates"][0] for view in selection.views.values()
+                   if view["candidates"][0]["document_ref"] == "alphaengine-doc:990000000000021"]
+        self.assertTrue(crowded, dump)
+        candidate = crowded[0]
+        self.assertEqual(candidate["companies"][0], "Widget Robotics Inc.")
+        self.assertEqual(candidate["companies_original_count"], len(crowd))
+        self.assertTrue(candidate["companies_truncated"])
+        self.assertEqual(candidate["companies_covered_kept"], 1)
+
+        # The owner releases the page; it is read like any other.
+        with self.assertRaises(Exception):
+            selection.quarantine.release(poisoned, actor_ref=AUTOMATION, reason="not a human")
+        selection.poisoned.clear()
+        selection.quarantine.release(poisoned, actor_ref=OWNER, reason="selector fixed")
+        self.assertEqual(selection.quarantine.active(rules_version=SELECTION_RULES_VERSION), [])
+        for _ in range(4):
+            coordinator.dispatch_once()
+            self.acquisitions.finish()
+        self.assertIn("alphaengine-doc:990000000000011", self.acquisitions.calls)
+        events = [event["event"] for event in selection.quarantine.record(poisoned)["events"]]
+        self.assertEqual(events, ["quarantined", "released"])
+
+    def test_an_exhausted_selection_ticket_is_quarantined_and_the_queue_moves(self) -> None:
+        """2026-10-02: one failed selection ticket (legacy ``database is
+        locked``, ws-7d a reply in the wrong shape) answered ``selection_pending:
+        exhausted`` for the same discovery on every tick and no AlphaEngine
+        document was acquired for days.  An exhausted ticket is now
+        quarantined with its ticket and reason, the discovery behind it is
+        acquired in the same tick, and an owner release puts it back."""
+
+        from dalton_core.coverage_mission import CoverageMissionAuthority
+        from dalton_core.discovery_candidate_selection import SELECTION_RULES_VERSION
+        from dalton_core.discovery_selection_quarantine import DiscoverySelectionQuarantine
+        from dalton_core.macos_launchagent import _alphaengine_discovery_plan
+        from dalton_core.mission_source_discovery import (
+            MissionSourceDiscoveryCoordinator, discovery_coordinator_state, load_discovery_plan,
+        )
+        from tests.test_mission_source_discovery import FakeSearchLauncher, SearchHarness
+
+        workspace, _ = self.create_workspace()
+        state = workspace.state_dir
+        stalled_page = [{"doc_id": "990000000000031"}, {"doc_id": "990000000000032"}]
+        next_page = [{"doc_id": "990000000000041"}]
+        harness = SearchHarness(state, stalled_page)
+        self.addCleanup(harness.close)
+        self.harness = harness
+        missions = CoverageMissionAuthority(harness.core)
+        plan = load_discovery_plan(_alphaengine_discovery_plan(state))
+        reason = "CandidateSelectionError: selection has an invalid closed shape"
+
+        class Exhausting(Selection):
+            """The first discovery's selection failed every attempt it had."""
+
+            def __init__(self) -> None:
+                super().__init__()
+                self.state = state
+                self.quarantine = DiscoverySelectionQuarantine(
+                    state / "discovery-selections" / "quarantine")
+                self.stalled: set[str] = set()
+
+            def start(self, *, discovery_ref, view, **kwargs):
+                if not self.started and not self.stalled:
+                    self.stalled.add(discovery_ref)
+                if discovery_ref in self.stalled:
+                    return {"id": "discovery-selection:" + "c" * 24, "status": "exhausted",
+                            "discovery_ref": discovery_ref, "recovery_epoch": 2,
+                            "attempts": 3, "failure_reason": reason,
+                            "completed_at": "2026-10-01T11:50:42.587857+00:00",
+                            "summary": {"status": "failed", "failure_reason": reason}}
+                return super().start(discovery_ref=discovery_ref, view=view, **kwargs)
+
+        selection = Exhausting()
+        self.acquisitions = Acquisitions(harness, state)
+        coordinator = MissionSourceDiscoveryCoordinator(
+            store=harness.core, missions=missions, plan=plan,
+            search_launcher=FakeSearchLauncher(harness, missions, plan),
+            acquisition_launcher=self.acquisitions, selection_launcher=selection,
+            spool_dir=state / "spool", clock=harness.clock)
+        ticks = [coordinator.dispatch_once()]
+        harness.handle.results = [dict(item) for item in next_page]
+        for _ in range(8):
+            ticks.append(coordinator.dispatch_once())
+            self.acquisitions.finish()
+        dump = json.dumps(ticks, indent=1, default=str)[-4000:]
+
+        [stalled] = sorted(selection.stalled)
+        record = selection.quarantine.record(stalled)
+        self.assertEqual(record["status"], "quarantined", dump)
+        self.assertEqual(record["error_type"], "DiscoverySelectionExhausted")
+        self.assertEqual(record["rules_version"], SELECTION_RULES_VERSION)
+        self.assertIn(reason, record["reason"])
+        self.assertIn("after 3 attempt(s)", record["reason"])
+        self.assertEqual(record["detail"]["ticket_ref"], "discovery-selection:" + "c" * 24)
+        self.assertEqual(record["detail"]["failure_reason"], reason)
+        self.assertEqual(record["detail"]["failure_type"], "CandidateSelectionError")
+        self.assertEqual(record["detail"]["attempts"], 3)
+        self.assertIn("alphaengine-doc:990000000000041", self.acquisitions.calls, dump)
+        self.assertNotIn("alphaengine-doc:990000000000031", self.acquisitions.calls, dump)
+        quarantined_tick = next(tick for tick in ticks if tick.get("selection_quarantined_now"))
+        self.assertEqual(quarantined_tick["selection_quarantined_now"], [stalled])
+        self.assertFalse(any(
+            (tick["acquisition"].get("status"), tick["acquisition"].get("reason"))
+            == ("selection_pending", "exhausted") for tick in ticks), dump)
+        self.assertEqual(discovery_coordinator_state(ticks[-1])["selection_quarantined"], 1)
+
+        # The owner releases it; the next attempt succeeds and it is read.
+        selection.stalled.clear()
+        selection.quarantine.release(stalled, actor_ref=OWNER, reason="selector retried")
+        for _ in range(4):
+            coordinator.dispatch_once()
+            self.acquisitions.finish()
+        self.assertIn("alphaengine-doc:990000000000031", self.acquisitions.calls)
+        events = [event["event"] for event in selection.quarantine.record(stalled)["events"]]
+        self.assertEqual(events, ["quarantined", "released"])
 
     def test_an_about_other_retirement_is_never_given_an_industry_the_rule_cannot_read(self) -> None:
         from dalton_core.claim_industry_reattribution import (
@@ -1141,6 +1752,783 @@ class NewWorkspaceCanaryTests(unittest.TestCase):
         self.assertEqual((again["examined"], again["already_reviewed"]), (0, 2), again)
 
 
+class NewWorkspaceInheritsTheMatureEnvironmentTests(unittest.TestCase):
+    """Canary (2026-09-30, review section 2): a created workspace starts at parity.
+
+    A fake mature ("legacy") environment on a fake host -- 22 lane model
+    configurations, a day-budget lineage ending at $500, the host's credential
+    slots, the crowd tools / grants / a prior-research corpus inside its state,
+    a claim-support settings file -- and the two runtime templates exported
+    from it *before* the owner raised the document-draft output limit to
+    16 000.  The workspace is then created through ``provision_runtime``, the
+    exact sequence the cockpit's create button runs, and must come up with:
+    the same credential slots, the same per-call budgets (the 16 000 included),
+    the same day-budget head in every lane *and* in service.json, the crowd
+    lane wired, its own (unshared) prior-research directory, every connector
+    permission approved, the claim-support settings, the findata /
+    ir-page-watch contracts, a weekly brief coordinator waiting for a plan,
+    its own publication worker, a workspace-named SEC lane, a health report
+    whose pre-mission governance rows are information, and nothing left for
+    the repair script to do.
+    """
+
+    LEGACY_SLOTS = ["credential-slot:openclaw:deepseek", "credential-slot:openclaw:openai",
+                    "credential-slot:openclaw:claude-cli"]
+    DRAFT = "mission-document-draft-model-config.json"
+
+    def setUp(self) -> None:
+        self.temp = tempfile.TemporaryDirectory(dir="/tmp")
+        self.addCleanup(self.temp.cleanup)
+        self.root = Path(self.temp.name)
+        environ = patch.dict(os.environ, {
+            "DALTON_OPENCLAW_WORKSPACE": str(self.root / "no-openclaw")}, clear=False)
+        environ.start(); self.addCleanup(environ.stop)
+        for name in ("DALTON_WORKSPACE_MANIFEST", "DALTON_PRIOR_RESEARCH_DIR"):
+            os.environ.pop(name, None)
+        for target in ("socket.create_connection", "socket.socket.connect",
+                       "urllib.request.urlopen", "http.client.HTTPConnection.connect"):
+            guard = patch(target, _no_network)
+            guard.start(); self.addCleanup(guard.stop)
+        from dalton_core.workspace_template_freshness import clear_cache
+        clear_cache()
+
+    # -- the mature environment and its templates --------------------------------
+
+    def build_legacy(self) -> None:
+        from dalton_core.bootstrap import bootstrap
+        from dalton_core.model_deployment import POLICY_REF, install_openclaw_catalog
+        from dalton_core.thesis_impact_budget import ThesisImpactBudgetStore
+        from dalton_core.workspace_model_setup import EXPECTED_CONFIG_NAMES
+
+        host = self.root / "hostfiles"; host.mkdir()
+        self.socket, self.key = host / "model.sock", host / "model.key"
+        self.openclaw, self.tailscale = host / "openclaw.json", host / "tailscale"
+        for path in (self.socket, self.key, self.openclaw, self.tailscale):
+            path.write_text("{}")
+        self.shared_policy = host / "model-call-budget-policy.json"
+        body = {"schema_version": "dalton-shared-call-budget-policy-0.1",
+                "default_max_cost_usd": 1.0, "purpose_max_cost_usd": {}, "revision": 1,
+                "prior_hash": None, "updated_at": "2026-09-14T00:00:00+00:00",
+                "actor_ref": "human:owner"}
+        self.shared_policy.write_text(json.dumps({**body, "content_hash": content_hash(body)}))
+        from dalton_core.shared_daily_budget import policy_wire, write_owner_only
+        self.daily_policy = host / "shared-daily-budget.json"
+        write_owner_only(self.daily_policy, policy_wire(
+            max_daily_cost_usd=500.0, max_daily_paid_calls=100000,
+            max_alphaengine_calls_24h=130, revision=1, prior_hash=None,
+            updated_at="2026-09-18T00:00:00.000000+00:00", actor_ref="human:owner"))
+
+        legacy = self.root / "legacy"
+        self.legacy_state = legacy / "state" / "dalton-core"
+        self.legacy_config = legacy / "config" / "service.json"
+        self.legacy_state.mkdir(parents=True)
+        now = datetime(2026, 9, 14, tzinfo=timezone.utc)
+        install_openclaw_catalog(self.legacy_state / "model-router.sqlite", checked_at=now)
+        self.head = "thesis-impact-day-budget-policy:configured:canary-500"
+        with ThesisImpactBudgetStore(self.legacy_state / "thesis-impact-budget.sqlite",
+                                     clock=lambda: now) as budget:
+            prior = None
+            for policy, cap in (("thesis-impact-day-budget-policy:production:1", 25),
+                                ("thesis-impact-day-budget-policy:production:3", 180),
+                                (self.head, 500)):
+                budget.register_policy(policy_version_id=policy,
+                                       day_cap_micros=cap * 1_000_000,
+                                       prior_version_id=prior)
+                prior = policy
+        base = {
+            "routing_policy_ref": POLICY_REF, "credential_slot_refs": list(self.LEGACY_SLOTS),
+            "model_router_db": str(self.legacy_state / "model-router.sqlite"),
+            "broker_socket": str(self.socket), "broker_auth_key": str(self.key),
+            "broker_client_id": "client:dalton-core", "expected_agent_id": "chem",
+            "budget_db": str(self.legacy_state / "thesis-impact-budget.sqlite"),
+            "budget_policy_ref": self.head,
+            "shared_call_budget_policy_path": str(self.shared_policy),
+        }
+        for name in EXPECTED_CONFIG_NAMES:
+            _write_json(self.legacy_state / name, base)
+        _write_json(self.legacy_state / self.DRAFT, {**base, "purpose_call_budgets": {
+            "mission_directed_document_draft": {"max_cost_usd": 1.0}}})
+        bootstrap(self.legacy_state, self.legacy_config)
+        raw = json.loads(self.legacy_config.read_text())
+        state = self.legacy_state
+        raw.update({
+            "bounded_planner": {"enabled": True, "interval_seconds": 300, "config": {
+                "doctrine_pack_version_hash": "a" * 64,
+                "doctrine_pack_version_ref": "doctrine-pack-version:default:1",
+                "filed_window_days": 400, "max_probes_per_tick": 1,
+                "max_response_bytes": 8388608,
+                "observation_mandate_version_ref": "mandate-version:default:1",
+                "planner_broker_auth_key": str(self.key),
+                "planner_broker_client_id": "client:dalton-core",
+                "planner_broker_socket": str(self.socket),
+                "planner_call_budget": {"max_cost_usd": 1.0, "max_input_tokens": 80000,
+                                        "max_output_tokens": 16000, "timeout_seconds": 300},
+                "planner_credential_slot_refs": list(self.LEGACY_SLOTS),
+                "planner_expected_agent_id": "chem", "planner_max_cost_usd": 0.5,
+                "planner_model_router_db": str(state / "model-router.sqlite"),
+                "planner_routing_policy_ref": POLICY_REF,
+                "scheduler_db": str(state / "scheduler.sqlite"), "timeout_seconds": 60.0,
+                "token_config": str(state / "writer-tokens.json"),
+                "user_agent": "Dalton canary", "writer_socket": str(state / "run/writer.sock")}},
+            "thesis_impact": {"enabled": False, "interval_seconds": 300, "config": {
+                "assessment_routing_policy_ref": POLICY_REF,
+                "broker_auth_key": str(self.key), "broker_client_id": "client:dalton-core",
+                "broker_socket": str(self.socket),
+                "budget_db": str(state / "thesis-impact-budget.sqlite"),
+                # What template v6 carried: an older version than the lanes.
+                "budget_policy_version_id": "thesis-impact-day-budget-policy:production:3",
+                "company_thesis_refs": {}, "credential_slot_refs": list(self.LEGACY_SLOTS),
+                "day_cap_micros": 25000000, "expected_agent_id": "chem", "max_targets": 25,
+                "model_router_db": str(state / "model-router.sqlite"),
+                "routing_policy_ref": POLICY_REF,
+                "scheduler_db": str(state / "scheduler.sqlite"), "timeout_seconds": 180,
+                "token_config": str(state / "writer-tokens.json"),
+                "verifier_routing_policy_ref": POLICY_REF,
+                "writer_socket": str(state / "run/writer.sock")}},
+            "document_extraction": {"max_windows_per_tick": 30, "numeric_windows_per_tick": 10,
+                                    "discovery_windows_per_tick": 10},
+            "agenda": {"enabled": False, "interval_seconds": 3600, "config": {}},
+            "weekly_brief": {"enabled": False, "interval_seconds": 300, "config": {}},
+            "outbox": {"enabled": False, "interval_seconds": 60, "config": {}},
+            "control": {"enabled": False, "config": {"cockpit": {
+                "openclaw_config_path": str(self.openclaw), "state_dir": str(state)}}},
+        })
+        self.legacy_config.write_text(json.dumps(raw))
+        _write_json(state / "document-research-config.json", {
+            "schema_version": "document-research-config-0.1",
+            "purpose": "mission_directed_document_research", "inventory_preview_chars": 600,
+            "spool_dir": str(state / "transcript-spool"), "enabled_sources": ["source:sec-edgar"],
+            "policy": {"schema_version": "document-research-policy-0.1",
+                       "policy_ref": "document-research-policy:canary:1",
+                       "allowed_purposes": ["mission_directed_document_research"],
+                       "allowed_access_policy_refs": ["policy:access:public-web"],
+                       "max_query_terms": 16, "max_query_term_chars": 240, "max_results": 24,
+                       "max_read_chars": 100000, "max_question_chars": 12000,
+                       "max_context_before_chars": 2000, "max_context_after_chars": 4000,
+                       "content_hash": "a" * 64},
+            "source_reading_limits": {"alphaengine_max_document_chars": 10000000,
+                                      "public_web_max_source_chars": 10000000,
+                                      "public_web_max_pdf_pages": 2000,
+                                      "public_web_max_decompressed_bytes": 100000000}})
+        # Host inputs the legacy install put inside its own state directory.
+        for tool in ("xueqiu", "xreach"):
+            path = state / "host-tools" / tool
+            path.parent.mkdir(parents=True, exist_ok=True)
+            path.write_text("#!/bin/sh\nexit 0\n"); os.chmod(path, 0o755)
+            _write_json(state / "credential-grants" / f"{tool}.json", {"grant": tool})
+        (state / "feeds" / "prior-research" / "0000000001").mkdir(parents=True)
+        _write_json(state / "claim-support-verification.json", {"backfill_batches_per_run": 0})
+
+    def export_templates(self) -> dict:
+        import hashlib
+        from dalton_core.workspace_model_setup import export_runtime_template
+        from dalton_core.workspace_service_setup import export_service_template
+
+        from dalton_core.model_router import ModelRouter
+        from dalton_core.thesis_impact_budget import ThesisImpactBudgetStore
+
+        templates = {"model": self.root / "hostfiles" / "model-runtime-v6.json",
+                     "service": self.root / "hostfiles" / "service-runtime-v8.json"}
+        # A live environment's writer keeps its WAL databases open; the
+        # read-only export needs their sidecars to exist, as they do on a host.
+        with ModelRouter(self.legacy_state / "model-router.sqlite"), \
+                ThesisImpactBudgetStore(self.legacy_state / "thesis-impact-budget.sqlite"):
+            export_runtime_template(self.legacy_state, templates["model"])
+        export_service_template(self.legacy_config, templates["service"])
+        for path in templates.values():
+            os.chmod(path, 0o600)
+        return {name: {"path": str(path.resolve()),
+                       "sha256": hashlib.sha256(path.read_bytes()).hexdigest()}
+                for name, path in templates.items()}
+
+    def raise_draft_output_after_export(self) -> None:
+        """What the owner did on 09-30, after the template had been exported."""
+
+        path = self.legacy_state / self.DRAFT
+        config = json.loads(path.read_text())
+        config["purpose_call_budgets"] = {"mission_directed_document_draft": {
+            "max_cost_usd": 1.0, "max_output_tokens": 16000}}
+        _write_json(path, config)
+
+    # -- the creation ------------------------------------------------------------
+
+    def create(self, runtime_templates: dict):
+        from dalton_core.workspace import load_workspace_manifest
+        from dalton_core.workspace_creation import create_blank_workspace
+        from dalton_core.workspace_manager import provision_runtime
+
+        release = self.root / "release"; release.mkdir()
+        host_root = self.root / "host"
+        body = {"schema_version": "dalton-shared-connection-catalog-0.1", "models": [],
+                "sources": [{"allowed_hosts": ["data.sec.gov", "www.sec.gov"],
+                             "allowed_operations": ["list_filings", "get_company_facts"],
+                             "auth_mode": "none",
+                             "capability_id": "capability:dalton:connector:sec-edgar",
+                             "connector_ref": "connector:sec-edgar", "credential_slot_refs": [],
+                             "id": "connector-profile-template:sec:canary",
+                             "transport": {"config_path": None,
+                                           "endpoint_ref": "transport:public-http:0.1",
+                                           "kind": "connector", "socket_path": None}}]}
+        catalog = {**body, "content_hash": content_hash(body)}
+        catalog_path = self.root / "hostfiles" / "catalog.json"
+        catalog_path.write_text(json.dumps(catalog))
+        manager_path = host_root / "manager.json"
+        config = {
+            "host_root": str(host_root), "release_path": str(release),
+            "release_ref": "release:sha256:" + "d" * 64, "owner_login": "owner@example.com",
+            "tailscale_host": "canary.example.ts.net",
+            "tailscale_executable": str(self.tailscale),
+            "launch_agents_dir": str(self.root / "agents"), "ports": [18961],
+            "legacy_workspace": {"name": "现有研究环境", "workspace_id": "legacy",
+                                 "status": "running", "url": "https://canary.example/",
+                                 "state_dir": str(self.legacy_state),
+                                 "config_path": str(self.legacy_config)},
+            "runtime_templates": runtime_templates,
+            "shared_call_budget_policy_path": str(self.shared_policy),
+            "shared_daily_budget_policy_path": str(self.daily_policy),
+        }
+        _write_json(manager_path, config)
+        os.chmod(manager_path, 0o600)
+        from dalton_core.workspace_manager import _config
+        config = _config(manager_path)  # the manager schema accepts the legacy paths
+        shared = [release, self.socket, self.key, self.openclaw, self.tailscale,
+                  self.shared_policy, self.daily_policy, manager_path, catalog_path,
+                  *(Path(item["path"]) for item in runtime_templates.values())]
+        receipt = create_blank_workspace(
+            host_root, "ws-canaryinherit", 18961, config["release_ref"], release,
+            request_id="canary-inherit", display_name="Canary inheritance",
+            shared_readonly_paths=tuple(str(Path(path).resolve()) for path in shared),
+            connection_catalog={"path": str(catalog_path.resolve()),
+                                "content_hash": catalog["content_hash"]})
+        manifest = Path(receipt["manifest_path"])
+        ready = provision_runtime(config, manifest, login="owner@example.com",
+                                  manager_config_path=manager_path.resolve())
+        return load_workspace_manifest(manifest), ready, config
+
+    # -- the test ---------------------------------------------------------------------
+
+    def test_a_created_workspace_has_parity_with_the_mature_environment(self) -> None:
+        from dalton_core.claim_support_verification import SETTINGS_FILENAME
+        from dalton_core.sec_company_facts_lane import lane_slug_for_state
+        from dalton_core.service import ServiceConfig
+        from dalton_core.workspace_health_parity import Environment, check_governance
+        from dalton_core.workspace_host_scheme import audit_host_scheme, source_credential_slots
+        from dalton_core.workspace_lane_parity import plan_parity_actions, resolve_host_sources
+        from dalton_core.workspace_process import render_publication_worker
+
+        self.build_legacy()
+        templates = self.export_templates()
+        self.raise_draft_output_after_export()
+        workspace, ready, config = self.create(templates)
+        state = workspace.state_dir
+
+        # a3: credential slots -- every list names every host slot.
+        for slot in self.LEGACY_SLOTS:
+            self.assertIn(slot, source_credential_slots(state))
+        rows = {row["key"]: row for row in audit_host_scheme(
+            state, source_state_dir=self.legacy_state)}
+        self.assertEqual(rows["credential_slots"]["status"], "ok", rows["credential_slots"])
+        self.assertEqual(rows["shared_daily_budget"]["status"], "ok", rows["shared_daily_budget"])
+
+        # a2: the per-call budgets, including the one raised after the export.
+        self.assertEqual(rows["call_budgets"]["status"], "ok", rows["call_budgets"])
+        draft = json.loads((state / self.DRAFT).read_text())
+        self.assertEqual(draft["purpose_call_budgets"]["mission_directed_document_draft"]
+                         ["max_output_tokens"], 16000)
+        self.assertEqual(ready["host_scheme"]["call_budgets"]["status"], "aligned")
+
+        # b3: one day cap -- the lineage head -- in every lane and in service.json.
+        pins = {json.loads(path.read_text())["budget_policy_ref"]
+                for path in state.glob("*model-config.json")}
+        self.assertEqual(pins, {self.head})
+        service = json.loads(workspace.config_path.read_text())
+        self.assertEqual(service["thesis_impact"]["config"]["budget_policy_version_id"],
+                         self.head)
+        self.assertEqual(len(list(state.glob("*model-config.json"))), 22)
+
+        # c2: crowd is wired from the legacy state; prior research is this
+        # workspace's own empty directory (owner instruction, 2026-09-30).
+        for name in ("host-tools/xueqiu", "host-tools/xreach",
+                     "credential-grants/xueqiu.json", "credential-grants/xreach.json"):
+            self.assertTrue((state / name).exists(), name)
+        prior = state / "feeds" / "prior-research"
+        self.assertTrue(prior.is_dir() and not prior.is_symlink())
+        self.assertEqual(list(prior.iterdir()), [])
+        self.assertFalse(prior.resolve().is_relative_to(self.legacy_state.resolve()))
+        host_lanes = ready["runtime"]["host_lane_inputs"]
+        self.assertIn("source:prior-research", host_lanes["source_refs"])
+        self.assertIn("source:xueqiu", host_lanes["source_refs"])
+        self.assertNotIn("feeds/prior-research", host_lanes["borrowed_from_source_state"])
+        # Every connector permission is approved at creation, the HKEX
+        # buy-back tape and cn-hk-findata included.
+        approved = {path.name for path in (state / "connector-governance").iterdir()
+                    if json.loads(path.read_text()).get("status") == "approved"}
+        self.assertIn("hkex-filings-daily-buyback-tape-v1.json", approved)
+        self.assertEqual(len([name for name in approved if name.startswith("cn-hk-findata")]), 6)
+        self.assertEqual(len([name for name in approved if name.startswith("ir-page-watch")]), 2)
+
+        # c3: the findata and ir-page-watch contracts are approved by this owner.
+        governance = {path.name for path in (state / "connector-governance").iterdir()}
+        self.assertTrue(any(name.startswith("ir-page-watch") for name in governance), governance)
+
+        # #21 (2026-10-07): approvals alone do not start the IR-page watcher.
+        # The pages are the owner's to declare, so a new workspace has no
+        # ``ir-pages.json``, the ownership lane emits no declaration flag, and
+        # the lane's tick says why in Chinese instead of reading anything.
+        from types import SimpleNamespace as _NS
+
+        from dalton_core.ir_page_watch_core import IR_PAGES_ABSENT_REASON
+        from dalton_core.lane_registry import LaunchAgentContext
+        from dalton_core.mission_ownership_lane import (
+            MissionOwnershipLaneCoordinator, argv_fragment as ownership_argv,
+            ir_watch_absent_reason,
+        )
+
+        self.assertFalse((state / "ir-pages.json").exists())
+        self.assertNotIn("--ir-page-declaration",
+                         ownership_argv(LaunchAgentContext(state=state)))
+        reason = ir_watch_absent_reason(
+            _NS(), _NS(ir_declaration_path=None, ir_governance_dir=None))
+        self.assertEqual(reason, IR_PAGES_ABSENT_REASON)
+        lane = MissionOwnershipLaneCoordinator(
+            connection=None, state_dir=state, launcher=None, mission=lambda: None,
+            ir_watch=None, ir_watch_reason=reason)
+        watched = lane._watch_ir_pages({})
+        self.assertEqual(watched["status"], "unconfigured")
+        self.assertIn("ir-pages.json", watched["reason"])
+
+        # F14 (2026-10-07): every lane this workspace runs reaches the failure
+        # ledger -- its own budget or the writer's observer -- so the cockpit
+        # failure panel is not blind to any of them, with nothing to install.
+        from dalton_core.cockpit_plane import REGISTRY_LANE_LABELS, _failure_ledger_coverage
+        from dalton_core.lane_registry import failure_ledger_coverage
+
+        coverage = failure_ledger_coverage()
+        self.assertTrue(coverage)
+        self.assertTrue(all(row["mode"] in {"own", "observed"} for row in coverage.values()))
+        self.assertTrue(all(row["ledger_lane"] in REGISTRY_LANE_LABELS
+                            for row in coverage.values()))
+        self.assertEqual(_failure_ledger_coverage()["uncovered"], [])
+        self.assertTrue(any("findata" in name or name.startswith("cn-hk") for name in governance),
+                        governance)
+
+        # The claim-support settings are the host's.
+        self.assertEqual(json.loads((state / SETTINGS_FILENAME).read_text()),
+                         {"backfill_batches_per_run": 0})
+
+        # d2: a weekly brief coordinator is configured and waiting for a plan.
+        self.assertTrue(service["weekly_brief"]["enabled"])
+        self.assertEqual(service["weekly_brief"]["config"]["plan_path"],
+                         str(state / "weekly-brief-plan.json"))
+        ServiceConfig.from_file(workspace.config_path)
+
+        # h2: its own publication worker, every path in its own state.
+        rendered = render_publication_worker(workspace, self.root / "agents")
+        worker = json.loads((state / "research-publication-worker-config.json").read_text())
+        for key in ("core_db", "model_config", "work_dir", "output_directory"):
+            self.assertTrue(Path(worker[key]).is_relative_to(state), key)
+        self.assertTrue(any("publication-worker" in str(path) for path in rendered.values()))
+
+        # e2: the SEC lane is named after this workspace.
+        self.assertEqual(lane_slug_for_state(state), "ws-canaryinherit-sec-lane")
+
+        # d1: before the first mission the baseline rows are information.
+        env = Environment("canary", state, service_config=workspace.config_path)
+        try:
+            governance_rows = check_governance(env)
+        finally:
+            env.close()
+        self.assertEqual([row["check"] for row in governance_rows if row["status"] == "pending"],
+                         ["mission"])
+
+        # Item 4: the template was exported before the draft-output change; that
+        # field is realigned at creation, so the template still reads fresh.
+        self.assertEqual(ready["template_freshness"]["status"], "fresh",
+                         ready["template_freshness"])
+
+        # And nothing is left for the repair script to do.
+        leftover = plan_parity_actions(
+            state, actor_ref=OWNER,
+            host_sources=resolve_host_sources(source_state_dir=self.legacy_state),
+            source_state_dir=self.legacy_state)
+        self.assertEqual([(action.kind, action.target) for action in leftover], [])
+
+
+class NewWorkspaceOwnerLeverTests(unittest.TestCase):
+    """2026-10-06 (vision-gap #11/#12): the owner's levers work in a created workspace.
+
+    Same code as every other environment and nothing configured for them: the
+    receipts table appears on first use, the controller, the lane child
+    launcher, the day ledger and the admission authorities obey the fold, the
+    inspection reads it, and a coverage-list change publishes a mission
+    version and the plans that follow from it.
+    """
+
+    setUp = NewWorkspaceCanaryTests.setUp
+    create_workspace = NewWorkspaceCanaryTests.create_workspace
+
+    def writer(self, state: Path):
+        from dalton_core.coverage_mission import CoverageMissionAuthority
+        from dalton_core.writer_server import LaneShortCircuit
+        from dalton_core.macos_launchagent import (
+            _alphaengine_discovery_plan, _sec_discovery_plan,
+        )
+        from dalton_core.research_question_backlog import ResearchQuestionBacklog
+        from dalton_core.writer_server import WriterServer
+
+        store = DaltonStore(state / "core.sqlite")
+        self.addCleanup(store.close)
+        server = object.__new__(WriterServer)
+        server.db_path = state / "core.sqlite"
+        server._store = store
+        server._coverage_mission = CoverageMissionAuthority(store)
+        server._backlog = ResearchQuestionBacklog(store)
+        server._lane_launchers = {}
+        server.lane_holds = LaneShortCircuit()
+        server._lane_deadline = None
+        server._sec_company_resolver_identity = None
+        server.sec_ticker_resolver = lambda ticker: dict(ISSUERS[ticker])
+        server._discovery_plan_path = str(_alphaengine_discovery_plan(state))
+        server._web_search_plan_path = None
+        server._sec_filings_plan_path = str(_sec_discovery_plan(state))
+        server._search_launcher = server._web_search_launcher = None
+        server._sec_filings_launcher = None
+        return server
+
+    def test_pause_stop_prioritise_and_change_the_list_in_a_new_workspace(self) -> None:
+        from dalton_core.coverage_list_change import coverage_selected_plan
+        from dalton_core.lane_child_launcher import LaneChildOwnerPaused
+        from dalton_core.mission_source_discovery import (
+            ALPHAENGINE_SOURCE_REF, SEC_SOURCE_REF, load_discovery_plan,
+        )
+        from dalton_core.owner_levers import (
+            OwnerLeverHold, assert_admission_open, lever_state, lever_state_for_state_dir,
+            spawn_refusal, tick_summary,
+        )
+        from dalton_core.thesis_impact_budget import (
+            OwnerEmergencyStopRefused, ThesisImpactBudgetStore,
+        )
+        from dalton_core.tick_ledger import TickLedger
+        from dalton_core.workspace_health_parity import Environment, check_owner_levers
+
+        workspace, mission = self.create_workspace()
+        state = workspace.state_dir
+        ISSUERS["NEWC"] = {"ticker": "NEWC", "cik": "9900003", "name": "Newco Actuators Inc."}
+        self.addCleanup(ISSUERS.pop, "NEWC", None)
+        server = self.writer(state)
+
+        class Lane:
+            def __init__(self, operation, handler):
+                self.operation, self.handler, self.init_kwarg = operation, handler, None
+
+        seen: list[list[str]] = []
+
+        def handler(srv, _params):
+            active = srv.coverage_mission.active_mission(mission["mission_ref"])
+            seen.append([member["company_ref"] for member in active["universe"]])
+            return {"status": "idle"}
+
+        # Nothing pulled yet: a new workspace runs exactly as before.
+        self.assertEqual(lever_state_for_state_dir(state)["receipt_count"], 0)
+        with patch("dalton_core.writer_server.lane_for_operation", return_value=None):
+            self.assertEqual(server._run_lane(Lane("dispatch_mission_tracking", handler), {})["status"], "idle")
+        self.assertEqual(sorted(seen[-1]), [GZMO, WDGT])
+
+        # Company pause with a TTL: the lane does not see WDGT, no child starts for it.
+        until = (datetime.now(timezone.utc) + timedelta(hours=2)).isoformat()
+        out = server._op_apply_owner_lever({
+            "lever": "pause", "scope_kind": "company", "scope_ref": WDGT,
+            "reason": "earnings next week", "until": until, "actor_ref": OWNER})
+        self.assertEqual(out["receipt"]["outcome"], "applied")
+        with patch("dalton_core.writer_server.lane_for_operation", return_value=None):
+            server._run_lane(Lane("dispatch_mission_tracking", handler), {})
+        self.assertEqual(seen[-1], [GZMO])
+        # ...but the authority itself still reads the stored record.
+        self.assertEqual(len(server.coverage_mission.active_mission(mission["mission_ref"])["universe"]), 2)
+        self.assertIn("paused by owner until", spawn_refusal(state, {"company_ref": WDGT}))
+        self.assertIsNone(spawn_refusal(state, {"company_ref": GZMO}))
+        with self.assertRaisesRegex(OwnerLeverHold, "paused by owner"):
+            assert_admission_open(server.store.connection, WDGT)
+        assert_admission_open(server.store.connection, GZMO)
+        # The TTL expires by itself: three hours later nothing is paused.
+        later = lever_state(server.store.connection, now=datetime.now(timezone.utc) + timedelta(hours=3))
+        self.assertEqual(later["companies"], {})
+        self.assertEqual(later["expired"][0]["scope_ref"], WDGT)
+
+        # Lane pause: the lane answers paused, the tick ledger says so.
+        server._op_apply_owner_lever({
+            "lever": "pause", "scope_kind": "lane", "scope_ref": "dispatch_mission_tracking",
+            "reason": "noisy", "actor_ref": OWNER})
+        with patch("dalton_core.writer_server.lane_for_operation", return_value=None):
+            paused = server._run_lane(Lane("dispatch_mission_tracking", handler), {})
+        self.assertTrue(paused["status"].startswith("paused:paused by owner until resumed"))
+
+        # Emergency stop: every lane, every paid call, every admission refused.
+        server._op_apply_owner_lever({"lever": "emergency_stop", "reason": "runaway spend",
+                                      "actor_ref": OWNER})
+        with patch("dalton_core.writer_server.lane_for_operation", return_value=None):
+            stopped = server._run_lane(Lane("dispatch_mission_statements", handler), {})
+        self.assertEqual(stopped["reason_code"], "owner_emergency_stop")
+        with ThesisImpactBudgetStore(state / "thesis-impact-budget.sqlite") as budget:
+            with self.assertRaisesRegex(OwnerEmergencyStopRefused, "owner_emergency_stop"):
+                budget.admit(policy_version_id="p", day="2026-10-06", work_order_ref="w",
+                             attempt_number=1, phase="model", route_decision_ref="r",
+                             reserved_micros=1)
+        with self.assertRaises(OwnerLeverHold):
+            assert_admission_open(server.store.connection, GZMO)
+        self.assertIn("no new lane children", spawn_refusal(state, {"company_ref": GZMO}))
+        summary = tick_summary(server._op_owner_lever_state({}))
+        self.assertTrue(summary["emergency_stop"])
+        with TickLedger(state / "tick-ledger.sqlite") as ledger:
+            ledger.append_tick({"status": "idle", "active_loop_count": 0, "probes_executed": 0,
+                                "executed": [], "skipped": [], "owner_levers": summary},
+                               started_at=datetime.now(timezone.utc))
+        ticks = sqlite3.connect(state / "tick-ledger.sqlite")
+        status = ticks.execute("SELECT status FROM tick_ledger_lanes WHERE driver_key='owner_levers'").fetchone()[0]
+        ticks.close()
+        self.assertIn("emergency stop by owner until resumed", status)
+        # The inspection reads it, and a restart does not lose it.
+        env = Environment("canary", state, service_config=workspace.config_path)
+        try:
+            rows = {row["check"]: row for row in check_owner_levers(env)}
+        finally:
+            env.close()
+        self.assertEqual(rows["emergency_stop"]["status"], "warn")
+        server.store.close()
+        server = self.writer(state)
+        self.assertIsNotNone(server._owner_lever_state()["emergency"])
+        server._op_apply_owner_lever({"lever": "resume_all", "reason": "fixed", "actor_ref": OWNER})
+        self.assertIsNone(server._owner_lever_state()["emergency"])
+        with self.assertRaises(Exception):
+            server._op_apply_owner_lever({"lever": "pause", "scope_kind": "company",
+                                          "scope_ref": WDGT, "reason": "x",
+                                          "actor_ref": "automation:coverage-mission"})
+
+        # Stop a research line: an unknown question is refused, and the refusal is a receipt.
+        stop = server._op_stop_research_line({"line_ref": "research-question:none", "reason": "dead end",
+                                              "actor_ref": OWNER})
+        self.assertEqual(stop["status"], "refused")
+        self.assertEqual(stop["receipt"]["lever"], "stop_line")
+
+        # Prioritise: a TrackingCadenceVersion per adjustable source, by the owner.
+        first = server._op_prioritize_company({"company_ref": GZMO, "reason": "catalyst",
+                                               "actor_ref": OWNER})
+        self.assertEqual(first["status"], "published")
+        # 2026-10-07: the same lever re-times discovery for this company only
+        # -- plan intervals ÷4, never under a day -- with no plan file touched.
+        from dalton_core.tracking_cadence import (
+            discovery_cadence_divisor, scaled_interval_days,
+        )
+
+        self.assertEqual(discovery_cadence_divisor(server.store, GZMO)["divisor"], 4)
+        self.assertEqual(discovery_cadence_divisor(server.store, WDGT)["divisor"], 1)
+        self.assertEqual(scaled_interval_days(30, 4), 7)
+        self.assertEqual(scaled_interval_days(2, 4), 1)
+        sources = {item["source_key"] for item in first["published"]}
+        self.assertIn("alphaengine", sources)
+        self.assertNotIn("sec", sources)  # fixed cadences are never touched
+        rows = server.store.connection.execute(
+            "SELECT actor_ref, change_reason FROM tracking_cadence_versions WHERE company_ref=?",
+            (GZMO,)).fetchall()
+        self.assertTrue(rows and all(tuple(r) == (OWNER, "human_revision") for r in rows))
+        back = server._op_prioritize_company({"company_ref": GZMO, "mode": "normal",
+                                              "reason": "done", "actor_ref": OWNER})
+        self.assertEqual(back["status"], "published")
+        self.assertEqual(discovery_cadence_divisor(server.store, GZMO)["divisor"], 1)
+
+        # Coverage list: draft (SEC issuer, plans, budget), then publish.
+        old_alpha = load_discovery_plan(server._discovery_plan_path)
+        draft = server._op_draft_coverage_change({
+            "mission_ref": mission["mission_ref"], "add": ["NEWC"], "remove": [WDGT],
+            "actor_ref": OWNER})
+        added = draft["additions"][0]
+        self.assertEqual((added["cik"], added["name"], added["company_ref"]),
+                         ("0009900003", "Newco Actuators Inc.", "company:ticker:newc"))
+        by_source = {change["source_ref"]: change for change in draft["plans"]}
+        self.assertEqual(by_source[ALPHAENGINE_SOURCE_REF]["added"], ["company:ticker:newc"])
+        self.assertEqual(by_source[SEC_SOURCE_REF]["removed"], [WDGT])
+        self.assertTrue(draft["budget"]["caps_unchanged"])
+        published = server._op_publish_coverage_change({
+            "mission_ref": mission["mission_ref"], "expected_mission_hash": mission["content_hash"],
+            "add": [{"ticker": "NEWC", "cik": added["cik"], "name": added["name"],
+                     "coverage_tier": "B"}],
+            "remove": [WDGT], "reason": "swap WDGT for NEWC", "actor_ref": OWNER,
+            "idempotency_key": "canary-coverage"})
+        self.assertEqual(published["plan_errors"], [])
+        active = server.coverage_mission.active_mission(mission["mission_ref"])
+        self.assertEqual(active["version"], mission["version"] + 1)
+        self.assertEqual(sorted(m["company_ref"] for m in active["universe"]),
+                         ["company:ticker:gzmo", "company:ticker:newc"])
+        alpha = load_discovery_plan(coverage_selected_plan(state, ALPHAENGINE_SOURCE_REF))
+        sec = load_discovery_plan(coverage_selected_plan(state, SEC_SOURCE_REF))
+        self.assertEqual(alpha["companies"]["company:ticker:newc"]["ticker"], "NEWC")
+        self.assertNotIn(WDGT, alpha["companies"])
+        self.assertEqual(alpha["specs"], old_alpha["specs"])  # query forms untouched
+        self.assertEqual(sec["companies"]["company:ticker:newc"], {"cik": "0009900003"})
+        receipt = published["receipt"]
+        self.assertEqual((receipt["lever"], receipt["actor_ref"]), ("coverage_change", OWNER))
+        self.assertEqual(receipt["refs"]["mission_version_ref"], active["id"])
+        # A stale page cannot publish over it.
+        from dalton_core.errors import IdempotencyConflict
+        with self.assertRaises(IdempotencyConflict):
+            server._op_publish_coverage_change({
+                "mission_ref": mission["mission_ref"],
+                "expected_mission_hash": mission["content_hash"], "add": [],
+                "remove": [GZMO], "reason": "x", "actor_ref": OWNER})
+        # Every lever left a receipt the inspection can read.
+        levers = [r["lever"] for r in server.owner_levers.receipts(limit=50)]
+        for lever in ("pause", "emergency_stop", "resume_all", "stop_line", "prioritize",
+                      "coverage_change"):
+            self.assertIn(lever, levers)
+
+
+class NewWorkspaceScenarioTests(unittest.TestCase):
+    """ADR-0012: structured scenarios in a created workspace, with nothing configured.
+
+    The mission a new workspace publishes already grants the three scopes the
+    scenario lanes use (dossier, observation, market_event); the tables
+    appear on first use; the proposal lane is on because the workspace holds
+    a model configuration; and an owner decision, an observation tick and a
+    probability revision all run through the same code as legacy.
+    """
+
+    setUp = NewWorkspaceCanaryTests.setUp
+    create_workspace = NewWorkspaceCanaryTests.create_workspace
+    writer = NewWorkspaceOwnerLeverTests.writer
+
+    def test_scenarios_run_in_a_new_workspace_with_nothing_extra(self) -> None:
+        from types import SimpleNamespace
+
+        from dalton_core.company_scenario import CompanyScenarioAuthority, in_force
+        from dalton_core.mission_scenario_lane import (
+            build_proposal_launcher, dispatch_observation,
+        )
+        from dalton_core.scenario_proposal import eligible_companies
+        from dalton_core.tracking_cadence import TrackingCadenceAuthority
+
+        workspace, mission = self.create_workspace()
+        state = workspace.state_dir
+        for scope in ("dossier", "observation", "market_event"):
+            self.assertIn(scope, mission["autonomy"]["may_write"])
+        server = self.writer(state)
+        server.lane_state = {}
+        # Nothing yet: the observation lane is idle and reads no table it lacks.
+        self.assertEqual(dispatch_observation(server, {})["status"], "idle")
+        self.assertEqual(eligible_companies(server.store.connection, mission,
+                                            now=datetime.now(timezone.utc),
+                                            min_repropose_days=7), [])
+        launcher = build_proposal_launcher(SimpleNamespace(db=str(state / "core.sqlite")))
+        if (state / "initial-screen-model-config.json").is_file() or \
+                (state / "dossier-model-config.json").is_file():
+            self.assertIsNotNone(launcher)
+            launcher.close()
+        # A proposal (as the lane's child would write it), decided by the owner.
+        from tests.finance_scenario_fixture import seed_held_model
+        from tests.test_market_price_authority import bar
+        from tests.test_valuation_snapshot import roles, history
+        from dalton_core.market_price import MarketPriceSeriesAuthority
+        from dalton_core.valuation_snapshot import ValuationSnapshotAuthority
+        from dalton_core.scenario_rules import partition_conditions
+        today = datetime.now(timezone.utc).date()
+        model, _specification, _inputs = seed_held_model(server.store, server._coverage_mission, mission,
+            company_ref=WDGT, ticker="WDGT", cik="0009900001", entity_name="Widget Robotics Inc.")
+        price = MarketPriceSeriesAuthority(server.store).publish_series(company_ref=WDGT, ticker="WDGT", currency="USD",
+            bars=[bar(today.isoformat(), "200", open="198", high="202", low="197")],
+            invocation_ref="connector-invocation:synthetic-price", artifact_hash="a" * 64,
+            governance_ref="governance:synthetic", governance_hash="b" * 64,
+            requested_start=today.isoformat(), requested_end=today.isoformat(), captured_at=today.isoformat()+"T00:00:00+00:00")
+        p = {"version_ref":price["id"],"version_hash":price["content_hash"],"bar_date":today.isoformat(),"close":"200","currency":"USD",
+            "invocation_ref":"connector-invocation:synthetic-price","artifact_hash":"a"*64}
+        shares = {k:v for k,v in p.items() if k in ("version_ref","version_hash","invocation_ref","artifact_hash")}
+        shares.update(as_of=today.isoformat(), shares_outstanding="1000000")
+        valuation = ValuationSnapshotAuthority(server.store).publish_snapshot(company_ref=WDGT, price=p, shares=shares,
+            fundamental_windows=[{"as_of":"2025-12-31","roles":roles()}], price_history=history(last=today.isoformat()),
+            share_history=[{"as_of":"2020-01-01","shares_outstanding":"1000000"}])
+        partition={"observed_by":"sec_actual","metric_ref":"concept:us-gaap:Revenues","transform":"yoy_pct","cutpoints":["5","15"],"source_refs":[model["id"]]}
+        def scenario(key, probability, delta):
+            return {"key":key,"name":key,"narrative":"Synthetic dated quantity scenario","probability":probability,
+                "evidence_refs":[model["id"]],"partition":partition,"triggers":partition_conditions(key,partition,today=today),
+                "probability_basis":{"kind":"template_prior","because":"Explicit synthetic template prior","source_refs":[model["id"]],"as_of":today.isoformat()},
+                "driver_deltas":[{"driver_ref":"economic:volume","mode":"relative_level","delta":delta,"because":"Synthetic quantity variation","refs":[model["id"]]}]}
+
+        proposal = CompanyScenarioAuthority(server.store).propose_set(
+            company_ref=WDGT, scenarios=[scenario("bear", "0.25", "-.1"), scenario("base", "0.5", "0"), scenario("bull", "0.25", ".1")],
+            anchors={"model_version_ref":model["id"],"model_version_hash":model["content_hash"],"valuation_snapshot_ref":valuation["id"],"price_as_of":today.isoformat()}, proposer=None, mission=mission,
+            actor_ref=mission["autonomy"]["automation_principal"])
+        decided = server._op_decide_company_scenario_set({
+            "set_ref": proposal["id"], "set_hash": proposal["content_hash"],
+            "decision": "accept", "reason": "looks right", "actor_ref": OWNER})
+        self.assertEqual(decided["decision"], "accept")
+        observed = dispatch_observation(server, {})
+        # The middle interval has both a lower and an upper condition.
+        self.assertEqual((observed["status"], observed.get("appended")), ("observed", 4), observed)
+        live = in_force(server.store.connection, WDGT)
+        bear = next(item for item in live if item["key"] == "bear")
+        from dalton_core.company_scenario import CompanyScenarioValidationError
+        blank_changes=[{"scenario_ref":row["scenario_ref"],"version_ref":row["id"],"version_hash":row["content_hash"],
+            "probability":{"bear":"0.7","base":"0.2","bull":"0.1"}[row["key"]]} for row in live]
+        with self.assertRaisesRegex(CompanyScenarioValidationError,"evidence rationale"):
+            CompanyScenarioAuthority(server.store).revise_group(company_ref=WDGT,changes=blank_changes,
+                reason="  ",actor_ref=OWNER,mission=mission)
+        self.assertEqual(in_force(server.store.connection,WDGT),live)
+        revised = server._op_revise_company_scenario_group({
+            "company_ref":WDGT,"changes":[{"scenario_ref":row["scenario_ref"],"version_ref":row["id"],"version_hash":row["content_hash"],
+                "probability":{"bear":"0.7","base":"0.2","bull":"0.1"}[row["key"]]} for row in live],
+            "reason": "bookings weak", "actor_ref": OWNER})
+        self.assertEqual(next(row["probability"] for row in revised["versions"] if row["key"]=="bear"), "0.70")
+        self.assertTrue(revised["cadence"]["published"])
+        cadence = TrackingCadenceAuthority(server.store).latest(WDGT, "alphaengine")
+        self.assertEqual((cadence["decision"], cadence["actor_ref"]),
+                         ("scenario_probability", OWNER))
+        current=in_force(server.store.connection,WDGT)
+        reset=CompanyScenarioAuthority(server.store).revise_group(company_ref=WDGT,changes=[{
+            "scenario_ref":row["scenario_ref"],"version_ref":row["id"],"version_hash":row["content_hash"],
+            "probability":{"bear":".25","base":".5","bull":".25"}[row["key"]]} for row in current],
+            reason="Return to the explicit template prior while awaiting new evidence",actor_ref=OWNER,mission=mission)
+        self.assertEqual(len(reset["versions"]),3)
+        self.assertTrue(all(row["probability_basis"]["kind"]=="template_prior" for row in reset["versions"]))
+
+
+class NewWorkspaceMarketProxyAndDisclosureTests(unittest.TestCase):
+    """2026-10-07 slices #15-#17: a created workspace needs nothing to get them.
+
+    Market-proxy derivation, the SEC-filing disclosure reader (10-K Item 5
+    buybacks, Item 5 / 9B trading arrangements) and the proxy tagging rule run
+    on the same code as legacy: the first mission already grants every scope
+    they write under, the seeded proxy file leaves derivation on, and on a
+    workspace with nothing fetched yet each one reads nothing and fails nothing.
+    """
+
+    setUp = NewWorkspaceCanaryTests.setUp
+    create_workspace = NewWorkspaceCanaryTests.create_workspace
+
+    def test_proxies_and_filing_disclosures_need_no_workspace_setup(self) -> None:
+        from dalton_core.acquired_sec_filings import acquired_filing_documents
+        from dalton_core.market_proxy_catalog import derive_mappings
+        from dalton_core.market_proxy_claim import load_mapping_config
+        from dalton_core.tracking_lane_cli import company_events
+
+        workspace, mission = self.create_workspace()
+        state = workspace.state_dir
+        for scope in ("market_price", "claim", "evidence", "claim_index",
+                      "market_event", "observation"):
+            self.assertIn(scope, mission["autonomy"]["may_write"])
+        config = state / "market-proxy-mappings.json"
+        if config.is_file():
+            self.assertTrue(load_mapping_config(config)["derive_from_model_drivers"])
+        with DaltonStore(state / "core.sqlite") as store:
+            refs = [item["company_ref"] for item in mission["universe"]]
+            self.assertEqual(derive_mappings(store.connection, refs), [])
+            for ref in refs:
+                found = acquired_filing_documents(store.connection, company_ref=ref,
+                                                  state_dir=state)
+                self.assertEqual(found["documents"], [])
+                events = company_events(store, mission, company_ref=ref,
+                                        now=datetime.now(timezone.utc))
+                self.assertFalse([event for event in events if event["kind"] in
+                                  ("insider_trading_plan", "buyback_disclosure")])
+
+
 class NextVersionIdTests(unittest.TestCase):
     """The owner scripts could not upgrade a created workspace's first mission."""
 
@@ -1162,3 +2550,339 @@ class NextVersionIdTests(unittest.TestCase):
 
 if __name__ == "__main__":
     unittest.main()
+
+
+class NewWorkspaceOwnerDeliveryTests(unittest.TestCase):
+    """Vision-gap #13: a created workspace inherits the delivery contract state.
+
+    Seeded ``proposed`` with no recipient, exactly as install.sh seeds it on
+    every other environment; nothing is sent until this workspace's owner
+    approves it with a chat id, and then the same code delivers -- here, the
+    owner's own emergency stop -- once, through the host tool (a fake), with a
+    receipt.
+    """
+
+    setUp = NewWorkspaceCanaryTests.setUp
+    create_workspace = NewWorkspaceCanaryTests.create_workspace
+
+    def test_a_created_workspace_waits_for_its_owner_then_delivers_once(self) -> None:
+        from dalton_core import owner_delivery as od
+        from dalton_core.lane_registry import LaunchAgentContext
+        from dalton_core.mission_owner_delivery_lane import (
+            OwnerDeliveryLauncher, argv_fragment,
+        )
+        from dalton_core.needs_human import collect
+        from dalton_core.owner_levers import OwnerLeverAuthority
+
+        workspace, _mission = self.create_workspace()
+        state = workspace.state_dir
+        seeded = json.loads(od.contract_path(state).read_text())
+        self.assertEqual(seeded, od.build_contract_record())
+        self.assertEqual(oct(od.contract_path(state).stat().st_mode & 0o777), "0o600")
+        self.assertEqual(argv_fragment(LaunchAgentContext(state=state)),
+                         ["--owner-delivery-state-dir", str(state)])
+        # Unapproved: the lane starts no child, the pass sends nothing, and the
+        # to-do list mentions it without calling it blocking.
+        spawned = []
+        launcher = OwnerDeliveryLauncher(state_dir=state, popen=lambda *a, **k: spawned.append(a))
+        self.assertEqual(launcher.dispatch_once()["status"], "not_granted")
+        self.assertEqual(spawned, [])
+        quiet = [item for item in collect(state_dir=state, environment="canary")["items"]
+                 if "飞书推送" in item["title"]]
+        self.assertEqual(len(quiet), 1)
+        self.assertFalse(quiet[0]["actionable"])
+
+        class Sender:
+            sent: list = []
+
+            def send(self, chat_id, body):
+                self.sent.append((chat_id, body))
+                return "om_canary"
+
+        sender = Sender()
+        self.assertEqual(od.run_delivery_pass(state, sender=sender)["status"], "not_granted")
+        # The owner approves this environment (the ops script's apply).
+        approved_at = datetime.now(timezone.utc)
+        with patch("sys.stdout"):
+            self.assertEqual(od.main(["approve", "--state-dir", str(state), "--chat-id",
+                                      "oc_canary0000000000", "--approved-by", OWNER,
+                                      "--apply"]), 0)
+        with DaltonStore(state / "core.sqlite") as store:
+            OwnerLeverAuthority(store).record(
+                lever="emergency_stop", scope_kind="global", scope_ref="global",
+                reason="canary stop", actor_ref=OWNER,
+                now=approved_at + timedelta(minutes=1))
+        later = approved_at + timedelta(minutes=2)
+        first = od.run_delivery_pass(state, sender=sender, now=later)
+        self.assertEqual(first["status"], "delivered", first)
+        self.assertEqual(len(sender.sent), 1)
+        self.assertEqual(sender.sent[0][0], "oc_canary0000000000")
+        self.assertIn("紧急停机已生效", sender.sent[0][1])
+        od.run_delivery_pass(state, sender=sender, now=later + timedelta(hours=1))
+        self.assertEqual(len(sender.sent), 1)
+        receipts = od.ledger_summary(state)
+        self.assertEqual(receipts["counts"], {"attempting": 1, "delivered": 1})
+
+
+class NextVersionIdTests(unittest.TestCase):
+    """The owner scripts could not upgrade a created workspace's first mission."""
+
+    def test_a_hash_named_first_version_gets_the_writers_numbered_name(self) -> None:
+        from scripts.sign_auto_commit_rules import _next_version_id
+
+        # ws-7d's first version; the cascade used to refuse it outright.
+        self.assertEqual(
+            _next_version_id("coverage-mission-version:ws-7d:f85cd96a7f406dd704e8ca5c", 2),
+            "coverage-mission-version:ws-7d:2")
+        # A hash that happens to end in digits used to become "...a52".
+        self.assertEqual(
+            _next_version_id("coverage-mission-version:canary:3fde112926c0291adddab215", 2),
+            "coverage-mission-version:canary:2")
+        self.assertEqual(_next_version_id("policy-17", 18), "policy-18")
+        self.assertEqual(_next_version_id("constitution-version:first-mission:ab12:5", 6),
+                         "constitution-version:first-mission:ab12:6")
+
+
+if __name__ == "__main__":
+    unittest.main()
+
+
+class NewWorkspaceConvictionV2Tests(unittest.TestCase):
+    """ADR-0013: a created workspace starts on Conviction v2 with no patches."""
+
+    setUp = NewWorkspaceCanaryTests.setUp
+    create_workspace = NewWorkspaceCanaryTests.create_workspace
+    writer = NewWorkspaceOwnerLeverTests.writer
+
+    def test_a_created_workspace_drafts_conviction_calls_under_v2(self) -> None:
+        """ADR-0013: Conviction v2 with no policy published and nothing patched.
+
+        The defaults are in code, so a workspace created by the formal flow
+        already drafts under v2: the foundation binds the v2 default, the
+        mission grants the scope and the checkpoint, the child's precheck asks
+        only for an active thesis and a current valuation snapshot -- and says
+        in Chinese which one is missing -- and the owner can publish the next
+        version through the writer, which an automation principal cannot.
+        """
+
+        from types import SimpleNamespace
+
+        from dalton_core.conviction_call_cli import (
+            active_gate, gate_inputs_v2, precheck_for, run_conviction_call,
+        )
+        from dalton_core.conviction_policy import (
+            DEFAULT_POLICY, DEFAULT_POLICY_HASH, effective_policy,
+        )
+        from dalton_core.coverage_mission import CoverageMissionAuthority
+        from dalton_core.writer_server import (
+            HUMAN_GOVERNANCE_OPERATIONS, MISSION_AUTOMATION_OPERATIONS,
+        )
+
+        workspace, mission = self.create_workspace()
+        state = workspace.state_dir
+        foundation = json.loads((state / "research-foundation.json").read_text())
+        self.assertEqual(foundation["methods"]["conviction_policy"]["content_hash"],
+                         DEFAULT_POLICY_HASH)
+        with DaltonStore(state / "core.sqlite") as store:
+            self.assertEqual(active_gate(store.connection), "v2")
+            policy = effective_policy(store.connection)
+            self.assertEqual(policy["source"], "code_default")
+            current = CoverageMissionAuthority(store).mission(mission["id"])
+            self.assertIn("conviction_call", current["autonomy"]["may_write"])
+            self.assertIn("conviction_call", current["autonomy"]["human_checkpoints"])
+            gate = precheck_for(gate_inputs_v2(store, WDGT,
+                                               industry_ref=current["industry_ref"]),
+                                WDGT, policy)
+        self.assertFalse(gate["eligible"])
+        self.assertEqual(gate["reason_labels"], ["没有生效的投资论点", "还没有估值快照"])
+        summary = run_conviction_call(state_dir=state, company_ref=WDGT,
+                                      summary_dir=self.root / "conviction-run", dry_run=True)
+        self.assertEqual((summary["gate_version"], summary["call_status"]),
+                         ("v2", "not_eligible"), summary)
+        self.assertIn("还没有估值快照", summary["failure_reason"])
+        self.assertIn("publish_conviction_policy", HUMAN_GOVERNANCE_OPERATIONS)
+        self.assertNotIn("publish_conviction_policy", MISSION_AUTOMATION_OPERATIONS)
+        server = self.writer(state)
+        body = json.loads(json.dumps(dict(DEFAULT_POLICY)))
+        body["max_drafts_per_day"] = 1
+        out = server._op_publish_conviction_policy({
+            "policy": body, "reason": "canary: one draft a day", "actor_ref": OWNER,
+            "prior_version_ref": None, "idempotency_key": "canary-policy"})
+        self.assertEqual(out["status"], "published")
+        self.assertEqual(effective_policy(server.store.connection)["version"], 1)
+        from dalton_core.mission_conviction_lane import argv_fragment
+
+        model_config = state / "initial-screen-model-config.json"
+        self.assertEqual(bool(argv_fragment(SimpleNamespace(state=state))),
+                         model_config.is_file())
+
+
+class NextVersionIdTests(unittest.TestCase):
+    """The owner scripts could not upgrade a created workspace's first mission."""
+
+    def test_a_hash_named_first_version_gets_the_writers_numbered_name(self) -> None:
+        from scripts.sign_auto_commit_rules import _next_version_id
+
+        # ws-7d's first version; the cascade used to refuse it outright.
+        self.assertEqual(
+            _next_version_id("coverage-mission-version:ws-7d:f85cd96a7f406dd704e8ca5c", 2),
+            "coverage-mission-version:ws-7d:2")
+        # A hash that happens to end in digits used to become "...a52".
+        self.assertEqual(
+            _next_version_id("coverage-mission-version:canary:3fde112926c0291adddab215", 2),
+            "coverage-mission-version:canary:2")
+        self.assertEqual(_next_version_id("policy-17", 18), "policy-18")
+        self.assertEqual(_next_version_id("constitution-version:first-mission:ab12:5", 6),
+                         "constitution-version:first-mission:ab12:6")
+
+
+class NewWorkspaceFundTemplateTests(unittest.TestCase):
+    """Vision-gap #4: a created workspace exports with the default fund template.
+
+    No patch, no configuration: a Core that has never seen the registry
+    resolves every company to the built-in template; the writer seeds the
+    built-in row on first use; the owner can register a template and choose
+    it for a company through the same doors as every other environment; and
+    the export records which template it used and why.
+    """
+
+    setUp = NewWorkspaceCanaryTests.setUp
+    create_workspace = NewWorkspaceCanaryTests.create_workspace
+    writer = NewWorkspaceOwnerLeverTests.writer
+
+    def test_a_created_workspace_exports_with_the_default_template(self) -> None:
+        from openpyxl import load_workbook
+
+        from dalton_core.company_model_inputs import build_model_inputs
+        from dalton_core.fund_xlsx_export import export_fund_workbook
+        from dalton_core.fund_xlsx_template_registry import (
+            BUILTIN_VERSION_REF, builtin_version, export_binding, resolve_template,
+            template_versions,
+        )
+        from dalton_core.model_forecast_driver import ForecastModelAuthority
+        from tests.test_fund_xlsx_template_registry import candidate
+        from tests.test_model_forecast_driver import ledger, model, spec
+
+        workspace, mission = self.create_workspace()
+        state = workspace.state_dir
+        member = mission["universe"][0]["company_ref"]
+        # Read-only, before anything opened the registry: the built-in.
+        reader = sqlite3.connect(f"file:{state / 'core.sqlite'}?mode=ro", uri=True)
+        self.addCleanup(reader.close)
+        self.assertEqual([BUILTIN_VERSION_REF], [r["id"] for r in template_versions(reader)])
+        resolved = resolve_template(reader, member)
+        self.assertEqual(("builtin", BUILTIN_VERSION_REF),
+                         (resolved["basis"], resolved["template"]["id"]))
+        # Export a model with what the new workspace resolved.
+        specification = spec(quarters=8)
+        inputs = build_model_inputs(ledger(), specification)
+        server = self.writer(state)
+        forecast = ForecastModelAuthority(server.store).publish(model(specification=specification))
+        calendar = {"calendar_ref": "fiscal-calendar:canary", "source_hash": "1" * 64,
+                    "as_of": "2026-08-31", "fiscal_year_end_month": 8}
+        calendar["content_hash"] = content_hash(calendar)
+        out = Path(self.temp.name) / "canary-model.xlsx"
+        result = export_fund_workbook(out, model=forecast, spec=specification, inputs=inputs,
+                                      calendar_binding=calendar,
+                                      template=export_binding(resolved))
+        self.assertEqual((BUILTIN_VERSION_REF, "builtin"),
+                         (result["template_version_ref"], result["template_basis"]))
+        book = load_workbook(out)
+        self.assertEqual(["Valuation", "Financials", "Driver", "Sources", "Formula Map"],
+                         book.sheetnames)
+        # The writer seeds the built-in row the first time it opens the registry.
+        self.assertEqual(builtin_version(), server.fund_xlsx_templates.versions()[0])
+        rows = server.store.connection.execute(
+            "SELECT version_id FROM fund_xlsx_template_versions").fetchall()
+        self.assertEqual([BUILTIN_VERSION_REF], [row[0] for row in rows])
+        # The owner registers a template and picks it for one company.
+        registered = server._op_register_fund_xlsx_template({
+            "candidate": candidate(Path(self.temp.name).resolve()), "display_name": "canary",
+            "reason": "first upload", "actor_ref": OWNER})["template"]
+        server._op_select_fund_xlsx_template({
+            "scope_kind": "company", "scope_ref": member, "reason": "try it",
+            "actor_ref": OWNER, "template_version_ref": registered["id"],
+            "template_version_hash": registered["content_hash"]})
+        chosen = resolve_template(server.store.connection, member)
+        self.assertEqual(("company", registered["id"]),
+                         (chosen["basis"], chosen["template"]["id"]))
+        others = [item["company_ref"] for item in mission["universe"][1:]]
+        for other in others:
+            self.assertEqual("builtin", resolve_template(server.store.connection, other)["basis"])
+
+
+if __name__ == "__main__":
+    unittest.main()
+
+
+class NewWorkspaceReturnAttributionTests(unittest.TestCase):
+    """ADR-0014: income bridges, per-share series and return attribution, nothing configured.
+
+    The mission a created workspace publishes grants ``valuation``; the lane is
+    in process (no launcher, no model config); the tables appear on first
+    write; and the bridges a filed statement yields in the created workspace
+    are the same bytes the pure builders give anywhere else.
+    """
+
+    setUp = NewWorkspaceCanaryTests.setUp
+    create_workspace = NewWorkspaceCanaryTests.create_workspace
+    writer = NewWorkspaceOwnerLeverTests.writer
+    ingest_statements = NewWorkspaceCanaryTests.ingest_statements
+
+    def test_return_attribution_runs_in_a_new_workspace_with_nothing_extra(self) -> None:
+        from dalton_core.cockpit_return_attribution import card_views
+        from dalton_core.lane_registry import lane_for_operation, load_lanes
+        from dalton_core.mission_return_attribution_lane import dispatch
+        from dalton_core.return_attribution import (
+            compute_company, latest_bridges, latest_series, table_exists,
+        )
+        from tests.test_return_attribution import calendar_company_filings
+
+        workspace, mission = self.create_workspace()
+        state = workspace.state_dir
+        self.assertIn("valuation", mission["autonomy"]["may_write"])
+        load_lanes()
+        spec = lane_for_operation("dispatch_return_attribution")
+        self.assertEqual((spec.order, spec.init_kwarg, spec.launcher_factory), (98, None, None))
+        server = self.writer(state)
+        server.lane_state = {}
+        self.missions = server.coverage_mission
+        # Nothing filed: each company is visited once and nothing is written.
+        for _ in range(2):
+            out = dispatch(server, {})
+            self.assertEqual(out["status"], "unchanged", out)
+            self.assertIn("还没有申报报表行", out["reason"])
+        if table_exists(server.store.connection, "income_bridge_versions"):
+            self.assertEqual(server.store.connection.execute(
+                "SELECT COUNT(*) FROM income_bridge_versions").fetchone()[0], 0)
+        # WDGT's statements, as the financial-statements lane records them.
+        numbered = {}
+        for index, (_accession, form, filed, report, lines) in enumerate(calendar_company_filings()):
+            numbered[f"0009900001-26-{index + 1:06d}"] = (form, filed, report, [
+                {"statement": line.get("statement", "income"), "concept": line["concept"],
+                 "label": line["concept"].split(":")[1], "level": 1,
+                 "parent_concept": line["parent"], "is_breakdown": False, "dimension_axis": None,
+                 "dimension_member": None, "period_start": line["start"], "period_end": line["end"],
+                 "value": line["value"], "unit": line["unit"], "balance": line["balance"]}
+                for line in lines])
+        self.ingest_statements(mission, WDGT, "WDGT", numbered)
+        later = datetime.now(timezone.utc) + timedelta(minutes=6)
+        outcomes = [dispatch(server, {}, now=later + timedelta(seconds=step)) for step in range(2)]
+        published = next(item for item in outcomes if item.get("company_ref") == WDGT)
+        self.assertEqual(published["status"], "published", outcomes)
+        bridges = latest_bridges(server.store.connection, WDGT)
+        self.assertTrue(bridges)
+        self.assertEqual({item["status"] for item in bridges}, {"complete"})
+        self.assertTrue(all(item["actor_ref"] == AUTOMATION for item in bridges))
+        series = latest_series(server.store.connection, WDGT)
+        self.assertEqual(series["missing"], [])
+        self.assertIn("FY2025 Q4", [item["fiscal_label"] for item in series["quarters_not_stated"]])
+        # Same code everywhere: the stored bodies are what the pure builders give.
+        recomputed = compute_company(server.store.connection, WDGT)["bridges"]
+        stored = [{key: item[key] for key in recomputed[0]} for item in bridges]
+        self.assertEqual(sorted(json.dumps(item, sort_keys=True) for item in stored),
+                         sorted(json.dumps(item, sort_keys=True) for item in recomputed))
+        view = card_views(server.store.connection, [WDGT, GZMO], mission.get("industry_ref"))
+        self.assertIn(WDGT, view)
+        self.assertNotIn(GZMO, view)
+        self.assertIn("个完整勾稽", view[WDGT]["headline"])

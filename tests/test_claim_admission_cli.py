@@ -108,6 +108,44 @@ class DoorAndCliTests(unittest.TestCase):
         self.assertEqual(call.call_args.kwargs["operation"], "retire_claim_by_hand")
         self.assertEqual(call.call_args.kwargs["params"]["claim_version_ref"], "claim-version:a")
 
+    def test_a_named_list_is_held_to_its_reviewed_selection(self) -> None:
+        """2026-09-29: --expect-selection was ignored with --claim-version-ref."""
+
+        import json
+        import sqlite3
+
+        from dalton_core import claim_admission_cli as cli
+
+        def connect(_state):
+            connection = sqlite3.connect(":memory:")
+            connection.row_factory = sqlite3.Row
+            connection.execute("CREATE TABLE claim_versions(claim_version_id TEXT, claim_json TEXT, "
+                               "content_hash TEXT)")
+            for ref in ("claim-version:a", "claim-version:b"):
+                connection.execute("INSERT INTO claim_versions VALUES(?,?,?)",
+                                   (ref, json.dumps({"normalized_statement": "s"}), "h"))
+            return connection
+
+        refs = ["claim-version:a", "claim-version:b"]
+        reviewed = cli.selection_hash(refs)
+        with patch.object(cli, "_connect", connect), \
+                patch("dalton_core.claim_retirement.retired_claim_version_refs", return_value=set()):
+            dry = cli.retire(Path("/nonexistent"), claim_version_refs=refs,
+                             expect_selection=reviewed, reason="r", apply=False, actor=None)
+            self.assertEqual((dry["count"], dry["selection_sha256"]), (2, reviewed))
+            with self.assertRaises(SystemExit):
+                cli.retire(Path("/nonexistent"), claim_version_refs=refs,
+                           expect_selection="0" * 64, reason="r", apply=True, actor="human:lumos")
+        # One of the list was retired meanwhile: the reviewed hash no longer holds.
+        with patch.object(cli, "_connect", connect), \
+                patch("dalton_core.claim_retirement.retired_claim_version_refs",
+                      return_value={"claim-version:a"}), \
+                patch("dalton_core.governance_cli.ephemeral_call") as call:
+            with self.assertRaises(SystemExit):
+                cli.retire(Path("/nonexistent"), claim_version_refs=refs,
+                           expect_selection=reviewed, reason="r", apply=True, actor="human:lumos")
+        call.assert_not_called()
+
     def test_the_replay_names_what_admission_would_hold_today(self) -> None:
         from dalton_core.claim_admission_cli import judge_claim
 

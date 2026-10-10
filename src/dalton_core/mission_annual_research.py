@@ -484,6 +484,11 @@ class MissionAnnualResearchAuthority:
             if existing["identity_hash"] != identity_hash:
                 raise MissionAnnualResearchError("annual research admission identity collided")
             return {"status_marker": "duplicate", **wire}
+        # 2026-10-06: a new admission is refused while the owner has paused
+        # this company or stopped everything (owner_levers).
+        from .owner_levers import assert_admission_open
+
+        assert_admission_open(self.connection, identity.get("company_ref"))
         created_at = self.clock().astimezone(timezone.utc).isoformat(timespec="microseconds")
         wire = {
             **identity,

@@ -3,7 +3,7 @@
 ## Boundary
 
 The first R11 source freeze candidate was
-`/Users/everflow/Projects/dalton-foundation-followup-r11-acceptance-worktree`
+`$HOME/Projects/dalton-foundation-followup-r11-acceptance-worktree`
 at `62f35597b2ca3c57d02bc06e688a2484829c1309`. A subsequent live finding showed
 that synchronous backup integrity checks can stall the controller heartbeat,
 so an R11a successor may replace it. The release ref, source, full-suite,

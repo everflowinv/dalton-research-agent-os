@@ -142,7 +142,7 @@ class NeedsHumanEndpointTests(PlaneHarness):
         # that never surfaced anywhere before this panel.
         result = self.plane().needs_human()
         kinds = {row["kind"] for row in result["items"]}
-        self.assertEqual(kinds, {"source_not_connected"})
+        self.assertEqual(kinds, {"source_not_connected", "model_coverage_gap"})
         self.assertNotIn("gate_decision", kinds)
 
     def test_the_route_is_reachable_by_its_path(self):

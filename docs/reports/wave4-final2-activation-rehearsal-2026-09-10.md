@@ -10,9 +10,9 @@ make a paid model call.
 
 Inputs were hash-bound:
 
-- live source: `/Users/everflow/Library/Application Support/Dalton`
+- live source: `$HOME/Library/Application Support/Dalton`
 - output: `/tmp/dalton-wave4-final2-activation-20260910`
-- OpenClaw catalog: `/Users/everflow/.openclaw/openclaw.json`, read only
+- OpenClaw catalog: `$HOME/.openclaw/openclaw.json`, read only
 - private mission v14 params SHA-256:
   `dd09fcdea9a0329b594efade2bd6ea3479788df992222beb62563b7fab353ebb`
 - `deploy/phase9/activation-models-v1.simulation.json` SHA-256:

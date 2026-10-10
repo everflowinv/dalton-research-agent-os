@@ -48,7 +48,10 @@ class CockpitProviderBoundaryTests(unittest.TestCase):
                 self.assertEqual(first["text"], '{"verdict":"pass","findings":[]}')
                 self.assertEqual(len(broker.requests), 1)
                 structured = broker.requests[0]["requiredControls"]["structuredOutput"]
-                self.assertEqual(structured["schemaName"], purpose + "_provider_output_v0_1")
+                # ADR-0013: the conviction verifier's contract is v0.2.
+                version = "v0_2" if purpose == "conviction_call_verifier" else "v0_1"
+                self.assertEqual(structured["schemaName"],
+                                 purpose + "_provider_output_" + version)
                 with Scheduler(self.root / "scheduler.sqlite") as scheduler:
                     authority = scheduler.work_order_authority(first["work_order_ref"])
                 self.assertEqual(structured["schemaHash"], authority["work_order"]["metadata"][

@@ -61,8 +61,18 @@ class LockedAdapter(fallback.ChainAdapter):
 
 
 class CockpitLeaseLockContentionTests(unittest.TestCase):
-    setUp = fallback.CockpitChainTests.setUp
     _model = fallback.CockpitChainTests._model
+
+    def setUp(self) -> None:
+        fallback.CockpitChainTests.setUp(self)
+        # The retry loop narrates every "database is locked ... retry n" to
+        # stderr by design; here the lock is the fixture, so that narration
+        # is expected output and only buries real failures in the test log.
+        import contextlib
+        import io
+        quiet = contextlib.redirect_stderr(io.StringIO())
+        quiet.__enter__()
+        self.addCleanup(quiet.__exit__, None, None, None)
 
     def _ask(self, adapter, request_id="locked"):
         return self._model(adapter, policy_version_ref=self.chain_policy).call(
@@ -356,6 +366,7 @@ class CockpitLeaseLockContentionTests(unittest.TestCase):
         with patch.object(ThesisImpactBudgetStore, "admit", landed_then_locked), \
                 patch.object(cockpit_model, "_lock_retry_sleep", lambda _s: None), \
                 patch.object(cockpit_model, "LEASE_RELEASE_RETRY_SECONDS", 0), \
+                patch.object(cockpit_model, "ADMISSION_LOCK_RETRY_SECONDS", 0), \
                 self.assertRaisesRegex(sqlite3.OperationalError, "locked"):
             self._ask(adapter, request_id="admit-locked")
         self.assertEqual(adapter.served, [])

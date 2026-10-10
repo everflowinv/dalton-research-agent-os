@@ -135,9 +135,9 @@ sqlite3 "file:$S/core.sqlite?mode=ro" "select company_ref,count(*) from valuatio
 
 ## 12. 迁移到 EveSSD（最后做；会停全部服务、rsync 约 9.2 GB、原目录改名保留）
 ```zsh
-sudo diskutil enableOwnership /Volumes/EveSSD        # 可选但推荐：保住 0600/0700 的内核级属主约束
-.venv/bin/python scripts/migrate_state_dir.py --dest /Volumes/EveSSD/Dalton            # 预演
-.venv/bin/python scripts/migrate_state_dir.py --dest /Volumes/EveSSD/Dalton --apply    # 执行；回滚：--rollback --apply
+sudo diskutil enableOwnership /Volumes/<storage-volume>        # 可选但推荐：保住 0600/0700 的内核级属主约束
+.venv/bin/python scripts/migrate_state_dir.py --dest /Volumes/<storage-volume>/Dalton            # 预演
+.venv/bin/python scripts/migrate_state_dir.py --dest /Volumes/<storage-volume>/Dalton --apply    # 执行；回滚：--rollback --apply
 ```
 
 ## 执行记录（2026-09-17 03:00–03:35 UTC）与偏差

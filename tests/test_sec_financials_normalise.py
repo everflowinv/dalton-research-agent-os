@@ -229,10 +229,8 @@ class WireTests(unittest.TestCase):
         from dalton_core.connector_inventory import load_packaged_connector_inventory
         from dalton_core.sec_financials_core import OPERATION
 
-        template = load_packaged_connector_inventory()["templates"]["sec-financials"]
-        ref = f"schema:connector-inventory:sec-financials:{OPERATION}:output:0.1"
-        schema = next(d["document"] for d in template["schema_documents"]
-                      if d["schema_ref"] == ref)
+        from dalton_core.sec_financials_core import sec_financials_output_schema
+        schema = sec_financials_output_schema(version=4)
         filing = normalise_filing(
             accession="0001352010-26-000046", form="10-Q", filed="2026-08-06",
             report_date="2026-06-30",

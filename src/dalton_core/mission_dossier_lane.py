@@ -90,6 +90,7 @@ CONTENT_REFUSAL_COOLDOWN_SECONDS = 6 * 60 * 60
 # that lands inside the interval is not lost: it moves the change key, and
 # the first tick after the interval drafts all of it at once.
 MIN_REDRAFT_SECONDS = 3 * 60 * 60
+MATERIAL_PROBE_SECONDS = 30 * 60
 
 
 def permission_key(connection: Any, launcher: Any, signature: str) -> str:
@@ -228,6 +229,7 @@ def company_change_keys(
         append_probe(connection, "claim_retirement_reinstatements"),
         append_probe(connection, "evidence_relations"),
         append_probe(connection, "coverage_mission_statement_lines"),
+        append_probe(connection, "research_followup_requests"),
         *[str(item) for item in control],
     ]
     keys: dict[str, str] = {}
@@ -256,6 +258,8 @@ class MissionDossierLaneCoordinator:
                  min_redraft_seconds: int = MIN_REDRAFT_SECONDS) -> None:
         self.connection = connection
         self.launcher = launcher
+        self.state_dir = getattr(launcher, "state_dir", None)
+        self._material_cache: dict[str, tuple[str, datetime, Mapping[str, Any]]] = {}
         self.companies = companies
         self.mission = mission
         self.cooldown_seconds = int(cooldown_seconds)
@@ -413,6 +417,40 @@ class MissionDossierLaneCoordinator:
                 (company_ref,)).fetchone()
         except Exception:  # noqa: BLE001 - no dossier table yet: nothing to pace
             return None
+
+    def _material_probe(self, company_ref: str, *, source_signature: str = "") -> Mapping[str, Any] | None:
+        """Read arrivals and review deadlines even when the Claim key is quiet.
+
+        Keep this outside the expensive Claim-signature memo: a document can
+        arrive before Claim promotion, and a review can become due with no
+        database write. The policy fingerprint changes only at those edges.
+        """
+        if self.state_dir is None:
+            return None
+        from .company_dossier import CompanyDossierAuthority
+        from .redraft_policy import lane_probe
+
+        exists = self.connection.execute(
+            "SELECT 1 FROM sqlite_master WHERE type='table' "
+            "AND name='company_dossier_versions'").fetchone()
+        reader = object.__new__(CompanyDossierAuthority)
+        reader.connection = self.connection
+        prior = None if exists is None else reader.latest(company_ref)
+        now = self._cooldown_clock()
+        if now.tzinfo is None:
+            now = now.replace(tzinfo=timezone.utc)
+        now = now.astimezone(timezone.utc)
+        kwargs = dict(product="dossier", target=company_ref,
+                      company_refs=[company_ref], prior=prior, now=now)
+        light = lane_probe(self.state_dir, self.connection, **kwargs, light_only=True)
+        key = compose([source_signature, light["fingerprint"]])
+        cached = self._material_cache.get(company_ref)
+        if cached is not None and cached[0] == key and (
+                timedelta(0) <= now - cached[1] < timedelta(seconds=MATERIAL_PROBE_SECONDS)):
+            return cached[2]
+        probe = lane_probe(self.state_dir, self.connection, **kwargs)
+        self._material_cache[company_ref] = (key, now, probe)
+        return probe
 
     def _retired_cited_by_head(self, version_id: str) -> list[str]:
         """Retired Claims the published head still cites, or [] if unreadable."""
@@ -656,6 +694,7 @@ class MissionDossierLaneCoordinator:
         # store thread to be told so.
         keys = self._change_keys(companies)
         recomputed: list[str] = []
+        material_probes: dict[str, Any] = {}
 
         def fresh() -> dict[str, Any]:
             """Which companies paid for a full signature this tick, if any.
@@ -665,9 +704,13 @@ class MissionDossierLaneCoordinator:
             a tick was slow wants to know.
             """
 
-            return {} if not recomputed else {"recomputed": list(recomputed)}
+            return {
+                **({} if not recomputed else {"recomputed": list(recomputed)}),
+                **({} if not material_probes else {"material_probes": material_probes}),
+            }
 
         for company_ref in companies:
+            probe = None
             if company_ref is None:
                 evidence = ledger_signature(self.connection)
             else:
@@ -684,6 +727,19 @@ class MissionDossierLaneCoordinator:
                     self.change_keys.remember(label, key, signed)
                     recomputed.append(label)
                 evidence = f"{company_ref}|{signed}"
+            if company_ref is not None:
+                try:
+                    probe = self._material_probe(
+                        str(company_ref), source_signature=permission_key(
+                            self.connection, self.launcher, evidence))
+                except Exception as exc:  # unreadable policy is never permission to spend
+                    return {"status": "unavailable", "settled": settled,
+                            "company_ref": company_ref,
+                            "reason": f"{type(exc).__name__}: {exc}"}
+                if probe is not None:
+                    material_probes[str(company_ref)] = dict(probe)
+            if probe is not None:
+                evidence += f"|material-review:{probe['fingerprint']}"
             signature = permission_key(self.connection, self.launcher, evidence)
             clear_obsolete_permissions(self.budget, signature, company_ref)
             if signature in self._quiet_signatures:
@@ -724,7 +780,8 @@ class MissionDossierLaneCoordinator:
             # The redraft interval, asked last: it is about *when*, and the
             # holds above are about *whether*.  A controlled re-entry is a
             # reviewed human decision and is not made to wait for it.
-            paced = (None if controlled_reentry is not None
+            urgent = probe is not None and probe["urgent"] is True
+            paced = (None if controlled_reentry is not None or urgent
                      else self.redraft_pacing(company_ref))
             exception = None
             if paced is not None and "exception" in paced:
@@ -891,6 +948,7 @@ def argv_fragment(context: Any) -> list[str]:
 
 LANE = register_lane(LaneSpec(
     operation="dispatch_company_dossier",
+    failure_ledger="company_dossier",
     # 137, between the crowd-source feed and the research-task lane. The
     # debate map takes 135: it reads the dossier, so it runs after it.
     order=137,

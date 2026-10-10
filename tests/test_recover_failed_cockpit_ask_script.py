@@ -1,4 +1,5 @@
 import hashlib,json,sqlite3,subprocess,sys,tempfile,unittest
+from contextlib import closing
 from pathlib import Path
 from dalton_core.cockpit_ask_recovery import failed_job_hash
 from dalton_core.store import canonical_json
@@ -10,14 +11,17 @@ class T(unittest.TestCase):
   self.p={'question':'q','answer':'a','gaps':[],'replayed':True};self.pf=self.r/'p.json';self.pf.write_text(canonical_json(self.p));self.ps=hashlib.sha256(canonical_json(self.p).encode()).hexdigest()
   c=sqlite3.connect(self.r/'thesis-impact-budget.sqlite');c.execute('create table thesis_impact_day_admissions(admission_id text,work_order_ref text)');c.execute('create table thesis_impact_day_settlements(admission_id text,actual_micros integer)');c.execute('insert into thesis_impact_day_admissions values(?,?)',('a','work:p'));c.execute('insert into thesis_impact_day_settlements values(?,?)',('a',10));c.commit();c.close()
   for n in ('m','c','b','v'): (self.r/f'{n}.json').write_text('{}')
+ def tearDown(self):self.t.cleanup()
+ def status(self):
+  with closing(sqlite3.connect(self.j)) as c:return c.execute('select status from cockpit_jobs').fetchone()[0]
  def cmd(self,ref='result:p',out='out.json',execute=False):
   args=[sys.executable,'scripts/recover_failed_cockpit_ask.py','--journal-db',str(self.j),'--scheduler-db',str(self.s),'--mission',str(self.r/'m.json'),'--checker-config',str(self.r/'c.json'),'--brain-config',str(self.r/'b.json'),'--verifier-config',str(self.r/'v.json'),'--artifact-dir',str(self.r/'art'),'--receipt',str(self.r/'receipt'),'--output',str(self.r/out),'--job-id','job:1','--expected-failed-hash',self.h,'--expected-checker-source-hash',hashlib.sha256((canonical_json({'kind':'ask_answer','version_ref':'cockpit-ask:rid','sections':[{'title':'回答','body':'a','gaps':[]}]})+'\n').encode()).hexdigest(),'--producer-result-envelope-ref',ref,'--producer-route-decision-ref','route:p','--brain-result-envelope-ref','result:b','--brain-raw-sha256','a'*64,'--original-source-commit','a'*40,'--successor-source-commit','b'*40,'--recovered-at','t2']
   if execute:args.append('--execute')
   return subprocess.run(args,cwd=Path(__file__).parents[1],env={**__import__('os').environ,'PYTHONPATH':'src'},capture_output=True,text=True)
  def test_plan_binds_formal_envelope_and_preoccupied_output_refuses_before_mutation(self):
   self.assertEqual(self.cmd().returncode,0);self.assertTrue((self.r/'out.json').exists())
-  before=sqlite3.connect(self.j).execute('select status from cockpit_jobs').fetchone()[0]
-  self.assertEqual(self.cmd().returncode,0);self.assertEqual(sqlite3.connect(self.j).execute('select status from cockpit_jobs').fetchone()[0],before)
+  before=self.status()
+  self.assertEqual(self.cmd().returncode,0);self.assertEqual(self.status(),before)
  def test_fullwidth_prompt_detail_is_not_part_of_citation_statement(self):
   import importlib.util
   spec=importlib.util.spec_from_file_location('recover_script',Path('scripts/recover_failed_cockpit_ask.py'));m=importlib.util.module_from_spec(spec);spec.loader.exec_module(m)

@@ -26,7 +26,7 @@ from dalton_core.research_publication_worker import (
 
 MISSION = {"universe": [{"company_ref": "company:a"}]}
 PRODUCT = {"kind": "initial_screen", "subject_ref": "company:a", "version_ref": "screen:1",
-           "status": "available", "sections": [{"title": "结论", "body": "正文", "gaps": []}]}
+           "status": "available", "sections": [{"title": "结论", "body": "原始研究已经给出完整且可复核的经营判断。", "gaps": []}]}
 
 
 def reader(connection, mission, company):
@@ -66,8 +66,11 @@ class RetryTests(unittest.TestCase):
             "this request is already running": "already_running",
             "ValueError: display attachment exceeds the size limit": "attachment_size",
             "language checker quote is not in its source section": "checker_quote_unanchored",
+            # Batch w: its own class (and round) since the unit-conversion fix.
             "check-only draft failed validation: localized section changed financial number "
-            "tokens": "check_only_content",
+            "tokens": "check_only_numeric",
+            "check-only draft failed validation: localized section 2 has no Simplified "
+            "Chinese presentation text": "check_only_content",
             "language checker served an unexpected transport or model": None,
             "semantic verifier model is not independent of both authors": None,
         }
@@ -82,8 +85,11 @@ class RetryTests(unittest.TestCase):
 
     # -- the automatic retry ---------------------------------------------
     def test_a_transient_failure_is_retried_once_and_only_once(self):
-        self.outcomes = [failed("this request is already running"),
-                         failed("this request is already running")]
+        # 2026-10-07: a lock or route failure is retried with back-off
+        # (test_cockpit_p0_publication); a spent budget stays once a day.
+        refused = ("today's research budget refused the call: thesis-impact budget "
+                   "refused the call (mission_budget_exceeded)")
+        self.outcomes = [failed(refused), failed(refused)]
         first = self.poll()
         self.assertEqual(first["pending"], 1)
         again = self.poll()
@@ -91,7 +97,7 @@ class RetryTests(unittest.TestCase):
         self.assertEqual(again["products"][0]["retry"], "automatic")
         [record] = retry_chain(self.state, self.identity_hash())
         self.assertEqual((record["trigger"], record["retry_class"], record["auto_round"]),
-                         ("automatic", "already_running", AUTO_RETRY_ROUND))
+                         ("automatic", "budget_refused", AUTO_RETRY_ROUND))
         # The idempotency mark: failing again does not buy a third attempt.
         for _ in range(3):
             self.assertEqual(self.poll()["retried"], 0)
@@ -139,7 +145,12 @@ class RetryTests(unittest.TestCase):
         self.outcomes = [{"status": "completed"}]
         request_retry(self.state, self.identity_hash()[:12], actor_ref="human:owner",
                       reason="once more", apply=True)
-        self.assertEqual(self.poll()["completed"], 1)
+        self.assertEqual(self.poll()["deferred"], 1)
+        self.assertEqual(self.prepared,2)
+        import time
+        resumed=poll_once(None,MISSION,state_dir=self.state,prepare=self.prepare,
+                          library_reader=reader,clock=lambda:time.time()+86401)
+        self.assertEqual(resumed['completed'],1)
         self.assertEqual([row["sequence"] for row in retry_chain(self.state, self.identity_hash())],
                          [1, 2])
         with self.assertRaisesRegex(ValueError, "already completed"):
@@ -160,7 +171,8 @@ class RetryTests(unittest.TestCase):
             request_retry(self.state, "deadbeefdeadbeef", actor_ref="human:owner", reason="x")
 
     def test_a_tampered_retry_chain_stops_the_poll(self):
-        self.outcomes = [failed("database is locked"), failed("database is locked")]
+        refused = "today's research budget refused the call (mission_budget_exceeded)"
+        self.outcomes = [failed(refused), failed(refused)]
         self.poll(); self.poll()
         [path] = (self.state / "retries" / self.identity_hash()).glob("*.json")
         record = json.loads(path.read_text())

@@ -191,6 +191,23 @@ class HtmlRenderTests(unittest.TestCase):
             self.assertIn('章节标题原始记录', details)
             self.assertIn(raw, details)
 
+    def test_server_heading_and_version_label_reach_the_export(self):
+        # 2026-10-07 inspection: the export shows the same 「因果链一 · …」
+        # heading and 「第 N 版」 as the cockpit; the id stays in details.
+        mission, lib = self.fixture()
+        product = lib['products'][0]
+        product['version_label'] = '第 31 版'
+        section = product['sections'][0]
+        section['title'] = 'causal_chain:0'
+        section['label'] = '因果链一 · 预算与宏观：审批周期与滞后'
+        page = render_research_html(lib, mission=mission)
+        article = page.split('<article>', 1)[1].split('</article>', 1)[0]
+        visible, details = article.split('<details class="refs">', 1)
+        self.assertIn('<h3>因果链一 · 预算与宏观：审批周期与滞后</h3>', visible)
+        self.assertNotIn('causal_chain', visible)
+        self.assertIn('causal_chain:0', details)
+        self.assertIn('第 31 版', page.split('<article>', 1)[0])
+
     def test_period_end_in_gap_is_readable_and_raw_gap_stays_in_details(self):
         mission, lib = self.fixture()
         raw = '每个单元格对应各自的财务期末日期（period_end）。'

@@ -1836,6 +1836,7 @@ class ConnectorStore:
         provider_request_id: str | None = None,
         retry_at: str | None = None,
         physical_attempt_id: str | None = None,
+        error: Mapping[str, Any] | None = None,
         idempotency_key: str,
     ) -> dict[str, Any]:
         connector_invocation_ref = _text(connector_invocation_ref, "connector_invocation_ref")
@@ -1874,6 +1875,19 @@ class ConnectorStore:
             "retry_at": retry_at,
             "physical_attempt_id": physical_attempt_id,
         }
+        # 2026-10-08: what the provider said when the attempt failed
+        # ("E_UPSTREAM_API: 用户状态发生变更，刷新 token").  Optional and only
+        # present on failed attempts, so every earlier record and hash stands.
+        if error is not None:
+            if outcome == "succeeded":
+                raise ConnectorValidationError("a succeeded attempt carries no error")
+            if not isinstance(error, Mapping):
+                raise ConnectorValidationError("attempt error must be an object")
+            request["error"] = {
+                "code": _text(str(error.get("code") or "unknown"), "error.code"),
+                "message": str(error.get("message") or "")[:1000],
+                "retryable": error.get("retryable") if type(error.get("retryable")) is bool else None,
+            }
         request_hash = content_hash(request)
         with self.store._transaction() as cur:
             duplicate = self._idem(cur, idempotency_key, "record_connector_attempt", request_hash)

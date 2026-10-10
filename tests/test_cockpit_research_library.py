@@ -109,3 +109,59 @@ class ResearchLibraryTests(DeliverableHarness):
         self.assertEqual(shown["sections"][0]["display_gaps"], ["交付成本：缺少人员数量"])
         self.assertEqual(shown["sections"][0]["display_body"], "固定成本剥离进度仍需细化。")
         self.assertEqual(shown["content_hash"], original["content_hash"])
+
+
+class DisplayLabelTests(DeliverableHarness):
+    """2026-10-07 inspection: 「第 ? 版」 and ``causal_chain:0`` headings."""
+
+    def test_version_label_is_attached_after_the_localization_lookup(self):
+        from unittest.mock import patch
+        self.grant("deliverable")
+        self.publish([{"title": "Business", "body": "A sourced business description.",
+                       "claim_refs": [], "numbers": [], "gaps": []}])
+        with patch("dalton_core.research_localization_store.localize_library",
+                   side_effect=lambda conn, value: __import__("copy").deepcopy(value)) as lookup:
+            display = research_library(self.store.connection, self.mission, ACN)
+        looked_up = next(p for p in lookup.call_args.args[1]["products"]
+                         if p["kind"] == "initial_screen")
+        self.assertNotIn("version_label", looked_up)
+        shown = next(p for p in display["products"] if p["kind"] == "initial_screen")
+        self.assertEqual(shown["version"], 1)
+        self.assertEqual(shown["version_label"], "第 1 版")
+        raw = research_library(self.store.connection, self.mission, ACN, localize=False)
+        self.assertNotIn("version_label", next(p for p in raw["products"]
+                                               if p["kind"] == "initial_screen"))
+
+    def test_version_label_never_shows_a_question_mark(self):
+        from dalton_core.cockpit_research_library import version_label
+        self.assertEqual(version_label(42, "company-dossier-version:x:42"), "第 42 版")
+        self.assertEqual(version_label(None, "company-dossier-version:company-sec-cik-1:42"),
+                         "第 42 版")
+        self.assertEqual(version_label(None, "debate-map-version:d00d505b6da78a2e"),
+                         "版本 d00d505b")
+        self.assertEqual(version_label(None, None), "版本未标明")
+        html = (__import__("pathlib").Path(__file__).resolve().parents[1]
+                / "src" / "dalton_core" / "cockpit_control.html").read_text()
+        self.assertNotIn('p.version||"?"', html)
+
+    def test_causal_chain_sections_are_headed_by_their_own_titles(self):
+        from dalton_core.cockpit_research_library import _attach_display, _section_label
+        record = {"sections": [
+            {"link_index": 0, "title": "预算与宏观：审批周期与滞后"},
+            {"link_index": 1, "title": None}]}
+        labels = [_section_label("industry_framework", record, "causal_chain:0", "正文"),
+                  _section_label("industry_framework", record, "causal_chain:1",
+                                 "新签订单领先收入两到四个季度，转化节奏决定可见度。"),
+                  _section_label("industry_framework", record, "industry_characteristics", "")]
+        self.assertEqual(labels, ["因果链一 · 预算与宏观：审批周期与滞后",
+                                  "因果链二 · 新签订单领先收入两到四个季度", "行业特征"])
+        # The localized overlay may keep the id, or rename it inconsistently;
+        # the heading follows the record either way.  A reviewed Chinese title
+        # of a non-chain section is kept.
+        product = {"sections": [{"title": "causal_chain:0"}, {"title": "因果链条二：订单"},
+                                {"title": "行业特征：合同复利与周期属性"}]}
+        _attach_display(product, {"version": 3, "version_label": "第 3 版",
+                                  "section_labels": labels})
+        self.assertEqual([s.get("label") for s in product["sections"]],
+                         [labels[0], labels[1], None])
+        self.assertEqual(product["version_label"], "第 3 版")

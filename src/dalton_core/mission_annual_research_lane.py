@@ -1,7 +1,11 @@
-"""Writer lane for already-admitted directed document research.
+"""Writer lane for mission annual-report research admissions.
 
-The planner/research-task producer writes the immutable admission.  This lane
-only selects an unstarted admission and launches its admission-ref-only child.
+The immutable admission is written by the research-task producer step in
+``mission_annual_research_producer`` (a planner inquiry that binds a current
+Dossier repair target, plus an acquired 10-K of the active mission version),
+which this lane runs only when it has nothing unstarted to launch.  Otherwise
+this lane only selects an unstarted admission and launches its
+admission-ref-only child.
 An orphaned or failed child is held and skipped so the lane never guesses that
 another paid call is safe, while later independent admissions can still run.
 A child ticket whose *name* moved because a release changed this launcher's
@@ -48,6 +52,15 @@ def _sha256(value: Any) -> bool:
 
 class MissionAnnualResearchLaneError(RuntimeError):
     pass
+
+
+def _repeated_unavailable(unavailable: str, prior_reason: str | None) -> str:
+    """Escalate a pre-claim re-entry refusal that repeats (see lane_reentry_claim)."""
+
+    from .lane_reentry_claim import escalate_repeated_refusal
+
+    return escalate_repeated_refusal(
+        unavailable, prior_reason, REENTRY_ESCALATED_REASON)
 
 
 def _read_holds(path: Path) -> dict[str, dict[str, Any]]:
@@ -112,10 +125,12 @@ class MissionAnnualResearchCoordinator:
     def __init__(
         self, *, store: Any, launcher: Any | None,
         clock: Callable[[], datetime] | None = None,
+        producer: Any | None = None,
     ) -> None:
         self.store = store
         self.launcher = launcher
         self.clock = clock or (lambda: datetime.now(timezone.utc))
+        self.producer = producer
 
     @property
     def latest_path(self) -> Path:
@@ -167,9 +182,17 @@ class MissionAnnualResearchCoordinator:
                 "WHERE o.outcome_id IS NULL ORDER BY a.created_at,a.admission_id"
             ).fetchall()
         except sqlite3.OperationalError as exc:
-            if "no such table" in str(exc):
-                return []
-            raise
+            if "no such table: mission_annual_research_outcomes" not in str(exc):
+                if "no such table" in str(exc):
+                    return []
+                raise
+            # The executor creates its tables on its first run.  A Core whose
+            # first admission was just written by the producer has none yet,
+            # and that admission is exactly the one to launch.
+            rows = self.store.connection.execute(
+                "SELECT * FROM mission_annual_research_admissions "
+                "ORDER BY created_at,admission_id"
+            ).fetchall()
         result = []
         for row in rows:
             try:
@@ -471,6 +494,7 @@ class MissionAnnualResearchCoordinator:
     def _reentry_hold_reason(
         self, admission: Mapping[str, Any], ticket_ref: str | None,
         recovery: Mapping[str, Any], exc: Exception,
+        *, prior_reason: str | None = None,
     ) -> str:
         """Automatic once, then a person.
 
@@ -480,8 +504,9 @@ class MissionAnnualResearchCoordinator:
         attempt is a different fact and has to be held under its own name.
         """
 
+        unavailable = "controlled_reentry_unavailable:" + str(exc)
         if ticket_ref is None:
-            return "controlled_reentry_unavailable:" + str(exc)
+            return _repeated_unavailable(unavailable, prior_reason)
         try:
             if self.launcher.status(ticket_ref).get(
                     "rebound_from_ticket_ref") is not None:
@@ -503,12 +528,16 @@ class MissionAnnualResearchCoordinator:
             attempted = False
         if attempted:
             return REENTRY_ESCALATED_REASON + ":" + str(exc)
-        return "controlled_reentry_unavailable:" + str(exc)
+        return _repeated_unavailable(unavailable, prior_reason)
 
     def dispatch_once(self) -> dict[str, Any]:
         if self.launcher is None:
             return {"status": "unconfigured", "reason": "annual research lane is absent"}
         holds = _read_holds(self.holds_path)
+        # The reasons as the previous tick left them: a refusal only counts as
+        # repeated against an earlier tick, never against itself earlier in
+        # this one (the same admission can be tried from two places per tick).
+        prior_reasons = {ref: held["reason"] for ref, held in holds.items()}
         admissions = self._admissions()
         by_ref = {item["id"]: item for item in admissions}
         latest = self._latest()
@@ -593,7 +622,8 @@ class MissionAnnualResearchCoordinator:
                         return {"status": "busy", "reason": str(exc), "last": settled}
                     except LaneChildRejected as exc:
                         reason = self._reentry_hold_reason(
-                            admission, ticket["id"], recovery, exc)
+                            admission, ticket["id"], recovery, exc,
+                            prior_reason=prior_reasons.get(admission["id"]))
                         self._hold(
                             holds, admission, reason=reason,
                             ticket_ref=ticket["id"],
@@ -640,6 +670,31 @@ class MissionAnnualResearchCoordinator:
                     ticket_ref=ticket["id"], disposition=disposition,
                 )
 
+        launched = self._launch_next(admissions, holds, settled)
+        if launched is not None:
+            return launched
+        produced = None
+        if self.producer is not None:
+            try:
+                produced = self.producer.produce_once()
+            except Exception as exc:  # noqa: BLE001 - the lane keeps its own work
+                produced = {
+                    "status": "failed", "decline": "producer_failed",
+                    "reason": f"admission 生产步骤失败：{type(exc).__name__}: {exc}",
+                    "counts": {},
+                }
+            if produced.get("status") == "admitted":
+                admissions = self._admissions()
+                launched = self._launch_next(admissions, holds, settled)
+                if launched is not None:
+                    return {**launched, "produced": produced["admissions"],
+                            "reason": produced["reason"]}
+        return self._idle(admissions, holds, settled, produced)
+
+    def _launch_next(
+        self, admissions: list[dict[str, Any]], holds: dict[str, dict[str, Any]],
+        settled: dict[str, Any] | None,
+    ) -> dict[str, Any] | None:
         for admission in admissions:
             held = holds.get(admission["id"])
             if held is not None:
@@ -680,6 +735,12 @@ class MissionAnnualResearchCoordinator:
                 "status": "launched", "ticket_ref": ticket["id"],
                 "admission_ref": admission["id"], "last": settled,
             }
+        return None
+
+    def _idle(
+        self, admissions: list[dict[str, Any]], holds: Mapping[str, Any],
+        settled: dict[str, Any] | None, produced: Mapping[str, Any] | None,
+    ) -> dict[str, Any]:
         status = (
             "recovery_required"
             if any(item["disposition"] == "recovery_required"
@@ -691,24 +752,35 @@ class MissionAnnualResearchCoordinator:
             "reason": "no unstarted annual research admission",
             "held": len(holds), "last": settled,
         }
-        if not admissions:
-            # C2-3.  Live on 2026-09-16 every annual-research counter was zero:
-            # no starts, no observations, no admissions.  The lane was not
-            # stuck -- it had never had an input, because nothing in ``src``
-            # calls ``MissionAnnualResearchAuthority.admit`` except its own
-            # replan.  An idle lane that cannot say why it is idle is
-            # indistinguishable from a healthy one, so it says why.
-            result["eligibility"] = self._annual_eligibility()
-            ready = [item for item in result["eligibility"]["candidates"]
-                     if item["annual_report_ready"]]
+        if produced is not None and produced.get("status") == "failed" and status == "idle":
+            result["status"] = "failed"
+        if produced is not None:
+            result["producer"] = produced.get("decline") or produced.get("status")
+            for key, value in (produced.get("counts") or {}).items():
+                result["producer_" + key] = value
+        if admissions and produced is not None:
             result["reason"] = (
-                f"年报全文研究从未启动：已取得且已读完的 10-K 有 {len(ready)} 份，"
-                "但 mission_annual_research_admissions 一行都没有。"
-                "这条车道只消费 admission，不生产 admission；"
-                "目前 src 里没有任何 CLI、writer 操作或车道会调用 "
-                "MissionAnnualResearchAuthority.admit()，"
-                "它要求一个在册的 Dossier 修复目标加上绑定该目标的已结束 planner inquiry。"
+                "没有未启动的年报研究 admission；生产步骤本轮未新增："
+                + str(produced.get("reason"))
             )
+        if not admissions:
+            # C2-3.  Live on 2026-09-16 every annual-research counter was zero,
+            # and on 2026-10-02 still: nothing wrote an admission.  The
+            # producer step now does; an idle lane names the input it lacks.
+            result["eligibility"] = self._annual_eligibility()
+            if produced is None:
+                result["reason"] = (
+                    "年报全文研究还没有 admission，且这个 writer 没有配置 admission 生产步骤"
+                    "（mission_annual_research_producer）；车道只能等待。"
+                )
+            else:
+                result["reason"] = (
+                    "年报全文研究还没有 admission："
+                    + str(produced.get("reason"))
+                    + "。admission 由本车道的生产步骤以 mission 自动化身份写入，需要三样输入："
+                    "在册的 Dossier 修复目标、最近研究计划里绑定该目标且不带 directed_document 的 "
+                    "planner inquiry、以及当前 mission 版本下已取得的该公司 10-K。"
+                )
         return result
 
     def _annual_eligibility(self) -> dict[str, Any]:
@@ -771,10 +843,39 @@ def dispatch(server: Any, _params: Mapping[str, Any]) -> dict[str, Any]:
     coordinator = server.lane_state.get(LAUNCHER_KWARG)
     if coordinator is None:
         coordinator = MissionAnnualResearchCoordinator(
-            store=server.store, launcher=launcher
+            store=server.store, launcher=launcher,
+            producer=build_producer(server, launcher),
         )
         server.lane_state[LAUNCHER_KWARG] = coordinator
     return coordinator.dispatch_once()
+
+
+def build_producer(server: Any, launcher: Any | None) -> Any | None:
+    """The admission producer over the writer's own Core, or None if unlaunched.
+
+    It shares this lane's switch: a writer without the annual lane config has
+    no launcher, and an admission nobody can execute is not produced.
+    """
+
+    if launcher is None:
+        return None
+    from functools import partial
+
+    from .mission_annual_research_producer import (
+        MissionAnnualResearchProducer, open_writer_admission_authority,
+    )
+
+    state_dir = Path(launcher.state_dir)
+    draft = getattr(launcher, "draft_model_config_path", None)
+    verifier = getattr(launcher, "verifier_model_config_path", None)
+    return MissionAnnualResearchProducer(
+        store=server.store, state_dir=state_dir, ledger_dir=launcher.tickets_dir,
+        authority_factory=partial(
+            open_writer_admission_authority, server=server, state_dir=state_dir,
+            draft_config_path=draft, verifier_config_path=verifier,
+        ),
+        draft_config_path=draft, verifier_config_path=verifier,
+    )
 
 
 def add_arguments(parser: Any) -> None:
@@ -852,5 +953,6 @@ __all__ = [
     "REENTRY_ESCALATED_REASON",
     "DRIVER_KEY", "LANE", "LANE_CONFIG", "LAUNCHER_KWARG",
     "MissionAnnualResearchCoordinator", "MissionAnnualResearchLaneError",
-    "add_arguments", "argv_fragment", "build_launcher", "lane_configuration",
+    "add_arguments", "argv_fragment", "build_launcher", "build_producer",
+    "lane_configuration",
 ]

@@ -424,6 +424,7 @@ class HumanReviewAuthority:
             "SELECT 1 FROM sqlite_master WHERE type='table' AND name='candidate_claim_versions'"
         ).fetchone()
         if required is None:
+            self.connection.close()
             raise ResearchReviewRejected("candidate staging schema is unavailable")
         self.connection.executescript(_SCHEMA_PATH.read_text(encoding="utf-8"))
         if self.path != ":memory:":
@@ -497,7 +498,9 @@ class HumanReviewAuthority:
             claim, evidence = self._candidate_pair(row["version_id"])
             decision = None if row["decision_json"] is None else validate_human_review_decision(json.loads(row["decision_json"]))
             event = None if decision is None else self._current_commit_event(decision["id"])
+            terminal = self._terminal_event(claim["id"])
             result.append({
+                "terminal": terminal,
                 "claim": claim, "evidence": evidence, "decision": decision,
                 "commit_state": None if event is None else event["state"],
                 "commit_error_code": None if event is None else event["error_code"],
@@ -512,6 +515,57 @@ class HumanReviewAuthority:
             _text(candidate_claim_ref, "candidate_claim_ref")
         )
         return {"evidence": evidence, "claim": claim}
+
+    def _terminal_event(self, version_ref):
+        row = self.connection.execute("SELECT * FROM candidate_terminal_events WHERE candidate_version_ref=?", (version_ref,)).fetchone()
+        if row is None:
+            return None
+        wire = json.loads(row["record_json"])
+        if (canonical_json(wire) != row["record_json"] or wire.get("candidate_version_ref") != version_ref
+                or wire.get("candidate_hash") != row["candidate_hash"] or wire.get("created_at") != row["created_at"]
+                or wire.get("state") != row["state"] or wire.get("content_hash") != row["content_hash"]
+                or content_hash({k:v for k,v in wire.items() if k != "content_hash"}) != row["content_hash"]):
+            raise ResearchReviewConflict("candidate terminal authority drifted")
+        return wire
+
+    @_serialized
+    def expire_staged(self, *, now=None, sla_hours=24, formal_candidate_hashes=(), formal_candidate_refs=()):
+        """Append terminal reasons for overdue, unreviewed exact versions."""
+        from datetime import timedelta
+        moment = now or datetime.now(timezone.utc)
+        if moment.tzinfo is None or isinstance(sla_hours, bool) or not isinstance(sla_hours, int) or sla_hours <= 0:
+            raise ResearchReviewError("candidate SLA requires a positive hour bound and aware time")
+        cutoff = moment - timedelta(hours=sla_hours)
+        rows = self.connection.execute("SELECT c.version_id FROM candidate_claim_versions c "
+            "WHERE NOT EXISTS (SELECT 1 FROM human_review_decisions d WHERE d.candidate_claim_version_ref=c.version_id) "
+            "AND NOT EXISTS (SELECT 1 FROM candidate_terminal_events t WHERE t.candidate_version_ref=c.version_id) "
+            "ORDER BY c.created_at,c.version_id").fetchall()
+        expired = []
+        for row in rows:
+            claim, evidence = self._candidate_pair(row[0])
+            if claim["content_hash"] in set(formal_candidate_hashes) or claim["id"] in set(formal_candidate_refs):
+                continue
+            if datetime.fromisoformat(claim["created_at"].replace("Z", "+00:00")) > cutoff:
+                continue
+            body = {"schema_version": "candidate-terminal-v1", "candidate_version_ref": claim["id"],
+                "candidate_hash": claim["content_hash"], "evidence_hash": evidence["content_hash"],
+                "state": "expired", "reason": "候选结论超过审核期限仍未获得正式采纳，已结束等待；保留原始记录供复核。",
+                "actor_ref": "automation:research-question-maintenance", "sla_hours": sla_hours,
+                "created_at": moment.astimezone(timezone.utc).isoformat(timespec="microseconds")}
+            wire = {**body, "content_hash": content_hash(body)}
+            self.connection.execute("BEGIN IMMEDIATE")
+            try:
+                if self.connection.execute("SELECT 1 FROM human_review_decisions WHERE candidate_claim_version_ref=?", (claim["id"],)).fetchone() or self._terminal_event(claim["id"]):
+                    self.connection.execute("COMMIT")
+                    continue
+                self.connection.execute("INSERT INTO candidate_terminal_events VALUES(?,?,?,?,?,?)",
+                    (claim["id"], claim["content_hash"], "expired", canonical_json(wire), wire["content_hash"], wire["created_at"]))
+                self.connection.execute("COMMIT")
+            except BaseException:
+                self.connection.execute("ROLLBACK")
+                raise
+            expired.append(wire)
+        return {"status": "completed", "expired": expired, "sla_hours": sla_hours}
 
     @_serialized
     def candidate_status(self, candidate_claim_ref: str) -> dict[str, Any]:
@@ -543,8 +597,9 @@ class HumanReviewAuthority:
             else validate_human_review_decision(json.loads(decision_row["decision_json"]))
         )
         event = None if decision is None else self._current_commit_event(decision["id"])
+        terminal = self._terminal_event(claim["id"])
         if decision is None:
-            review_state = "staged"
+            review_state = "expired" if terminal is not None else "staged"
         elif event is None:
             review_state = "decided"
         else:
@@ -556,6 +611,7 @@ class HumanReviewAuthority:
             "candidate_evidence_hash": evidence["content_hash"],
             "claim_kind": claim["claim_kind"],
             "review_state": review_state,
+            "terminal_reason": None if terminal is None else terminal["reason"],
             "claim": claim,
             "evidence": evidence,
             "decision": decision,
@@ -764,6 +820,8 @@ class HumanReviewAuthority:
         claim, evidence = self._candidate_pair(_text(candidate_claim_ref, "candidate_claim_ref"))
         if claim["content_hash"] != _hash(candidate_claim_hash, "candidate_claim_hash"):
             raise ResearchReviewConflict("candidate claim hash drifted")
+        if self._terminal_event(claim["id"]) is not None:
+            raise ResearchReviewRejected("candidate review deadline expired; submit a freshly verified version")
         semantics = _semantics(reviewed_semantics, "reviewed_semantics")
         if canonical_json(semantics) != canonical_json(_candidate_semantics(claim)):
             raise ResearchReviewConflict("reviewed semantics do not bind the candidate exactly")
@@ -815,6 +873,8 @@ class HumanReviewAuthority:
         })
         self.connection.execute("BEGIN IMMEDIATE")
         try:
+            if self._terminal_event(claim["id"]) is not None:
+                raise ResearchReviewRejected("candidate review deadline expired")
             prior = self.connection.execute(
                 "SELECT request_hash,result_json FROM human_review_requests WHERE idempotency_key=?",
                 (key,),

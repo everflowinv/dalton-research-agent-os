@@ -1,7 +1,7 @@
 """List the document-figure Claims that repeat another of the same document -- read-only.
 
     PYTHONPATH=src .venv/bin/python scripts/list_document_figure_duplicates.py \\
-        --state-dir /Volumes/EveSSD/Dalton/workspaces/ws-7d894366d1132e2930475a60/state/dalton-core \\
+        --state-dir <state-dir> \\
         [--out /tmp/figure-duplicates.json] [--refs-only]
 
 2026-09-28: the promoter keyed a figure on its free-text period and its own row,

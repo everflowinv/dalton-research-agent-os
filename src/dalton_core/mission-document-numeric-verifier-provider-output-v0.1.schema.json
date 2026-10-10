@@ -1,0 +1,57 @@
+{
+  "additionalProperties": false,
+  "properties": {
+    "candidate_ref": {
+      "type": "string"
+    },
+    "schema_version": {
+      "enum": [
+        "0.1"
+      ]
+    },
+    "targets": {
+      "items": {
+        "additionalProperties": false,
+        "properties": {
+          "reason": {
+            "type": [
+              "string",
+              "null"
+            ]
+          },
+          "target_ref": {
+            "type": "string"
+          },
+          "verdict": {
+            "enum": [
+              "accept",
+              "reject",
+              "unavailable"
+            ]
+          }
+        },
+        "required": [
+          "target_ref",
+          "verdict",
+          "reason"
+        ],
+        "type": "object"
+      },
+      "maxItems": 8,
+      "type": "array"
+    },
+    "verdict": {
+      "enum": [
+        "pass",
+        "reject"
+      ]
+    }
+  },
+  "required": [
+    "schema_version",
+    "candidate_ref",
+    "verdict",
+    "targets"
+  ],
+  "type": "object"
+}

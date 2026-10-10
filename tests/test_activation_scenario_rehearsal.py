@@ -5,6 +5,7 @@ import json
 import tempfile
 import unittest
 from pathlib import Path
+from unittest.mock import patch
 
 from scripts.rehearse_activation_scenario import (
     ActivationScenarioRehearsal, ROLE_CONFIGS, checked_json, validate_mission_candidate,
@@ -95,6 +96,26 @@ class ActivationScenarioTests(unittest.TestCase):
                                        temp_root=temp, report=None)
             validate_cli_paths(live_root=live, source_root=original,
                                temp_root=root / "rehearsal", report=root / "report.md")
+
+    def test_configured_temporary_directory_alias_keeps_source_and_output_guards(self):
+        from scripts.rehearse_deploy import validate_cli_paths
+        with tempfile.TemporaryDirectory() as tmp:
+            root = Path(tmp)
+            target = root / 'configured-temp'; target.mkdir()
+            alias = root / 'temporary-alias'; alias.symlink_to(target, target_is_directory=True)
+            live = target / 'live'; live.mkdir()
+            with patch('scripts.rehearse_deploy.tempfile.gettempdir', return_value=str(alias)):
+                validate_cli_paths(live_root=live, source_root=None,
+                                   temp_root=alias / 'rehearsal', report=target / 'report.md')
+                with self.assertRaisesRegex(ValueError, 'overlap'):
+                    validate_cli_paths(live_root=live, source_root=None,
+                                       temp_root=alias / 'live' / 'rehearsal', report=None)
+                with self.assertRaisesRegex(ValueError, 'overwrite'):
+                    validate_cli_paths(live_root=live, source_root=None,
+                                       temp_root=alias / 'rehearsal', report=alias / 'live' / 'core.sqlite')
+                with self.assertRaisesRegex(ValueError, 'temporary directory'):
+                    validate_cli_paths(live_root=live, source_root=None,
+                                       temp_root=Path('/not-a-temporary-directory/rehearsal'), report=None)
 
 
 if __name__ == "__main__":

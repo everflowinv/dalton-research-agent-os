@@ -18,6 +18,15 @@ times anything looks at it.
 It proposes and stops.  ``gate_reopen`` is a human checkpoint by construction
 (ADR-0008): approving is what the cockpit and the writer are for, and re-issuing
 is what the Initial Screen lane does once it sees an approval it has not spent.
+
+Batch C (owner decision 2026-10-09 #4) adds one exception: when the writer
+gives the lane its state directory, every passed company is also checked
+against the redraft thresholds (:mod:`redraft_policy`) -- a new quarter's
+transcript or release, a material consensus move, a batch of new broker
+reports, ... -- and when they fire the lane proposes *and* accepts the
+reopen as automation (``GateReopenAuthority.decide_by_policy``), recording
+every trigger and an owner-visible note.  Single arrivals below the
+thresholds change nothing (they are counted as 「待消化」).
 """
 
 from __future__ import annotations
@@ -96,6 +105,8 @@ class MissionReopenLaneCoordinator:
         authority: Any,
         policy: Mapping[str, Any] | None = None,
         clock: Callable[[], datetime] | None = None,
+        state_dir: str | Path | None = None,
+        redraft_thresholds: Mapping[str, Any] | None = None,
     ) -> None:
         self.mission = mission
         self.connection = connection
@@ -103,6 +114,43 @@ class MissionReopenLaneCoordinator:
         self.policy = policy
         self.clock = clock or (lambda: datetime.now(timezone.utc))
         self._weeks: dict[str, str] = {}
+        # Batch C (owner decision 2026-10-09 #4): with a state directory the
+        # lane also applies the redraft thresholds (``redraft_policy``) and
+        # reopens a passed gate automatically when they fire.
+        self.state_dir = Path(state_dir) if state_dir is not None else None
+        self.redraft_thresholds = redraft_thresholds
+        self._policy_seen: dict[str, tuple[Any, ...]] = {}
+
+    def _policy_probe(self, company_ref: str) -> tuple[Any, ...]:
+        """Re-evaluate a company only when material arrived or the day changed."""
+
+        from . import evidence_index
+
+        try:
+            latest = evidence_index.material_arrival_summary(
+                self.state_dir, company_ref, include_backfill=True).get("latest_arrival_id")
+        except Exception:  # noqa: BLE001
+            latest = None
+        return (latest, self.clock().date().isoformat())
+
+    def policy_reopen(self, mission: Mapping[str, Any], company_ref: str) -> dict[str, Any] | None:
+        """``redraft_policy.auto_reopen`` for one passed company, at most once per probe."""
+
+        if self.state_dir is None or not callable(getattr(self.authority, "decide_by_policy", None)):
+            return None
+        probe = self._policy_probe(company_ref)
+        if self._policy_seen.get(company_ref) == probe:
+            return None
+        from .redraft_policy import auto_reopen
+
+        try:
+            result = auto_reopen(self.authority, self.connection, self.state_dir, company_ref,
+                                 mission=mission, now=self.clock(), thresholds=self.redraft_thresholds)
+        except Exception as exc:  # noqa: BLE001 - one company's failure is reported, not raised
+            result = {"status": "failed", "reason": f"{type(exc).__name__}: {exc}"[:MAX_FAILURE_DETAIL_CHARS]}
+        if result.get("status") != "failed":
+            self._policy_seen[company_ref] = probe
+        return result
 
     def week_ref(self, mission: Mapping[str, Any]) -> str:
         year, week, _day = self.clock().isocalendar()
@@ -145,7 +193,16 @@ class MissionReopenLaneCoordinator:
         looked: list[dict[str, Any]] = []
         proposed: list[str] = []
         held = 0
+        reopened: list[str] = []
         for company_ref in companies:
+            by_policy = self.policy_reopen(mission, company_ref)
+            if by_policy is not None and by_policy.get("status") in ("reopened", "proposed"):
+                entry = {"company_ref": company_ref, "status": f"{by_policy['status']}_by_policy",
+                         "proposal_ref": by_policy.get("proposal_ref"), "note": by_policy.get("note")}
+                if by_policy["status"] == "reopened":
+                    reopened.append(by_policy.get("decision_ref"))
+                looked.append(entry)
+                continue
             if self._weeks.get(company_ref) == week:
                 held += 1
                 continue
@@ -208,7 +265,9 @@ class MissionReopenLaneCoordinator:
             looked.append(entry)
         return {
             "schema_version": SCHEMA_VERSION,
-            "status": "proposed" if proposed else ("held" if held and not looked else "idle"),
+            "status": ("reopened" if reopened else "proposed" if proposed
+                       else ("held" if held and not looked else "idle")),
+            "reopened_by_policy": reopened,
             "week_ref": week,
             "companies": len(companies),
             "held": held,
@@ -240,6 +299,7 @@ def dispatch(server: Any, params: Mapping[str, Any]) -> dict[str, Any]:
             mission=mission,
             connection=store.connection,
             authority=GateReopenAuthority(store),
+            state_dir=getattr(server, "state_dir", None),
         )
         server.lane_state[LANE_STATE_KEY] = coordinator
     return coordinator.dispatch_once()
@@ -342,9 +402,11 @@ LANE = register_lane(LaneSpec(
     driver_key="mission_reopen",
     handler=dispatch,
     note="P14d/ADR-0008: one evidence assessment a week per passed Initial "
-         "Screen; proposes gate_reopen when an item flips 缺 to 有. No model "
-         "call, no network, no child process -- so no budget pool and no "
-         "launchagent fragment. Proposes; decides nothing.",
+         "Screen; proposes gate_reopen when an item flips 缺 to 有. Batch C: "
+         "also applies the owner's redraft thresholds (redraft_policy) and "
+         "reopens a passed gate automatically, reasons recorded, when they fire. "
+         "No model call, no network, no child process -- so no budget pool and "
+         "no launchagent fragment.",
 ))
 
 

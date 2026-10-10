@@ -25,6 +25,7 @@ from .cockpit_model import (
     validate_setup_planning_context,
 )
 from .store import content_hash
+from .sec_plan_specs import generator_specs
 from .research_constitution import ResearchConstitutionAuthority
 from .research_playbook import read_exact_playbook_version
 from .workspace import WorkspacePaths
@@ -118,7 +119,7 @@ def _source_plan(defaults: Mapping[str, Any]) -> list[dict[str, str]]:
     refs = defaults.get("source_capability_refs")
     if isinstance(refs, list) and refs:
         return [{"source_ref": _text(ref, "source_capability_refs[]"),
-                 "role": "Reusable workspace source capability", "status": "connected"}
+                 "role": "沿用本项目已连接的资料来源", "status": "connected"}
                 for ref in refs]
     return []
 
@@ -148,9 +149,9 @@ def draft_first_mission(
         issues.append("at least one company and ticker require review")
     questions = ([_text(item, "research_questions[]") for item in research_questions]
                  if research_questions is not None else [
-                     f"What evidence would confirm or reject this objective: {goal}",
-                     "Which causal drivers explain the differences across the selected companies?",
-                     "What observable events would falsify the leading view?",
+                     f"哪些证据能够支持或推翻这一研究目标：{goal}",
+                     "哪些业务驱动因素能够解释所选公司的差异？",
+                     "哪些可观察事件会推翻当前主要判断？",
                  ])
     autonomy_source = defaults.get("autonomy", {})
     autonomy = {
@@ -397,6 +398,12 @@ def prepare_first_mission_bindings(
     required_driver_fields = {"drivers", "metric_specs", "thesis_templates"}
     if not required_driver_fields.issubset(driver_value):
         raise WorkspaceMissionSetupError("driver pack template is incomplete")
+    method_spec = methods.get("constitution_method")
+    method = method_spec.get("value") if isinstance(method_spec, Mapping) else None
+    if not isinstance(method, Mapping) or method_spec.get("content_hash") != content_hash(method):
+        raise WorkspaceMissionSetupError("constitution method template differs")
+    from .industry_archetypes import specialize
+    driver_value, method, specialization = specialize(industry_ref, driver_value, method)
 
     mission_budget = dict(body.get("budget", {}))
     # The mandate's budget is read by the same closed-shape checks as the
@@ -427,10 +434,6 @@ def prepare_first_mission_bindings(
         prior_version_ref=None,
         idempotency_key=f"workspace-first-mission:{digest}:driver-pack",
     )
-    method_spec = methods.get("constitution_method")
-    method = method_spec.get("value") if isinstance(method_spec, Mapping) else None
-    if not isinstance(method, Mapping) or method_spec.get("content_hash") != content_hash(method):
-        raise WorkspaceMissionSetupError("constitution method template differs")
     policy = ensure_first_mission_auto_commit_policy(
         store, actor_ref=actor_ref, mission_budget=mission_budget)
     constitution = ResearchConstitutionAuthority(store).publish_constitution(
@@ -479,7 +482,8 @@ def publish_first_mission_to_store(
         mission["bindings"]["constitution_version"]["ref"])
     materialize_first_mission_output_policies(
         workspace, mission=mission, constitution=constitution,
-        driver_pack=foundation["methods"]["driver_pack_template"]["value"])
+        driver_pack=CoverageAdmissionAuthority(store).driver_pack(
+            constitution["bindings"]["driver_pack_version"]["ref"]))
     # The resolver names each issuer on the way to its CIK. Collected here so
     # the feed plan below can say what a document may call each company; see
     # ``mission_company_names`` for why that could not stay a packaged dict.
@@ -571,10 +575,12 @@ def _atomic_json(path: Any, value: Mapping[str, Any]) -> None:
 def materialize_first_mission_output_policies(
     workspace: WorkspacePaths, *, mission: Mapping[str, Any],
     constitution: Mapping[str, Any], driver_pack: Mapping[str, Any],
+    policy_version_tag: str | None = None,
 ) -> dict[str, str]:
     """Bind generic dossier/framework policy shapes to the published method."""
     from .company_dossier import causal_chain_hash, validate_policy as validate_dossier_policy
     from .industry_framework import validate_policy as validate_framework_policy
+    from .industry_archetypes import dossier_chain_sections, archetypes_for, RULE_REF, ARCHETYPES
 
     method = constitution["method"]
     chain = list(method["causal_chain"])
@@ -582,12 +588,13 @@ def materialize_first_mission_output_policies(
     constitution_ref = constitution["constitution_ref"]
     rubric = list(method["output_rubric"]["criteria"])
     suffix = mission["mission_ref"].split(":", 1)[-1]
+    policy_tag = policy_version_tag or "v1"
     dossier = validate_dossier_policy({
-        "schema_version": "0.1", "policy_ref": f"dossier-policy:{suffix}:v1",
+        "schema_version": "0.1", "policy_ref": f"dossier-policy:{suffix}:{policy_tag}",
         "causal_chain_maps": [{
             "constitution_ref": constitution_ref, "causal_chain_hash": chain_hash,
-            "sections": ["demand_drivers" for _ in chain],
-            "note": "The reusable method defines one observable-input chain; its links are presented in the demand-driver section without changing their text.",
+            "sections": dossier_chain_sections(chain),
+            "note": "Declared archetype mechanisms map demand/pricing to demand and supply/cash investment to supply; custom unmapped chains require policy specialization.",
         }],
         "output_rubric_bindings": [{
             "criterion_hash": content_hash(str(criterion)), "check": None,
@@ -596,7 +603,7 @@ def materialize_first_mission_output_policies(
     })
     framework = validate_framework_policy({
         "schema_version": "0.1",
-        "policy_ref": f"industry-framework-policy:{suffix}:v1",
+        "policy_ref": f"industry-framework-policy:{suffix}:{policy_tag}",
         "causal_chain_titles": [{
             "constitution_ref": constitution_ref, "causal_chain_hash": chain_hash,
             "titles": chain,
@@ -625,6 +632,17 @@ def materialize_first_mission_output_policies(
     }
     _atomic_json(paths["dossier"], dossier)
     _atomic_json(paths["industry_framework"], framework)
+    keys = archetypes_for(mission["industry_ref"])
+    concrete = not any(str(item.get("driver_ref", "")).startswith("driver:workspace-generic:") for item in driver_pack["drivers"])
+    catalog_bound = bool(keys) and all(str(item.get("driver_ref", "")).startswith("driver:archetype:") for item in driver_pack["drivers"])
+    binding = {"rule_ref": RULE_REF, "status": ("specialized" if catalog_bound else "owner_specialized") if concrete else "unspecialized",
+               "archetypes": keys if catalog_bound else [], "library_hash": content_hash({key: ARCHETYPES[key] for key in keys}) if catalog_bound else None,
+               "reason": None if concrete else "当前行业尚未绑定可度量的行业机制；通用模板不能作为完成的行业研究框架",
+               "mission_version_ref": mission["id"], "mission_hash": mission["content_hash"],
+               "constitution_ref": constitution["id"], "constitution_hash": constitution["content_hash"],
+               "driver_pack_ref": driver_pack["id"], "driver_pack_hash": driver_pack["content_hash"],
+               "frozen_at": mission["created_at"], "scope": [row["company_ref"] for row in mission["universe"]]}
+    _atomic_json(workspace.state_dir / "industry-archetype-binding.json", {**binding, "content_hash": content_hash(binding)})
     return {key: str(value) for key, value in paths.items()}
 
 
@@ -689,14 +707,9 @@ def materialize_first_mission_discovery_plans(
                 "id": f"discovery-plan:{workspace.slug}:sec-filings:1",
                 "created_at": created_at, "mission_ref": mission["mission_ref"],
                 "source_ref": SEC_SOURCE_REF, "companies": resolved,
-                "specs": [
-                    {"spec_ref": "annual-report-10k", "form": "10-K",
-                     "lookback_days": 500, "rediscovery_interval_days": 30,
-                     "retry_interval_days": 2},
-                    {"spec_ref": "current-report-8k", "form": "8-K",
-                     "lookback_days": 90, "rediscovery_interval_days": 2,
-                     "retry_interval_days": 1},
-                ],
+                # Code-owned (``sec_plan_specs``): the 10-K and the Item
+                # 2.02 8-K, the same set every environment renders.
+                "specs": generator_specs(),
                 "budget": {"max_calls_24h": max(1, min(paid_calls, 50))},
             }
             sec_plan = validate_discovery_plan(
@@ -714,21 +727,13 @@ def materialize_first_mission_discovery_plans(
                      {**status_body, "content_hash": content_hash(status_body)})
     alpha_calls = int(mission["budget"]["max_alphaengine_calls_24h"])
     if ALPHAENGINE_SOURCE_REF in connected and alpha_calls > 0:
-        alpha_companies = {ref: {"name": ticker, "ticker": ticker, "aliases": []}
-                           for ref, ticker in companies.items()}
         plan = build_discovery_plan(
             plan_id=f"discovery-plan:{workspace.slug}:alphaengine:1",
             created_at=created_at, mission_ref=mission["mission_ref"],
-            companies=alpha_companies, source_ref=ALPHAENGINE_SOURCE_REF,
+            companies=alphaengine_plan_companies(companies, names_out),
+            source_ref=ALPHAENGINE_SOURCE_REF,
             max_calls_24h=alpha_calls,
-            specs=[
-                {"spec_ref": "earnings-call-transcripts", "document_type": "meeting_minutes",
-                 "query_variants": [{"query_template": "{name} {quarter} earnings call transcript", "filters": {}}],
-                 "lookback_days": 400, "rediscovery_interval_days": 7, "retry_interval_days": 1},
-                {"spec_ref": "sell-side-reports", "document_type": "sell_side_report",
-                 "query_variants": [{"query_template": "{ticker} analyst research report", "filters": {}}],
-                 "lookback_days": 180, "rediscovery_interval_days": 14, "retry_interval_days": 1},
-            ])
+            specs=alphaengine_plan_specs())
         plans.append((ALPHAENGINE_SOURCE_REF, ALPHAENGINE_PLAN_SELECTOR,
                       "alphaengine-discovery-plan-selection-0.1", plan))
     if WEB_SEARCH_SOURCE_REF in connected and paid_calls > 0:
@@ -763,6 +768,74 @@ def materialize_first_mission_discovery_plans(
                      {**selector_body, "content_hash": content_hash(selector_body)})
         written[source_ref] = str(directory / filename)
     return written
+
+
+# 2026-10-02 (ws-7d): AlphaEngine titles a call by the issuer's name
+# ("Alphabet Q2 2026", "Microsoft Q4 2026"), never by its ticker.  The first
+# plan this module wrote searched "GOOGL latest quarter earnings call
+# transcript" with no name and no alias, and for fifteen days returned Okta,
+# Volvo and Haier calls for GOOGL and MSFT and nothing older than one quarter
+# for AMZN -- so no Initial Screen could ever pass.  The legacy plan that works
+# carries the issuer's name, an alias and several phrasings; this is that.
+_CORPORATE_SUFFIX = re.compile(
+    r"[,\s]+(?:inc|incorporated|corp|corporation|co|company|plc|ltd|limited|llc|"
+    r"lp|n\.?v|s\.?a|ag|se|holdings?|group)\.?$",
+    re.IGNORECASE,
+)
+
+
+def issuer_short_name(ticker: str, registered: Sequence[str] = ()) -> str:
+    """The name a document title uses for an issuer, best known first.
+
+    The maintained name table wins (it is what attribution matches against);
+    otherwise the SEC registered name with its corporate suffixes removed;
+    otherwise the ticker.
+    """
+
+    from .document_subject import COMPANY_NAMES
+
+    packaged = COMPANY_NAMES.get(ticker.upper())
+    if packaged:
+        return packaged[0]
+    for name in registered:
+        text = str(name or "").strip()
+        previous = None
+        while text and text != previous:
+            previous = text
+            text = _CORPORATE_SUFFIX.sub("", text).strip(" ,")
+        if text:
+            return text[:80]
+    return ticker
+
+
+def alphaengine_plan_companies(
+    companies: Mapping[str, str], registered: Mapping[str, Sequence[str]] | None = None,
+) -> dict[str, dict[str, Any]]:
+    """company_ref → ``{name, ticker, aliases}`` for an AlphaEngine plan."""
+
+    out: dict[str, dict[str, Any]] = {}
+    for ref, ticker in companies.items():
+        name = issuer_short_name(ticker, (registered or {}).get(ticker.upper(), ()))
+        out[ref] = {"name": name, "ticker": ticker, "aliases": [name]}
+    return out
+
+
+def alphaengine_plan_specs() -> list[dict[str, Any]]:
+    """The AlphaEngine specs a first mission's plan approves: governed fields only.
+
+    2026-10-06 (owner decision A): the query forms are not part of the plan;
+    they live once in ``alphaengine_query_forms.ALPHAENGINE_QUERY_FORMS`` and
+    every environment renders them from there, so the plan written here is
+    schema 0.7 and carries per spec only what the owner decides -- document
+    type, lookback and the two intervals.
+    """
+
+    return [
+        {"spec_ref": "earnings-call-transcripts", "document_type": "meeting_minutes",
+         "lookback_days": 400, "rediscovery_interval_days": 7, "retry_interval_days": 1},
+        {"spec_ref": "sell-side-reports", "document_type": "sell_side_report",
+         "lookback_days": 180, "rediscovery_interval_days": 14, "retry_interval_days": 1},
+    ]
 
 
 def resolve_sec_ticker(

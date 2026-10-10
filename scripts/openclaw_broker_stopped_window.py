@@ -9,7 +9,6 @@ one gateway stop/config CAS/start.  It never replays or refunds a journal row.
 from __future__ import annotations
 
 import datetime
-import ast
 import json
 import os
 import re
@@ -26,7 +25,8 @@ from typing import Any, Mapping
 from scripts.prepare_successor_config_transition import (
     _json_bytes, _plugin_tree, canonical_hash,
     _reviewed_historical_unresolved, expected_openclaw_frame_transition_state,
-    sha256_bytes,
+    sha256_bytes, MODEL_BROKER_HOST_PATCH_HELPERS, _expected_model_broker_host_patch,
+    _host_patch_constants, ConfigTransitionError,
 )
 
 
@@ -371,8 +371,7 @@ def _host_patch_artifacts(*, packet_root: Path, source_root: Path,
     helper_rel = Path(str(row["helper_relative_path"]))
     target_rel = Path(str(row["target_relative_path"]))
     _need(not helper_rel.is_absolute() and ".." not in helper_rel.parts
-          and helper_rel.as_posix()
-          == "integrations/openclaw_host_patches/patch_provider_output_control_endpoint.py"
+          and helper_rel.as_posix() in MODEL_BROKER_HOST_PATCH_HELPERS
           and not target_rel.is_absolute() and ".." not in target_rel.parts
           and target_rel.parts and target_rel.parts[0] == "dist",
           "model broker host patch path is outside reviewed scope")
@@ -397,19 +396,26 @@ def _host_patch_artifacts(*, packet_root: Path, source_root: Path,
           and sha256_bytes(before.read_bytes()) == row["before_sha256"]
           and sha256_bytes(after.read_bytes()) == row["after_sha256"],
           "model broker host patch artifacts differ")
-    assignments = {}
-    for statement in ast.parse(helper.read_text(encoding="utf-8")).body:
-        if isinstance(statement, ast.Assign):
-            for name in statement.targets:
-                if isinstance(name, ast.Name) and name.id in {"ORIGINAL", "PATCHED"}:
-                    assignments[name.id] = ast.literal_eval(statement.value)
-    original, patched = assignments.get("ORIGINAL"), assignments.get("PATCHED")
-    before_text = before.read_text(encoding="utf-8")
-    _need(isinstance(original, str) and isinstance(patched, str)
-          and before_text.count(original) == 1 and before_text.count(patched) == 0
-          and after.read_text(encoding="utf-8")
-              == before_text.replace(original, patched, 1),
+    try:
+        expected_after = _expected_model_broker_host_patch(helper, before.read_bytes())
+    except (ConfigTransitionError, ValueError, KeyError) as exc:
+        raise BrokerStoppedWindowError("model broker host patch after artifact is not the exact helper transform") from exc
+    _need(after.read_bytes() == expected_after,
           "model broker host patch after artifact is not the exact helper transform")
+    if helper.name == "patch_broker_reasoning_capability.py":
+        values = _host_patch_constants(helper)
+        _need(json.loads((openclaw_root / "package.json").read_text()).get("version")
+              in values["SUPPORTED_VERSIONS"], "broker reasoning host version differs")
+        for pattern, markers in (("model-runtime-binding-*.mjs", values["BINDING_MARKERS"]),
+                                 ("simple-completion-execution-*.mjs", values["EXECUTION_MARKERS"])):
+            matches = sorted((openclaw_root / "dist").glob(pattern))
+            _need(len(matches) == 1 and matches[0].is_file() and not matches[0].is_symlink()
+                  and all(marker in matches[0].read_text(encoding="utf-8") for marker in markers),
+                  "broker reasoning host binding/dispatch contract differs")
+        transport = openclaw_root / "node_modules/@openclaw/ai/dist/transports.mjs"
+        _need(transport.is_file() and not transport.is_symlink()
+              and all(marker in transport.read_text(encoding="utf-8") for marker in values["TRANSPORT_MARKERS"]),
+              "broker reasoning host provider wrapper contract differs")
     return helper, target, before.read_bytes(), after.read_bytes()
 
 
@@ -423,11 +429,12 @@ def apply_reviewed_host_patch(*, packet_root: Path, source_root: Path,
         openclaw_root=openclaw_root, row=row)
     identity = _compare_and_install(target, before, after)
     try:
+        check_arguments = ([] if helper.name == "patch_broker_reasoning_capability.py" else ["--check"])
         checked = run([sys.executable, str(helper), "--openclaw-root",
-                       str(openclaw_root), "--check"], text=True,
+                       str(openclaw_root), *check_arguments], text=True,
                       capture_output=True)
         _need(checked.returncode == 0
-              and "OK provider output control endpoint" in checked.stdout,
+              and MODEL_BROKER_HOST_PATCH_HELPERS[row["helper_relative_path"]] in checked.stdout,
               "model broker host capability check failed")
         result = {"schema_version": "openclaw-model-host-patch-receipt-0.1",
                   "status": "installed_checked_no_call",
@@ -600,11 +607,12 @@ def verify_reviewed_host_patch(*, packet_root: Path, source_root: Path,
     _need(identity == (current.st_dev, current.st_ino)
           and target.read_bytes() == after,
           "installed model broker host patch differs")
+    check_arguments = ([] if helper.name == "patch_broker_reasoning_capability.py" else ["--check"])
     checked = run([sys.executable, str(helper), "--openclaw-root",
-                   str(openclaw_root), "--check"], text=True,
+                   str(openclaw_root), *check_arguments], text=True,
                   capture_output=True)
     _need(checked.returncode == 0
-          and "OK provider output control endpoint" in checked.stdout,
+          and MODEL_BROKER_HOST_PATCH_HELPERS[row["helper_relative_path"]] in checked.stdout,
           "installed model broker host capability check failed")
     return {"status": "installed_checked_no_call",
             "receipt_sha256": sha256_bytes(receipt_path.read_bytes()),

@@ -38,6 +38,114 @@ from .lane_failure_ledger import lane_budget
 TICKET_SCHEMA_VERSION = "0.1"
 TICKET_PREFIX = "document-extraction"
 DEFAULT_MAX_WINDOWS_PER_TICK = 4
+
+
+def _write_attachment_cursor(path: Path, record_id: str) -> None:
+    """Independent CLI/controller scans may finish together; never share a tmp."""
+    import tempfile
+    fd, temporary = tempfile.mkstemp(prefix='.'+path.name+'.', dir=path.parent)
+    try:
+        with os.fdopen(fd, 'w', encoding='utf-8') as stream:
+            stream.write(canonical_json({'schema_version': '0.1', 'after_record_id': record_id})+'\n')
+            stream.flush()
+            os.fsync(stream.fileno())
+        os.replace(temporary, path)
+    finally:
+        Path(temporary).unlink(missing_ok=True)
+
+
+def register_held_annual_attachments(missions: CoverageMissionAuthority, *,
+                                    state_dir: Path, spool: Any = None,
+                                    spool_factory: Callable[[], Any] | None = None,
+                                    spool_dir: Path | None = None,
+                                    requested_by: str | None = None,
+                                    max_new: int = 2) -> dict[str, Any]:
+    """Bounded zero-call maintenance, independent of the extraction queue.
+
+    A cached outcome only identifies a candidate. The existing registration
+    authority must re-prove its original bytes, issuer, URL and receipts and
+    the mission grant before it can become an independent review.
+    """
+    from .connector_authority_port import ReadOnlyConnectorReceiptReader
+    from .sec_annual_report_exhibit import exhibit_outcome
+
+    result: dict[str, Any] = {"registered": [], "refused": []}
+    if isinstance(max_new, bool) or not isinstance(max_new, int) or not 1 <= max_new <= 2:
+        raise ValueError('annual attachment maintenance allows at most two registrations per tick')
+    cursor_path = Path(state_dir)/'extractions'/'annual-attachment-maintenance.json'
+    try:
+        cursor_wire = json.loads(cursor_path.read_text(encoding='utf-8'))
+        cursor = cursor_wire['after_record_id'] if (isinstance(cursor_wire, dict)
+                                                   and cursor_wire.get('schema_version') == '0.1'
+                                                   and isinstance(cursor_wire.get('after_record_id'), str)) else ''
+    except (OSError, ValueError, TypeError, KeyError):
+        cursor = ''
+    query = (
+        "SELECT d.record_id,d.ticket_ref,d.document_ref,d.mission_version_ref "
+        "FROM coverage_mission_discovered_documents d "
+        "JOIN coverage_mission_source_discoveries s ON s.record_id=d.discovery_ref "
+        "JOIN coverage_mission_pointer p ON p.mission_version_id=d.mission_version_ref "
+        "WHERE d.source_ref='source:sec-edgar' AND d.status='acquired' "
+        "AND d.ticket_ref IS NOT NULL AND d.document_ref LIKE 'sec:filing:%' "
+        "AND s.spec_ref='annual-report-10k' AND d.record_id>? ORDER BY d.record_id LIMIT 100")
+    rows = missions.connection.execute(query, (cursor,)).fetchall()
+    if not rows and cursor:
+        rows = missions.connection.execute(query, ('',)).fetchall()
+    attempts = 0
+    scanned = 0
+    last_scanned = None
+    for parent in rows:
+        if attempts >= max_new:
+            break
+        scanned += 1
+        last_scanned = parent['record_id']
+        outcome = exhibit_outcome(Path(state_dir), parent['ticket_ref'])
+        if not outcome or outcome.get('status') != 'succeeded':
+            continue
+        child_ref = parent['document_ref'].replace('sec:filing:', 'sec:exhibit:', 1) + ':' + str(outcome.get('exhibit_name', ''))
+        registered = missions.connection.execute(
+            "SELECT 1 FROM coverage_mission_discovered_documents d "
+            "JOIN coverage_mission_document_reviews r ON r.discovered_document_ref=d.record_id "
+            "WHERE d.mission_version_ref=? AND d.ticket_ref=? AND d.document_ref=? "
+            "AND d.status='acquired' LIMIT 1",
+            (parent['mission_version_ref'], parent['ticket_ref'], child_ref)).fetchone()
+        if registered:
+            continue
+        attempts += 1
+        try:
+            if spool is None and spool_factory is not None:
+                spool = spool_factory()
+            if spool is None:
+                from .raw_spool import MultiRootRawSpoolReader, RawSpoolError, RawSpoolReader
+                roots = []
+                seen = set()
+                for path in (spool_dir, Path(state_dir)/'connector-spool', Path(state_dir)/'transcript-spool'):
+                    if path is None or Path(path).resolve() in seen:
+                        continue
+                    seen.add(Path(path).resolve())
+                    try:
+                        roots.append(RawSpoolReader(path))
+                    except RawSpoolError:
+                        continue
+                if not roots:
+                    raise ValueError('held annual attachment original spool is unavailable')
+                spool = roots[0] if len(roots) == 1 else MultiRootRawSpoolReader(roots)
+            mission = missions.mission(parent['mission_version_ref'])
+            attached = missions.register_acquired_annual_attachment(
+                parent['record_id'], state_dir=state_dir, spool=spool,
+                receipt_reader=ReadOnlyConnectorReceiptReader(missions.connection),
+                requested_by=requested_by or mission['autonomy']['automation_principal'])
+            if attached:
+                result['registered'].append(attached)
+        except Exception as exc:
+            result['refused'].append({'parent_record_id': parent['record_id'], 'reason': str(exc)})
+    if last_scanned is not None:
+        _secure_dir(cursor_path.parent)
+        _write_attachment_cursor(cursor_path, last_scanned)
+    result['scanned'] = scanned
+    return result
+
+
 # C2-1: an hour is the right pause for a lane with *nothing to read*.  It was
 # also being applied to a lane with a full queue: live on 2026-09-16 the
 # awaiting count sat at 192 for an hour at a time while the coordinator held,
@@ -229,6 +337,7 @@ class DocumentExtractionLauncher:
             raise ExtractionLaunchRejected("max_discovery_windows must be 0..50")
         config_fingerprint = self.configuration_fingerprint()
         with self._lock:
+            self._reap_locked()
             if self._current is not None and self._current[1].poll() is None:
                 raise ExtractionLaunchConflict(f"extraction {self._current[0]} is still running")
             started_at = _wire_time(self.clock())
@@ -310,6 +419,34 @@ class DocumentExtractionLauncher:
             return True
         return True
 
+    def reap(self) -> list[str]:
+        """Settle an exited owned child without dispatching another window.
+
+        Used by the writer's existing generic child-reaping hook. Terminal
+        ticket facts and summary bytes are preserved; no budget is settled here.
+        """
+        with self._lock:
+            return self._reap_locked()
+
+    def _reap_locked(self) -> list[str]:
+        if self._current is None:
+            return []
+        ticket_ref, process = self._current
+        code = process.poll()
+        if code is None:
+            return []
+        path = self._ticket_path(ticket_ref)
+        record = json.loads(path.read_text(encoding="utf-8"))
+        if record.get("id") != ticket_ref:
+            raise ExtractionLaunchRejected("extraction ticket identity differs")
+        if record.get("status") == "running":
+            record["exit_code"] = code
+            record["completed_at"] = _wire_time(self.clock())
+            record["status"] = "succeeded" if code == 0 else "failed"
+            _write_owner_only(path, record)
+        self._current = None
+        return [ticket_ref]
+
     def running(self) -> bool:
         with self._lock:
             return self._current is not None and self._current[1].poll() is None
@@ -323,6 +460,12 @@ class DocumentExtractionLauncher:
 
     def close(self) -> None:
         with self._lock:
+            try:
+                self._reap_locked()
+            except (OSError, ValueError, ExtractionLaunchRejected):
+                # Preserve the unreadable ticket for normal adoption/review;
+                # an accounting-file error must not interrupt shutdown.
+                pass
             current, self._current = self._current, None
         if current is not None and current[1].poll() is None:
             current[1].terminate()
@@ -562,8 +705,15 @@ class DocumentExtractionCoordinator:
     def dispatch_once(self) -> dict[str, Any]:
         latest = self._latest()
         carried = self._carry_awaiting()
+        attachments = register_held_annual_attachments(
+            self.missions, state_dir=self.launcher.state_dir,
+            spool_dir=getattr(self.launcher, 'spool_dir', None))
         awaiting, awaiting_fingerprint = self._awaiting_state()
         result: dict[str, Any] = {"awaiting": awaiting}
+        if attachments['registered']:
+            result['annual_report_attachments'] = attachments['registered']
+        if attachments['refused']:
+            result['annual_report_attachment_refusals'] = attachments['refused']
         filtered = self._carry_filtered()
         if carried or filtered:
             skipped = [row for row in carried if row.get("status") != "carried"]

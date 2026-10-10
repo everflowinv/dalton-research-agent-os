@@ -203,8 +203,67 @@ class CoordinatorTests(unittest.TestCase):
                         summary={"framework_status": "nothing_new"})
         result = coordinator.dispatch_once()
         self.assertEqual(result["status"], "idle")
-        self.assertIn("nothing has moved", result["reason"])
+        # 2026-10-07: with no framework version yet the idle reason names
+        # what the run was missing instead of "nothing has moved".
+        self.assertIn("还没有第一个版本", result["reason"])
+        self.assertEqual(result["missing_input"], "还没有可写进框架的新证据")
         self.assertEqual(len(launcher.started), 1)
+
+    def test_after_a_published_version_the_weekly_cadence_applies(self):
+        launcher = FakeLauncher()
+        coordinator = self.coordinator(launcher, now=lambda: 0.0)
+        launched = coordinator.dispatch_once()
+        launcher.settle(launched["ticket_ref"],
+                        summary={"framework_status": "published", "version_ref": "v:1"})
+        coordinator.dispatch_once()
+        coordinator._quiet_signature = None
+        coordinator.connection.execute("INSERT INTO statement_ingest_lines VALUES (7)")
+        waiting = coordinator.dispatch_once()
+        self.assertEqual(waiting["status"], "waiting")
+        self.assertIn("weekly deliverable", waiting["reason"])
+
+    def test_a_first_run_that_published_nothing_retries_soon_and_names_the_input(self):
+        # ws-7d 2026-10-07: the first run crashed after the verifier passed,
+        # and the lane then waited a whole week from that launch.
+        from dalton_core.mission_industry_framework_lane import (
+            FIRST_DRAFT_RETRY_SECONDS,
+        )
+
+        launcher = FakeLauncher()
+        clock = {"now": 0.0}
+        coordinator = self.coordinator(launcher, now=lambda: clock["now"])
+        launched = coordinator.dispatch_once()
+        launcher.settle(launched["ticket_ref"], status="succeeded",
+                        summary={"framework_status": "verification_failed"})
+        coordinator.connection.execute("INSERT INTO statement_ingest_lines VALUES (8)")
+        clock["now"] = 60.0
+        waiting = coordinator.dispatch_once()
+        self.assertEqual(waiting["status"], "waiting")
+        self.assertNotIn("weekly", waiting["reason"])
+        self.assertIn("独立核验没有通过", waiting["reason"])
+        self.assertEqual(waiting["missing_input"], "独立核验没有通过")
+        clock["now"] = FIRST_DRAFT_RETRY_SECONDS + 1
+        self.assertEqual(coordinator.dispatch_once()["status"], "launched")
+        self.assertEqual(len(launcher.started), 2)
+
+    def test_a_restart_does_not_reset_the_week_once_a_version_exists(self):
+        import time as _time
+        from datetime import datetime, timezone
+
+        connection = self.connection()
+        connection.execute(
+            "CREATE TABLE IF NOT EXISTS industry_framework_versions "
+            "(framework_ref TEXT, version_number INTEGER, created_at TEXT)")
+        connection.execute(
+            "INSERT INTO industry_framework_versions VALUES ('f', 1, ?)",
+            (datetime.now(timezone.utc).isoformat(),))
+        launcher = FakeLauncher()
+        coordinator = MissionIndustryFrameworkLaneCoordinator(
+            connection=connection, launcher=launcher, clock=_time.time)
+        waiting = coordinator.dispatch_once()
+        self.assertEqual(waiting["status"], "waiting")
+        self.assertIn("weekly deliverable", waiting["reason"])
+        self.assertEqual(launcher.started, [])
 
     def test_every_quiet_status_is_a_reason_to_stay_quiet(self):
         for status in QUIET_STATUSES:
@@ -354,6 +413,189 @@ class LauncherTests(unittest.TestCase):
         self.assertIn("--framework-policy", command)
         self.assertIn("--verifier-model-config", command)
         self.assertIn("--max-units", command)
+
+
+class MaterialProbeCoordinatorTests(unittest.TestCase):
+    @staticmethod
+    def probe(fingerprint, *, urgent=False):
+        return {"fingerprint": fingerprint, "urgent": urgent, "pending_count": 1,
+                "next_review_at": "2026-10-24T00:00:00+00:00", "label": "必需材料出了新版本"}
+
+    def coordinator(self, now):
+        connection = CoordinatorTests.connection(self)
+        launcher = FakeLauncher()
+        coordinator = MissionIndustryFrameworkLaneCoordinator(
+            connection=connection, launcher=launcher, clock=lambda: now[0])
+        return coordinator, launcher
+
+    def test_document_probe_wakes_quiet_even_without_new_claims(self):
+        from unittest.mock import patch
+        now = [0.0]
+        coordinator, launcher = self.coordinator(now)
+        with patch.object(coordinator, "_material_probe", return_value=self.probe("old")):
+            first = coordinator.dispatch_once()
+            launcher.settle(first["ticket_ref"], summary={"framework_status": "nothing_new"})
+            self.assertEqual(coordinator.dispatch_once()["status"], "idle")
+        now[0] = 7 * 24 * 3600.0
+        with patch.object(coordinator, "_material_probe", return_value=self.probe("new", urgent=True)):
+            final = coordinator.dispatch_once()
+        self.assertEqual(final["status"], "launched")
+        self.assertNotEqual(first["signature"], final["signature"])
+
+    def test_due_edge_not_wall_clock_breaks_quiet_without_ledger_write(self):
+        from unittest.mock import patch
+        now = [13 * 24 * 3600.0]
+        coordinator, launcher = self.coordinator(now)
+        coordinator._published = True
+        before = coordinator.connection.total_changes
+        def probe(moment, **kwargs):
+            return self.probe("due" if moment >= 14 * 24 * 3600 else "pending")
+        with patch.object(coordinator, "_material_probe", side_effect=probe):
+            first = coordinator.dispatch_once()
+            launcher.settle(first["ticket_ref"], summary={"framework_status": "nothing_new"})
+            now[0] += 3600
+            self.assertEqual(coordinator.dispatch_once()["status"], "idle")
+            now[0] = 14 * 24 * 3600.0
+            waiting = coordinator.dispatch_once()
+            self.assertEqual(waiting["status"], "waiting")  # ordinary stale still observes week
+            self.assertNotEqual(first["signature"], waiting["signature"])
+            now[0] = 20 * 24 * 3600.0
+            self.assertEqual(coordinator.dispatch_once()["status"], "launched")
+        self.assertEqual(coordinator.connection.total_changes, before)
+
+    def test_only_proven_urgent_probe_bypasses_weekly_cadence(self):
+        from unittest.mock import patch
+        now = [100.0]
+        coordinator, launcher = self.coordinator(now)
+        coordinator._published = True
+        coordinator._last_launch = 0.0
+        with patch.object(coordinator, "_material_probe", return_value=self.probe("broker")):
+            self.assertEqual(coordinator.dispatch_once()["status"], "waiting")
+        with patch.object(coordinator, "_material_probe", return_value=self.probe("required", urgent=True)):
+            result = coordinator.dispatch_once()
+        self.assertEqual(result["status"], "launched")
+        self.assertEqual(result["trigger"], "material_policy")
+        self.assertEqual(len(launcher.started), 1)
+
+    def test_urgent_probe_keeps_permission_and_failure_budget(self):
+        from unittest.mock import patch
+        now = [100.0]
+        coordinator, launcher = self.coordinator(now)
+        coordinator._published = True
+        coordinator._last_launch = 0.0
+        with patch.object(coordinator, "_material_probe", return_value=self.probe("required", urgent=True)):
+            first = coordinator.dispatch_once()
+            launcher.settle(first["ticket_ref"], summary={"framework_status": "not_authorized"})
+            result = coordinator.dispatch_once()
+        self.assertNotEqual(result["status"], "launched")
+        self.assertEqual(len(launcher.started), 1)
+
+    def test_urgent_probe_does_not_change_first_draft_retry(self):
+        from unittest.mock import patch
+        now = [100.0]
+        coordinator, launcher = self.coordinator(now)
+        coordinator._last_launch = 0.0
+        with patch.object(coordinator, "_material_probe", return_value=self.probe("required", urgent=True)):
+            result = coordinator.dispatch_once()
+        self.assertEqual(result["status"], "waiting")
+        self.assertEqual(launcher.started, [])
+
+    def test_actual_probe_uses_verified_active_mission_and_utc(self):
+        from datetime import timedelta
+        from unittest.mock import patch
+        from tests.test_dossier_lane import Harness
+        harness = Harness()
+        self.addCleanup(harness.close)
+        launcher = FakeLauncher()
+        launcher.state_dir = harness.state_dir
+        coordinator = MissionIndustryFrameworkLaneCoordinator(
+            connection=harness.store.connection, launcher=launcher)
+        harness.store.connection.execute("PRAGMA query_only=ON")
+        with patch("dalton_core.redraft_policy.lane_probe", return_value=self.probe("first"), create=True) as probe:
+            coordinator._material_probe(100.0)
+        args, kwargs = probe.call_args
+        self.assertEqual(args, (harness.state_dir, harness.store.connection))
+        self.assertEqual(kwargs["product"], "industry_framework")
+        self.assertEqual(kwargs["target"], harness.mission["industry_ref"])
+        self.assertEqual(kwargs["company_refs"], [member["company_ref"] for member in harness.mission["universe"]])
+        self.assertIsNone(kwargs["prior"])
+        self.assertEqual(kwargs["now"].timestamp(), 100.0)
+        self.assertEqual(kwargs["now"].utcoffset(), timedelta(0))
+
+    def test_heavy_probe_cache_rechecks_arrivals_core_changes_and_thirty_minute_deadline(self):
+        from unittest.mock import patch
+        from tests.test_dossier_lane import Harness
+        harness = Harness()
+        self.addCleanup(harness.close)
+        launcher = FakeLauncher()
+        launcher.state_dir = harness.state_dir
+        coordinator = MissionIndustryFrameworkLaneCoordinator(
+            connection=harness.store.connection, launcher=launcher)
+        light = ["old"]
+        heavy = []
+        def probe(*args, **kwargs):
+            if kwargs.get("light_only"):
+                return {"fingerprint": light[0]}
+            heavy.append(kwargs["now"])
+            return self.probe("policy:" + light[0])
+        with patch("dalton_core.redraft_policy.lane_probe", side_effect=probe):
+            coordinator._material_probe(100.0, source_signature="core-old")
+            coordinator._material_probe(101.0, source_signature="core-old")
+            self.assertEqual(len(heavy), 1)
+            coordinator._material_probe(1900.0, source_signature="core-old")
+            self.assertEqual(len(heavy), 2)
+            coordinator._material_probe(1901.0, source_signature="core-new")
+            self.assertEqual(len(heavy), 3)
+            light[0] = "new"
+            coordinator._material_probe(1902.0, source_signature="core-new")
+            self.assertEqual(len(heavy), 4)
+
+    def test_real_framework_due_edge_reaches_inner_gate_and_still_waits_week(self):
+        from datetime import datetime, timedelta, timezone
+        from dalton_core.industry_framework import IndustryFrameworkAuthority
+        from tests.test_dossier_lane import Harness
+        from tests.test_industry_framework import record, simple_comparison
+        from tests.test_material_pack import Corpus
+        harness = Harness()
+        self.addCleanup(harness.close)
+        drafted = datetime.now(timezone.utc)
+        body = record(comparison=simple_comparison())
+        body["drafted_at"] = {"characteristics": drafted.isoformat()}
+        prior = IndustryFrameworkAuthority(harness.store).publish(body)
+        arrival = drafted + timedelta(minutes=1)
+        company = harness.mission["universe"][0]["company_ref"]
+        Corpus(harness.state_dir).add(
+            "sales_note", "Synthetic company operating check", "Synthetic sales discussion; no new claim.",
+            date=arrival.date().isoformat(), company=company,
+            now=arrival.isoformat(), acquired=arrival.isoformat())
+        now = [(drafted + timedelta(days=13, hours=23)).timestamp()]
+        first_moment = now[0]
+        launcher = FakeLauncher()
+        launcher.state_dir = harness.state_dir
+        coordinator = MissionIndustryFrameworkLaneCoordinator(
+            connection=harness.store.connection, launcher=launcher, clock=lambda: now[0])
+        before = harness.store.connection.total_changes
+        first = coordinator.dispatch_once()
+        self.assertEqual(first["status"], "launched")
+        self.assertEqual(first["material_probe"]["pending_count"], 1)
+        self.assertFalse(first["material_probe"]["urgent"])
+        launcher.settle(first["ticket_ref"], summary={"framework_status": "nothing_new"})
+        self.assertEqual(coordinator.dispatch_once()["status"], "idle")
+        now[0] = (drafted + timedelta(days=14, seconds=1)).timestamp()
+        due = coordinator.dispatch_once()
+        self.assertEqual(due["status"], "waiting")
+        self.assertNotEqual(first["signature"], due["signature"])
+        now[0] = first_moment + MIN_INTERVAL_SECONDS
+        self.assertEqual(coordinator.dispatch_once()["status"], "launched")
+        self.assertEqual(harness.store.connection.total_changes, before)
+        self.assertEqual(IndustryFrameworkAuthority(harness.store).framework(prior["id"])["content_hash"], prior["content_hash"])
+
+    def test_unreadable_probe_refuses_without_launch(self):
+        from unittest.mock import patch
+        coordinator, launcher = self.coordinator([100.0])
+        with patch.object(coordinator, "_material_probe", side_effect=ValueError("source drift")):
+            self.assertEqual(coordinator.dispatch_once()["status"], "unavailable")
+        self.assertEqual(launcher.started, [])
 
 
 if __name__ == "__main__":

@@ -71,7 +71,7 @@ class CurrencySymbolTests(unittest.TestCase):
                          ["$4200"])
 
     def test_the_contract_moved_so_terminal_holds_release(self):
-        self.assertEqual(NUMBER_SOURCE_CONTRACT_VERSION, "number-source-contract:0.7")
+        self.assertEqual(NUMBER_SOURCE_CONTRACT_VERSION, "number-source-contract:0.8")
 
 
 class NumbersRepairFindingsTests(unittest.TestCase):

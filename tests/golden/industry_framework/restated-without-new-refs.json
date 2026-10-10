@@ -450,8 +450,8 @@
     "status": "pass"
    },
    "required_sections_present": {
-    "count": 0,
-    "status": "pass"
+    "count": 2,
+    "status": "fail"
    },
    "restatement_drift": {
     "count": 7,

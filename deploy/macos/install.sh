@@ -161,9 +161,11 @@ fi
 
 "$venv_dir/bin/dalton-bootstrap" --state-dir "$state_dir" --config "$config_path"
 
-# F10: an empty, proposed mapping set wires the deterministic market-proxy
-# path without selecting a ticker or expanding research coverage. Operators
-# replace it only after reviewing the explicit source-to-subject mappings.
+# F10: an empty explicit mapping set. Catalog proxies for the drivers each
+# company's model declares are derived without it (market_proxy_catalog);
+# owner-written mappings here are added on top, and
+# "derive_from_model_drivers": false is the off switch. Research coverage is
+# never expanded: proxy series are price reads, not covered companies.
 market_proxy_config="$state_dir/market-proxy-mappings.json"
 if [[ ! -f "$market_proxy_config" ]]; then
   cp "$repo_root/deploy/phase9/proposed-market-proxy-mappings-v1.json" "$market_proxy_config"
@@ -266,7 +268,7 @@ done
 # the year to date under the same period_end -- EPAM's Q2 and H1 revenue both
 # end 2026-06-30. Without the start they are one number twice, and half-years
 # would have been ingested as quarters. Caught before any data was taken.
-for sec_financials_version in v1 v2 v3; do
+for sec_financials_version in v1 v2 v3 v4; do
   sec_financials_file="$governance_dir/sec-financial-statements-${sec_financials_version}.json"
   repo_record="$repo_root/deploy/connector-governance/sec-financial-statements-${sec_financials_version}.json"
   if [[ ! -f "$sec_financials_file" && -f "$repo_record" ]]; then
@@ -376,6 +378,18 @@ for ir_watch_kind in ir-page-watch-list-watches ir-page-watch-get-diff; do
     chmod 600 "$ir_watch_file"
   fi
 done
+
+# Vision-gap #13: owner delivery (Feishu). The record is the lane's switch and
+# the approval inside it is the switch for sending. Seeded once as *proposed*
+# with no recipient; the owner approves in place, per environment, with
+# docs/ops/owner-delivery-enable.sh (which also writes the Feishu chat id).
+# Never overwritten here, so an approved record survives every re-install.
+owner_delivery_file="$governance_dir/owner-delivery-feishu-v1.json"
+if [[ ! -f "$owner_delivery_file" && -f "$repo_root/deploy/connector-governance/owner-delivery-feishu-v1.json" ]]; then
+  cp "$repo_root/deploy/connector-governance/owner-delivery-feishu-v1.json" "$owner_delivery_file"
+  chmod 600 "$owner_delivery_file"
+fi
+
 # P9d-1: AlphaEngine search_library is a separate governed capability.  Seed
 # the committed *proposed* record once; the owner approves in place with
 # dalton-connector-governance approve.  The discovery plan is a hash-bound
@@ -969,6 +983,25 @@ elif [[ -n "$earnings_pin" || -n "$earnings_verifier_pin" ]]; then
   exit 2
 else
   print "note: set earnings producer and verifier tiers to install the earnings-season lane."
+fi
+# Held broker estimate tables: explicit paired pins; deterministic parsing
+# still runs first. Both calls retain the existing coverage/day budget.
+street_pin="${DALTON_STREET_ESTIMATE_MODEL_PROFILE:-}${DALTON_STREET_ESTIMATE_MODEL_TIER:-}"
+street_verifier_pin="${DALTON_STREET_ESTIMATE_VERIFIER_MODEL_PROFILE:-}${DALTON_STREET_ESTIMATE_VERIFIER_MODEL_TIER:-}"
+if [[ -n "$street_pin" && -n "$street_verifier_pin" ]]; then
+  if [[ "$street_pin" == "$street_verifier_pin" ]]; then
+    print -u2 "error: street estimate producer and verifier need distinct model pins"
+    exit 2
+  fi
+  install_role_model_config "model-routing-policy:dalton-openclaw-street-estimate" \
+    "street-estimate-model-config.json" \
+    "${DALTON_STREET_ESTIMATE_MODEL_PROFILE:-}" "${DALTON_STREET_ESTIMATE_MODEL_TIER:-}"
+  install_role_model_config "model-routing-policy:dalton-openclaw-street-estimate-verifier" \
+    "street-estimate-verifier-model-config.json" \
+    "${DALTON_STREET_ESTIMATE_VERIFIER_MODEL_PROFILE:-}" "${DALTON_STREET_ESTIMATE_VERIFIER_MODEL_TIER:-}"
+elif [[ -n "$street_pin" || -n "$street_verifier_pin" ]]; then
+  print -u2 "error: configure both street estimate producer and independent verifier or neither"
+  exit 2
 fi
 # P12b: the claim index. One configuration, so all-or-nothing is automatic.
 # The maintenance pool is the tightest of C2's four at 5% and this is where the

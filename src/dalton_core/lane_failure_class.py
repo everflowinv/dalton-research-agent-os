@@ -196,6 +196,11 @@ RULES: tuple[Rule, ...] = (
     Rule("ticket_gone", "lane ticket is no longer on disk", TRANSIENT),
     Rule("child_busy", "child_slot_busy", TRANSIENT),
     Rule("child_conflict", "lanechildconflict", TRANSIENT),
+    # 2026-10-06: the owner paused this (owner_levers).  Not a failure of the
+    # item and not an outage: it comes back when the owner resumes.
+    Rule("owner_emergency_stop", "owner_emergency_stop", TRANSIENT),
+    Rule("owner_paused", "paused by owner", TRANSIENT),
+    Rule("owner_paused_child", "lanechildownerpaused", TRANSIENT),
     # The Scheduler already holds a lease on this exact request, so a second
     # child asked for a judgement that is being paid for right now.  Not an
     # outage and not a refusal: the right answer is to come back, which is what
@@ -256,6 +261,12 @@ RULES: tuple[Rule, ...] = (
     Rule("http_error", "httperror", DEPENDENCY_UNAVAILABLE, None),
     Rule("remote_disconnected", "remotedisconnected",
          DEPENDENCY_UNAVAILABLE, None),
+    # #21: the IR-page watcher's child says so when the local changedetection
+    # process is not up -- "changedetection is not answering at ...: <urlopen
+    # error [Errno 61] Connection refused>".  Outage vocabulary, named by
+    # :data:`VENDORS`.
+    Rule("host_tool_not_answering", "is not answering at", DEPENDENCY_UNAVAILABLE, None),
+    Rule("connection_refused", "connection refused", DEPENDENCY_UNAVAILABLE, None),
     Rule("lease_expired", "lease_expired_before_transport",
          DEPENDENCY_UNAVAILABLE, "transport"),
 
@@ -310,6 +321,9 @@ VENDORS: tuple[tuple[str, str], ...] = (
     ("edgar", "sec"),
     ("company facts", "sec"),
     ("writer", "writer_rpc"),
+    # S5/#21: the IR-page watcher's one upstream is a process on this machine.
+    ("changedetection", "changedetection"),
+    ("127.0.0.1:5055", "changedetection"),
 )
 
 # A lane may name reasons only it emits.  Keyed by the lane's tick-summary
@@ -344,6 +358,10 @@ LANE_DEPENDENCIES: dict[str, str] = {
     "mission_sec_dispatch": "sec",
     "mission_ownership": "sec",
     "guidepoint": "guidepoint",
+    # F14 tail: lanes the writer now records for, named by the one source they
+    # talk to, so an outage of theirs is filed under it rather than ``unknown``.
+    "mission_sec_quarters": "sec",
+    "guidepoint_discovery": "guidepoint",
 }
 
 _WHITESPACE = re.compile(r"\s+")

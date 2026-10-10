@@ -26,7 +26,7 @@ _FIELDS = {
 }
 _OPTIONAL_FIELDS = {
     "shared_capacity", "shared_connector_capacity",
-    "shared_model_capacity_bindings",
+    "shared_model_capacity_bindings", "lifecycle",
 }
 
 
@@ -72,6 +72,7 @@ class WorkspacePaths:
     shared_connector_capacity: tuple[Mapping[str, str], ...]
     content_hash: str
     manifest_path: Path | None = None
+    lifecycle: str = "active"
 
     @classmethod
     def from_manifest(
@@ -120,7 +121,7 @@ class WorkspacePaths:
                 or _SHA.fullmatch(release_ref.removeprefix("release:sha256:")) is None:
             raise WorkspaceError("release_ref must bind a lowercase SHA-256")
         release = _absolute(value["release_path"], "release_path")
-        if not release.is_dir():
+        if value.get("lifecycle", "active") != "deleted" and not release.is_dir():
             raise WorkspaceError("release_path must name an installed release directory")
         shared = value["shared_readonly_paths"]
         if not isinstance(shared, list) or any(not isinstance(item, str) for item in shared):
@@ -215,11 +216,14 @@ class WorkspacePaths:
             _inside(manifest, root, "manifest_path")
             if manifest != (root / "workspace.json").resolve():
                 raise WorkspaceError("manifest_path is not workspace_root/workspace.json")
+        lifecycle = value.get("lifecycle", "active")
+        if lifecycle not in {"active", "paused", "archived", "deleted"}:
+            raise WorkspaceError("workspace lifecycle is invalid")
         return cls(workspace_id, slug, root, state, config, logs, spool, socket,
                    port, release_ref, release, shared_paths, capacity,
                    tuple(model_bindings),
                    tuple(connector_bindings),
-                   value["content_hash"], manifest)
+                   value["content_hash"], manifest, lifecycle)
 
     def service_binding(self) -> dict[str, str]:
         if self.manifest_path is None:
@@ -342,7 +346,7 @@ def validate_fleet_candidate(candidate: WorkspacePaths, host_root: str | Path) -
             raise WorkspaceError("workspace slug or root is already registered")
         if current.workspace_id == candidate.workspace_id:
             raise WorkspaceError("workspace_id is already registered")
-        if current.cockpit_port == candidate.cockpit_port:
+        if current.lifecycle in {"active", "paused"} and current.cockpit_port == candidate.cockpit_port:
             raise WorkspaceError("cockpit_port is already registered")
 
 

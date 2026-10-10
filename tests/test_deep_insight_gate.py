@@ -489,7 +489,7 @@ class StructuralStandardTests(unittest.TestCase):
         self.assertEqual([item["code"] for item in findings],
                          ["unmapped_output_rubric_criterion"])
 
-    def test_an_investment_conclusion_is_a_finding(self):
+    def test_an_investment_conclusion_is_no_longer_a_finding(self):
         record = self.record(answers={"q1": answered(
             "q1", self.ref, text="这家公司被市场低估了。")})
         # Under a policy that binds the criterion to a different check, the
@@ -501,7 +501,9 @@ class StructuralStandardTests(unittest.TestCase):
         findings = output_rubric_findings(
             record, constitution=constitution(),
             policy=policy(check="no_investment_conclusion"), prior=None)
-        self.assertEqual([item["code"] for item in findings], ["investment_conclusion"])
+        # Batch D: views are allowed (owner decision 2026-10-09); the banned
+        # word table is gone, so the bound check finds nothing.
+        self.assertEqual(findings, [])
 
     def test_the_gate_rubric_is_frozen_and_is_not_registered_with_q1s(self):
         from dalton_core.research_quality_rubrics import RUBRICS

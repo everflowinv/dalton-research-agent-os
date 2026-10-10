@@ -164,6 +164,10 @@ LANE_POOLS: dict[str, str] = {
     # P12c: drafting the debate map is coverage work, like the dossier.
     "dispatch_debate_map": "coverage",
     "dispatch_company_dossier": "coverage",
+    # ADR-0012: proposing scenarios is dossier work; observing them is
+    # tracking and makes no model call at all.
+    "dispatch_scenario_proposal": "coverage",
+    "dispatch_scenario_observation": "event_response",
     # Keeping the shelves tidy.
     "dispatch_claim_review": "maintenance",
     "dispatch_claim_index": "maintenance",
@@ -175,6 +179,12 @@ LANE_POOLS: dict[str, str] = {
     # provider outage makes the coverage pool precious is exactly the day this
     # lane must still be able to notice a model has gone.
     "dispatch_catalog_sync": "maintenance",
+    # Vision-gap #13: telling the owner. No model call, no paid fetch.
+    "dispatch_owner_delivery": "maintenance",
+    # Batch E: the material acquisition service makes no model call; its
+    # connector spend is booked in its own pool (``MATERIAL_ACQUISITION_POOL``
+    # below), and this entry only keeps the lane out of the unlisted default.
+    "dispatch_material_acquisition": "coverage",
     # -- not registered yet -------------------------------------------------
     "dispatch_market_events": "event_response",
     "dispatch_research_reflection": "maintenance",
@@ -206,6 +216,10 @@ PURPOSE_POOLS: dict[str, str] = {
     # or its book and this ledger would be counting different things.
     "event_judgement": "event_response",
     "thesis_reflection": "event_response",
+    # 2026-09-30: the cheap screen in front of the judge is part of the same
+    # response to the same event, so it spends from and is booked in the same
+    # pool (``event_response_spend`` and ``POOL_LEDGER_PURPOSES``).
+    "event_triage": "event_response",
     # P14e's loops, when they get their own purpose (today their model call
     # goes through llm_planner_execute, which carries the pool explicitly).
     "research_task": "adhoc",
@@ -219,6 +233,77 @@ PURPOSE_POOLS: dict[str, str] = {
 }
 
 DEFAULT_POOL = "coverage"
+
+# -- batch E: the material acquisition pool -----------------------------------
+#
+# The four pools above are model-dollar pools of one mission day, and their
+# names are a closed set a mission's ``budget.pools`` must match exactly.  The
+# material acquisition service (``material_acquisition``) spends something
+# else: connector calls -- AlphaEngine searches and document pages, web
+# searches and fetches, Guidepoint searches, SEC index reads -- some metered
+# in dollars, all of them in calls.  So its pool is a fifth, separate pool
+# with its own day ledger (``material_acquisition_spend`` in
+# ``material-requests.sqlite``), a modest default and two caps: dollars and
+# calls.  A request also carries its own cap (``request.budget``); whichever
+# is tighter stops the ladder, and only then does the owner see a card.  The
+# per-source call windows (``connector_rate_policy``) still bind at launch:
+# a coordinator that runs a targeted query on behalf of a request checks its
+# own window exactly as it does for its scheduled searches.
+MATERIAL_ACQUISITION_POOL = "material_acquisition"
+#: The day caps when nothing overrides them.  Modest on purpose: the ladder
+#: tries the free local rungs first, and a day that needs more than this is a
+#: day the owner should hear about (``material_budget_exceeded``).
+MATERIAL_ACQUISITION_DEFAULT_CAPS: dict[str, Any] = {"usd_per_day": "2.00", "calls_per_day": 60}
+#: Per request, when the request names no cap of its own.
+MATERIAL_ACQUISITION_REQUEST_DEFAULTS: dict[str, Any] = {"max_usd": "0.50", "max_calls": 8}
+#: Where a mission (or an operator file) may override the day caps.  The
+#: mission's ``budget`` block is a closed field set owned elsewhere, so the
+#: override is read from it only when present and otherwise from
+#: ``<state>/material-acquisition-pool.json``.
+MATERIAL_ACQUISITION_FIELD = "material_acquisition"
+MATERIAL_ACQUISITION_POOL_FILE = "material-acquisition-pool.json"
+
+
+def material_acquisition_caps(budget: Mapping[str, Any] | None = None,
+                              state_dir: str | Path | None = None) -> dict[str, Any]:
+    """The material acquisition pool's day caps, in micros and calls.
+
+    ``budget`` is a mission budget block; ``state_dir`` names the operator
+    override file.  A malformed override is refused (``BudgetPoolError``)
+    rather than silently replaced by the default -- the same rule as
+    :func:`pool_caps`.
+    """
+
+    declared: Any = None
+    source = "budget_pools.MATERIAL_ACQUISITION_DEFAULT_CAPS"
+    if isinstance(budget, Mapping) and budget.get(MATERIAL_ACQUISITION_FIELD) is not None:
+        declared = budget[MATERIAL_ACQUISITION_FIELD]
+        source = f"mission.budget.{MATERIAL_ACQUISITION_FIELD}"
+    elif state_dir is not None:
+        path = Path(state_dir) / MATERIAL_ACQUISITION_POOL_FILE
+        if path.is_file():
+            try:
+                declared = json.loads(path.read_text(encoding="utf-8"))
+            except (OSError, ValueError) as exc:
+                raise BudgetPoolError(f"{MATERIAL_ACQUISITION_POOL_FILE} is unreadable") from exc
+            source = MATERIAL_ACQUISITION_POOL_FILE
+    caps = dict(MATERIAL_ACQUISITION_DEFAULT_CAPS)
+    if declared is not None:
+        if not isinstance(declared, Mapping) or set(declared) - set(caps):
+            raise BudgetPoolError("material acquisition caps name only usd_per_day and calls_per_day")
+        caps.update(declared)
+    try:
+        usd = Decimal(str(caps["usd_per_day"]))
+        calls = caps["calls_per_day"]
+    except Exception as exc:  # noqa: BLE001 - Decimal raises several types
+        raise BudgetPoolError("material acquisition usd_per_day must be a number") from exc
+    if not usd.is_finite() or usd < 0:
+        raise BudgetPoolError("material acquisition usd_per_day must be a non-negative number")
+    if isinstance(calls, bool) or not isinstance(calls, int) or calls < 0:
+        raise BudgetPoolError("material acquisition calls_per_day must be a non-negative integer")
+    return {"pool": MATERIAL_ACQUISITION_POOL,
+            "usd_micros_per_day": int((usd * 1_000_000).to_integral_value()),
+            "calls_per_day": calls, "defaulted": declared is None, "source": source}
 
 
 def _pool_name(value: Any) -> str:

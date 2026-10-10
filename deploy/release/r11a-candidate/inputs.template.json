@@ -3,7 +3,7 @@
   "status": "incomplete",
   "release_ref": "foundation-followup-r11a",
   "source": {
-    "root": "/Users/everflow/Projects/dalton-foundation-followup-r11a-acceptance-worktree",
+    "root": "/path/to/clean-dalton-source",
     "commit": "424c22529d5317c4c5c9dc8ba88f37299cea3f49"
   },
   "artifacts": {

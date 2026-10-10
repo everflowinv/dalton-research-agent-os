@@ -96,7 +96,7 @@ def cockpit_port_busy(port: int) -> bool:
 
 
 def stop_instructions(slug: str) -> str:
-    roles = ("control", "controller", "thesis-impact", "writer")
+    roles = ("control", "controller", "thesis-impact", "publication-worker", "writer")
     lines = ["这个工作区的服务正在运行，先停下来再补（plist 不能在服务活着的时候重渲染）：", ""]
     lines += [f"  launchctl bootout gui/$(id -u)/space.lumos.dalton.workspace.{slug}.{role}"
               for role in roles]
@@ -145,12 +145,12 @@ def build_plan(
     """先全部算清楚再决定要不要写，所以计划和执行读的是同一份结果。"""
 
     workspace = load_workspace_manifest(manifest_path(slug, fleet_root))
-    host_sources = resolve_host_sources(source_state_dir=source_state_dir)
     mission = read_active_mission(workspace.state_dir)
-    if mission is None:
-        raise RepairError(
-            "这个工作区还没有发布研究任务；按任务生成的检索计划无从谈起，"
-            "先在驾驶舱里发布第一个任务再回来跑这个脚本。")
+    # 2026-09-30: a workspace with no mission yet (ws-e399) is repaired too.
+    # Only the mission-generated retrieval plans need a mission, and
+    # ``plan_parity_actions`` already leaves those out when there is none --
+    # the credential slots, routing lineages, host inputs, packaged contracts,
+    # per-call budgets, day-budget policy and claim-support settings do not.
     from dalton_core.workspace_host_scheme import resolve_source_state_dir
 
     # The environment this one is brought up to. Named on the command line, or
@@ -158,6 +158,11 @@ def build_plan(
     # without it the credential slot lists cannot be compared to anything.
     source = resolve_source_state_dir(
         workspace.state_dir, source_state_dir=source_state_dir)
+    # Host inputs are looked for in that same environment, as creation now
+    # does (``workspace_runtime_setup._host_lane_inputs``): the crowd tools,
+    # and their grants only exist in its state (prior-research is per
+    # environment: an empty directory of its own, never a link).
+    host_sources = resolve_host_sources(source_state_dir=source)
     actions = plan_parity_actions(
         workspace.state_dir, actor_ref=actor_ref, host_sources=host_sources,
         mission=mission, lanes=lanes, source_state_dir=source,
@@ -165,7 +170,7 @@ def build_plan(
     identity = _sec_identity(workspace)
     resolve_name = sec_name_resolver(workspace.state_dir, identity) if resolve_names else None
     names = dict(company_names or {})
-    unnamed = unknown_universe_tickers(mission)
+    unnamed = unknown_universe_tickers(mission) if mission is not None else []
     if unnamed and resolve_name is not None:
         names.update(resolve_universe_names(
             [item for item in mission.get("universe") or []
@@ -181,7 +186,7 @@ def build_plan(
         "manifest_path": str(workspace.manifest_path),
         "launch_agents_dir": str(launch_agents_dir),
         "actor_ref": actor_ref,
-        "mission_ref": mission["mission_ref"],
+        "mission_ref": None if mission is None else mission["mission_ref"],
         "host_sources": {k: str(v) for k, v in sorted(host_sources.items())},
         "actions": [action.as_wire() for action in actions],
         "company_names": {k: list(v) for k, v in sorted(names.items())},
@@ -198,7 +203,7 @@ def render_plan(plan: dict[str, Any]) -> str:
     lines = [
         f"工作区：{plan['slug']}（{plan['workspace_id']}）",
         f"状态目录：{plan['state_dir']}",
-        f"研究任务：{plan['mission_ref']}",
+        f"研究任务：{plan['mission_ref'] or '尚未发布（按任务生成的检索计划等首个任务发布后再补）'}",
         f"署名：{plan['actor_ref']}",
         "",
     ]
@@ -210,10 +215,18 @@ def render_plan(plan: dict[str, Any]) -> str:
             verb = {"link": "链接", "governance": "批准并写入",
                     "mission_plan": "按任务生成", "seed": "写入默认值",
                     "routing_policy": "补登记策略血统",
-                    "credential_slots": "补齐模型凭证槽位"}[action["kind"]]
+                    "credential_slots": "补齐模型凭证槽位",
+                    "call_budgets": "对齐每次调用的预算",
+                    "budget_policy": "对齐日预算策略",
+                    "claim_support_settings": "写入核验设置",
+                    "own_dir": "建立本环境自己的目录"}[action["kind"]]
             lines.append(f"  [{verb}] {action['target']}")
             if action["kind"] == "link":
                 lines.append(f"      来源：{action['detail']}")
+                source = plan.get("source_state_dir")
+                if source and Path(action["detail"]).is_relative_to(Path(source)):
+                    lines.append("      注意：这是链到另一个环境状态目录里的链接；"
+                                 "那个环境迁移后会断，迁移时要一并改。")
             else:
                 lines.append(f"      内容：{action['detail']}")
             lines.append(f"      原因：{action['reason']}")
@@ -262,7 +275,7 @@ def restart_instructions(slug: str) -> str:
     lines = ["", "新参数只有服务重启后才会生效。把它们拉起来："]
     lines += [f"  launchctl bootstrap gui/$(id -u) "
               f"~/Library/LaunchAgents/{namespace}.{role}.plist"
-              for role in ("writer", "controller", "control")]
+              for role in ("writer", "controller", "control", "publication-worker")]
     lines += ["", "重启后在驾驶舱看一轮 tick 摘要，确认这些通道不再是 held。", ""]
     return "\n".join(lines)
 
@@ -296,7 +309,8 @@ def main(argv: Sequence[str] | None = None) -> int:
         mission = read_active_mission(workspace.state_dir) or {}
         actor_ref = mission.get("actor_ref")
         if not isinstance(actor_ref, str) or not actor_ref.startswith("human:"):
-            parser.error("无法从任务里读出所有者，请用 --actor-ref human:... 指定")
+            parser.error("无法从任务里读出所有者（还没有发布任务时必须指定），"
+                         "请用 --actor-ref human:... 指定")
     try:
         plan = build_plan(
             args.workspace, fleet_root=fleet_root,

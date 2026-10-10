@@ -20,6 +20,7 @@ from pathlib import Path
 from typing import Any
 
 from .cockpit_model import CockpitModel, CockpitModelError
+from .call_budget import resolve_call_budget, resolve_run_budget
 from .coverage_mission import CoverageMissionAuthority
 from .debate_map import (
     DebateMapAuthority,
@@ -194,12 +195,14 @@ def run_debate_map(
             claim_rows=rows,
             driver_rows=subject_driver_rows(store, subject_ref, constitution),
             thesis=_thesis(store, subject_ref),
+            house_view=house_view(store, subject_ref),
             method=method,
             previous=previous,
             industry_classification=classification,
             max_bytes=TARGET_PROMPT_BYTES,
         )
         prompt = build_prompt(table)
+        summary["house_view"] = [row["ref"] for row in table.get("house_rows") or []]
         summary["prompt_bytes"] = len(prompt.encode("utf-8"))
         summary["prompt_fit"] = fit
         if dry_run:
@@ -240,6 +243,16 @@ def run_debate_map(
                             "failure_reason": "no model configured"})
             return summary
         config = json.loads(Path(model_config_path).expanduser().read_text(encoding="utf-8"))
+        producer_budget = resolve_call_budget(config, "debate_map", defaults={
+            "max_input_tokens": MAX_INPUT_TOKENS, "max_output_tokens": MAX_OUTPUT_TOKENS,
+            "max_cost_usd": MAX_COST_USD, "timeout_seconds": TIMEOUT_SECONDS})
+        verifier_budget = resolve_call_budget(config, "debate_map_verifier", defaults=producer_budget)
+        run_budget = resolve_run_budget(config, "debate_map",
+            defaults={"max_cost_usd": 2 * MAX_COST_USD},
+            call_budgets={"debate_map": producer_budget, "debate_map_verifier": verifier_budget})
+        summary["budget"] = {"run_cost_micros": int(float(run_budget["max_cost_usd"]) * 1_000_000),
+            "producer_cap_micros": int(float(producer_budget["max_cost_usd"]) * 1_000_000),
+            "verifier_cap_micros": int(float(verifier_budget["max_cost_usd"]) * 1_000_000)}
         model = CockpitModel(
             config, scheduler_db=str(scheduler_db or (state_dir / "scheduler.sqlite")),
             max_input_tokens=MAX_INPUT_TOKENS, max_output_tokens=MAX_OUTPUT_TOKENS,
@@ -251,11 +264,11 @@ def run_debate_map(
                 table=table, method=method, model=model, mission=mission,
                 created_at=created_at, previous=previous,
                 family_of=lambda ref: route_family(config["model_router_db"], ref),
-                # One subject, one run: the whole per-call bound is what a
-                # repair may draw on, and it has to leave the verifying call
-                # its own.
-                budget_remaining_micros=int(float(MAX_COST_USD) * 2_000_000),
-                repair_reserve_micros=int(float(MAX_COST_USD) * 1_000_000),
+                # One optional repair must fit its own cap and leave the
+                # independently resolved verifier cap after the draft spend.
+                budget_remaining_micros=summary["budget"]["run_cost_micros"],
+                repair_reserve_micros=(summary["budget"]["producer_cap_micros"]
+                                       + summary["budget"]["verifier_cap_micros"]),
             )
         except SchedulerError as exc:
             summary.update({"status": "succeeded", "map_status": "busy",
@@ -279,6 +292,10 @@ def run_debate_map(
             return summary
         debates = drafted["debates"]
         summary["debates"] = len(debates)
+        if drafted.get("verifier_dropped"):
+            # Named, so the ledger says which debates the verifier faulted
+            # and why they are absent from this version.
+            summary["verifier_dropped"] = list(drafted["verifier_dropped"])
         # Reported, never a refusal: a driver question this kind of company is
         # normally argued about that nothing on this map argues about is a hole
         # in the map, and the reader is the one who decides whether it matters.
@@ -398,6 +415,42 @@ def subject_classification(store: Any, subject_ref: str) -> str | None:
     word = str((record.get("industry_classification") or {})
                .get("classification") or "")
     return word or None
+
+
+def house_view(store: Any, subject_ref: str) -> dict[str, Any] | None:
+    """The current house view on a company, when one exists (batch D).
+
+    Read from the latest published Initial Screen drafted under the batch-D
+    contract: its ``contract.stance`` (看多/看空/中性/观察) and the worksheet's
+    core judgement. A screen without a contract stance, or no screen, is no
+    house view. Read-only, and an unreadable chain is "no view".
+    """
+
+    import json as _json
+
+    slug = str(subject_ref).rsplit(":", 1)[-1]
+    try:
+        row = store.connection.execute(
+            "SELECT v.record_json AS record_json FROM mission_deliverable_pointer p "
+            "JOIN mission_deliverable_versions v ON v.version_id=p.version_id "
+            "WHERE p.deliverable_ref=?", (f"mission-deliverable:initial_screen:{slug}",),
+        ).fetchone()
+    except Exception:  # noqa: BLE001 - no deliverable table is no house view
+        return None
+    if row is None:
+        return None
+    record = _json.loads(row["record_json"])
+    contract = record.get("contract") or {}
+    stance = contract.get("stance")
+    if not stance:
+        return None
+    worksheet = contract.get("worksheet") or {}
+    statement = str(worksheet.get("core_judgement") or record.get("summary") or "")
+    watch = contract.get("watch_price") or {}
+    if watch.get("status") == "given" and watch.get("value"):
+        statement = f"观察价 {watch['value']}。{statement}"
+    return {"ref": record["id"], "stance": str(stance), "statement": statement,
+            "as_of": str(record.get("created_at") or "")[:10]}
 
 
 def _thesis(store: Any, subject_ref: str) -> dict[str, Any] | None:

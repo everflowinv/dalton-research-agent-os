@@ -7,6 +7,8 @@ a bound or an eviction, so a control process that had been up for two minutes
 answered in 30 s where a fresh one answered in 5.
 """
 
+import contextlib
+import io
 import json
 import threading
 import unittest
@@ -205,11 +207,15 @@ class OverviewTtlTests(unittest.TestCase):
         plane = self.stale_plane(build)
         plane.overview()
         self.clock.advance(OVERVIEW_TTL_SECONDS + 1)
-        self.assertEqual(plane.overview(), {"snapshot": 1, "refreshing": True})
-        for _ in range(500):
-            if not plane._overview_building:
-                break
-            threading.Event().wait(0.01)
+        # The failed rebuild is logged to stderr by design; it is the fixture
+        # here, so keep it out of the test output.
+        with contextlib.redirect_stderr(io.StringIO()) as logged:
+            self.assertEqual(plane.overview(), {"snapshot": 1, "refreshing": True})
+            for _ in range(500):
+                if not plane._overview_building:
+                    break
+                threading.Event().wait(0.01)
+        self.assertIn("broken snapshot", logged.getvalue())
         self.assertEqual(plane.overview(), {"snapshot": 1, "refreshing": True})
         for _ in range(500):
             if plane._overview_generation == 2:
@@ -360,6 +366,7 @@ class ClaimsCacheKeyTests(unittest.TestCase):
     def setUp(self):
         import sqlite3
         self.core = sqlite3.connect(":memory:")
+        self.addCleanup(self.core.close)
         self.core.row_factory = sqlite3.Row
         self.core.execute(self.SCHEMA)
         self.plane = CockpitPlane.__new__(CockpitPlane)

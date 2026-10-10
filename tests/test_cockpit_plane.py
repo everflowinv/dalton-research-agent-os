@@ -91,7 +91,11 @@ class CockpitHarness:
                 ref = values.pop("mission_ref")
                 return self.h.missions.create_mission(ref, actor_ref=actor_ref, **values)
             if operation == "decide_thesis_admission":
-                return {"decision_id": params["decision_id"], "verdict": params["verdict"]}
+                from dalton_core.coverage_admission import CoverageAdmissionAuthority
+                from dalton_core.writer_server import WriterServer
+                writer=WriterServer.__new__(WriterServer)
+                writer._coverage_admission=CoverageAdmissionAuthority(self.h.h.core)
+                return writer._op_decide_thesis_admission({**params,"actor_ref":actor_ref})
             raise AssertionError(operation)
 
         def model_factory(config):
@@ -145,7 +149,7 @@ class CockpitPlaneTests(unittest.TestCase):
         MissionStageDriver(self.c.h.missions).run_once()
         after = next(c for c in self.c.plane.overview()["companies"] if c["company_ref"] == company["company_ref"])
         self.assertEqual((after["stage"], after["stage_status"], after["stage_ref"]),
-                         ("初步筛选", "进行中", "initial_screen"))
+                         ("立项初筛", "进行中", "initial_screen"))
         self.assertEqual(after["gate_decision"]["status"], "entered")
         self.assertEqual(view["totals"]["found"], sum(c["progress"]["found"] for c in view["companies"]))
         self.assertEqual(view["activity"]["service_state"], "running")
@@ -165,6 +169,21 @@ class CockpitPlaneTests(unittest.TestCase):
         self.assertNotIn("alphaengine-doc:", ticket_event["title"])
         self.assertEqual(log["cursor"], log["events"][0]["at"])
         self.assertEqual(self.c.plane.log(since=log["cursor"])["events"], [])
+
+    def test_log_names_the_lanes_in_error_for_a_degraded_heartbeat(self) -> None:
+        self.assertEqual(self.c.plane.log()["lanes_in_error"], [])
+        self.c.heartbeat.write_text(json.dumps({
+            "state": "degraded", "last_tick_at": self.c.h.h.clock().isoformat(),
+            "bounded_planner": {"state": "idle", "last_error": None},
+            "weekly_brief": {"state": "error", "last_completed_at": "2026-10-10T00:27:37Z",
+                             "last_error": "RemoteError: request rejected by contract or gate"},
+            "outbox": {"state": "ready"}, "agenda": {"state": "retired"},
+            "plugins": {"static_dashboard": {"state": "pending"}},
+        }), encoding="utf-8")
+        log = self.c.plane.log()
+        self.assertEqual(log["service_state"], "degraded")
+        self.assertEqual([(l["key"], l["label"]) for l in log["lanes_in_error"]], [("weekly_brief", "每周简报")])
+        self.assertTrue(any(e["kind"] == "problem" and e["lane"] == "每周简报" for e in log["events"]))
 
     def test_overview_projects_required_language_publication_policy_read_only(self) -> None:
         policy_path = self.c.core_path.parent / "research-language-policy.json"
@@ -315,6 +334,7 @@ class CockpitPlaneTests(unittest.TestCase):
         done = self.c.wait(job["job_id"])
         self.assertEqual(done["status"], "done", done["error"])
         result = done["result"]
+        # A flat (pre-batch-G) reply keeps its old body; the four parts are in ``sections``.
         self.assertEqual(result["answer"], "Fixture answer.")
         self.assertEqual(result["gaps"],
                          ["nothing on margins（sell_side_report → alphaengine）"])
@@ -325,14 +345,16 @@ class CockpitPlaneTests(unittest.TestCase):
         # block, rather than showing the same blank for "no table here" and
         # "nothing for this company".
         missing = {item["block"]: item["reason"] for item in result["context"]["missing"]}
-        self.assertEqual(missing["valuation"], "no_authority_on_this_core")
-        self.assertEqual(missing["consensus"], "reader_not_available")
+        self.assertEqual(missing["move"], "no_authority_on_this_core")
+        self.assertEqual(missing["passages"], "no_index")
         self.assertEqual(result["context"]["question_kind"], "other")
         self.assertFalse(result["context"]["wants_market_vs_us"])
         # Q1's deterministic layer ran, and its result is a cockpit artefact.
         self.assertEqual(result["quality"]["rubric_ref"], "rubric:ask-answer")
         self.assertFalse(result["quality"]["recorded"])
-        self.assertTrue(result["verification"]["passed"], result["verification"])
+        # A flat (pre-batch-G) reply is shown, and the verifier names the missing parts.
+        self.assertEqual(result["verification"]["failed_checks"],
+                         ["structure_present", "what_happened_cites_evidence"])
         self.assertFalse(result["replayed"])
         self.assertEqual(self.c.adapter.calls, 1)
         # The call was admitted in the day ledger against the mission's caps and settled.
@@ -468,7 +490,6 @@ class CockpitPlaneTests(unittest.TestCase):
 
         self.c.plane.governance_call = governance
         cases = (
-            ("thesis", "admit", "decide_thesis_admission", "rationale"),
             ("capability", "approve", "decide_capability_promotion", "rationale"),
             ("claim", "kept", "decide_claim_retirement", "rationale"),
             ("deep_insight_gate", "approve", "decide_deep_insight_gate", "reason"),
@@ -891,3 +912,50 @@ class TrajectoryTests(unittest.TestCase):
 
 if __name__ == "__main__":
     unittest.main()
+
+
+class PlainLanguageDisplayTests(unittest.TestCase):
+    """2026-10-07 inspection: English template claims and raw transport errors."""
+
+    def test_sec_quarter_comparison_preserves_units_period_and_direction(self):
+        from dalton_core.cockpit_plane import claim_statement_display
+        text = ("Synthetic plc reported Revenues of USD 90000000 for 2026-01-01..2026-03-31, "
+                "down 10% year over year from USD 100000000 in the comparable quarter.")
+        shown = claim_statement_display(text)
+        self.assertIn("同比下降 10%", shown)
+        self.assertIn("2026年1月1日至2026年3月31日", shown)
+        self.assertIn("9000 万美元", shown)
+        self.assertIn("上年同期为 1.00 亿美元", shown)
+        self.assertIsNone(claim_statement_display(text.replace("from USD", "from EUR")))
+
+    def test_figure_claim_templates_read_in_chinese(self):
+        from dalton_core.cockpit_plane import claim_statement_display
+
+        self.assertEqual(claim_statement_display(
+            "Net income for Fiscal Year Ended March 31, 2026 was USD 28 million (currency), "
+            "as published by the company in this document."),
+            "净利润（截至 2026 年 3 月 31 日的财年）为 2800 万美元，依据公司申报文件披露。")
+        self.assertEqual(claim_statement_display(
+            "Book-to-bill ratio (contract awards divided by annual revenue) of for fiscal 2026 "
+            "was 0.98 (ratio), as published by the company in this document."),
+            "订单收入比（新签订单/收入）（2026财年）为 0.98，依据公司申报文件披露。")
+        self.assertEqual(claim_statement_display(
+            "Adjusted Diluted EPS for fiscal 2025 was USD 12.15 (currency), as spoken on the "
+            "earnings call and recorded in this transcript; not read from a filed statement."),
+            "调整后稀释每股收益（2025财年）为 12.15 美元/股，据业绩电话会口述，并非申报报表数据。")
+        self.assertIsNone(claim_statement_display("营业收入同比增长 5%。"))
+        self.assertIsNone(claim_statement_display("Revenue grew in the quarter."))
+
+    def test_fetch_failures_named_in_the_report_are_translated(self):
+        from dalton_core.cockpit_plane import _display_reason
+
+        for raw, shown in (
+            ("fetch outcome retryable; PublicTransportResponseTooLarge: response "
+             "Content-Length exceeds the configured limit", "目标文件过大，超出单次下载上限"),
+            ("fetch outcome retryable; connector transport exceeded the authority deadline",
+             "连接超时，稍后自动重试"),
+            ("fetch outcome retryable; PublicTransportNetworkError: public HTTPS request failed",
+             "网络连接失败，稍后自动重试"),
+            ("acquisition ended orphaned (exit None)", "采集任务中途中断，稍后自动重试"),
+        ):
+            self.assertEqual(_display_reason(raw), shown)

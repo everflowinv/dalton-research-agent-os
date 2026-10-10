@@ -38,10 +38,10 @@ RULE=research-auto-commit:sec-statement-line-growth-fy-minus-9m:v1
 ACTOR=${ACTOR:-human:owner}
 ONLY=${ONLY:-all}
 MODE=${1:-dry-run}
-LEGACY_STATE=${LEGACY_STATE:-/Volumes/EveSSD/Dalton/legacy-state/dalton-core}
-WS7D_STATE=${WS7D_STATE:-/Volumes/EveSSD/Dalton/workspaces/ws-7d894366d1132e2930475a60/state/dalton-core}
-MANAGER=$HOME/.dalton/manager.json
-WS7D_MANIFEST=$HOME/.dalton/workspaces/ws-7d894366d1132e2930475a60/workspace.json
+LEGACY_STATE=${LEGACY_STATE:-"$HOME/Library/Application Support/Dalton/state/dalton-core"}
+WS7D_STATE=${WS7D_STATE:-"$HOME/.dalton/workspaces/ws-7d894366d1132e2930475a60/state/dalton-core"}
+MANAGER=${MANAGER:-$HOME/.dalton/manager.json}
+WS7D_MANIFEST=${WS7D_MANIFEST:-$HOME/.dalton/workspaces/ws-7d894366d1132e2930475a60/workspace.json}
 OUT=$(mktemp -d /tmp/sign-fy-minus-9m-XXXXXX)
 
 say()  { print -r -- "$*"; }

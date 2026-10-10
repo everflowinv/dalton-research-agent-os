@@ -138,11 +138,23 @@ def spec(*, quarters=4, cash="not_material"):
     }
 
 
-def model(missions=None, specification=None, **kwargs):
+def model(missions=None, specification=None, *, legacy=True, **kwargs):
     missions = ledger() if missions is None else missions
     specification = spec() if specification is None else specification
     record = build_forecast_model(
         specification, build_model_inputs(missions, specification), **kwargs)
+    # This file verifies the historical four-quarter single-driver product.
+    # New mechanism forecasts are exercised by test_scenario_valuation. Keep
+    # this read fixture in its original published shape, without bypassing a
+    # new forecast publication boundary.
+    requested = specification["horizon"]["forecast_quarters"] if legacy else len(record["forecast_periods"])
+    record["forecast_periods"] = record["forecast_periods"][:requested]
+    ends = {p["end"] for p in record["forecast_periods"]}
+    record["assumptions"] = [a for a in record["assumptions"] if a["period"]["end"] in ends]
+    for result in record["results"]: result["cells"] = [c for c in result["cells"] if c["period"]["end"] in ends]
+    if legacy:
+        record.pop("execution_contract", None)
+        record.pop("forecast_policy", None)
     # Two fields the authority would have supplied; a projection is bound to
     # both, so the fixture has to carry them.
     record["id"] = "forecast-model-version:fixture:1"
@@ -807,3 +819,11 @@ class RenderTests(unittest.TestCase):
 
 if __name__ == "__main__":  # pragma: no cover
     unittest.main()
+
+
+def new_sensitivity_model():
+    revenues=[Decimal(1000000000)+Decimal(10000000)*i for i in range(8)]
+    rates=[Decimal(x) for x in (".8",".81",".79",".8",".81",".79",".8",".81")]
+    costs=[r*c for r,c in zip(revenues,rates)];sgas=[r*Decimal(".1") for r in revenues]
+    taxes=[(r-c-s)*Decimal(".25") for r,c,s in zip(revenues,costs,sgas)]
+    return model(ledger({REVENUE:revenues,COST:costs,SGA:sgas,TAX:taxes}),spec(quarters=8),legacy=False)

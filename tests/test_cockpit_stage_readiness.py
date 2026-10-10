@@ -68,6 +68,64 @@ class StageReadinessProjectionTests(unittest.TestCase):
                 / "cockpit_control.html").read_text(encoding="utf-8")
         self.assertIn("c.latest_generation_failure", html)
 
+    @staticmethod
+    def write_run(root, name, *, status, at, company="company:epam", reason=None):
+        run = Path(root) / "initial-screens" / name
+        run.mkdir(parents=True)
+        (run / "ticket.json").write_text(json.dumps({"status": status, "completed_at": at}))
+        summary = {"status": status, "drafted": {"company_ref": company}, "sections": []}
+        if reason is not None:
+            summary["failure_reason"] = reason
+        (run / "summary.json").write_text(json.dumps(summary))
+
+    def test_later_success_clears_an_older_failure(self):
+        # P0-1: live EPAM failed at 10:13 and succeeded at 10:28 and on 09-14;
+        # the card kept saying the latest generation failed.
+        with tempfile.TemporaryDirectory() as tmp:
+            self.write_run(tmp, "a", status="failed", at="2026-09-09T10:13:10+00:00",
+                           reason="MissionDeliverableValidationError: number.text must be "
+                                  "text of 1..200 characters")
+            self.write_run(tmp, "b", status="succeeded", at="2026-09-09T10:28:56+00:00")
+            self.write_run(tmp, "c", status="succeeded", at="2026-09-14T19:18:00+00:00")
+            failures = _latest_initial_screen_failures(Path(tmp))
+        self.assertNotIn("company:epam", failures)
+        self.assertEqual(failures, {})
+
+    def test_failure_after_success_is_kept_and_translated(self):
+        with tempfile.TemporaryDirectory() as tmp:
+            self.write_run(tmp, "a", status="succeeded", at="2026-09-09T10:28:56+00:00")
+            self.write_run(tmp, "b", status="failed", at="2026-09-14T19:18:00+00:00",
+                           reason="MissionDeliverableValidationError: number.text must be "
+                                  "text of 1..200 characters")
+            self.write_run(tmp, "c", status="succeeded", at="2026-09-14T19:18:00+00:00",
+                           company="company:acn")
+            failures = _latest_initial_screen_failures(Path(tmp))
+        label = failures["company:epam"]
+        self.assertTrue(label.startswith("最新一次报告生成失败："))
+        self.assertNotIn("MissionDeliverableValidationError", label)
+        self.assertNotIn("number.text", label)
+        self.assertIn("格式校验", label)
+        self.assertNotIn("company:acn", failures)
+
+    def test_chinese_failure_reason_is_shown_as_written(self):
+        with tempfile.TemporaryDirectory() as tmp:
+            self.write_run(tmp, "a", status="failed", at="2026-09-14T11:52:07+00:00",
+                           reason="没有任何一节写出来，不发布空壳")
+            failures = _latest_initial_screen_failures(Path(tmp))
+        self.assertEqual(failures["company:epam"], "最新一次报告生成失败：没有任何一节写出来，不发布空壳")
+
+    def test_an_idle_ticket_without_a_company_does_not_clear_anything(self):
+        with tempfile.TemporaryDirectory() as tmp:
+            self.write_run(tmp, "a", status="failed", at="2026-09-14T11:52:07+00:00",
+                           reason="没有任何一节写出来，不发布空壳")
+            run = Path(tmp) / "initial-screens" / "idle"
+            run.mkdir()
+            (run / "ticket.json").write_text(json.dumps(
+                {"status": "succeeded", "completed_at": "2026-09-30T00:00:00+00:00"}))
+            (run / "summary.json").write_text(json.dumps({"status": "idle", "drafted": None}))
+            failures = _latest_initial_screen_failures(Path(tmp))
+        self.assertIn("company:epam", failures)
+
 
 if __name__ == "__main__":
     unittest.main()

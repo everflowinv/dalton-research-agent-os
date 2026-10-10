@@ -490,6 +490,7 @@ def argv_fragment(context: Any) -> list[str]:
 
 LANE = register_lane(LaneSpec(
     operation="dispatch_company_model_spec",
+    failure_ledger="mission_model_spec",
     order=90,
     driver_key="company_model_spec",
     handler=dispatch,

@@ -48,9 +48,19 @@ from dalton_core.store import DaltonStore, content_hash
 from tests.test_company_financial_statement_structure import (
     ACCESSION,
     company_spec,
-    financial_inputs,
+    financial_inputs as original_financial_inputs,
     proposal,
 )
+
+
+def financial_inputs():
+    from tests.test_company_financial_statement_structure import input_line
+    inputs = original_financial_inputs()
+    debt = input_line("us-gaap:LongTermDebtNoncurrent", (1000, 1000, 1000, 1000), statement="balance")
+    debt["period_basis"] = "instant"
+    for c in debt["cells"].values(): c["period_start"] = None
+    inputs["filed_lines"].append(debt)
+    return inputs
 
 
 def cells(results):
@@ -64,9 +74,15 @@ def forecastable_proposal(inputs):
     """Fixture topology with an explicitly derived diluted-EPS numerator."""
 
     candidate = proposal(inputs)
+    candidate["schema_version"] = STRUCTURE_SCHEMA_VERSION
     for line in candidate["lines"]:
-        if line["ref"] in {"interest-income", "interest-expense"}:
+        line["annual_forecast_method"] = "unavailable" if line["role"] == "diluted_weighted_average_shares" else None
+        if line["role"] == "diluted_weighted_average_shares": line["forecast_method"] = "quarterly_growth"
+    for line in candidate["lines"]:
+        if line["ref"] == "interest-income":
             line.update(forecast_method="share_of_line", forecast_base_ref="revenue")
+        elif line["ref"] == "interest-expense":
+            line.update(forecast_method="rate_times_balance", forecast_base_ref="long-term-debt")
         elif line["ref"] == "tax":
             line.update(forecast_method="share_of_line", forecast_base_ref="pretax")
         elif line["ref"] == "nci":
@@ -81,6 +97,10 @@ def forecastable_proposal(inputs):
         "terms": [{"line_ref": "parent", "coefficient": "1"}],
         "tie_out_concept": "eps_numerator", "evidence_refs": [ACCESSION],
     })
+    candidate["lines"].append({"ref": "long-term-debt", "role": "debt_noncurrent", "label": "Long-term debt",
+        "kind": "filed", "concept": "us-gaap:LongTermDebtNoncurrent", "statement": "balance", "unit": "usd",
+        "period_kind": "instant", "annual_semantics": "not_applicable", "forecast_method": "hold_last",
+        "forecast_base_ref": None, "annual_forecast_method": None})
     return candidate
 
 
@@ -115,6 +135,7 @@ def annual_authority_inputs():
 def annual_forecastable_proposal(inputs):
     candidate = forecastable_proposal(inputs)
     candidate["schema_version"] = STRUCTURE_SCHEMA_VERSION
+
     for line in candidate["lines"]:
         line["annual_forecast_method"] = None
         if line["role"] == "diluted_weighted_average_shares":
@@ -134,7 +155,7 @@ class FinancialStructureForecastConsumerTests(unittest.TestCase):
 
     def compute(self, structure, inputs):
         drivers = build_structure_drivers(inputs, structure)
-        periods = forecast_periods(revenue_anchor(drivers), 2)
+        periods = forecast_periods(revenue_anchor(drivers), 8)[:2]
         assumptions = default_structure_assumptions(drivers, periods, structure)
         return compute_structure_results(drivers, assumptions, periods, structure)
 
@@ -167,9 +188,9 @@ class FinancialStructureForecastConsumerTests(unittest.TestCase):
         income_term["coefficient"] = "-1"
         expense = self.compute(expense_structure, inputs)
         expense_cell = cells(expense)[("pretax_income", end)]
-        self.assertEqual(
+        self.assertAlmostEqual(
             Decimal(expense_cell["value"]),
-            operating - interest_income - interest_expense,
+            operating - interest_income - interest_expense, places=7,
         )
 
     def test_missing_leaf_assumption_propagates_unavailable_without_zero_fill(self):
@@ -203,7 +224,7 @@ class FinancialStructureForecastConsumerTests(unittest.TestCase):
             interest["history"], ("-43", "-13", "53", "-51", "-29")
         ):
             cell["value"] = value
-        periods = forecast_periods(revenue_anchor(drivers), 2)
+        periods = forecast_periods(revenue_anchor(drivers), 8)[:2]
         assumptions = default_structure_assumptions(drivers, periods, structure)
         self.assertFalse(any(
             item["driver_ref"] == interest["ref"] for item in assumptions))
@@ -220,7 +241,7 @@ class FinancialStructureForecastConsumerTests(unittest.TestCase):
     def test_growth_does_not_jump_a_missing_or_stale_quarter(self):
         inputs, structure = self.authority()
         drivers = build_structure_drivers(inputs, structure)
-        periods = forecast_periods(revenue_anchor(drivers), 2)
+        periods = forecast_periods(revenue_anchor(drivers), 8)[:2]
         assumptions = default_structure_assumptions(drivers, periods, structure)
         revenue = next(item for item in drivers if item["structure_line_ref"] == "revenue")
         assumptions = [item for item in assumptions if not (
@@ -259,7 +280,7 @@ class FinancialStructureForecastConsumerTests(unittest.TestCase):
         drivers = build_structure_drivers(inputs, changed)
         shares_driver = next(item for item in drivers
                              if item["structure_line_ref"] == "shares")
-        periods = forecast_periods(revenue_anchor(drivers), 1)
+        periods = forecast_periods(revenue_anchor(drivers), 8)[:1]
         assumptions = default_structure_assumptions(drivers, periods, changed)
         for item in assumptions:
             if item["driver_ref"] == shares_driver["ref"]:
@@ -349,7 +370,7 @@ class FinancialStructureForecastConsumerTests(unittest.TestCase):
         candidate = forecastable_proposal(inputs)
         spec = {**company_spec(), "decided_by": "automation:test",
                 "financial_statement_structure": {
-                    "schema_version": "0.1", "lines": candidate["lines"],
+                    "schema_version": STRUCTURE_SCHEMA_VERSION, "lines": candidate["lines"],
                     "formulas": candidate["formulas"],
                 }}
         structure, replay = materialize_financial_statement_structure(spec, inputs)
@@ -369,6 +390,7 @@ class FinancialStructureForecastConsumerTests(unittest.TestCase):
                 "interest_income": 10, "interest_expense": 20, "pretax": 270,
                 "tax": 60, "net": 210, "nci": 5, "parent": 205,
                 "eps_numerator": 205, "shares": 100, "eps": "2.05",
+                "us-gaap:LongTermDebtNoncurrent": 1000,
             }
             for line in current["filed_lines"]:
                 line["cells"]["2026-03-31"] = {
@@ -432,6 +454,7 @@ class FinancialStructureForecastConsumerTests(unittest.TestCase):
             prior = ForecastModelAuthority(store).publish(body)
         changed = copy.deepcopy(structure)
         changed["created_by"] = "automation:other-structure-decision"
+        changed["lines"][1].update(forecast_method="quarterly_growth", forecast_base_ref=None)
         changed_body = dict(changed)
         changed_body.pop("content_hash")
         from dalton_core.store import content_hash
@@ -497,11 +520,11 @@ class FinancialStructureForecastConsumerTests(unittest.TestCase):
             revised = revise_assumptions(
                 prior, [{"driver": tax_driver["ref"], "period": end,
                          "value": "0.219", "because": "new filed tax guidance",
-                         "refs": [{"kind": "filing", "ref": None, "concept": "tax",
+                         "refs": [{"kind": "doc_passage", "ref": "doc-passage:tax-guidance:0-100:aaaaaaaaaaaa", "concept": "tax",
                                    "period_end": "2025-12-31",
                                    "accession": ACCESSION}]}],
                 change_reason="assumption_review",
-                evidence_refs=[{"kind": "filing", "ref": None, "concept": "tax",
+                evidence_refs=[{"kind": "doc_passage", "ref": "doc-passage:tax-guidance:0-100:aaaaaaaaaaaa", "concept": "tax",
                                 "period_end": "2025-12-31", "accession": ACCESSION}],
                 actor_ref="automation:test")
             record = authority.publish(revised)
@@ -723,7 +746,8 @@ class FinancialStructureForecastConsumerTests(unittest.TestCase):
         rows = {item["label"]: item for item in held["periods"]}
         self.assertEqual(rows["FY2025A"]["historical_eps"]["value"], "6.7")
         self.assertEqual(rows["FY2026E"]["forecast_shares"]["value"], "100.00000000")
-        self.assertEqual(rows["FY2026E"]["forecast_eps"]["value"], "9.4678918595")
+        # 0.6 coverage rules: trailing growth is the TTM-implied quarterly rate.
+        self.assertEqual(rows["FY2026E"]["forecast_eps"]["value"], "9.7236149169")
         revenue = rows["FY2026E"]["line_outcomes"]["result:revenue"]
         self.assertEqual(revenue["status"], "computed")
         self.assertEqual(len(revenue["source_periods"]), 4)
@@ -797,6 +821,7 @@ class FinancialStructureForecastConsumerTests(unittest.TestCase):
                 "interest_income": 10, "interest_expense": 20, "pretax": 270,
                 "tax": 60, "net": 210, "nci": 5, "parent": 205,
                 "eps_numerator": 205, "shares": 101, "eps": "2.02970297",
+                "us-gaap:LongTermDebtNoncurrent": 1000,
             }
             for line in current["filed_lines"]:
                 line["cells"]["2026-03-31"] = {

@@ -7,6 +7,8 @@ the only thing that keeps this lane from producing a weekly newsletter.
 
 from __future__ import annotations
 
+from tests.thesis_question_fixtures import formal_content
+
 import json
 import tempfile
 import unittest
@@ -107,6 +109,12 @@ class ConvictionHarness(P14aHarness):
     def setUp(self):
         super().setUp()
         self.pass_screen(ACN)
+        # These are the v1 (P15d) lane's tests: every workspace now drafts
+        # under Conviction v2 (ADR-0013, tests/test_conviction_v2.py), and the
+        # v1 gate is kept reachable so its behaviour stays pinned.
+        gate = patch("dalton_core.conviction_call_cli.active_gate", return_value="v1")
+        gate.start()
+        self.addCleanup(gate.stop)
 
     def admit_thesis(self, company_ref="industry:us-it-services",
                      thesis_ref="thesis:us-it-services:lag"):
@@ -131,14 +139,14 @@ class ConvictionHarness(P14aHarness):
             mandate_version_hash=self.state["mandate"]["content_hash"],
             driver_pack_version_ref=self.state["pack"]["id"],
             driver_pack_version_hash=self.state["pack"]["content_hash"],
-            content={
+            content=formal_content(self.store, {
                 "statement": "Bookings lead revenue by two to four quarters.",
                 "mechanism": "The lag is the whole of the disagreement.",
                 "confidence": "medium",
                 "implied_expectation": "FY27 growth is high single digit.",
                 "claim_refs": [], "catalyst_refs": ["catalyst:quarterly-results"],
                 "falsifier_refs": ["falsifier:x"], "change_reason": "fixture",
-            },
+            }, question="question:" + thesis_ref, industry=("industry:us-it-services" if str(company_ref).startswith("industry:") else None)),
             actor_ref="human:coverage-owner",
             idempotency_key=f"thesis-admission-candidate:{thesis_ref}",
         )
@@ -373,7 +381,12 @@ class GateRunTests(ConvictionHarness):
             "consensus": "69000", "unit": "USDm", "gap_percent": "18",
             "refs": ["forecast-model-version:1"]}]}
         self.inject(module)
-        found = consensus_gap(self.store, ACN)
+        # Adapter success is exercised with an admitted source row. The new
+        # numerical gate must not admit this invented callback by shape alone.
+        from unittest.mock import patch
+        admitted=module.latest_consensus(self.store,ACN)["metrics"]
+        with patch("dalton_core.conviction_call_cli.comparable_consensus_metrics",return_value=(admitted,None)):
+            found = consensus_gap(self.store, ACN)
         self.assertEqual(found["status"], "available")
         self.assertEqual(found["metrics"][0]["gap_percent"], "18")
 

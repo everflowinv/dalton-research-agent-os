@@ -25,6 +25,7 @@ from pathlib import Path
 from typing import Any, Iterable, Mapping
 
 from .dashboard_projector import project_dashboard
+from .projection_cancellation import ProjectionCancelled, check_cancelled
 from .agenda_coordinator import AgendaCoordinator, AgendaCoordinatorConfig
 from .agenda_control import AgendaControlConfig
 from .backup import DatabaseBackupManager
@@ -46,6 +47,9 @@ from .workspace_runtime import WorkspaceRuntimeError, validate_runtime_context
 
 SCHEMA_VERSION = "0.1"
 CHILD_SETTLEMENT_INTERVAL_SECONDS = 15.0
+#: How long a projection round waits before retrying an index build that a
+#: busy writer deferred.
+PROJECTION_INDEX_RETRY_SECONDS = 300.0
 
 
 class ServiceConfigError(RuntimeError):
@@ -158,6 +162,11 @@ class ServiceConfig:
     # retirement.
     legacy_agenda_plane: bool = False
     workspace: WorkspaceBinding | None = None
+    # Vision-gap #13: the environment's overrides of owner delivery's numbers
+    # (digest window, day cap, fallback rate limit, cockpit link).  Defaults
+    # are code (``owner_delivery.DEFAULT_SETTINGS``); the recipient is not
+    # here -- it is the owner's field in the approval file.
+    owner_delivery: Mapping[str, Any] | None = None
 
     @classmethod
     def from_mapping(cls, raw: Mapping[str, Any]) -> "ServiceConfig":
@@ -171,7 +180,7 @@ class ServiceConfig:
             "agenda", "weekly_brief", "bounded_planner", "outbox", "control",
             "backup", "thesis_impact", "document_extraction",
             "alphaengine_owner_call_cap", "web_search_expected_provider", "raw_spool",
-            LEGACY_AGENDA_PLANE_KEY, "workspace",
+            LEGACY_AGENDA_PLANE_KEY, "workspace", "owner_delivery",
             # B1-4: optional, with a default that is not two seconds.  A
             # config that predates this still carries the key and still wins;
             # one that omits it gets the interval a full rebuild can actually
@@ -301,7 +310,13 @@ class ServiceConfig:
                 outbox_interval = _positive_number(
                     outbox_raw["interval_seconds"], "outbox.interval_seconds"
                 )
-        if weekly_brief_config is not None:
+        from .weekly_brief_workspace_plan import is_local_destination
+
+        # A plan read from its file is checked when it is published (the
+        # writer refuses a remote destination this service does not serve);
+        # a local destination needs no outbox bridge at all.
+        if (weekly_brief_config is not None and weekly_brief_config.plan is not None
+                and not is_local_destination(weekly_brief_config.plan.destination_ref)):
             if outbox_config is None:
                 raise ServiceConfigError(
                     "enabled weekly brief coordinator requires the outbox bridge"
@@ -434,7 +449,14 @@ class ServiceConfig:
             workspace = WorkspaceBinding(
                 identity, _absolute_path(workspace_raw["manifest_path"],
                                          "workspace.manifest_path").resolve(), digest)
+        from .owner_delivery import OwnerDeliveryError, validate_settings
+
+        try:
+            owner_delivery = validate_settings(raw.get("owner_delivery")) or None
+        except OwnerDeliveryError as exc:
+            raise ServiceConfigError(str(exc)) from exc
         return cls(
+            owner_delivery=owner_delivery,
             raw_spool_max_total_bytes=spool_raw.get("max_total_bytes"),
             raw_spool_archive_after_seconds=spool_raw.get("archive_after_seconds"),
             document_extraction_max_windows=extraction_max_windows,
@@ -665,7 +687,7 @@ class DaltonService:
             "last_success_at": None, "last_snapshot_id": None,
             "last_retention": None, "last_error": None,
         }
-        self._restore_backup_cadence()
+        self._backup_cadence_restored = self._backup is None
         self._publish_raw_spool_capacity()
 
     def _publish_raw_spool_capacity(self) -> None:
@@ -697,13 +719,10 @@ class DaltonService:
                 # and the built-in default still bound every write.
                 self._last_error = f"raw spool capacity policy not published: {exc}"
 
-    def _restore_backup_cadence(self) -> None:
+    def _restore_backup_cadence(self, manifest: Mapping[str, Any]) -> None:
         """Anchor the monotonic interval to the newest verified snapshot."""
 
         if self._backup is None or self.config.backup_interval_seconds is None:
-            return
-        manifest = self._backup.latest_verified_manifest()
-        if manifest is None:
             return
         try:
             created = datetime.fromisoformat(
@@ -746,9 +765,13 @@ class DaltonService:
             self._sweep_executor.shutdown(wait=True, cancel_futures=True)
             self._sweep_executor = None
             raise
-        if not self.config.legacy_agenda_plane:
-            # ADR-0009: one line, once, at start. launchd captures stderr, so
-            # the log says why no agenda cycle will ever appear again.
+        if not self.config.legacy_agenda_plane and not self._retirement_already_logged():
+            # ADR-0009: one line, once. launchd captures stderr, so the log
+            # says why no agenda cycle will ever appear again -- but it says
+            # it once per environment, not once per restart: legacy's
+            # controller.stderr had 143 copies of it by 2026-09-30.  The
+            # previous heartbeat already reading ``retired`` is the proof the
+            # line was written by an earlier start of this same environment.
             print(LEGACY_AGENDA_RETIRED_LINE, file=sys.stderr, flush=True)
         if self._agenda is not None:
             self._agenda_executor = concurrent.futures.ThreadPoolExecutor(
@@ -1080,9 +1103,19 @@ class DaltonService:
         return {"manifest": manifest, "retention": retention,
                 "retention_error": retention_error}
 
+    def _perform_initial_backup(self) -> dict[str, Any]:
+        """Verify cadence off the controller thread, without starting a backup.
+
+        The existing manifest/file hash gate remains unchanged. A due/missing
+        verified backup is admitted only by a later controller poll, so stop
+        during verification cannot launch a new SQLite backup afterwards.
+        """
+        return {"restored_manifest": self._backup.latest_verified_manifest()}
+
     def _poll_backup(self, *, allow_launch: bool = True) -> None:
         if self._backup is None or self.config.backup_interval_seconds is None:
             return
+        allow_launch = allow_launch and not self._stop.is_set()
         future = self._backup_future
         if future is not None and future.done():
             self._backup_future = None
@@ -1093,6 +1126,12 @@ class DaltonService:
                 self._last_backup_monotonic = time.monotonic()
                 self._backup_state.update(
                     state="error", last_error=f"{type(exc).__name__}: {exc}")
+                return
+            self._backup_cadence_restored = True
+            if "restored_manifest" in result:
+                self._backup_state.update(state="pending", last_error=None)
+                if result["restored_manifest"] is not None:
+                    self._restore_backup_cadence(result["restored_manifest"])
                 return
             manifest = result["manifest"]
             self._last_backup_monotonic = time.monotonic()
@@ -1118,8 +1157,11 @@ class DaltonService:
         if executor is None:
             raise RuntimeError("backup executor is unavailable")
         self._backup_state.update(
-            state="running", last_started_at=_utc_now(), last_error=None)
-        self._backup_future = executor.submit(self._perform_backup)
+            state="running" if self._backup_cadence_restored else "restoring",
+            last_started_at=_utc_now(), last_error=None)
+        self._backup_future = executor.submit(
+            self._perform_backup if self._backup_cadence_restored
+            else self._perform_initial_backup)
 
     def _run_backup(self) -> None:
         """Compatibility entry point for the controller's backup poll."""
@@ -1142,20 +1184,37 @@ class DaltonService:
 
         if getattr(self, "_projection_indexes_applied", False):
             return
-        self._projection_indexes_applied = True
+        # 2026-09-29: the flag used to be set before the attempt, so one busy
+        # writer at the first round (``deferred``: database is locked) left
+        # the indexes unbuilt -- and every round scanning -- until the process
+        # restarted.  A deferral is retried a few minutes later instead; only
+        # a table that does not exist yet is not worth retrying for.
+        if time.monotonic() < getattr(self, "_projection_indexes_retry_at", 0.0):
+            return
+        self._projection_indexes_retry_at = (
+            time.monotonic() + PROJECTION_INDEX_RETRY_SECONDS)
         try:
             from .migrations import apply_projection_indexes
 
-            apply_projection_indexes(
+            report = apply_projection_indexes(
                 core_db=self.config.core_db,
                 scheduler_db=self.config.scheduler_db,
             )
         except Exception:  # noqa: BLE001 - a projection never fails over an index
-            pass
+            return
+        retryable = [
+            name
+            for section in report.values() if section
+            for name, reason in section["deferred"].items()
+            if reason not in ("table is absent", "absent")
+        ]
+        if not retryable:
+            self._projection_indexes_applied = True
 
     def _build_projection(
         self, source_signature: tuple[Any, ...]
     ) -> tuple[dict[str, Any], tuple[Any, ...]]:
+        check_cancelled(self._stop.is_set)
         self._ensure_projection_indexes()
         snapshot = project_dashboard(
             self.config.core_db,
@@ -1163,6 +1222,7 @@ class DaltonService:
             self.config.projection_db,
             capability_catalog_db=self.config.capability_catalog_db,
             model_router_db=self.config.model_router_db,
+            cancel_requested=self._stop.is_set,
         )
         return snapshot, source_signature
 
@@ -1194,6 +1254,10 @@ class DaltonService:
         self._last_projection_monotonic = time.monotonic()
         try:
             snapshot, signature_before = future.result()
+        except ProjectionCancelled:
+            # A controlled stop is not a failed research/projection result.
+            # Keep the last successfully published watermark and timestamp.
+            return
         except Exception as exc:
             self._projection_error = f"{type(exc).__name__}: {exc}"
             return
@@ -1298,10 +1362,13 @@ class DaltonService:
             # ``--once`` is a maintenance cycle and historically returned
             # only after its backup finished. Persistent ticks take the
             # non-waiting path above and keep heartbeats moving.
-            backup_future = self._backup_future
-            if backup_future is not None:
-                concurrent.futures.wait((backup_future,))
+            while self._backup_future is not None:
+                concurrent.futures.wait((self._backup_future,))
                 self._poll_backup(allow_launch=False)
+                # Initial verification never launches a snapshot itself.
+                # Maintenance --once may admit the due snapshot here, but a
+                # stopped controller never starts new backup work.
+                self._poll_backup(allow_launch=not self._stop.is_set())
         self._last_tick_at = _utc_now()
         self._last_error = self._sweep_error or self._projection_error
         degraded = self._sweep_error is not None \
@@ -1357,6 +1424,22 @@ class DaltonService:
             "last_error": self._last_error,
         }
 
+    def _retirement_already_logged(self) -> bool:
+        """Whether an earlier start already announced the retired agenda plane.
+
+        Read from the heartbeat this environment left behind: only a start that
+        printed the line (or would have) writes ``agenda.state = retired``.  A
+        missing or unreadable heartbeat means a first start, so the line is
+        written -- saying it one extra time is cheaper than never saying it.
+        """
+
+        try:
+            previous = json.loads(Path(self.config.heartbeat_path).read_text(encoding="utf-8"))
+        except (OSError, ValueError):
+            return False
+        agenda = previous.get("agenda") if isinstance(previous, Mapping) else None
+        return isinstance(agenda, Mapping) and agenda.get("state") == "retired"
+
     def _write_heartbeat(self, state: str) -> dict[str, Any]:
         value = self._heartbeat(state)
         _atomic_json(self.config.heartbeat_path, value)
@@ -1379,6 +1462,14 @@ class DaltonService:
 
 
 def main(argv: Iterable[str] | None = None) -> int:
+    # P3 (2026-09-30): every stderr line of this daemon carries its time.
+    from .stderr_timestamps import timestamped_stderr
+
+    with timestamped_stderr():
+        return _main(argv)
+
+
+def _main(argv: Iterable[str] | None = None) -> int:
     from .controller_singleton import ControllerConflict, ControllerOwnership
 
     parser = argparse.ArgumentParser(description="Run the persistent Dalton controller")

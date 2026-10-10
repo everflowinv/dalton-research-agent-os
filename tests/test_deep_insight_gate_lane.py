@@ -436,7 +436,17 @@ class Harness:
         self.mission = rolled
         return rolled
 
-    def run(self, **kwargs):
+    def run(self, *, answer_standards: bool = False, **kwargs):
+        """Run the lane once.
+
+        Batch D's answer standards (q7 >=5-year attribution, q9 high-frequency
+        indicator, q10 full earnings chain on an invariant-passing model) are
+        off by default here for the same reason ``PERMISSIVE_STANDARD`` is:
+        these fixtures answer with one generic sentence and are about the
+        drafting contract, the chain and the decision.  The tests about the
+        standards pass ``answer_standards=True``.
+        """
+
         options = {
             "state_dir": self.state_dir,
             "model_config_path": self.model_config,
@@ -447,7 +457,13 @@ class Harness:
             "family_resolver": resolver,
         }
         options.update(kwargs)
-        return run_gate(**options)
+        if answer_standards:
+            return run_gate(**options)
+        from unittest.mock import patch
+
+        with patch("dalton_core.deep_insight_gate_standards.apply_answer_standards",
+                   lambda answers, **_: (dict(answers), [])):
+            return run_gate(**options)
 
     def gates(self):
         return DeepInsightGateAuthority(self.store)
@@ -1179,7 +1195,10 @@ class CockpitTests(unittest.TestCase):
 
     def test_the_undecided_gate_is_listed_with_a_plain_title(self):
         item = self.gate_item(self.plane())
-        self.assertEqual(item["title"], "深度认知评审十二问：是否让这家公司进入完整覆盖")
+        # P2-7: the company is in the title, so two gates never look alike.
+        self.assertEqual(item["title"], f"深度认知评审十二问：是否让 {item['who']} 进入完整覆盖")
+        self.assertNotIn("这家公司", item["title"])
+        self.assertIn("ACN", item["title"])
         self.assertEqual(item["ref"], self.draft["id"])
         self.assertEqual(item["hash"], self.draft["content_hash"])
         self.assertEqual([action["decision"] for action in item["actions"]],
@@ -1328,7 +1347,7 @@ class CockpitTests(unittest.TestCase):
         self.assertNotIn("rationale_default", plain)
         self.assertEqual(
             [action["label"] for action in plain["actions"]
-             if action["decision"] == "return_for_more_work"], ["退回补充"])
+             if action["decision"] == "return_for_more_work"], ["退回补充资料"])
 
     def test_a_decided_gate_leaves_the_page(self):
         plane = self.plane()

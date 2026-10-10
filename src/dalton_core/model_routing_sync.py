@@ -39,6 +39,22 @@ done that way:
   again: only the cockpit's own save handler calls this module, and a writer
   serving ``set_model_selection`` does not.
 
+**Which lineages a comparison asks (2026-10-02).**  An environment holds
+service-pin lineages -- ``dalton-openclaw``, ``-assessment``, ``-verifier``,
+and in the legacy environment also ``-planner`` and ``-smoke`` -- that declare
+one tier or none.  The source side has always ignored a lineage that does not
+declare a tier ("not disagreeing about it"); the target side did not, so every
+alignment run reported those lineages as "（没有这一项）" for tiers and stages
+no writer call can ever give them, and "还有 N 个环境与源环境不同" was a
+permanent false positive.  Both sides, and the fan-out's "already there"
+check, now ask only ``tier_holders`` / ``purpose_holders``: the lineages that
+declare the tier (or, for a stage, carry its pin or declare its tier), falling
+back to every lineage when none does.  ``route_activity`` additionally lets the
+alignment script resolve a *source* conflict that only idle lineages cause --
+lineages that made no route decision recently -- in favour of the lineages that
+do route, saying so in ``idle_ignored``; a conflict among routing lineages is
+still the owner's decision, now shown per lineage in ``conflict_details``.
+
 Nothing here opens the Core, writes a Claim, or touches the OpenClaw
 configuration.
 """
@@ -48,6 +64,7 @@ from __future__ import annotations
 import json
 from collections.abc import Iterable, Mapping, Sequence
 from dataclasses import dataclass
+from datetime import datetime, timezone
 from pathlib import Path
 from typing import Any, Callable
 
@@ -237,7 +254,7 @@ def host_environments(
             manifest = json.loads(manifest_path.read_text(encoding="utf-8"))
         except (OSError, UnicodeError, ValueError):
             continue
-        if not isinstance(manifest, Mapping):
+        if not isinstance(manifest, Mapping) or manifest.get("lifecycle", "active") != "active":
             continue
         state_dir = manifest.get("state_dir")
         slug = manifest.get("slug") or manifest_path.parent.name
@@ -284,8 +301,10 @@ _LATEST_POLICIES_SQL = (
 )
 
 
-def latest_policies(router_db: str | Path) -> dict[str, dict[str, Any]]:
-    """The head of every policy lineage in one environment, keyed by policy id.
+def _query_router(
+    router_db: str | Path, sql: str, params: Sequence[Any] = (),
+) -> list[Any]:
+    """Run one read-only query against one environment's router.
 
     The strict WAL reader first, because on a *running* environment that is the
     connection that cannot write even by accident and that sees the writer's
@@ -295,6 +314,9 @@ def latest_policies(router_db: str | Path) -> dict[str, dict[str, Any]]:
     waking it.  So a plain ``mode=ro`` connection is the fallback: it cannot
     create a file and cannot write, and the main file is the whole truth once
     the writer has gone.
+
+    ``sqlite3.Error`` is left to the caller, which knows whether an unreadable
+    table is fatal (the policies) or merely unknown (the route decisions).
     """
 
     import sqlite3
@@ -312,15 +334,64 @@ def latest_policies(router_db: str | Path) -> dict[str, dict[str, Any]]:
         connection = sqlite3.connect(f"file:{database}?mode=ro", uri=True, timeout=5)
         connection.row_factory = sqlite3.Row
     try:
-        rows = connection.execute(_LATEST_POLICIES_SQL).fetchall()
-    except sqlite3.Error as exc:
-        raise ModelRoutingSyncError(f"{database} 读不出路由策略：{exc}") from exc
+        return connection.execute(sql, tuple(params)).fetchall()
     finally:
         if opened is not None:
             opened.close()
         else:
             connection.close()
+
+
+def latest_policies(router_db: str | Path) -> dict[str, dict[str, Any]]:
+    """The head of every policy lineage in one environment, keyed by policy id.
+
+    Read through ``_query_router``: strict WAL reader on a running environment,
+    plain ``mode=ro`` on a stopped one.
+    """
+
+    import sqlite3
+
+    try:
+        rows = _query_router(router_db, _LATEST_POLICIES_SQL)
+    except sqlite3.Error as exc:
+        raise ModelRoutingSyncError(
+            f"{Path(router_db).expanduser()} 读不出路由策略：{exc}") from exc
     return {row["policy_id"]: json.loads(row["policy_json"]) for row in rows}
+
+
+_ROUTE_ACTIVITY_SQL = (
+    "SELECT v.policy_id AS policy_id, COUNT(*) AS decisions, "
+    "MAX(d.created_at) AS last_decision_at "
+    "FROM model_route_decisions d JOIN model_routing_policy_versions v "
+    "ON v.policy_version_ref = d.policy_version_ref "
+    "WHERE d.created_at >= ? GROUP BY v.policy_id"
+)
+
+
+def route_activity(
+    router_db: str | Path, *, since: datetime,
+) -> dict[str, dict[str, Any]] | None:
+    """Which policy lineages actually routed a call since ``since``.
+
+    Keyed by ``policy_id``; a lineage absent from the result made no route
+    decision in the window.  ``None`` -- not an empty dict -- when the decision
+    table cannot be read at all, so a caller can tell "nobody routed" from "I
+    do not know who routed" and never resolves a conflict on the second.
+    Read-only, through the same connection rules as ``latest_policies``.
+    """
+
+    import sqlite3
+
+    stamp = since.astimezone(timezone.utc).isoformat(timespec="microseconds")
+    try:
+        rows = _query_router(router_db, _ROUTE_ACTIVITY_SQL, (stamp,))
+    except sqlite3.Error:
+        return None
+    return {
+        str(row["policy_id"]): {"decisions": int(row["decisions"]),
+                                "last_decision_at": row["last_decision_at"]}
+        for row in rows
+    }
 
 
 def current_tier_chains(router_db: str | Path) -> dict[str, dict[str, list[str]]]:
@@ -337,6 +408,7 @@ def current_tier_chains(router_db: str | Path) -> dict[str, dict[str, list[str]]
         chains[policy_id] = {
             str(tier): [str(link) for link in (links or [])]
             for tier, links in tiers.items()
+            if tier != "legacy_default" and not str(tier).startswith("saved_default_")
         }
     return chains
 
@@ -350,6 +422,77 @@ def current_purpose_overrides(router_db: str | Path) -> dict[str, dict[str, Any]
     }
 
 
+def tier_holders(
+    tier_chains: Mapping[str, Mapping[str, Sequence[str]]], tier: str,
+) -> set[str]:
+    """The policy lineages that take part in ``tier`` in one environment.
+
+    A lineage that does not declare a tier is not *disagreeing* about it and is
+    not *behind* on it: it has no chain there.  Environments carry such
+    lineages for good reasons -- ``dalton-openclaw``, ``-assessment``,
+    ``-verifier`` (and in the legacy environment ``-planner`` and ``-smoke``)
+    are service-pin lineages that declare one tier or none -- and the writer's
+    ``set_model_selection`` / ``set_tier_selection`` only ever reaches the
+    lineages its model configurations pin *for that tier's stages*, so no save
+    could ever give them the tier.  Counting them as different made every
+    alignment report a permanent false positive (2026-10-02).
+
+    This is the same rule ``agreed_selections`` has always applied on the
+    source side; the target side, the fan-out's "already there" check and the
+    alignment script now all read through this one function.
+
+    When *no* lineage declares the tier, every lineage takes part: an
+    environment that is missing the tier altogether is genuinely behind, and a
+    save gives the lineages its lanes pin the chain, after which the rule
+    above takes over and the report converges.
+    """
+
+    declaring = {policy_id for policy_id, held in tier_chains.items() if held.get(tier)}
+    return declaring or set(tier_chains)
+
+
+def purpose_holders(
+    tier_chains: Mapping[str, Mapping[str, Sequence[str]]],
+    overrides: Mapping[str, Mapping[str, Any]],
+    purpose: str,
+) -> set[str]:
+    """The policy lineages that take part in one stage's pin.
+
+    A lineage takes part when it already carries an entry for the stage, or
+    when it declares the tier the stage belongs to.  The second clause is what
+    keeps the post-apply residual honest: a lane lineage can use the shared
+    default without a purpose override and must still be included in the
+    comparison. A service-pin lineage that does
+    not declare the tier (``dalton-openclaw`` for a cheap-tier stage) is not.
+    As with ``tier_holders``, when nothing qualifies every lineage takes part.
+    """
+
+    from .model_fallback_chain import purpose_tiers
+
+    tier = purpose_tiers().get(purpose)
+    lineages = set(tier_chains) | set(overrides)
+    holding = {
+        policy_id for policy_id in lineages
+        if (overrides.get(policy_id) or {}).get(purpose) is not None
+        or (tier is not None and (tier_chains.get(policy_id) or {}).get(tier))
+    }
+    return holding or lineages
+
+
+def _groups(values: Mapping[str, Any]) -> list[tuple[Any, list[str]]]:
+    """Distinct values, each with the lineages holding it, in first-seen order."""
+
+    groups: list[tuple[Any, list[str]]] = []
+    for policy_id, value in values.items():
+        for held, members in groups:
+            if held == value:
+                members.append(policy_id)
+                break
+        else:
+            groups.append((value, [policy_id]))
+    return groups
+
+
 def _agreed(values: Mapping[str, Any], subject: str) -> tuple[Any | None, list[str]]:
     """The one value every policy lineage agrees on, or nothing and a complaint.
 
@@ -360,10 +503,7 @@ def _agreed(values: Mapping[str, Any], subject: str) -> tuple[Any | None, list[s
     the owner never made.
     """
 
-    distinct: list[Any] = []
-    for value in values.values():
-        if value not in distinct:
-            distinct.append(value)
+    distinct = [value for value, _members in _groups(values)]
     if not distinct:
         return None, [f"{subject}：源环境没有这一项"]
     if len(distinct) > 1:
@@ -373,7 +513,53 @@ def _agreed(values: Mapping[str, Any], subject: str) -> tuple[Any | None, list[s
     return distinct[0], []
 
 
-def agreed_selections(router_db: str | Path) -> dict[str, Any]:
+def _resolve(
+    values: Mapping[str, Any], subject: str, *, kind: str, name: str,
+    active_policy_ids: set[str] | None,
+    conflict_details: list[dict[str, Any]],
+    idle_ignored: list[dict[str, Any]],
+) -> tuple[Any | None, list[str]]:
+    """``_agreed``, plus the two things an owner needs to act on a conflict.
+
+    With ``active_policy_ids`` given, a disagreement that exists *only*
+    because of lineages which routed no call in the caller's window is
+    resolved in favour of the lineages that did route -- provided at least one
+    did and all of those agree.  The ignored lineages are returned in
+    ``idle_ignored`` so the resolution is said out loud, never silent.  A
+    disagreement among routing lineages, or one where nobody routed, stays a
+    conflict, and ``conflict_details`` names which lineage holds which value
+    and whether it routes.
+    """
+
+    value, complaints = _agreed(values, subject)
+    if complaints and active_policy_ids is not None and len(values) > 1:
+        active = {key: item for key, item in values.items() if key in active_policy_ids}
+        if active:
+            resolved, still = _agreed(active, subject)
+            if not still:
+                idle_ignored.append({
+                    "kind": kind, "subject": name, "chain": resolved,
+                    "ignored": [{"policy_id": key, "chain": item}
+                                for key, item in sorted(values.items())
+                                if key not in active and item != resolved],
+                })
+                return resolved, []
+    if complaints and len(values) > 1:
+        conflict_details.append({
+            "kind": kind, "subject": name,
+            "values": [
+                {"chain": held, "policy_ids": sorted(members),
+                 "routing": (None if active_policy_ids is None else
+                             sorted(key for key in members if key in active_policy_ids))}
+                for held, members in _groups(values)
+            ],
+        })
+    return value, complaints
+
+
+def agreed_selections(
+    router_db: str | Path, *, active_policy_ids: Iterable[str] | None = None,
+) -> dict[str, Any]:
     """Every tier chain and per-stage override one environment stands behind.
 
     The reading half of ``scripts/align_model_routing.py``, moved here when
@@ -382,22 +568,36 @@ def agreed_selections(router_db: str | Path) -> dict[str, Any]:
     way the alignment script does or "aligned at creation" and "aligned by the
     script" would be two different configurations.
 
+    ``active_policy_ids`` (2026-10-02) is the set of lineages that routed a call
+    recently (see ``route_activity``).  Given it, a conflict that only idle
+    lineages cause is resolved to the routing lineages' value and listed in
+    ``idle_ignored``; without it (the default, and what workspace creation and
+    the readiness row pass) the behaviour is exactly the old one.  Either way
+    ``conflict_details`` says, per remaining conflict, which lineages hold
+    which value.  ``tiers``, ``purposes`` and ``conflicts`` keep their shape.
+
     Read-only: it opens the router the same way ``latest_policies`` does and
     writes nothing.
     """
 
+    active = None if active_policy_ids is None else {str(item) for item in active_policy_ids}
     tier_chains = current_tier_chains(router_db)
     overrides = current_purpose_overrides(router_db)
     tiers: dict[str, list[str]] = {}
     purposes: dict[str, list[str]] = {}
     conflicts: list[str] = []
+    conflict_details: list[dict[str, Any]] = []
+    idle_ignored: list[dict[str, Any]] = []
     for tier in sorted({name for held in tier_chains.values() for name in held}):
         # A lineage that does not declare this tier is not disagreeing about
         # it; it simply has no chain there. Only the lineages that hold one
         # have to agree, or there is nothing to copy.
         declared = {policy_id: held[tier] for policy_id, held in tier_chains.items()
                     if held.get(tier)}
-        chain, complaints = _agreed(declared, f"类别「{tier}」")
+        chain, complaints = _resolve(
+            declared, f"类别「{tier}」", kind="tier", name=tier,
+            active_policy_ids=active, conflict_details=conflict_details,
+            idle_ignored=idle_ignored)
         conflicts.extend(complaints)
         if chain:
             tiers[tier] = list(chain)
@@ -409,17 +609,21 @@ def agreed_selections(router_db: str | Path) -> dict[str, Any]:
             # disagreement about the model; it is a lineage that never had that
             # stage. Only the pinned ones are propagated.
             entries = {key: value for key, value in entries.items() if value is not None}
-        selection, complaints = _agreed(
+        explicit = any((value or {}).get("mode") == "explicit" for value in entries.values())
+        selection, complaints = _resolve(
             {key: (value or {}).get("chain") if (value or {}).get("mode") == "explicit"
              else None for key, value in entries.items()},
-            f"环节「{purpose}」",
+            f"环节「{purpose}」", kind="purpose", name=purpose,
+            active_policy_ids=active,
+            conflict_details=conflict_details if explicit else [],
+            idle_ignored=idle_ignored if explicit else [],
         )
-        if complaints and any((value or {}).get("mode") == "explicit"
-                              for value in entries.values()):
+        if complaints and explicit:
             conflicts.extend(complaints)
         if selection:
             purposes[purpose] = list(selection)
-    return {"tiers": tiers, "purposes": purposes, "conflicts": conflicts}
+    return {"tiers": tiers, "purposes": purposes, "conflicts": conflicts,
+            "conflict_details": conflict_details, "idle_ignored": idle_ignored}
 
 
 def _selection_landed(environment: Environment, params: Mapping[str, Any]) -> bool:
@@ -431,27 +635,48 @@ def _selection_landed(environment: Environment, params: Mapping[str, Any]) -> bo
     explicit chain can be answered this way; a ``tier`` mode selection means
     "whatever the built-in chain for this tier is", which is resolved by the
     receiving environment and so is always sent.
+
+    Only the lineages that take part in the tier or stage are asked
+    (``tier_holders`` / ``purpose_holders``): a service-pin lineage the save
+    can never reach must not keep an aligned environment looking unaligned.
     """
 
+    if params.get("thinking_level") is not None:
+        try:
+            from .model_selection import model_configs, _latest_policy
+            from .model_router import ModelRouter, ModelRouterError
+            pins = model_configs(environment.state_dir)
+            if not pins:
+                return False
+            with ModelRouter(environment.router_db, read_only=True) as router:
+                for pin in pins:
+                    policy = _latest_policy(router, router.get_policy(pin["config"]["routing_policy_ref"])["id"])
+                    override = (policy.get("thinking_level_overrides") or {}).get(params["purpose"], {})
+                    if override.get("level") != params["thinking_level"] or override.get("reason") != params.get("reason"):
+                        return False
+            return True
+        except (OSError, ValueError, KeyError, ModelRouterError):
+            return False
     if params.get("mode") != "explicit":
         return False
     wanted = [str(item) for item in (params.get("chain") or [])]
     try:
+        chains = current_tier_chains(environment.router_db)
         if params.get("tier") is not None:
-            chains = current_tier_chains(environment.router_db)
             if not chains:
                 return False
-            return all(
-                held.get(str(params["tier"])) == wanted for held in chains.values()
-            )
+            tier = str(params["tier"])
+            return all(chains[policy_id].get(tier) == wanted
+                       for policy_id in tier_holders(chains, tier))
         overrides = current_purpose_overrides(environment.router_db)
         if not overrides:
             return False
         purpose = str(params["purpose"])
         return all(
-            (held.get(purpose) or {}).get("mode") == "explicit"
-            and [str(item) for item in (held.get(purpose) or {}).get("chain", [])] == wanted
-            for held in overrides.values()
+            (overrides.get(policy_id, {}).get(purpose) or {}).get("mode") == "explicit"
+            and [str(item) for item in
+                 (overrides.get(policy_id, {}).get(purpose) or {}).get("chain", [])] == wanted
+            for policy_id in purpose_holders(chains, overrides, purpose)
         )
     except (ModelRoutingSyncError, OSError, ValueError, KeyError):
         # Cannot read it, cannot claim it is done. The call will be made and

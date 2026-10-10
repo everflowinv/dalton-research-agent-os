@@ -1056,9 +1056,8 @@ class AnswerRoutingAuthority:
             ) as exc:
                 raise AnswerRoutingConflict("current ThesisVersion is invalid") from exc
             thesis_wire = thesis.to_dict()
-            thesis_content = {
-                field: thesis_wire[field] for field in _THESIS_CONTENT_FIELDS
-            }
+            from .thesis_question_model import thesis_payload
+            thesis_content = thesis_payload(thesis_wire)
             if thesis.schema_version == "0.1":
                 authority_matches = (
                     thesis.verification_ref == row["verification_id"]
@@ -1103,9 +1102,10 @@ class AnswerRoutingAuthority:
     def _unobservable_terminals(
         self, mandate_ref: str, company_ref: str
     ) -> list[dict[str, Any]]:
+        from .bounded_planner_loop import terminal_event_table
         rows = self.connection.execute(
             "SELECT t.*,l.record_json AS loop_json,l.content_hash AS loop_hash "
-            "FROM bounded_planner_terminal_events t "
+            f"FROM {terminal_event_table(self.connection)} t "
             "JOIN bounded_planner_loop_versions l ON l.version_id=t.loop_version_ref "
             "JOIN backlog_question_versions q ON q.version_id=l.question_version_ref "
             "WHERE q.mandate_ref=? AND q.company_ref=? "

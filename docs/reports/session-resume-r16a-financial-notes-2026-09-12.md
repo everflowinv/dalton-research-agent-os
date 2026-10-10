@@ -6,7 +6,7 @@ The original development conversation stopped during remote context compaction. 
 
 Frozen source `77cdfb486896fafb269e078dd00c07d7df0545ee` passed 7,675 tests, zero failures/errors and one skip in 775.443 seconds. The exact 606-file wheel and three embedded JavaScript checks pass; the guarded copied-state rehearsal passed 14 steps / 42 ticks / zero escapes. These existing receipts were revalidated rather than relabelled or rerun against different source.
 
-Packet: `/Users/everflow/Projects/dalton-owner-activation-20260910/foundation-r16a-release`. Manifest SHA-256: `02af549e7258bf7ef8ac5fc449e059ec6e6086f285e7cfaceb4722689ec7babf`. The reviewed pure-preserve operations checkout is `52360f4c349f2b275d97c2465e39f2bd4b045569`.
+Packet: `$HOME/Projects/dalton-owner-activation-20260910/foundation-r16a-release`. Manifest SHA-256: `02af549e7258bf7ef8ac5fc449e059ec6e6086f285e7cfaceb4722689ec7babf`. The reviewed pure-preserve operations checkout is `52360f4c349f2b275d97c2465e39f2bd4b045569`.
 
 Fresh read-only preflight preserved all 17 model configurations, existing mission v14, source authorities, service and OpenClaw configuration. Disk preflight required 4,817,426,110 bytes with 6,694,535,168 available. Deployment was started under standing owner authorization; receipts use the exclusive `deployment-resumed-v1` names. Installation, health and publication remain separately measured stages.
 

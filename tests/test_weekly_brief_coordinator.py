@@ -121,6 +121,54 @@ class WeeklyBriefCoordinatorTests(unittest.TestCase):
         self.assertTrue(report["ok"], report)
         self.assertEqual(1, report["cycle_admissions"])
 
+    def test_renderer_wording_change_replays_the_enqueued_issue(self) -> None:
+        # Live shape 2026-10-10 (legacy): the 10-08 issue was enqueued with
+        # scenario lines prefixed 「触发：」/「否定：」 and return lines labelled
+        # 「市场一致预期（下一财年 EPS + 目标价）」.  Batch am / ADR-0017 changed
+        # those renderers, so every 5-minute tick rebuilt a different body
+        # for the same frozen issue and the outbox key replayed as conflict.
+        plan = self.plan()
+        self.authorize(plan)
+        first = self.execute(plan)
+        original = self.weekly.render_markdown
+
+        def reworded(version_id):
+            rendered = dict(original(version_id))
+            rendered["body"] = rendered["body"] + "\n  - 营业收入同比增速 ≥ 2%（2027-01-31 前）——未触发\n"
+            return rendered
+
+        with patch.object(self.weekly, "render_markdown", side_effect=reworded):
+            replay = self.execute(plan)
+            again = self.execute(plan, as_of="2026-08-27T12:05:00+00:00")
+        for result in (replay, again):
+            self.assertEqual("ready", result["status"])
+            self.assertEqual("replayed", result["outbox_status"])
+            self.assertTrue(result["artifact_drift"])
+            self.assertEqual(first["outbox_message_ref"], result["outbox_message_ref"])
+            self.assertEqual(first["issue_version_hash"], result["issue_version_hash"])
+        pending = self.agenda.pending_outbox()
+        self.assertEqual(1, len(pending))
+        # The message the owner gets is the one enqueued at publication.
+        self.assertEqual(original(first["issue_version_ref"])["body"], pending[0]["payload"]["body"])
+
+    def test_different_issue_under_an_enqueued_cycle_is_still_a_conflict(self) -> None:
+        from dalton_core.weekly_brief_coordinator import WeeklyBriefCoordinatorError
+
+        plan = self.plan()
+        self.authorize(plan)
+        self.execute(plan)
+        original = self.weekly.publish_scheduled_issue
+
+        def other_issue(*args, **kwargs):
+            issue = dict(original(*args, **kwargs))
+            issue["content_hash"] = "0" * 64
+            return issue
+
+        with patch.object(self.weekly, "publish_scheduled_issue", side_effect=other_issue):
+            with self.assertRaisesRegex(WeeklyBriefCoordinatorError, "status=conflict"):
+                self.execute(plan)
+        self.assertEqual(1, len(self.agenda.pending_outbox()))
+
     def test_plan_hash_drift_is_denied_before_a_second_cycle(self) -> None:
         plan = self.plan()
         self.authorize(plan)

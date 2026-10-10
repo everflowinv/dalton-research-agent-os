@@ -120,6 +120,211 @@ CONCEPT_METRICS: Mapping[str, tuple[str, str]] = {
 # never be mistaken for the consolidated one.
 BREAKDOWN_SUFFIX = "segment "
 
+# 2026-09-30: *which* dimension makes a filed line a segment number.
+#
+# Until this rule every dimensional line was promoted as "segment <metric>:
+# <member>", whatever its axis.  The statement of stockholders' equity files
+# net income on ``us-gaap:StatementEquityComponentsAxis`` (the Retained
+# Earnings column of the roll-forward), so the Ledger held "segment net income:
+# Retained Earnings" for every covered company -- 117 Claims in legacy and 87 in
+# ws-7d -- beside Alphabet's EPS by share class (``StatementClassOfStockAxis``,
+# 186), AOCI reclassifications, useful-life estimate changes, a humanitarian
+# commitment and an equity-method investee, all of them read by the dossier as
+# "业务构成".  A member of such an axis is a column of a roll-forward or an
+# attribute of the number, not a part of the business.
+#
+# So a dimensional line is a segment number only when its axis is one whose
+# members are operating, product/service or geographic parts of the company
+# (the same axes ``economic_invariants.ADDITIVE_SEGMENT_AXES`` sums), or when it
+# is the operating-segments column of ``ConsolidationItemsAxis`` crossed with a
+# segment (IBM, DXC and Cognizant file their segment tables only that way).
+# Revenue-mix and share-class EPS lines are promoted under their own honest
+# names (``non_segment_metric``, below).  Every other dimensional line is
+# refused -- not promoted under the plain metric either, since it is not the
+# consolidated number.  Lines already
+# promoted under the old rule are left exactly as stored (their anchors are
+# unchanged, so the admission replay of what this rule still promotes is
+# byte-identical); the ones this rule refuses require an explicit human
+# retirement with a reviewed exact selection hash via claim_admission_cli.
+SEGMENT_CLASSIFICATION_RULE = "rule:quantitative-claim-promotion:segment-axes:2026-09-30b"
+SEGMENT_AXES = frozenset({
+    "srt:SegmentAxis",
+    "srt:StatementBusinessSegmentsAxis",
+    "us-gaap:StatementBusinessSegmentsAxis",
+    "srt:StatementGeographicalAxis",
+    "us-gaap:StatementGeographicalAxis",
+    "srt:ProductOrServiceAxis",
+    "us-gaap:ProductOrServiceAxis",
+})
+CONSOLIDATION_ITEMS_AXES = frozenset({
+    "srt:ConsolidationItemsAxis",
+    "us-gaap:ConsolidationItemsAxis",
+})
+OPERATING_SEGMENTS_MEMBER = "us-gaap:OperatingSegmentsMember"
+# Members that are never a part of the business, whatever axis the parser
+# happened to record first for a multi-dimensional fact: equity components,
+# the parent/non-controlling split, share classes, AOCI reclassifications,
+# restatement and adjustment columns.
+NON_SEGMENT_MEMBERS = frozenset({
+    "us-gaap:RetainedEarningsMember",
+    "us-gaap:RetainedEarningsUnappropriatedMember",
+    "us-gaap:RetainedEarningsAppropriatedMember",
+    "us-gaap:AdditionalPaidInCapitalMember",
+    "us-gaap:AdditionalPaidInCapitalCommonStockMember",
+    "us-gaap:AccumulatedOtherComprehensiveIncomeMember",
+    "us-gaap:AccumulatedTranslationAdjustmentMember",
+    "us-gaap:TreasuryStockMember",
+    "us-gaap:TreasuryStockCommonMember",
+    "us-gaap:TreasuryStockPreferredMember",
+    "us-gaap:CommonStockMember",
+    "us-gaap:CommonStockIncludingAdditionalPaidInCapitalMember",
+    "us-gaap:PreferredStockMember",
+    "us-gaap:ParentMember",
+    "us-gaap:NoncontrollingInterestMember",
+    "us-gaap:ReceivablesFromStockholderMember",
+    "us-gaap:ReclassificationOutOfAccumulatedOtherComprehensiveIncomeMember",
+    "srt:ScenarioPreviouslyReportedMember",
+    "srt:RestatementAdjustmentMember",
+    "srt:RevisionOfPriorPeriodAdjustmentMember",
+    "srt:RevisionOfPriorPeriodReclassificationAdjustmentMember",
+    "srt:RevisionOfPriorPeriodErrorCorrectionAdjustmentMember",
+    "us-gaap:CumulativeEffectPeriodOfAdoptionAdjustmentMember",
+})
+# A multi-dimensional fact is stored under one axis; its label spells every
+# member.  Legacy rows carry no ``dimension_count``, so an AOCI reclassification
+# filed on ProductOrServiceAxis x ReclassificationOutOfAOCIAxis (IBM's "Sales -
+# Reclassification out of Accumulated Other Comprehensive Income - ...") is
+# recognisable only by its label.
+NON_SEGMENT_LABEL_MARKERS = (
+    "reclassification out of accumulated other comprehensive income",
+    "reclassification out of aoci",
+)
+
+
+def is_segment_line(line: Mapping[str, Any]) -> bool:
+    """True when a dimensional line is a part of the business (see above)."""
+
+    axis = str(line.get("dimension_axis") or "").strip()
+    member = str(line.get("dimension_member") or "").strip()
+    if not axis or member in NON_SEGMENT_MEMBERS:
+        return False
+    label = str(line.get("label") or "").casefold()
+    if any(marker in label for marker in NON_SEGMENT_LABEL_MARKERS):
+        return False
+    if axis in SEGMENT_AXES:
+        return True
+    if axis in CONSOLIDATION_ITEMS_AXES and member == OPERATING_SEGMENTS_MEMBER:
+        # The operating-segments column crossed with a segment member.  Filed
+        # alone (exactly one dimension) it is the sum of the segments, not one.
+        return line.get("dimension_count") != 1
+    return False
+
+
+# 2026-09-30b: two kinds of dimensional line are real, useful numbers without
+# being segments, and are promoted under a name that says what they are:
+#
+# * revenue split by a revenue-mix axis -- EPAM's and Accenture's industry
+#   verticals (filed on ``EquitySecuritiesByIndustryAxis``), fixed-price vs
+#   time-and-materials, point-in-time vs over-time -- as
+#   "revenue by industry: <member>" and so on;
+# * EPS by share class (Alphabet files no undimensioned EPS) as
+#   "basic eps (<class>)", only when the class axis is the fact's only
+#   dimension (``dimension_count == 1``; unknown is refused).
+#
+# Everything else that is not a segment stays refused.
+REVENUE_MIX_AXES: Mapping[str, tuple[str, str]] = {
+    # axis -> (metric prefix, Chinese qualifier)
+    "us-gaap:EquitySecuritiesByIndustryAxis": ("revenue by industry", "按行业"),
+    "us-gaap:ContractWithCustomerBasisOfPricingAxis": ("revenue by pricing basis", "按定价方式"),
+    "us-gaap:TimingOfTransferOfGoodOrServiceAxis": (
+        "revenue by timing of transfer", "按履约时点"),
+}
+SHARE_CLASS_AXES = frozenset({"us-gaap:StatementClassOfStockAxis"})
+SHARE_CLASS_METRICS = frozenset({"basic eps", "diluted eps"})
+
+
+def _member_label(line: Mapping[str, Any]) -> str:
+    return str(line.get("label") or line.get("dimension_member") or "").strip()
+
+
+def _excluded_member(line: Mapping[str, Any]) -> bool:
+    member = str(line.get("dimension_member") or "").strip()
+    label = str(line.get("label") or "").casefold()
+    return member in NON_SEGMENT_MEMBERS or any(
+        marker in label for marker in NON_SEGMENT_LABEL_MARKERS)
+
+
+def non_segment_metric(line: Mapping[str, Any]) -> tuple[str, str] | None:
+    """(metric, Chinese label) for a revenue-mix or share-class line, else None."""
+
+    mapped = CONCEPT_METRICS.get(str(line.get("concept") or ""))
+    axis = str(line.get("dimension_axis") or "").strip()
+    member = _member_label(line)
+    if mapped is None or not axis or not member or _excluded_member(line):
+        return None
+    metric, label = mapped
+    if axis in REVENUE_MIX_AXES and metric == "revenue":
+        prefix, qualifier = REVENUE_MIX_AXES[axis]
+        return f"{prefix}: {member}", f"{label}（{qualifier}：{member}）"
+    if (axis in SHARE_CLASS_AXES and metric in SHARE_CLASS_METRICS
+            and line.get("dimension_count") == 1):
+        return f"{metric} ({member})", f"{label}（{member}）"
+    return None
+
+
+def renamed_line_proposal(proposal: Mapping[str, Any]) -> bool:
+    """True for a filed dimensional line promoted under a non-segment name.
+
+    Such a line was promoted before 2026-09-30 as "segment ..." under the
+    line's own identities (candidate claim, material, staging idempotency key
+    are keyed by the row alone).  Its renamed candidate carries the new name
+    in those identities, or every one of them would be an identity conflict
+    with the misnamed candidate and the new name could never be staged.  Lines
+    whose name did not change keep their identities byte for byte.
+    """
+
+    if proposal.get("origin_kind") != "statement_line":
+        return False
+    anchor = proposal.get("anchor") or {}
+    dimensional = bool(anchor.get("dimension_axis") or anchor.get("dimension_member"))
+    return dimensional and not str(proposal.get("metric_or_aspect") or "").startswith(
+        BREAKDOWN_SUFFIX)
+
+
+def _renamed_identity(proposal: Mapping[str, Any], identity: dict[str, Any]) -> dict[str, Any]:
+    if renamed_line_proposal(proposal):
+        return {**identity, "metric_or_aspect": proposal["metric_or_aspect"]}
+    return identity
+
+
+def legacy_promotion_id(proposal: Mapping[str, Any]) -> str | None:
+    """The promotion id the row had under its pre-2026-09-30 "segment" name."""
+
+    anchor = proposal.get("anchor") or {}
+    legacy = legacy_segment_metric({
+        "concept": anchor.get("concept"), "label": anchor.get("as_reported_label"),
+        "dimension_axis": anchor.get("dimension_axis"),
+        "dimension_member": anchor.get("dimension_member"),
+    })
+    if legacy is None:
+        return None
+    return promotion_id_for({**proposal, "metric_or_aspect": legacy})
+
+
+def legacy_segment_metric(line: Mapping[str, Any]) -> str | None:
+    """The name the pre-2026-09-30 promoter gave a dimensional line.
+
+    Every dimensional line was "segment <metric>: <member>" then.  Used to find
+    the misnamed Claim a renamed line replaces, so the new name is promoted only
+    once that Claim has been retired.
+    """
+
+    mapped = CONCEPT_METRICS.get(str(line.get("concept") or ""))
+    if mapped is None or not (line.get("dimension_member") or line.get("dimension_axis")):
+        return None
+    member = _member_label(line)
+    return f"{BREAKDOWN_SUFFIX}{mapped[0]}: {member}" if member else f"{BREAKDOWN_SUFFIX}{mapped[0]}"
+
 # The two ratios worth deriving, because a margin is what a reader asks for and
 # neither is filed as its own line.  Both are computed from two lines of the
 # *same filing and the same period*, so the derivation is exact and its
@@ -218,6 +423,12 @@ def metric_for_line(line: Mapping[str, Any]) -> tuple[str, str] | None:
         return None
     metric, label = mapped
     if line.get("dimension_member") or line.get("dimension_axis"):
+        if not is_segment_line(line):
+            # A revenue-mix or share-class line keeps an honest name; a column
+            # of the equity roll-forward, an AOCI reclassification ... is not a
+            # segment and not the consolidated number either
+            # (SEGMENT_CLASSIFICATION_RULE).
+            return non_segment_metric(line)
         # The member goes *into the name*.  Without it every segment of one
         # period shares a ``metric_or_aspect`` and therefore one claim-index
         # dedupe group, and the index would keep exactly one of them as
@@ -343,6 +554,10 @@ def derived_ratio_proposals(
         if item["origin_kind"] != "statement_line":
             continue
         if item["metric_or_aspect"].startswith(BREAKDOWN_SUFFIX):
+            continue
+        anchor = item.get("anchor") or {}
+        if anchor.get("dimension_axis") or anchor.get("dimension_member"):
+            # A revenue-mix or share-class line is a part too, whatever its name.
             continue
         by_metric_period.setdefault((item["metric_or_aspect"], item["period"]), item)
     out: list[dict[str, Any]] = []
@@ -543,21 +758,37 @@ def statement_line_proposals(
     # 已入账的数字不再占用本轮的 limit：否则最新申报的前 limit 条一旦入账，
     # 之后每一轮都只重放这同一批重复项，其余几千行永远轮不到（2026-09-17 线上
     # 就卡在 admitted=225 / promoted=0）。blocked / staged 的仍然重提，它们还没走完。
-    admitted: set[str] = set()
+    admitted: dict[str, str | None] = {}
     if connection.execute(
         "SELECT 1 FROM sqlite_master WHERE type='table' AND name='quantitative_claim_promotions'"
     ).fetchone() is not None:
         admitted = {
-            str(row[0]) for row in connection.execute(
-                "SELECT promotion_id FROM quantitative_claim_promotions WHERE disposition='admitted'"
+            str(row[0]): row[1] for row in connection.execute(
+                "SELECT promotion_id, claim_version_ref FROM quantitative_claim_promotions "
+                "WHERE disposition='admitted'"
             ).fetchall()
         }
+    retired: set[str] | None = None
     proposals: list[dict[str, Any]] = []
     for filing_row in connection.execute(query, params).fetchall():
         filing = {key: filing_row[key] for key in filing_row.keys()}
         for proposal in filing_proposals(connection, filing):
             if admitted and promotion_id_for(proposal) in admitted:
                 continue
+            if admitted and renamed_line_proposal(proposal):
+                # 2026-09-30b: the same row is live in the Ledger under its
+                # old "segment ..." name.  The honest name is promoted once the
+                # owner has retired that Claim (withdraw-equity-component-
+                # segment-claims-2026-09-30.sh, group C) -- never beside it,
+                # which would put the same filed number in the Ledger twice.
+                held = admitted.get(legacy_promotion_id(proposal) or "")
+                if held:
+                    if retired is None:
+                        from .claim_retirement import retired_claim_version_refs
+
+                        retired = retired_claim_version_refs(connection)
+                    if held not in retired:
+                        continue
             proposals.append(proposal)
         if len(proposals) >= limit:
             break
@@ -799,11 +1030,11 @@ class SecStatementLineAuthorityResolver:
         artifact_ref, artifact_hash = _raw_sink(records)
         base = {
             "schema_version": "0.2",
-            "id": "sec-statement-line-material:" + content_hash({
+            "id": "sec-statement-line-material:" + content_hash(_renamed_identity(proposal, {
                 "origin_ref": proposal["origin_ref"],
                 "ingest_id": payload["ingest_id"],
                 "filing_hash": payload["filing_content_hash"],
-            })[:32],
+            }))[:32],
             "created_at": str(filing["recorded_at"]),
             # The filing row is the envelope of this mode: append-only,
             # authority-gated, and carrying the accession the SEC published.
@@ -1118,10 +1349,10 @@ def build_statement_line_candidate(
         numeric_spec_hash = spec["content_hash"]
 
     when = material["retrieved_at"]
-    identity = content_hash({
+    identity = content_hash(_renamed_identity(proposal, {
         "origin_ref": proposal["origin_ref"],
         "filing_hash": material["source_content_hash"],
-    })[:32]
+    }))[:32]
     evidence = validate_candidate_evidence(build_candidate_evidence(
         material, source_verification,
         candidate_evidence_ref="candidate-evidence:sec-statement-line:" + identity,
@@ -1172,6 +1403,14 @@ def build_statement_line_candidate(
     }
 
 
+def statement_line_idempotency_key(proposal: Mapping[str, Any]) -> str:
+    key = "statement-line-promotion:" + str(proposal["origin_ref"])
+    if renamed_line_proposal(proposal):
+        # The row's own key already answers with the misnamed candidate.
+        key += "#" + content_hash({"metric_or_aspect": proposal["metric_or_aspect"]})[:16]
+    return key
+
+
 def stage_statement_line_candidate(
     connection: sqlite3.Connection,
     staging: Any,
@@ -1194,7 +1433,7 @@ def stage_statement_line_candidate(
         numeric_spec=bundle["numeric_spec"],
         numeric_verification=(
             None if bundle["numeric_spec"] is None else bundle["numeric_verification"]),
-        idempotency_key="statement-line-promotion:" + str(origin_ref),
+        idempotency_key=statement_line_idempotency_key(bundle["proposal"]),
         verification_mode=SEC_STATEMENT_LINE_AUTHORITY_MODE,
         verified_statement_line=bundle["verified_statement_line"],
         statement_resolver=bundle["resolver"],
@@ -1374,6 +1613,16 @@ __all__ = [
     "QuantitativeClaimPromotionError",
     "QuantitativeClaimPromotionLedger",
     "SCHEMA_VERSION",
+    "SEGMENT_AXES",
+    "SEGMENT_CLASSIFICATION_RULE",
+    "NON_SEGMENT_MEMBERS",
+    "is_segment_line",
+    "legacy_promotion_id",
+    "legacy_segment_metric",
+    "non_segment_metric",
+    "renamed_line_proposal",
+    "statement_line_idempotency_key",
+    "REVENUE_MIX_AXES",
     "canonical_decimal",
     "derived_ratio_proposals",
     "document_figure_proposal",

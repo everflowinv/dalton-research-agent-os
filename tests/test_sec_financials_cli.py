@@ -150,6 +150,23 @@ class ChildTests(unittest.TestCase):
         line = next(line for line in summary["observation"]["filings"][0]["lines"]
                     if line["dimension_axis"] is not None)
         self.assertEqual(line["dimension_count"], 1)
+        self.assertNotIn("dimensions", line)
+
+    def test_approved_v4_retains_complete_member_identities(self):
+        raw = fixture_parse()
+        income = raw["filings"][0]["statements"]["income"]
+        income["structure"][0].update({"dimension_axis": "srt:ConsolidationItemsAxis",
+                                      "dimension_member": "us-gaap:OperatingSegmentsMember"})
+        income["facts"][0].update({"dimension": "srt:ConsolidationItemsAxis",
+                                  "member": "us-gaap:OperatingSegmentsMember",
+                                  "dim_srt_ConsolidationItemsAxis": "us-gaap:OperatingSegmentsMember",
+                                  "dim_us-gaap_StatementBusinessSegmentsAxis": "synthetic:AlphaMember"})
+        summary = self.run_child(governance=self.governance(version=4), fixture=self.fixture(raw))
+        self.assertEqual(summary["status"], "succeeded")
+        [line] = [line for line in summary["observation"]["filings"][0]["lines"]
+                  if line["dimension_axis"] == "srt:ConsolidationItemsAxis"]
+        self.assertEqual(line["dimensions"]["us-gaap:StatementBusinessSegmentsAxis"], "synthetic:AlphaMember")
+        self.assertEqual(line["dimension_count"], 2)
 
     def test_unapproved_v3_refuses_before_live_parser_transport(self):
         from unittest.mock import patch

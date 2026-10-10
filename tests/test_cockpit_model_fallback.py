@@ -218,6 +218,26 @@ class ReturnedProviderSequenceAdapter(ChainAdapter):
 
 
 class CockpitChainTests(unittest.TestCase):
+    def test_publication_seventh_dispatch_settles_zero_and_does_not_cool_provider(self):
+        from dalton_core.research_publication_limits import publication_scope,GovernedPublicationModel,PublicationParked
+        adapter=ChainAdapter({'profile:gpt-6-astra':{'code':'REQUIRED_CONTROLS_UNAVAILABLE',
+            'message':'first local endpoint cannot supply controls','proved_local_not_sent':True}})
+        with publication_scope(self.root/'publication-limits.sqlite3','source',tick='tick') as scope:
+            scope[0].clock=lambda:NOW.timestamp()
+            for index in range(5):scope[0].admit('source','previous',str(index),kind='call')
+            model=GovernedPublicationModel(self._model(adapter,policy_version_ref=self.chain_policy))
+            with self.assertRaisesRegex(PublicationParked,'call_24h_limit'):
+                model.call(purpose='plan',request_id='seventh-dispatch',prompt='draft',mission=self.mission)
+        self.assertEqual(adapter.served,['profile:gpt-6-astra'])
+        with ThesisImpactBudgetStore(self.root/'budget.sqlite') as budget:
+            rows=budget.connection.execute('SELECT s.actual_micros,a.record_json FROM thesis_impact_day_admissions a '
+                'JOIN thesis_impact_day_settlements s ON s.admission_id=a.admission_id').fetchall()
+            self.assertEqual([row[0] for row in rows],[0])
+            self.assertEqual(json.loads(rows[0][1])['publication']['source_hash'],'source')
+            self.assertEqual(budget.connection.execute('SELECT COUNT(*) FROM thesis_impact_day_admissions a '
+                'LEFT JOIN thesis_impact_day_settlements s ON s.admission_id=a.admission_id WHERE s.admission_id IS NULL').fetchone()[0],0)
+        with ModelRouter(self.router_db,read_only=True) as router:self.assertEqual(router.active_cooldowns(),{})
+
     def test_only_a_proved_pre_send_failure_may_fall_back(self) -> None:
         adapter = ChainAdapter({
             "profile:gpt-6-astra": BrokerDefinitelyNotSent("connect failed")})
@@ -1890,6 +1910,40 @@ class CockpitChainTests(unittest.TestCase):
         )
         self.assertNotEqual(verifier["work_order_ref"], legacy.id)
 
+    def test_initial_screen_verifier_work_order_binds_provider_contract_into_identity(self) -> None:
+        import dalton_core.initial_screen_cli  # registers the real stage purposes
+        producer = self._model(
+            ChainAdapter({}), policy_version_ref=self.chain_policy
+        ).call(purpose="initial_screen", request_id="initial-screen-provider-contract",
+               prompt="draft", mission=self.mission)
+        verifier = self._model(
+            ChainAdapter({}), policy_version_ref=self.verifier_policy,
+            slots=self.verifier_slots,
+        ).call(
+            purpose="initial_screen_verifier", request_id="initial-screen-provider-contract",
+            prompt='{"verdict":"pass","findings":[]}', mission=self.mission,
+            producer_route_decision_refs=[producer["route_decision_ref"]],
+        )
+        with Scheduler(self.root / "scheduler.sqlite") as scheduler:
+            stored = scheduler.work_order_authority(verifier["work_order_ref"])
+        metadata = stored["work_order"]["metadata"]
+        self.assertEqual(
+            stored["work_order"]["requested_capabilities"],
+            ["provider-controlled-verify"],
+        )
+        self.assertEqual(metadata["verifier_output_schema_version"], "0.1")
+        self.assertEqual(metadata["verifier_provider_contract"],
+                         "initial-screen-verifier-provider-output-0.1")
+        self.assertRegex(metadata["verifier_provider_schema_hash"], r"^[0-9a-f]{64}$")
+        legacy = build_work(
+            purpose="initial_screen_verifier", request_id="initial-screen-provider-contract",
+            prompt='{"verdict":"pass","findings":[]}',
+            mission_version_ref=self.mission["id"], max_input_tokens=120_000,
+            max_output_tokens=500, max_cost_usd=0.5, max_seconds=120,
+            created_at=self.mission["created_at"],
+        )
+        self.assertNotEqual(verifier["work_order_ref"], legacy.id)
+
     def test_every_purpose_with_a_provider_contract_routes_on_the_verifier_tier(self) -> None:
         # 2026-09-26: a provider output contract makes the WorkOrder ask for
         # provider-controlled-verify, and only the verifier chain is kept
@@ -1962,7 +2016,8 @@ class CockpitChainTests(unittest.TestCase):
 
         cases = (
             ("debate_map_verifier", "debate-map-verifier-provider-output-0.1"),
-            ("conviction_call_verifier", "conviction-call-verifier-provider-output-0.1"),
+            # ADR-0013: v0.2 carries the v1 and the v2 finding codes.
+            ("conviction_call_verifier", "conviction-call-verifier-provider-output-0.2"),
             # 2026-09-25: without a contract the support check's WorkOrder
             # carried no output schema version and the adapter refused it.
             ("claim_support_verifier", "claim-support-verifier-provider-output-0.1"),
@@ -1983,7 +2038,8 @@ class CockpitChainTests(unittest.TestCase):
                     stored = scheduler.work_order_authority(result["work_order_ref"])
                 metadata = stored["work_order"]["metadata"]
                 self.assertEqual(metadata["verifier_provider_contract"], contract)
-                self.assertEqual(metadata["verifier_output_schema_version"], "0.1")
+                self.assertEqual(metadata["verifier_output_schema_version"],
+                                 contract.rsplit("-", 1)[-1])
                 self.assertRegex(
                     metadata["verifier_provider_schema_hash"], r"^[0-9a-f]{64}$"
                 )

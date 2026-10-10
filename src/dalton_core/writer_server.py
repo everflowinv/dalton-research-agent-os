@@ -62,6 +62,11 @@ from .mission_source_discovery import (
     discovery_query_hash,
     load_discovery_plan,
 )
+from .alphaengine_query_forms import (
+    effective_discovery_plan,
+    query_form_report,
+    query_forms_ledger_note,
+)
 from .document_extraction_launcher import DocumentExtractionCoordinator, DocumentExtractionLauncher
 from .public_web_fetch_launcher import (
     FetchLaunchConflict,
@@ -394,6 +399,26 @@ class PriorityStoreExecutor(concurrent.futures.Executor):
         if wait and threading.current_thread() is not self._thread:
             self._thread.join()
 
+
+
+def _rendered_alphaengine_plan(path: str | Path) -> tuple[dict[str, Any], dict[str, str] | None]:
+    """The approved discovery plan as this writer runs it, and its ledger note.
+
+    2026-10-06 (owner decision A): AlphaEngine query forms are the code's
+    (``alphaengine_query_forms``); the approved file contributes the governed
+    fields.  Any other source's plan is returned as approved.
+    """
+
+    approved = load_discovery_plan(path)
+    if approved["source_ref"] != ALPHAENGINE_SOURCE_REF:
+        return approved, None
+    report = query_form_report(approved)
+    note = query_forms_ledger_note(report)
+    print(f"dalton-writer: AlphaEngine plan {report['plan_ref']} "
+          f"(approved {report['approved_plan_hash'][:12]}) renders "
+          f"{report.get('effective_plan_hash', '')[:12]}: {note['query_forms_note']}",
+          file=sys.stderr, flush=True)
+    return effective_discovery_plan(approved), note
 
 class WriterServerError(RuntimeError):
     pass
@@ -815,6 +840,8 @@ HUMAN_GOVERNANCE_OPERATIONS = frozenset({
     "publish_research_playbook", "get_research_playbook",
     "get_active_research_playbook", "research_playbook_report",
     "create_coverage_mission", "set_research_budget_authority_chain", "publish_first_workspace_mission", "get_coverage_mission",
+    # 2026-09-30 (d2): the owner schedules this environment's weekly brief.
+    "publish_workspace_weekly_brief_plan",
     "get_active_coverage_mission", "record_mission_stage",
     "coverage_mission_progress", "coverage_mission_stage_records",
     "reconcile_forecasts", "forecast_reconciliations",
@@ -826,6 +853,8 @@ HUMAN_GOVERNANCE_OPERATIONS = frozenset({
     "authorize_mission_document_reentry",
     "authorize_mission_document_paid_recovery",
     "authorize_mission_document_unproved_recovery",
+    # 2026-09-30: close one escalated/terminal document admission for good.
+    "withdraw_mission_document_admission",
     "mission_stage_checklist", "claim_retirement_challenges", "decide_claim_retirement",
     # 2026-09-24: withdraw a wrong retirement by appending a record.  A
     # person's door; the review patrol's automatic re-review writes through
@@ -892,6 +921,10 @@ HUMAN_GOVERNANCE_OPERATIONS = frozenset({
     # nowhere else, so an automation principal is refused before the operation
     # runs; the authority and the schema refuse a non-``human:`` actor again.
     "decide_conviction_call",
+    # ADR-0013: the owner publishes the Conviction v2 policy (thresholds for
+    # expected return, evidence confidence, scenarios, horizons, the daily
+    # drafting budget).  A person's door only, append-only.
+    "publish_conviction_policy",
     # P14b / P14d: the two decisions the evolution layer hands back. ADR-0007
     # says automation may propose that a thesis is wrong and only a person may
     # accept; ADR-0008 says a passed gate may be re-opened and that reopening
@@ -900,7 +933,40 @@ HUMAN_GOVERNANCE_OPERATIONS = frozenset({
     # reason: there is no principal a lane could authenticate as that would
     # let it decide either one.
     "decide_thesis_revision_candidate",
+    "decide_research_followup",
     "decide_gate_reopen",
+    # 2026-10-06 (vision-gap #11/#12): the owner's levers.  Every one is a
+    # person's act and writes an append-only receipt (owner_levers.py); none
+    # is reachable by an automation principal.
+    "apply_owner_lever", "stop_research_line", "prioritize_company",
+    "draft_coverage_change", "publish_coverage_change",
+    # ADR-0012: the owner adjudicates a structured-scenario proposal and may
+    # move a probability or retire a scenario that is in force.  Automation
+    # may propose a set and append observations; it can never decide one.
+    "decide_company_scenario_set", "revise_company_scenario",
+    # 2026-10-09 (UX review C23/C24): the whole probability group in one
+    # append-only, all-or-nothing transaction; the per-scenario op stays.
+    "revise_company_scenario_group",
+    # 2026-10-07 (vision-gap #4): the owner registers a fund Excel template
+    # and chooses which template a company / industry / the workspace exports
+    # with.  Append-only receipts (fund_xlsx_template_registry.py).
+    "register_fund_xlsx_template", "select_fund_xlsx_template",
+    # 2026-10-07 (cockpit inspection BUG-02): the owner asks the publication
+    # worker to run the language review of one parked or given-up product
+    # again.  Append-only: the retry record under
+    # research-publication-work/products/retries is the receipt (who, why,
+    # which state it reopens).  A person's door only -- the worker's own
+    # automatic retries are bounded by its retry classes.
+    "retry_publication_language_review",
+    # 2026-10-09: the owner acknowledges a 待我处理 card that has nothing to
+    # press -- 已知悉 / 暂不提醒 N 天 / 放弃这份资料.  Append-only receipts
+    # (needs_human_ack.py); a person's door only.
+    "acknowledge_needs_human_card",
+    # Batch G (2026-10-09): a question whose window holds no first-hand
+    # material opens (or joins) a MaterialRequest for it, as the owner who
+    # asked.  Append-only ledger (material_requests.py), idempotent by digest;
+    # nothing is fetched here -- the acquisition service (batch E) works it.
+    "open_ask_material_request",
 })
 # Mission stage bookkeeping is human-governed but must also be reachable by
 # the mission's declared ``automation:`` principal; the CoverageMission
@@ -1014,6 +1080,7 @@ CORE_OPERATION_LITERALS = frozenset({
     "publish_research_playbook", "get_research_playbook",
     "get_active_research_playbook", "research_playbook_report",
     "create_coverage_mission", "set_research_budget_authority_chain",
+    "publish_workspace_weekly_brief_plan",
     "publish_first_workspace_mission", "get_coverage_mission",
     "get_active_coverage_mission", "record_mission_stage",
     "coverage_mission_progress", "coverage_mission_stage_records",
@@ -1048,6 +1115,9 @@ CORE_OPERATION_LITERALS = frozenset({
     "publish_answer_sufficiency_policy", "answer_subjects", "route_answer",
     "dispatch_answer_refresh",
     "settle_company_model_spec",
+    # 2026-10-06: the controller tick reads the owner's levers once per tick
+    # and writes them into the tick ledger.
+    "owner_lever_state",
 })
 CORE_OPERATIONS = CORE_OPERATION_LITERALS
 
@@ -1204,9 +1274,12 @@ OPERATION_FIELDS: dict[str, frozenset[str]] = {
     # a page that sent both would be told which one it meant.  ``tier`` is the
     # 2026-09-15 whole-tier edit and stands in for ``purpose``.
     "set_model_selection": frozenset({
-        "purpose", "tier", "mode", "chain", "actor_ref"}),
+        "purpose", "tier", "mode", "chain", "actor_ref", "thinking_level", "reason"}),
     "set_model_call_budget": frozenset({"purpose", "kind", "budget", "expected_config_hash", "actor_ref"}),
     "set_research_budget_authority_chain": frozenset({"mission_ref", "budget", "expected_mission_hash", "actor_ref"}),
+    "publish_workspace_weekly_brief_plan": frozenset({
+        "weekday", "hour", "minute", "timezone", "destination_ref",
+        "expected_plan_hash", "actor_ref"}),
     # No path parameter. The file this writes is named by the writer's own
     # ``--model-catalog-config``, not by the caller: an operation that took the
     # path to write would be an operation that writes anywhere.
@@ -1241,6 +1314,12 @@ OPERATION_FIELDS: dict[str, frozenset[str]] = {
     }),
     "decide_thesis_revision_candidate": frozenset({
         "candidate_ref", "candidate_hash", "verdict", "reason", "content", "actor_ref",
+    }),
+    "decide_research_followup": frozenset({
+        "request_ref", "request_hash", "action", "reason", "closure_evidence", "owner_ref", "due_on", "actor_ref", "idempotency_key",
+    }),
+    "publish_conviction_policy": frozenset({
+        "policy", "reason", "prior_version_ref", "idempotency_key", "actor_ref",
     }),
     "decide_gate_reopen": frozenset({
         "proposal_ref", "proposal_hash", "verdict", "reason", "actor_ref",
@@ -1313,10 +1392,43 @@ OPERATION_FIELDS: dict[str, frozenset[str]] = {
         "review_id", "expected_review_hash", "decision_ref", "failed_windows", "actor_ref",
     }),
     "authorize_mission_document_reentry": frozenset({"admission_ref", "actor_ref"}),
+    # 2026-10-07: ``job_ref`` polls the governed job a request started.
     "authorize_mission_document_paid_recovery": frozenset({
-        "admission_ref", "max_cost_usd", "actor_ref"}),
+        "admission_ref", "max_cost_usd", "actor_ref", "job_ref"}),
     "authorize_mission_document_unproved_recovery": frozenset({
-        "admission_ref", "max_cost_usd", "actor_ref"}),
+        "admission_ref", "max_cost_usd", "actor_ref", "job_ref"}),
+    "withdraw_mission_document_admission": frozenset({
+        "admission_ref", "reason", "actor_ref"}),
+    "apply_owner_lever": frozenset({
+        "lever", "scope_kind", "scope_ref", "reason", "until", "idempotency_key", "actor_ref"}),
+    "stop_research_line": frozenset({"line_ref", "reason", "idempotency_key", "actor_ref"}),
+    "prioritize_company": frozenset({
+        "company_ref", "mode", "reason", "idempotency_key", "actor_ref"}),
+    "draft_coverage_change": frozenset({"mission_ref", "add", "remove", "actor_ref"}),
+    "publish_coverage_change": frozenset({
+        "mission_ref", "expected_mission_hash", "add", "remove", "reason",
+        "idempotency_key", "actor_ref"}),
+    "owner_lever_state": frozenset(),
+    "register_fund_xlsx_template": frozenset({
+        "candidate", "display_name", "description", "industries", "mapping",
+        "source_filename", "sheet_bindings", "reason", "idempotency_key", "actor_ref"}),
+    "select_fund_xlsx_template": frozenset({
+        "scope_kind", "scope_ref", "template_version_ref", "template_version_hash",
+        "reason", "idempotency_key", "actor_ref"}),
+    "acknowledge_needs_human_card": frozenset({
+        "card_ref", "kind", "choice", "condition_hash", "snooze_days", "reason",
+        "idempotency_key", "actor_ref"}),
+    "open_ask_material_request": frozenset({
+        "subject", "need", "period", "acceptance", "product_ref", "run_ref", "actor_ref"}),
+    "retry_publication_language_review": frozenset({
+        "identity_hash", "product_hash", "batch_ref", "reason", "idempotency_key", "actor_ref"}),
+    "decide_company_scenario_set": frozenset({
+        "set_ref", "set_hash", "decision", "reason", "idempotency_key", "actor_ref"}),
+    "revise_company_scenario": frozenset({
+        "scenario_ref", "version_ref", "version_hash", "probability", "retire", "reason",
+        "idempotency_key", "actor_ref"}),
+    "revise_company_scenario_group": frozenset({
+        "company_ref", "changes", "reason", "idempotency_key", "actor_ref"}),
 
     "forecast_reconciliations": frozenset({
         "company_ref", "claim_version_ref", "forecast_line_ref", "created_from", "created_to",
@@ -1548,12 +1660,27 @@ OPERATION_ACTOR_FIELDS: dict[str, str] = {
     "publish_research_playbook": "actor_ref",
     "create_coverage_mission": "actor_ref",
     "set_research_budget_authority_chain": "actor_ref",
+    "publish_workspace_weekly_brief_plan": "actor_ref",
     "publish_first_workspace_mission": "actor_ref",
     "resolve_mission_document_review": "actor_ref",
     "reopen_mission_document_review": "actor_ref",
     "authorize_mission_document_reentry": "actor_ref",
     "authorize_mission_document_paid_recovery": "actor_ref",
     "authorize_mission_document_unproved_recovery": "actor_ref",
+    "withdraw_mission_document_admission": "actor_ref",
+    "apply_owner_lever": "actor_ref",
+    "stop_research_line": "actor_ref",
+    "prioritize_company": "actor_ref",
+    "decide_company_scenario_set": "actor_ref",
+    "revise_company_scenario": "actor_ref",
+    "revise_company_scenario_group": "actor_ref",
+    "register_fund_xlsx_template": "actor_ref",
+    "select_fund_xlsx_template": "actor_ref",
+    "retry_publication_language_review": "actor_ref",
+    "acknowledge_needs_human_card": "actor_ref",
+    "open_ask_material_request": "actor_ref",
+    "draft_coverage_change": "actor_ref",
+    "publish_coverage_change": "actor_ref",
     "mission_document_evidence": "actor_ref",
     "document_extraction_preflight": "actor_ref",
     "generate_document_extraction": "actor_ref",
@@ -1568,7 +1695,9 @@ OPERATION_ACTOR_FIELDS: dict[str, str] = {
     "decide_deep_insight_gate": "actor_ref",
     "decide_investment_memo": "actor_ref",
     "decide_conviction_call": "actor_ref",
+    "publish_conviction_policy": "actor_ref",
     "decide_thesis_revision_candidate": "actor_ref",
+    "decide_research_followup": "actor_ref",
     "decide_gate_reopen": "actor_ref",
     "publish_forecast_line": "actor_ref",
     "publish_probe_template": "actor_ref",
@@ -2061,6 +2190,11 @@ class WriterServer:
         # B1-2: the monotonic instant the lane currently on the store thread
         # is expected to hand it back.  ``None`` between lanes.
         self._lane_deadline: float | None = None
+        # 2026-10-07: heavy owner doors run as governed jobs on their own
+        # thread; the store thread only takes the request (``owner_door_jobs``).
+        from .owner_door_jobs import OwnerDoorJobs
+
+        self.owner_door_jobs = OwnerDoorJobs(db_path)
         if not principals:
             raise WriterServerError("at least one principal is required")
         # Explicit local installation only; never derive authority from an
@@ -2469,6 +2603,11 @@ class WriterServer:
             self._store_executor.shutdown(wait=True, cancel_futures=True)
             self._store_executor = None
             raise
+        # The cold-cache window starts when the store is open, not when the
+        # object was built.
+        jobs = getattr(self, "owner_door_jobs", None)
+        if jobs is not None:
+            jobs.mark_started()
         listener = socket.socket(socket.AF_UNIX, socket.SOCK_STREAM)
         try:
             listener.bind(self.socket_path)
@@ -2554,11 +2693,37 @@ class WriterServer:
                 self._sec_filings_plan_path = str(selected_sec)
                 if self._sec_filings_launcher is not None:
                     self._sec_filings_launcher.plan_path = selected_sec
+        else:
+            # 2026-10-06 (vision-gap #12): an environment that is not
+            # workspace-bound (legacy) reads its configured plans, except
+            # where the owner has since changed the coverage list from the
+            # cockpit: that selection is the owner's and survives a restart
+            # here exactly as it does in a workspace.
+            from .coverage_list_change import coverage_selected_plan
+            from .mission_source_discovery import (
+                ALPHAENGINE_SOURCE_REF as _AE, SEC_SOURCE_REF as _SEC,
+                WEB_SEARCH_SOURCE_REF as _WEB,
+            )
+            owner_alpha = coverage_selected_plan(self.state_dir, _AE)
+            owner_web = coverage_selected_plan(self.state_dir, _WEB)
+            owner_sec = coverage_selected_plan(self.state_dir, _SEC)
+            if owner_alpha is not None:
+                self._discovery_plan_path = str(owner_alpha)
+                if self._search_launcher is not None:
+                    self._search_launcher.plan_path = owner_alpha
+            if owner_web is not None:
+                self._web_search_plan_path = str(owner_web)
+                if self._web_search_launcher is not None:
+                    self._web_search_launcher.plan_path = owner_web
+            if owner_sec is not None:
+                self._sec_filings_plan_path = str(owner_sec)
+                if self._sec_filings_launcher is not None:
+                    self._sec_filings_launcher.plan_path = owner_sec
         if self._discovery_plan_path is not None:
             # An unusable plan must not keep the writer (and every other lane)
             # from starting; the discovery op reports the reason instead.
             try:
-                plan = load_discovery_plan(self._discovery_plan_path)
+                plan, query_forms = _rendered_alphaengine_plan(self._discovery_plan_path)
             except (OSError, ValueError) as exc:
                 self._discovery_plan_error = f"discovery plan is unusable: {exc}"
             else:
@@ -2567,6 +2732,7 @@ class WriterServer:
                     store=self._store,
                     missions=self._coverage_mission,
                     plan=plan,
+                    query_forms=query_forms,
                     search_launcher=self._search_launcher,
                     acquisition_launcher=self._acquisition_launcher,
                     selection_launcher=self._discovery_selection_launcher,
@@ -2625,7 +2791,7 @@ class WriterServer:
                    else {"discovery_windows_per_tick": self._document_extraction_discovery_windows}),
             )
         self._backlog = ResearchQuestionBacklog(self._store)
-        self._bounded_planner = BoundedPlannerAuthority(self._store)
+        self._bounded_planner = BoundedPlannerAuthority(self._store, state_dir=self.state_dir)
         self._intent_writer = IntentWriterAuthority(
             self._agenda, self._backlog, self._bounded_planner
         )
@@ -2848,6 +3014,9 @@ class WriterServer:
             pass
 
     def _close_executors(self) -> None:
+        jobs = getattr(self, "owner_door_jobs", None)
+        if jobs is not None:
+            jobs.close()
         connection_executor, self._connection_executor = self._connection_executor, None
         if connection_executor is not None:
             connection_executor.shutdown(wait=True, cancel_futures=True)
@@ -3182,7 +3351,7 @@ class WriterServer:
         replica._coverage_mission = CoverageMissionAuthority(store)
         replica._forecast_reconciliation = ForecastReconciliationAuthority(store)
         replica._backlog = ResearchQuestionBacklog(store)
-        replica._bounded_planner = BoundedPlannerAuthority(store)
+        replica._bounded_planner = BoundedPlannerAuthority(store, state_dir=self.state_dir)
         replica._intent_writer = IntentWriterAuthority(
             replica._agenda, replica._backlog, replica._bounded_planner)
         replica._answer_routing = AnswerRoutingAuthority(
@@ -3230,8 +3399,33 @@ class WriterServer:
             lane = lane_for_operation(operation)
             if lane is None or lane.handler is None:
                 raise WriterServerError(f"{operation} has no handler")
-            return self._run_lane(lane, params)
-        return method(params)
+            return self._observe_lane_outcome(operation, self._run_lane(lane, params))
+        return self._observe_lane_outcome(operation, method(params))
+
+    def _observe_lane_outcome(self, operation: str, result: Any) -> Any:
+        """F14 tail: put a budget-less lane's failures in the failure ledger.
+
+        Twenty-two driven lanes keep no ``LaneFailureBudget`` of their own, so
+        their failures never reached the cockpit's failure panel.  The observer
+        records them under the lane's driver key; a lane that has its own budget,
+        or an operation that is not a lane, passes through untouched.  The
+        result is returned as it came: this is bookkeeping, not a verdict.
+        """
+
+        if not str(operation).startswith("dispatch_"):
+            return result
+        observer = getattr(self, "_failure_observer", None)
+        if observer is None:
+            from .lane_failure_observer import LaneOutcomeObserver
+
+            try:
+                state_dir = self.state_dir
+            except Exception:  # noqa: BLE001 - no database path, no ledger
+                state_dir = None
+            observer = LaneOutcomeObserver(state_dir)
+            self._failure_observer = observer
+        observer.observe(operation, result)
+        return result
 
     # -- lanes: one budget, one memory of why a lane refused ---------------
 
@@ -3298,10 +3492,24 @@ class WriterServer:
         """
 
         operation = lane.operation
+        # 2026-10-06 (vision-gap #11): the owner's levers.  A paused lane --
+        # or every lane while an emergency stop is set -- answers ``paused``
+        # without running, and the tick ledger records the sentence.  Children
+        # that finished are still reaped: the stop is on new work, not on
+        # bookkeeping.  While a lane does run, the companies the owner paused
+        # are not in the universe it reads (owner_levers.dispatch_scope).
+        from .owner_levers import dispatch_scope, lane_refusal
+
+        levers = self._owner_lever_state()
+        refusal = lane_refusal(levers, operation)
+        if refusal is not None:
+            self.reap_lane_children()
+            return refusal
         started = time.monotonic()
         self._lane_deadline = started + LANE_SOFT_BUDGET_SECONDS
         try:
-            result = lane.handler(self, params)
+            with dispatch_scope(frozenset(levers.get("companies") or ())):
+                result = lane.handler(self, params)
         except BaseException as exc:
             kind = _lane_hold_kind(exc)
             if kind is not None:
@@ -3321,6 +3529,11 @@ class WriterServer:
             self._hold_lane(operation, kind, reason=reason, detail=result)
         else:
             self.lane_holds.clear(operation)
+        if operation in {"dispatch_company_model_spec", "dispatch_company_model_forecast",
+                         "dispatch_research_task", "dispatch_quality_scoring",
+                         "dispatch_company_dossier", "dispatch_industry_framework"}:
+            from .research_followup_automation import FollowupAutomationAuthority
+            FollowupAutomationAuthority(self.store).observe_lane(operation, result)
         elapsed = time.monotonic() - started
         if elapsed > LANE_SOFT_BUDGET_SECONDS and isinstance(result, Mapping):
             result = {
@@ -3988,6 +4201,62 @@ class WriterServer:
                         "mission budget must be published through the policy/mandate/constitution cascade")
         return self.coverage_mission.create_mission(mission_ref, **values)
 
+    def _op_publish_workspace_weekly_brief_plan(self, p: Mapping[str, Any]) -> Any:
+        """The owner's weekly brief schedule (review 2026-09-30, gap d2).
+
+        Destination optional: without one the brief is written into this
+        environment's own ``weekly-briefs/`` directory and listed on the
+        cockpit's weekly brief page.  A remote destination is accepted only
+        when it is the endpoint this environment's outbox bridge serves --
+        otherwise the brief would be queued for a channel nothing delivers to.
+        """
+
+        from .weekly_brief_workspace_plan import (
+            WorkspaceWeeklyBriefConflict,
+            WorkspaceWeeklyBriefError,
+            is_local_destination,
+            publish_workspace_weekly_brief_plan,
+        )
+
+        destination = p.get("destination_ref")
+        if destination is not None and not isinstance(destination, str):
+            raise ValidationError("destination_ref must be text or null")
+        if isinstance(destination, str) and destination.strip() \
+                and not is_local_destination(destination.strip()):
+            endpoint = None
+            service_path = None if self._workspace is None else self._workspace.config_path
+            if service_path is not None:
+                try:
+                    from .service import ServiceConfig
+
+                    outbox = ServiceConfig.from_file(service_path).outbox
+                    endpoint = None if outbox is None else outbox.endpoint_ref
+                except Exception:  # noqa: BLE001 - an unreadable config serves nothing
+                    endpoint = None
+            else:
+                endpoint = destination.strip()  # legacy: its service.json is the owner's
+            if endpoint != destination.strip():
+                raise ValidationError(
+                    "this environment has no outbox bridge for that destination; "
+                    "leave the destination empty to deliver the brief to the cockpit")
+        for name, low, high in (("weekday", 0, 6), ("hour", 0, 23), ("minute", 0, 59)):
+            value = p.get(name)
+            if isinstance(value, bool) or not isinstance(value, int) or not low <= value <= high:
+                raise ValidationError(f"{name} must be an integer from {low} to {high}")
+        expected = p.get("expected_plan_hash")
+        if expected is not None and not isinstance(expected, str):
+            raise ValidationError("expected_plan_hash must be text or null")
+        try:
+            return publish_workspace_weekly_brief_plan(
+                self.store, self.state_dir, weekday=p["weekday"], hour=p["hour"],
+                minute=p["minute"], timezone=p.get("timezone"),
+                destination_ref=destination, expected_plan_hash=expected,
+                actor_ref=p["actor_ref"])
+        except WorkspaceWeeklyBriefConflict as exc:
+            raise IdempotencyConflict(str(exc)) from exc
+        except WorkspaceWeeklyBriefError as exc:
+            raise ValidationError(str(exc)) from exc
+
     def _op_set_research_budget_authority_chain(self, p: Mapping[str, Any]) -> Any:
         mission = self.coverage_mission.active_mission(p["mission_ref"])
         if mission["content_hash"] != p["expected_mission_hash"]:
@@ -4145,14 +4414,31 @@ class WriterServer:
             _web_discovery_plan,
         )
 
-        alpha_path = _alphaengine_discovery_plan(self._workspace.state_dir)
-        if alpha_path.is_file() and self._search_launcher is not None:
-            plan = load_discovery_plan(alpha_path)
+        self._install_discovery_plans(
+            alpha_path=_alphaengine_discovery_plan(self._workspace.state_dir),
+            web_path=_web_discovery_plan(self._workspace.state_dir),
+            sec_path=_sec_discovery_plan(self._workspace.state_dir),
+        )
+
+    def _install_discovery_plans(
+        self, *, alpha_path: Path | None = None, web_path: Path | None = None,
+        sec_path: Path | None = None,
+    ) -> None:
+        """Point each discovery source at a plan file and rebuild its coordinator.
+
+        Shared by the first mission (workspace) and the owner's coverage-list
+        change (any environment), so a confirmed plan is live on the next tick
+        without a restart.
+        """
+
+        if alpha_path is not None and alpha_path.is_file() and self._search_launcher is not None:
+            plan, query_forms = _rendered_alphaengine_plan(alpha_path)
             self._search_launcher.plan_path = alpha_path
             self._discovery_plan_path = str(alpha_path)
             self._discovery_plan_error = None
             self._source_discovery = MissionSourceDiscoveryCoordinator(
                 store=self.store, missions=self.coverage_mission, plan=plan,
+                query_forms=query_forms,
                 search_launcher=self._search_launcher,
                 acquisition_launcher=self._acquisition_launcher,
                 selection_launcher=self._discovery_selection_launcher,
@@ -4160,8 +4446,7 @@ class WriterServer:
                 **({} if self._alphaengine_owner_call_cap is None
                    else {"owner_call_cap": self._alphaengine_owner_call_cap}),
             )
-        web_path = _web_discovery_plan(self._workspace.state_dir)
-        if web_path.is_file() and self._web_search_launcher is not None:
+        if web_path is not None and web_path.is_file() and self._web_search_launcher is not None:
             plan = load_discovery_plan(web_path)
             self._web_search_launcher.plan_path = web_path
             self._web_search_plan_path = str(web_path)
@@ -4172,8 +4457,7 @@ class WriterServer:
                 acquisition_launcher=self._web_fetch_launcher,
                 spool_dir=self._transcript_spool_dir,
             )
-        sec_path = _sec_discovery_plan(self._workspace.state_dir)
-        if sec_path.is_file() and self._sec_filings_launcher is not None:
+        if sec_path is not None and sec_path.is_file() and self._sec_filings_launcher is not None:
             plan = load_discovery_plan(sec_path)
             self._sec_filings_launcher.plan_path = sec_path
             self._sec_filings_plan_path = str(sec_path)
@@ -4283,6 +4567,18 @@ class WriterServer:
         ):
             raise WriterServerError("chain must be a list of profile ids")
         try:
+            if values.get("thinking_level") is not None:
+                if values.get("tier") is not None:
+                    raise WriterServerError("thinking level is configured by purpose")
+                if mode not in (None, "thinking"):
+                    raise WriterServerError("thinking edits cannot also change model selection mode")
+                result = set_model_selection(self.state_dir, purpose=str(values["purpose"]),
+                    mode="thinking", thinking_level=values["thinking_level"], chain=chain,
+                    actor_ref=str(values["actor_ref"]), reason=values.get("reason"))
+                if values["purpose"] == "plan":
+                    applied, reason = self._reload_planner_model_config()
+                    result = {**result, "requires_restart": not applied, "reload_note": reason}
+                return result
             if values.get("tier") is not None:
                 # 2026-09-15: the owner edits one chain per tier (reasoning,
                 # reading, verification) rather than per calling stage.
@@ -4717,11 +5013,20 @@ class WriterServer:
             "SELECT mission_ref FROM coverage_mission_versions WHERE mission_version_id=?)",
             (memo["mission_version_ref"],),
         ).fetchone()
-        if pointer is None or pointer["mission_version_id"] != memo["mission_version_ref"]:
-            raise WriterServerError("the Investment Memo is not bound to the active mission version")
-        mission = self.coverage_mission.mission(pointer["mission_version_id"])
-        if mission["content_hash"] != memo["mission_version_hash"]:
+        # ADR-0011 (as H1 did for the Deep Insight Gate): the memo was drafted
+        # under the version it binds, and its model work is verified against
+        # that version; the decision's stage records bind the *active* version
+        # of the same mission.  The live mission rolls a version whenever a
+        # budget or policy is signed, and a memo waiting for its owner must not
+        # become undecidable -- or be paid for again -- because of that.
+        if pointer is None:
+            raise WriterServerError("the Investment Memo's mission has no active version")
+        bound_mission = self.coverage_mission.mission(memo["mission_version_ref"])
+        if bound_mission["content_hash"] != memo["mission_version_hash"]:
             raise WriterServerError("Investment Memo mission hash binding failed")
+        mission = self.coverage_mission.mission(pointer["mission_version_id"])
+        if mission.get("mission_ref") != bound_mission.get("mission_ref"):
+            raise WriterServerError("the Investment Memo is not bound to the active mission")
 
         playbook = self.research_playbook.playbook(str(memo["playbook_version_ref"]))
         if playbook.get("content_hash") != memo.get("playbook_version_hash"):
@@ -4744,7 +5049,7 @@ class WriterServer:
                 if route.get("outcome") != "selected" or route.get("work_order_ref") != call["work_order_ref"]:
                     raise WriterServerError("Investment Memo producer route/work-order binding failed")
                 self._verify_memo_formal_call(
-                    call, route, purpose="investment_memo", mission=mission)
+                    call, route, purpose="investment_memo", mission=bound_mission)
                 family = served_family(router, str(call["route_decision_ref"]))
                 if not family:
                     raise WriterServerError("Investment Memo producer family is unresolved")
@@ -4753,7 +5058,7 @@ class WriterServer:
             if route.get("outcome") != "selected" or route.get("work_order_ref") != verifier["work_order_ref"]:
                 raise WriterServerError("Investment Memo verifier route/work-order binding failed")
             verifier_envelope = self._verify_memo_formal_call(
-                verifier, route, purpose="investment_memo_verifier", mission=mission,
+                verifier, route, purpose="investment_memo_verifier", mission=bound_mission,
                 producer_routes=verifier["producer_route_decision_refs"])
             verifier_family = served_family(router, str(verifier["route_decision_ref"]))
             if not verifier_family or verifier_family in producer_families:
@@ -4920,6 +5225,32 @@ class WriterServer:
         if self._conviction_calls is None:
             raise WriterServerError("conviction-call authority is unavailable")
         return self._conviction_calls.decide(**dict(p))
+    def _op_publish_conviction_policy(self, p: Mapping[str, Any]) -> Any:
+        """ADR-0013: append one Conviction v2 policy version, as a person.
+
+        ``actor_ref`` is the authenticated principal; the authority refuses a
+        non-``human:`` actor again and the schema a third time.  A stale
+        ``prior_version_ref`` is a conflict -- two pages editing the same
+        thresholds must see each other -- and identical thresholds are
+        answered ``unchanged`` rather than appended.
+        """
+
+        from .conviction_policy import (
+            ConvictionPolicyAuthority, ConvictionPolicyConflict,
+            ConvictionPolicyValidationError,
+        )
+
+        try:
+            return ConvictionPolicyAuthority(self.store).publish(
+                policy=p.get("policy"), reason=p.get("reason"),
+                actor_ref=p.get("actor_ref"),
+                prior_version_ref=p.get("prior_version_ref"),
+                idempotency_key=p.get("idempotency_key"))
+        except ConvictionPolicyValidationError as exc:
+            raise ValidationError(str(exc)) from exc
+        except ConvictionPolicyConflict as exc:
+            raise IdempotencyConflict(str(exc)) from exc
+
     def _op_decide_thesis_revision_candidate(self, p: Mapping[str, Any]) -> Any:
         """P14b: accept, reject or defer one ThesisRevisionCandidate.
 
@@ -4953,6 +5284,19 @@ class WriterServer:
         if self._gate_reopen is None:
             raise WriterServerError("gate-reopen authority is unavailable")
         return self._gate_reopen.decide(**dict(p))
+
+    def _op_decide_research_followup(self, p: Mapping[str, Any]) -> Any:
+        from .research_followup import ResearchFollowupAuthority, requests
+        authority = ResearchFollowupAuthority(self.store)
+        request = next((r for r in requests(self.store.connection) if r['id'] == p.get('request_ref')), None)
+        if request is None or request['content_hash'] != p.get('request_hash'):
+            raise ValidationError('research followup request hash differs')
+        try:
+            return authority.decide(p['request_ref'], action=p['action'], actor_ref=p['actor_ref'], reason=p['reason'],
+                                    closure_evidence=p.get('closure_evidence') or [], owner_ref=p.get('owner_ref'), due_on=p.get('due_on'),
+                                    idempotency_key=p.get('idempotency_key'))
+        except ValueError as exc:
+            raise ValidationError(str(exc)) from exc
 
     def _op_publish_doctrine_pack(self, p: Mapping[str, Any]) -> Any:
         if self._research_doctrine is None:
@@ -5898,6 +6242,28 @@ class WriterServer:
             raise WriterServerError("include_candidates must be boolean")
         values.setdefault("state", None)
         values.setdefault("company_ref", None)
+        # 2026-10-08 (DEFECT-01): a workspace that has not published a research
+        # mission yet has no discovery plan and no active mission.  Reading the
+        # queue is then an empty answer, not a refusal -- the cockpit showed
+        # 「读取失败：HTTP 503」 on a fresh workspace.  An explicit ref that does
+        # not exist is still refused.
+        if values.get("mission_version_ref") is None:
+            coordinator = self._source_discovery or self._web_source_discovery
+            try:
+                if coordinator is None:
+                    raise CoverageMissionNotFound("no discovery plan")
+                self.coverage_mission.active_mission(coordinator.plan["mission_ref"])
+            except CoverageMissionNotFound:
+                values.pop("mission_version_ref", None)
+                return {
+                    "projection_kind": "mission_document_reviews",
+                    "mission_version_ref": None,
+                    "reviews": [],
+                    "limit_reached": False,
+                    "candidate_limit_reached": False,
+                    "empty_reason": "no_published_mission",
+                    "empty_label": "还没有发布研究任务",
+                }
         mission_version_ref = self._resolve_mission_version_ref(values)
         reviews = self.coverage_mission.document_reviews(mission_version_ref, **values)
         if include_candidates:
@@ -6020,6 +6386,717 @@ class WriterServer:
 
         return authorize_unproved_recovery(self, dict(p))
 
+    def _op_withdraw_mission_document_admission(self, p: Mapping[str, Any]) -> Any:
+        # The owner's close of a document-research admission no retry can
+        # fix.  In the writer because the lane's hold ledger and the Core are
+        # writer state; refused unless the hold is escalated or terminal and
+        # nothing of the admission is running.
+        from .mission_document_research_lane import withdraw_admission
+
+        return withdraw_admission(self, dict(p))
+
+    # -- the owner's levers (2026-10-06, vision-gap #11 / #12) -------------
+
+    @property
+    def owner_levers(self) -> Any:
+        authority = getattr(self, "_owner_lever_authority", None)
+        if authority is None:
+            from .owner_levers import OwnerLeverAuthority
+
+            authority = OwnerLeverAuthority(self.store)
+            self._owner_lever_authority = authority
+        return authority
+
+    def _owner_lever_state(self) -> dict[str, Any]:
+        """The fold of the owner's levers; a Core that cannot say means none."""
+
+        from .owner_levers import empty_state, lever_state
+
+        try:
+            return lever_state(self.store.connection)
+        except Exception:  # noqa: BLE001 - a lever is an instruction, a read error is not
+            return empty_state()
+
+    def _op_owner_lever_state(self, p: Mapping[str, Any]) -> Any:
+        from .owner_levers import tick_summary
+
+        state = self._owner_lever_state()
+        return {"projection_kind": "owner_lever_state", **state,
+                "tick": tick_summary(state)}
+
+    def _owner_lane_operations(self) -> set[str]:
+        from .lane_registry import registered_lanes
+        from .owner_levers import EXTRA_LANE_OPERATIONS
+
+        return {spec.operation for spec in registered_lanes()} | set(EXTRA_LANE_OPERATIONS)
+
+    # -- the fund Excel template registry (2026-10-07, vision-gap #4) ------
+
+    @property
+    def fund_xlsx_templates(self) -> Any:
+        """Seeds the built-in template the first time it is opened."""
+
+        authority = getattr(self, "_fund_xlsx_template_registry", None)
+        if authority is None:
+            from .fund_xlsx_template_registry import FundXlsxTemplateRegistry
+
+            authority = FundXlsxTemplateRegistry(self.store)
+            self._fund_xlsx_template_registry = authority
+        return authority
+
+    def _op_register_fund_xlsx_template(self, p: Mapping[str, Any]) -> Any:
+        """Append the next version of a template.  Inert until selected."""
+
+        from .fund_xlsx_template_registry import (
+            FundXlsxTemplateRegistryConflict, FundXlsxTemplateRegistryError,
+        )
+
+        try:
+            record = self.fund_xlsx_templates.register(
+                candidate=p.get("candidate"), display_name=p.get("display_name"),
+                description=p.get("description"), industries=p.get("industries") or (),
+                mapping=p.get("mapping"), source_filename=p.get("source_filename"),
+                sheet_bindings=p.get("sheet_bindings"), reason=p.get("reason"),
+                actor_ref=p["actor_ref"], idempotency_key=p.get("idempotency_key"),
+                now=self._now())
+        except FundXlsxTemplateRegistryError as exc:
+            raise ValidationError(str(exc)) from exc
+        except FundXlsxTemplateRegistryConflict as exc:
+            raise IdempotencyConflict(str(exc)) from exc
+        status = record.pop("status")
+        return {"status": status, "template": record}
+
+    def _op_select_fund_xlsx_template(self, p: Mapping[str, Any]) -> Any:
+        """Choose (or, with no template, withdraw) a scope's template."""
+
+        from .fund_xlsx_template_registry import (
+            FundXlsxTemplateRegistryConflict, FundXlsxTemplateRegistryError,
+        )
+
+        scope_kind, scope_ref = p.get("scope_kind"), p.get("scope_ref")
+        if (scope_kind == "company" and p.get("template_version_ref") is not None
+                and scope_ref not in self._active_universe_refs()):
+            raise ValidationError("company is not in the active coverage list")
+        try:
+            receipt = self.fund_xlsx_templates.choose(
+                scope_kind=scope_kind, scope_ref=scope_ref,
+                template_version_ref=p.get("template_version_ref"),
+                template_version_hash=p.get("template_version_hash"),
+                reason=p.get("reason"), actor_ref=p["actor_ref"],
+                idempotency_key=p.get("idempotency_key"), now=self._now())
+        except FundXlsxTemplateRegistryError as exc:
+            raise ValidationError(str(exc)) from exc
+        except FundXlsxTemplateRegistryConflict as exc:
+            raise IdempotencyConflict(str(exc)) from exc
+        status = receipt.pop("status")
+        return {"status": status, "receipt": receipt}
+
+    def _active_universe_refs(self) -> set[str]:
+        mission = self._active_mission_version()
+        return set() if mission is None else {
+            member["company_ref"] for member in mission["universe"]}
+
+    def _op_retry_publication_language_review(self, p: Mapping[str, Any]) -> Any:
+        """Reopen one product's language review for the next worker poll.
+
+        Bound to the exact state the owner saw: the identity and source hash
+        must both match the worker's current state for that product, so a
+        retry asked against a version since replaced is refused rather than
+        applied to something the owner did not read.  The append-only retry
+        record ``request_retry`` writes is the receipt.
+        """
+
+        import re
+
+        from .final_text_state import publication_work_dir
+        from .research_publication_worker import _read_state, request_retry
+
+        actor = str(p.get("actor_ref") or "")
+        if not actor.startswith("human:"):
+            raise ValidationError("a language review is retried only by a person")
+        if p.get("batch_ref") is not None:
+            return self._retry_ui_text_language_review(p, actor)
+        identity_hash = p.get("identity_hash")
+        product_hash = p.get("product_hash")
+        for name, value in (("identity_hash", identity_hash), ("product_hash", product_hash)):
+            if not isinstance(value, str) or re.fullmatch(r"[0-9a-f]{64}", value) is None:
+                raise ValidationError(f"{name} must be a 64-hex digest")
+        reason = p.get("reason")
+        if not isinstance(reason, str) or not reason.strip() or len(reason) > 1000:
+            raise ValidationError("reason must be 1..1000 characters")
+        state_dir = publication_work_dir(self.state_dir) / "products"
+        try:
+            prior = _read_state(state_dir / f"{identity_hash}.json")
+        except ValueError as exc:
+            raise ValidationError(str(exc)) from exc
+        if prior is None:
+            raise ValidationError("this product has no language review state to retry")
+        if prior["product_hash"] != product_hash:
+            raise IdempotencyConflict("the product changed since it was shown; reload and retry")
+        try:
+            outcome = request_retry(state_dir, identity_hash, actor_ref=actor,
+                                    reason=reason.strip(), apply=True,
+                                    now=lambda: self._now().isoformat())
+        except ValueError as exc:
+            raise ValidationError(str(exc)) from exc
+        return {"status": outcome["status"], "identity_hash": identity_hash,
+                "product_hash": product_hash, "receipt": outcome.get("retry")}
+
+    def _op_acknowledge_needs_human_card(self, p: Mapping[str, Any]) -> Any:
+        """「已知悉 / 暂不提醒 N 天 / 放弃这份资料」 on one 待我处理 card.
+
+        Append-only (``needs_human_acknowledgements``); the receipt is the row.
+        The page hides the card while the newest row for it still matches the
+        card's condition and has not expired.  「放弃这份资料」 is also obeyed by
+        the acquisition coordinator, which never offers that document again.
+        """
+
+        from .needs_human_ack import NeedsHumanAckAuthority, NeedsHumanAckError
+
+        authority = getattr(self, "_needs_human_ack_authority", None)
+        if authority is None:
+            authority = NeedsHumanAckAuthority(self.store)
+            self._needs_human_ack_authority = authority
+        try:
+            receipt = authority.record(
+                card_ref=p.get("card_ref"), kind=p.get("kind"), choice=p.get("choice"),
+                condition_hash=p.get("condition_hash"), reason=p.get("reason"),
+                actor_ref=p.get("actor_ref"), snooze_days=p.get("snooze_days"),
+                idempotency_key=p.get("idempotency_key"), now=self._now())
+        except NeedsHumanAckError as exc:
+            raise ValidationError(str(exc)) from exc
+        return {"status": receipt["status"], "receipt": receipt}
+
+    def _op_open_ask_material_request(self, p: Mapping[str, Any]) -> Any:
+        """Open (or join) the MaterialRequest one question's missing material needs.
+
+        The question panel found no first-hand passage inside the window the
+        owner asked about; this records that need in the MaterialRequest ledger
+        (``<state_dir>/material-requests.sqlite``) with the ``ask`` lane as the
+        requester, so the acquisition service (batch E) works it and the answer
+        can later be resumed over what it finds.  Idempotent by digest
+        (subject, need, period).  A person's door: the owner who asked.
+        """
+
+        from .material_requests import MaterialRequestError, open_request
+
+        actor = str(p.get("actor_ref") or "")
+        if not actor.startswith("human:"):
+            raise ValidationError("an ask material request is opened only for a person's question")
+        need = p.get("need")
+        if not isinstance(need, Mapping) or need.get("kind") != "answer":
+            raise ValidationError("an ask material request needs {kind: answer, question, doc_kinds}")
+        subject = p.get("subject")
+        if not isinstance(subject, str) or subject not in self._active_universe_refs():
+            raise ValidationError("the subject must be a company in the active mission")
+        product_ref = p.get("product_ref")
+        if not isinstance(product_ref, str) or not product_ref.startswith("cockpit-ask:") or len(product_ref) > 200:
+            raise ValidationError("product_ref must name the cockpit question (cockpit-ask:...)")
+        acceptance = p.get("acceptance") or {}
+        if not isinstance(acceptance, Mapping):
+            raise ValidationError("acceptance must be an object")
+        try:
+            view = open_request(
+                self.state_dir,
+                requester={"lane": "ask", "product_ref": product_ref, "run_ref": p.get("run_ref"),
+                           "section": "uncertainties"},
+                subject=subject, need=dict(need), period=p.get("period"),
+                source_priority=("indexed_corpus", "sales_notes", "alphaengine", "sec_edgar", "web"),
+                acceptance=dict(acceptance), actor_ref=actor, now=self._now().isoformat())
+        except MaterialRequestError as exc:
+            raise ValidationError(str(exc)) from exc
+        return {"status": view.get("write_status"),
+                "request": {key: view.get(key) for key in ("id", "status", "status_label", "subject", "need",
+                                                           "period", "deadline", "created_at")}}
+
+    def _retry_ui_text_language_review(self, p: Mapping[str, Any], actor: str) -> Any:
+        """「重新进行语言质检」 for one blocked UI-text batch (2026-10-09).
+
+        A blocked batch replays its cached draft, review and route decisions
+        on every attempt, so the same failure comes back each time; the owner's
+        retry therefore opens a new generation from a fresh draft.  The
+        append-only retry record ``ui_text_discovery.request_retry`` writes is
+        the receipt; nothing is deleted.
+        """
+
+        import re
+
+        from .final_text_state import publication_work_dir
+        from .ui_text_discovery import request_retry as request_ui_retry
+
+        batch_ref = p.get("batch_ref")
+        if not isinstance(batch_ref, str) or re.fullmatch(
+                r"ui-text-batch:[0-9a-f]{64}", batch_ref) is None:
+            raise ValidationError("batch_ref must be ui-text-batch:<64-hex>")
+        if p.get("identity_hash") is not None or p.get("product_hash") is not None:
+            raise ValidationError("a UI text retry names the batch only")
+        reason = p.get("reason")
+        if not isinstance(reason, str) or not reason.strip() or len(reason) > 1000:
+            raise ValidationError("reason must be 1..1000 characters")
+        root = publication_work_dir(self.state_dir) / "ui-text-products"
+        try:
+            outcome = request_ui_retry(root, batch_ref, actor_ref=actor,
+                                       reason=reason.strip(), redraft=True, apply=True)
+        except ValueError as exc:
+            raise ValidationError(str(exc)) from exc
+        return {"status": outcome["status"], "batch_ref": batch_ref,
+                "receipt": outcome.get("retry")}
+
+    def _op_apply_owner_lever(self, p: Mapping[str, Any]) -> Any:
+        """Pause / resume a company or a lane, or stop / resume everything.
+
+        Append-only: one receipt per pull.  The controller obeys the fold of
+        the receipts from the next lane call on (``_run_lane``), the lane
+        child launcher and the day ledger read the same fold from disk, and a
+        pause with ``until`` reads as resumed once that time has passed.
+        """
+
+        from .owner_levers import GLOBAL_SCOPE_REF, OwnerLeverValidationError, safe_ref
+
+        lever = p.get("lever")
+        if lever not in {"pause", "resume", "emergency_stop", "resume_all"}:
+            raise ValidationError("lever must be pause, resume, emergency_stop or resume_all")
+        scope_kind = p.get("scope_kind")
+        scope_ref = p.get("scope_ref")
+        if lever in {"emergency_stop", "resume_all"}:
+            scope_kind, scope_ref = "global", GLOBAL_SCOPE_REF
+        try:
+            scope_ref = safe_ref(scope_ref, "scope_ref")
+        except OwnerLeverValidationError as exc:
+            raise ValidationError(str(exc)) from exc
+        state = self._owner_lever_state()
+        outcome = "applied"
+        if scope_kind == "company":
+            if lever == "pause" and scope_ref not in self._active_universe_refs():
+                raise ValidationError("company is not in the active coverage list")
+            if lever == "resume" and scope_ref not in state["companies"]:
+                outcome = "was_not_paused"
+        elif scope_kind == "lane":
+            if scope_ref not in self._owner_lane_operations():
+                raise ValidationError("lane is not a registered controller lane")
+            if lever == "resume" and scope_ref not in state["lanes"]:
+                outcome = "was_not_paused"
+        elif scope_kind == "global":
+            if lever == "resume_all" and state["emergency"] is None:
+                outcome = "was_not_stopped"
+        else:
+            raise ValidationError("scope_kind must be company or lane")
+        try:
+            receipt = self.owner_levers.record(
+                lever=lever, scope_kind=scope_kind, scope_ref=scope_ref,
+                reason=p.get("reason"), actor_ref=p["actor_ref"], until=p.get("until"),
+                outcome=outcome, idempotency_key=p.get("idempotency_key"),
+                now=self._now())
+        except OwnerLeverValidationError as exc:
+            raise ValidationError(str(exc)) from exc
+        return {"status": receipt["status"], "receipt": receipt,
+                "state": self._owner_lever_state()}
+
+    def _op_stop_research_line(self, p: Mapping[str, Any]) -> Any:
+        """Stop one research line through the door that already closes it.
+
+        A document-research admission goes through the existing withdraw door
+        (``withdraw_mission_document_admission``: refused while anything of it
+        runs or while its hold is still recoverable); a research question goes
+        through ``ResearchQuestionBacklog.retire_question``.  Either way the
+        attempt -- including a refusal -- is a receipt.
+        """
+
+        from .owner_levers import OwnerLeverValidationError, line_kind, safe_ref
+
+        try:
+            line_ref = safe_ref(p.get("line_ref"), "line_ref")
+        except OwnerLeverValidationError as exc:
+            raise ValidationError(str(exc)) from exc
+        reason = p.get("reason")
+        if not isinstance(reason, str) or not reason.strip():
+            raise ValidationError("a stop needs a reason")
+        kind = line_kind(line_ref)
+        refs: dict[str, Any] = {"line_kind": kind}
+        try:
+            if kind == "admission":
+                from .mission_document_research_lane import withdraw_admission
+
+                result = withdraw_admission(self, {
+                    "admission_ref": line_ref, "reason": reason.strip(),
+                    "actor_ref": p["actor_ref"]})
+                status = str(result.get("status") or "")
+                outcome = {"already_withdrawn": "already_stopped", "refused": "refused",
+                           "unconfigured": "refused"}.get(status, "stopped")
+                if status == "refused":
+                    refs["refused_because"] = list(result.get("reasons") or [])[:8]
+                refs["withdrawal_ref"] = result.get("id") or result.get("withdrawal_id")
+            else:
+                result = self._backlog.retire_question(
+                    question_ref=line_ref, reason=reason.strip(), actor_ref=p["actor_ref"],
+                    idempotency_key=(None if p.get("idempotency_key") is None
+                                     else f"owner-stop:{p['idempotency_key']}"))
+                outcome = "stopped"
+        except Exception as exc:  # noqa: BLE001 - the refusal is the receipt
+            result = {"status": "refused", "reason": f"{type(exc).__name__}: {exc}"[:300]}
+            outcome = "refused"
+            refs["refused_because"] = [result["reason"]]
+        receipt = self.owner_levers.record(
+            lever="stop_line", scope_kind="line", scope_ref=line_ref, reason=reason,
+            actor_ref=p["actor_ref"], outcome=outcome, refs=refs,
+            idempotency_key=p.get("idempotency_key"), now=self._now())
+        return {"status": outcome, "receipt": receipt, "result": result}
+
+    def _tracking_policy(self) -> dict[str, Any]:
+        from .tracking_cadence import POLICY_PATH, load_policy
+
+        installed = self.state_dir / "tracking-policy.json"
+        return load_policy(installed if installed.is_file() else POLICY_PATH)
+
+    def _op_prioritize_company(self, p: Mapping[str, Any]) -> Any:
+        """"Look at this company first", as ADR-0009 says it is spelled.
+
+        One ``TrackingCadenceVersion`` per adjustable source, published by the
+        owner (``human_revision``): the re-read interval drops to a quarter of
+        the policy baseline (never under an hour).  ``mode=normal`` publishes
+        the baseline back.  Fixed sources (prices, SEC filings, the calendar)
+        are left alone -- the cadence authority refuses them, by design.  The
+        evidence each version cites is this request's own ref, and the
+        receipt lists every version published.
+        """
+
+        from .tracking_cadence import (
+            TrackingCadenceAuthority, TrackingCadenceError, publish_priority,
+        )
+
+        company_ref = p.get("company_ref")
+        mode = p.get("mode") or "prioritize"
+        if mode not in {"prioritize", "normal"}:
+            raise ValidationError("mode must be prioritize or normal")
+        reason = p.get("reason")
+        if not isinstance(reason, str) or not reason.strip():
+            raise ValidationError("prioritising a company needs a reason")
+        mission = self._active_mission_version()
+        if mission is None:
+            raise ValidationError("there is no active coverage mission")
+        if company_ref not in {member["company_ref"] for member in mission["universe"]}:
+            raise ValidationError("company is not in the active coverage list")
+        policy = self._tracking_policy()
+        authority = TrackingCadenceAuthority(self.store)
+        moment = self._now()
+        request_ref = "owner-lever-request:" + content_hash({
+            "lever": "prioritize", "company_ref": company_ref, "mode": mode,
+            "reason": reason.strip(), "actor_ref": p["actor_ref"],
+            "key": p.get("idempotency_key") or moment.isoformat()})[:32]
+        try:
+            outcome = publish_priority(
+                authority, company_ref=company_ref, mode=mode,
+                because=("owner: " + ("prioritise" if mode == "prioritize" else "back to baseline")
+                         + f" -- {reason.strip()}"),
+                evidence_refs=[request_ref], change_reason="human_revision",
+                policy=policy, mission=mission, actor_ref=p["actor_ref"],
+                decision="owner_prioritize" if mode == "prioritize" else "owner_normal")
+        except TrackingCadenceError as exc:
+            raise ValidationError(str(exc)) from exc
+        published, unchanged = outcome["published"], outcome["unchanged"]
+        receipt = self.owner_levers.record(
+            lever="prioritize", scope_kind="company", scope_ref=company_ref,
+            reason=reason, actor_ref=p["actor_ref"],
+            outcome=("published" if published else "unchanged") + f":{mode}",
+            refs={"request_ref": request_ref, "cadence_versions": published,
+                  "unchanged_sources": unchanged, "policy_ref": policy["policy_ref"]},
+            idempotency_key=p.get("idempotency_key"), now=moment)
+        return {"status": "published" if published else "unchanged", "mode": mode,
+                "published": published, "unchanged": unchanged, "receipt": receipt}
+
+    def _scenario_probability_cadence(self, company_ref: str, changes: list[dict[str, Any]],
+                                      *, actor_ref: str, mission: Mapping[str, Any]) -> dict[str, Any]:
+        """ADR-0012: a material probability move re-times the company's tracking.
+
+        Through the same ``publish_priority`` the owner's 「优先看这家」 uses;
+        the evidence is the scenario versions whose probability moved.  A
+        missing tracking policy leaves the decision standing and says so.
+        """
+
+        if not changes:
+            return {"published": [], "unchanged": [], "reason": "no material probability change"}
+        from .tracking_cadence import (
+            TrackingCadenceAuthority, TrackingCadenceError, publish_priority,
+        )
+
+        try:
+            policy = self._tracking_policy()
+            moved = "；".join(f"{item['name']} {item['from']}→{item['to']}" for item in changes)
+            return publish_priority(
+                TrackingCadenceAuthority(self.store), company_ref=company_ref,
+                mode="prioritize", because=f"情景概率变化（ADR-0012）——{moved}",
+                evidence_refs=[item["version_ref"] for item in changes],
+                change_reason="human_revision", policy=policy, mission=mission,
+                actor_ref=actor_ref, decision="scenario_probability")
+        except (TrackingCadenceError, OSError, ValueError) as exc:
+            return {"published": [], "unchanged": [],
+                    "reason": f"{type(exc).__name__}: {exc}"[:300]}
+
+    def _op_decide_company_scenario_set(self, p: Mapping[str, Any]) -> Any:
+        """ADR-0012: the owner accepts, rejects or defers one scenario proposal."""
+
+        from .company_scenario import CompanyScenarioAuthority, CompanyScenarioError
+
+        mission = self._active_mission_version()
+        if mission is None:
+            raise ValidationError("there is no active coverage mission")
+        authority = CompanyScenarioAuthority(self.store)
+        try:
+            result = authority.decide_set(
+                set_ref=p.get("set_ref"), set_hash=p.get("set_hash"),
+                decision=p.get("decision"), reason=p.get("reason") or "",
+                actor_ref=p["actor_ref"], idempotency_key=p.get("idempotency_key"))
+        except CompanyScenarioError as exc:
+            raise ValidationError(str(exc)) from exc
+        result["cadence"] = self._scenario_probability_cadence(
+            result["company_ref"], list(result.get("probability_changes") or ()),
+            actor_ref=p["actor_ref"], mission=mission)
+        return result
+
+    def _op_revise_company_scenario(self, p: Mapping[str, Any]) -> Any:
+        """ADR-0012: the owner moves a probability or retires an adopted scenario."""
+
+        from .company_scenario import CompanyScenarioAuthority, CompanyScenarioError
+
+        mission = self._active_mission_version()
+        if mission is None:
+            raise ValidationError("there is no active coverage mission")
+        retire = p.get("retire") or False
+        if not isinstance(retire, bool):
+            raise ValidationError("retire must be true or false")
+        authority = CompanyScenarioAuthority(self.store)
+        try:
+            result = authority.revise(
+                scenario_ref=p.get("scenario_ref"), version_ref=p.get("version_ref"),
+                version_hash=p.get("version_hash"), probability=p.get("probability"),
+                retire=retire, reason=p.get("reason") or "", actor_ref=p["actor_ref"],
+                mission=mission, idempotency_key=p.get("idempotency_key"))
+        except CompanyScenarioError as exc:
+            raise ValidationError(str(exc)) from exc
+        result["cadence"] = self._scenario_probability_cadence(
+            result["company_ref"], list(result.get("probability_changes") or ()),
+            actor_ref=p["actor_ref"], mission=mission)
+        return result
+
+    def _op_revise_company_scenario_group(self, p: Mapping[str, Any]) -> Any:
+        """2026-10-09: the owner's whole probability group, all or nothing."""
+
+        from .company_scenario import CompanyScenarioAuthority, CompanyScenarioError
+
+        mission = self._active_mission_version()
+        if mission is None:
+            raise ValidationError("there is no active coverage mission")
+        changes = p.get("changes")
+        if not isinstance(changes, list):
+            raise ValidationError("changes must be a list")
+        authority = CompanyScenarioAuthority(self.store)
+        try:
+            result = authority.revise_group(
+                company_ref=p.get("company_ref"), changes=changes,
+                reason=p.get("reason") or "", actor_ref=p["actor_ref"], mission=mission,
+                idempotency_key=p.get("idempotency_key"))
+        except CompanyScenarioError as exc:
+            raise ValidationError(str(exc)) from exc
+        result["cadence"] = self._scenario_probability_cadence(
+            result["company_ref"], list(result.get("probability_changes") or ()),
+            actor_ref=p["actor_ref"], mission=mission)
+        return result
+
+    def _coverage_resolver(self) -> Any:
+        """The SEC issuer resolver the first-mission flow uses, or ``None``."""
+
+        injected = getattr(self, "sec_ticker_resolver", None)
+        if injected is not None:
+            return injected
+        identity = self._sec_company_resolver_identity
+        if not identity:
+            return None
+        from .workspace_mission_setup import resolve_sec_ticker
+
+        return lambda ticker: resolve_sec_ticker(ticker, state_dir=self.state_dir, identity=identity)
+
+    def _selected_plans(self) -> dict[str, tuple[Path, dict[str, Any]]]:
+        from .mission_source_discovery import (
+            ALPHAENGINE_SOURCE_REF, SEC_SOURCE_REF, WEB_SEARCH_SOURCE_REF,
+        )
+
+        plans: dict[str, tuple[Path, dict[str, Any]]] = {}
+        for source_ref, path in (
+            (SEC_SOURCE_REF, self._sec_filings_plan_path),
+            (ALPHAENGINE_SOURCE_REF, self._discovery_plan_path),
+            (WEB_SEARCH_SOURCE_REF, self._web_search_plan_path),
+        ):
+            if not path:
+                continue
+            try:
+                plan = load_discovery_plan(path)
+            except (OSError, ValueError):
+                continue
+            plans[source_ref] = (Path(path), plan)
+        return plans
+
+    def _coverage_change(
+        self, mission: Mapping[str, Any], add: Any, remove: Any,
+        resolver: Any,
+    ) -> dict[str, Any]:
+        from .coverage_list_change import (
+            CoverageListChangeError, budget_impact, new_universe, normalize_request,
+            now_text, plan_after, resolve_additions,
+        )
+
+        try:
+            additions, removals = normalize_request(add, remove)
+            resolved = resolve_additions(mission, additions, resolver)
+            universe = new_universe(mission, resolved, removals)
+        except CoverageListChangeError as exc:
+            raise ValidationError(str(exc)) from exc
+        version = int(mission["version"]) + 1
+        created_at = now_text(self._now)
+        changes: list[dict[str, Any]] = []
+        next_plans: list[dict[str, Any]] = []
+        for source_ref, (path, plan) in sorted(self._selected_plans().items()):
+            nxt, change = plan_after(plan, resolved, removals,
+                                     mission_version=version, created_at=created_at)
+            change["current_plan_file"] = path.name
+            changes.append(change)
+            if nxt is not None:
+                next_plans.append(nxt)
+        tickers = {member["company_ref"]: member["ticker"] for member in mission["universe"]}
+        return {
+            "schema_version": "coverage-list-change-draft-0.1",
+            "kind": "scope_expansion" if any(
+                entry.get("resolution") == "resolved" for entry in resolved) else "scope_reduction",
+            "based_on": {"mission_ref": mission["mission_ref"], "mission_version_ref": mission["id"],
+                         "mission_version_hash": mission["content_hash"],
+                         "version": mission["version"]},
+            "additions": resolved,
+            "removals": [{"company_ref": ref, "ticker": tickers.get(ref)} for ref in removals],
+            "universe_after": universe,
+            "plans": changes,
+            "budget": budget_impact(mission, len(mission["universe"]), len(universe), changes),
+            "next_version": version,
+            "_next_plans": next_plans,
+        }
+
+    def _active_mission_named(self, mission_ref: Any) -> dict[str, Any]:
+        mission = self._active_mission_version()
+        if mission is None:
+            raise ValidationError("there is no active coverage mission")
+        if mission_ref is not None and mission_ref != mission["mission_ref"]:
+            raise ValidationError("mission_ref is not the active coverage mission")
+        return mission
+
+    def _op_draft_coverage_change(self, p: Mapping[str, Any]) -> Any:
+        """What adding / removing these companies would do.  Writes nothing.
+
+        Resolves each new ticker to its SEC issuer (CIK, registered name) the
+        way the first-mission flow does, lists for every selected discovery
+        plan which companies would enter or leave it, and the budget impact.
+        """
+
+        mission = self._active_mission_named(p.get("mission_ref"))
+        draft = self._coverage_change(mission, p.get("add"), p.get("remove"),
+                                      self._coverage_resolver())
+        draft.pop("_next_plans")
+        return draft
+
+    def _op_publish_coverage_change(self, p: Mapping[str, Any]) -> Any:
+        """Publish the confirmed coverage list as a new mission version.
+
+        ``add`` carries the issuers the owner read in the draft (ticker, CIK,
+        registered name, tier); nothing is resolved again here, so confirming
+        never waits on SEC.  The mission version goes through
+        ``create_coverage_mission`` (the same checks as every other publish:
+        human actor, continue the latest version, budget unchanged), then the
+        selected discovery plans gain / lose the companies and are hot-loaded,
+        and one receipt names all of it.
+        """
+
+        from .coverage_list_change import write_plan
+
+        mission = self._active_mission_named(p.get("mission_ref"))
+        expected = p.get("expected_mission_hash")
+        if expected != mission["content_hash"]:
+            raise IdempotencyConflict("the coverage mission changed since this draft was written")
+        reason = p.get("reason")
+        if not isinstance(reason, str) or not reason.strip():
+            raise ValidationError("a coverage change needs a reason")
+        issuers: dict[str, dict[str, Any]] = {}
+        add_tickers: list[dict[str, Any]] = []
+        for item in p.get("add") or ():
+            if not isinstance(item, Mapping) or not isinstance(item.get("ticker"), str):
+                raise ValidationError("each addition must carry the ticker the draft resolved")
+            ticker = item["ticker"].strip().upper()
+            add_tickers.append({"ticker": ticker,
+                                "coverage_tier": item.get("coverage_tier") or "B"})
+            if item.get("cik"):
+                issuers[ticker] = {"cik": str(item["cik"]), "name": item.get("name") or ticker}
+
+        def confirmed(ticker: str) -> Mapping[str, Any]:
+            if ticker not in issuers:
+                raise ValueError("not resolved in the confirmed draft")
+            return issuers[ticker]
+
+        change = self._coverage_change(mission, add_tickers, p.get("remove"), confirmed)
+        version = change["next_version"]
+        slug = mission["mission_ref"].split(":", 1)[1]
+        params = {
+            "mission_ref": mission["mission_ref"],
+            **{field: json.loads(json.dumps(mission[field])) for field in (
+                "title", "objective", "industry_ref", "research_questions", "deliverables",
+                "source_plan", "bindings", "autonomy", "budget")},
+            "universe": change["universe_after"],
+            "actor_ref": p["actor_ref"],
+            "version_id": f"coverage-mission-version:{slug}:{version}",
+            "prior_version_ref": mission["id"],
+            "idempotency_key": f"{mission['mission_ref']}:{version}:coverage:"
+                               f"{p.get('idempotency_key') or content_hash(change['universe_after'])[:16]}",
+        }
+        published = self._op_create_coverage_mission(params)
+        written: list[dict[str, str]] = []
+        plan_errors: list[str] = []
+        paths: dict[str, Path] = {}
+        for plan in change["_next_plans"]:
+            try:
+                files = write_plan(self.state_dir, plan, mission_version=version)
+            except (OSError, ValueError) as exc:
+                plan_errors.append(f"{plan['source_ref']}: {exc}"[:200])
+                continue
+            written.append(files)
+            paths[plan["source_ref"]] = Path(files["plan_path"])
+        if paths:
+            from .mission_source_discovery import (
+                ALPHAENGINE_SOURCE_REF, SEC_SOURCE_REF, WEB_SEARCH_SOURCE_REF,
+            )
+
+            try:
+                self._install_discovery_plans(
+                    alpha_path=paths.get(ALPHAENGINE_SOURCE_REF),
+                    web_path=paths.get(WEB_SEARCH_SOURCE_REF),
+                    sec_path=paths.get(SEC_SOURCE_REF))
+            except (OSError, ValueError) as exc:
+                plan_errors.append(f"reload: {exc}"[:200])
+        receipt = self.owner_levers.record(
+            lever="coverage_change", scope_kind="mission", scope_ref=mission["mission_ref"],
+            reason=reason, actor_ref=p["actor_ref"],
+            outcome="published" if not plan_errors else "published_with_plan_errors",
+            refs={
+                "mission_version_ref": published.get("id"),
+                "prior_mission_version_ref": mission["id"],
+                "added": [{"company_ref": entry["company_ref"], "ticker": entry["ticker"],
+                           "cik": entry.get("cik"), "name": entry.get("name")}
+                          for entry in change["additions"]
+                          if entry.get("resolution") == "resolved"],
+                "removed": [entry["company_ref"] for entry in change["removals"]],
+                "plans": [files["plan_ref"] for files in written],
+                "plan_errors": plan_errors,
+            },
+            idempotency_key=p.get("idempotency_key"), now=self._now())
+        return {"status": "published", "mission_version_ref": published.get("id"),
+                "version": version, "plans": written, "plan_errors": plan_errors,
+                "receipt": receipt,
+                "draft": {key: value for key, value in change.items() if key != "_next_plans"}}
+
     def _op_bounded_alphaengine_probe(self, p: Mapping[str, Any]) -> Any:
         # Executes in the writer: the acquisition subprocess writes Core
         # connector authority, which the driver process must not open, and
@@ -6072,11 +7149,16 @@ class WriterServer:
                 "max_alphaengine_probe_calls_24h", MAX_CALLS_PER_WINDOW
             )
         )
+        # 2026-10-07: the mission cap bounds every AlphaEngine call; the probe
+        # cap bounds only the probes' own calls.  Folding them into one
+        # number compared with every call blocked probes as soon as
+        # discovery had searched (batch r).
         return execute_alphaengine_probe(
             work_order,
             launcher=self._acquisition_launcher,
             connection=self.store.connection,
-            max_calls_per_window=min(total_cap, probe_cap),
+            max_calls_per_window=total_cap,
+            max_probe_calls_per_window=probe_cap,
         )
 
     def _op_start_bounded_source_discovery(self, p: Mapping[str, Any]) -> Any:
@@ -6366,7 +7448,14 @@ class WriterServer:
         return None
 
     def _op_dispatch_coverage_mission_sec_lane(self, p: Mapping[str, Any]) -> Any:
-        return self._dispatch_one_coverage_mission_sec_lane()
+        from .owner_levers import dispatch_scope, lane_refusal
+
+        levers = self._owner_lever_state()
+        refusal = lane_refusal(levers, "dispatch_coverage_mission_sec_lane")
+        if refusal is not None:
+            return refusal
+        with dispatch_scope(frozenset(levers.get("companies") or ())):
+            return self._dispatch_one_coverage_mission_sec_lane()
 
     def _op_bounded_planner_active_loops(self, p: Mapping[str, Any]) -> Any:
         from .budget_pools import pool_for_loop
@@ -6892,7 +7981,43 @@ class WriterServer:
 require_lane_handlers(WriterServer)
 
 
+def with_derived_lane_arguments(parser: argparse.ArgumentParser, raw_argv: list[str],
+                                args: argparse.Namespace) -> argparse.Namespace:
+    """Re-parse with the lane flags code derives for this Core and argv lacks.
+
+    See ``lane_registry.derived_lane_argv``.  Logged to stderr so a writer
+    whose plist is older than its release says which lanes it added itself.
+    """
+
+    from .lane_registry import LaunchAgentContext, derived_lane_argv
+
+    state = Path(args.db).expanduser().resolve().parent
+    context = LaunchAgentContext(
+        state=state,
+        extraction_model_config_path=getattr(args, "document_extraction_model_config", None),
+        candidate_staging_path=getattr(args, "candidate_staging", None),
+    )
+    try:
+        extra = derived_lane_argv(raw_argv, context)
+    except Exception as exc:  # noqa: BLE001 - a lane that cannot render stays as rendered
+        print(f"writer: lane arguments not derived from code: {exc}", file=sys.stderr)
+        return args
+    if not extra:
+        return args
+    print("writer: lane arguments derived from code (not in the LaunchAgent): "
+          + " ".join(token for token in extra if token.startswith("--")), file=sys.stderr)
+    return parser.parse_args([*raw_argv, *extra])
+
+
 def main(argv: list[str] | None = None) -> int:
+    # P3 (2026-09-30): every stderr line of this daemon carries its time.
+    from .stderr_timestamps import timestamped_stderr
+
+    with timestamped_stderr():
+        return _main(argv)
+
+
+def _main(argv: list[str] | None = None) -> int:
     parser = argparse.ArgumentParser(description="Dalton Core owner-only writer service")
     parser.add_argument("--db", required=True)
     parser.add_argument("--socket", required=True)
@@ -7083,7 +8208,11 @@ def main(argv: list[str] | None = None) -> int:
     # P14-0: every registered lane adds its own arguments. A new lane adds
     # none here.
     add_lane_arguments(parser)
-    args = parser.parse_args(argv)
+    raw_argv = list(sys.argv[1:] if argv is None else argv)
+    args = parser.parse_args(raw_argv)
+    # Batch t: a lane registered in code is live after a release switch even
+    # though the switch does not re-render this process's LaunchAgent.
+    args = with_derived_lane_arguments(parser, raw_argv, args)
     try:
         validate_runtime_context(
             state_dir=Path(args.db).expanduser().resolve().parent,

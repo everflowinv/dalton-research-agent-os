@@ -22,6 +22,7 @@ from dalton_core.event_judgement import (
 from dalton_core.event_judgement_cli import run_judgement, unjudged_event_groups
 from dalton_core.research_event import ResearchEventAuthority, record_event
 from dalton_core.tracking_cadence import POLICY_PATH
+from tests.event_result_fixtures import index_event_body
 from tests.p14a_fixtures import ACN, AUTOMATION, P14aHarness
 from tests.test_event_judgement import (
     JUDGE_ROUTE,
@@ -88,7 +89,11 @@ class Harness(P14aHarness):
         self.pass_screen(ACN)
         self.cap = pool(self.mission)["cap_micros"]
 
-    def document(self, kind, document, *, day=9, hour=10, discovery="d"):
+    def document(self, kind, document, *, day=9, hour=10, discovery="d", body=True):
+        if body:
+            # Batch F: a document event is judged on its body, so the harness
+            # indexes one (an unread body is 证据不足，安排读取, tested apart).
+            index_event_body(self.state_dir, kind, document, date=f"2026-09-{day:02d}")
         return record_event(
             self.events, company_ref=ACN, kind=kind,
             occurred_at=f"2026-09-{day:02d}T{hour:02d}:00:00+00:00",

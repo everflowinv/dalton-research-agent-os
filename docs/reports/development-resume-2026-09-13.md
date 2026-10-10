@@ -21,14 +21,14 @@ R21 冻结 `8801dadd688705c0f6e21f20111697cb7ef0ad80` 全量已完成：7,854 te
 
 ## 验证
 
-最终冻结代码为 `d1d012ed277e0449b78583d280acaeeb6ac20f2f`，保留于干净的 `/Users/everflow/Projects/dalton-resume-0913-final`。已完成的局部检查：财务 284 项、调度/结算/预测联合 314 项、部署契约与 rollback 123 项，最后增加发布复核后 135 项。它们是不同或重叠集合，不相加为总测试数。首轮 root 测试命令用了两个不存在的模块名，产生 loader errors；修正为实际模块名后 314 项通过，失败调用不计作通过。
+最终冻结代码为 `d1d012ed277e0449b78583d280acaeeb6ac20f2f`，保留于干净的 `$HOME/Projects/dalton-resume-0913-final`。已完成的局部检查：财务 284 项、调度/结算/预测联合 314 项、部署契约与 rollback 123 项，最后增加发布复核后 135 项。它们是不同或重叠集合，不相加为总测试数。首轮 root 测试命令用了两个不存在的模块名，产生 loader errors；修正为实际模块名后 314 项通过，失败调用不计作通过。
 
 ### 最终同版结果
 
 - **完整 7,909 tests / 0 failures / 0 errors / 1 skip**；unittest 783.934s，runner 786.560s；2026-09-13 10:57:37 UTC 完成。结束时 HEAD 与冻结一致，工作区干净。
 - wheel 与源码 **608 个运行文件逐字一致**（440 Python / 73 SQL / 92 JSON / 3 HTML），3 处内嵌 JavaScript 检查通过。wheel SHA-256：`294c5f0eba23fe5b97cf8a22277c01b86f27a1fe52e8d15d8d5244a0abed788d`。
 - full-suite receipt SHA-256：`4e017db698a174028e255c9e2b9121f9f1a6bb296b7a0a1d86c97947d0dff492`；日志：`8b53b5a46ccf0c402bd3d8b64cb1f114b9ab75341653f715dcbed21ca2474f23`；native result：`c068a1a6c65545d8a0b5dd0ffa96f8e23f258020ba89958267927c648104d900`。
-- 完整证据已逐字归档到 `/Users/everflow/Projects/dalton-owner-activation-20260910/development-0913-writer-transition/`，包含 `evidence-manifest.json`、最终与中断 runner/log/receipt、native result、wheel 与局部回归日志。
+- 完整证据已逐字归档到 `$HOME/Projects/dalton-owner-activation-20260910/development-0913-writer-transition/`，包含 `evidence-manifest.json`、最终与中断 runner/log/receipt、native result、wheel 与局部回归日志。
 
 早先冻结 `5bb0327e` 的全量运行在 275.992s 主动中断，退出 -2、没有 native result，原因是最后复查发现 post-health finalizer 新建校验器时缺少 writer 证明上下文。`d1d012ed` 已修复并增加真实 fresh-worker 入口与不匹配 installed proof 的拒绝测试；之后才重新跑完上述全量。另一次局部入口测试因未提交文档而触发真实 ops-clean guard，其后仅隔离测试夹具的 ops identity，生产 guard 保持。所有失败/中断均不记为通过。
 

@@ -301,6 +301,37 @@ class FakeBroker:
 
 
 class OpenClawModelAdapterTests(unittest.TestCase):
+    def test_every_general_level_is_explicit_and_medium_purposes_use_the_route(self):
+        for level in ("off", "minimal", "low", "medium", "high"):
+            with self.subTest(level=level):
+                work = WorkOrder.from_dict({**self.work.to_dict(), "id": "work:thinking-" + level,
+                    "metadata": {**self.work.metadata, "thinking_level": level}})
+                routed = self.router.route(work, attempt_number=1, capability="research",
+                    policy_version_ref="model-routing-policy-version:default:1",
+                    credential_slot_refs=["credential-slot:openai:dalton"],
+                    required_modalities=["text"], required_context_tokens=1_000,
+                    estimated_input_tokens=500, estimated_output_tokens=250,
+                    idempotency_key="route-thinking:" + level)["decision"]
+                (invocation, result), broker = self.run_with(success_response, work=work, route=routed)
+                broker.close()
+                self.assertEqual(broker.requests[0]["controls"], {"thinkingLevel": level})
+                self.assertEqual(invocation.usage["thinking_level"], level)
+                self.assertEqual(result.metadata["thinking_level"], level)
+
+    def test_default_low_and_initial_screen_medium_are_explicit(self):
+        (_, _), broker = self.run_with(success_response)
+        broker.close()
+        self.assertEqual(broker.requests[0]["controls"]["thinkingLevel"], "low")
+        work = WorkOrder.from_dict({**self.work.to_dict(), "id": "work:initial-thinking-medium"})
+        routed = self.router.route(work, attempt_number=1, capability="research",
+            purpose="initial_screen", policy_version_ref="model-routing-policy-version:default:1",
+            credential_slot_refs=["credential-slot:openai:dalton"], required_modalities=["text"],
+            required_context_tokens=1_000, estimated_input_tokens=500, estimated_output_tokens=250,
+            idempotency_key="route-thinking:initial-screen")["decision"]
+        (_, _), broker = self.run_with(success_response, work=work, route=routed)
+        broker.close()
+        self.assertEqual(broker.requests[0]["controls"]["thinkingLevel"], "medium")
+
     def setUp(self) -> None:
         self.temp = tempfile.TemporaryDirectory()
         self.directory = Path(self.temp.name)
@@ -409,7 +440,7 @@ class OpenClawModelAdapterTests(unittest.TestCase):
             set(request),
             {
                 "schemaVersion", "invocationId", "workOrderId", "profileId",
-                "model", "prompt", "maxTokens", "timeoutMs", "auth",
+                "model", "prompt", "maxTokens", "timeoutMs", "auth", "controls",
             },
         )
         self.assertEqual(request["prompt"], self.work.question)
@@ -528,7 +559,7 @@ class OpenClawModelAdapterTests(unittest.TestCase):
             set(controls),
             {
                 "maxInputTokens", "maxOutputTokens", "maxTotalTokens",
-                "maxCostUsd", "structuredOutput",
+                "maxCostUsd", "structuredOutput", "thinkingLevel",
             },
         )
         self.assertEqual(controls["maxInputTokens"], 1_000)
@@ -630,6 +661,12 @@ class OpenClawModelAdapterTests(unittest.TestCase):
              "claim-support-verifier-provider-output-v0.1.schema.json",
              "claim_support_verifier_provider_output_v0_1", None),
         )
+        cases += (("initial_screen_verifier", "initial-screen-verifier-provider-output-0.1",
+                   "initial-screen-verifier-provider-output-v0.1.schema.json",
+                   "initial_screen_verifier_provider_output_v0_1", "section"),)
+        cases += (("street_estimate_verifier", "street-estimate-verifier-provider-output-0.1",
+                   "street-estimate-verifier-provider-output-v0.1.schema.json",
+                   "street_estimate_verifier_provider_output_v0_1", None),)
         for index, (purpose, contract, resource, schema_name, locator) in enumerate(cases, 1):
             with self.subTest(purpose=purpose):
                 verifier = WorkOrder.from_dict({**self.work.to_dict(),
@@ -757,7 +794,7 @@ class OpenClawModelAdapterTests(unittest.TestCase):
             idempotency_key="route-key:model-verification-thinking-high",
         )["decision"]
         with self.assertRaisesRegex(
-            ModelAdmissionError, "unsupported thinking level"
+            ModelAdmissionError, "thinking"
         ):
             self.run_with(
                 success_response,
@@ -1489,7 +1526,7 @@ class OpenClawModelAdapterTests(unittest.TestCase):
         script = r'''
 import { ModelBroker } from "./src/broker.mjs";
 import { BrokerServer } from "./src/server.mjs";
-const runtime={version:"node-hmac-conformance",llm:{complete:async (x)=>({text:"real-node-bound",provider:"openai",model:"gpt-5.6",agentId:x.agentId,usage:{inputTokens:10,outputTokens:2,totalTokens:12,costUsd:0.1}})}};
+const runtime={version:"node-hmac-conformance",llm:{capabilities:{thinkingLevel:{version:"0.1",levels:["low"]}},complete:async (x)=>({text:"real-node-bound",provider:"openai",model:"gpt-5.6",agentId:x.agentId,usage:{inputTokens:10,outputTokens:2,totalTokens:12,costUsd:0.1}})}};
 const config={dedicatedAgentId:"dalton-model-broker",clientId:"client:dalton-runtime",socketName:"broker.sock",profiles:[{id:"profile:research",model:"openai/gpt-5.6",maxTokens:2000,timeoutMs:5000}]};
 const server=new BrokerServer(new ModelBroker(runtime,config)); const path=await server.start(process.env.DALTON_TEST_STATE_DIR); console.log(path);
 process.on("SIGTERM",async()=>{await server.stop();process.exit(0)});

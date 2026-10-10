@@ -363,3 +363,43 @@ class AnnualReportDefinitelyNotSentRetryTests(unittest.TestCase):
 
 if __name__ == "__main__":
     unittest.main()
+
+
+class BudgetLedgerBusyTests(unittest.TestCase):
+    """Live legacy 2026-10-06 01:14Z, admission 3c49a49c: the shared day-budget
+    ledger stayed write-locked past its busy timeout while the draft was being
+    admitted, twice.  Nothing was reserved and nothing was sent, but the call
+    was recorded as MODEL_ADAPTER_REJECTED -- terminal -- and the admission was
+    held for a person.  A busy ledger is a proved, transient no-send."""
+
+    def _worker(self, error):
+        def admit(*_args):
+            raise error
+
+        return SimpleNamespace(budget_store=object(), _admit_model_call=admit)
+
+    def test_a_locked_budget_ledger_is_a_retryable_no_send(self):
+        import sqlite3
+
+        from dalton_core.openclaw_model_adapter import LocalAdmissionBusy
+
+        for message in ("database is locked", "database table is locked",
+                        "database is busy"):
+            with self.subTest(message=message):
+                worker = self._worker(sqlite3.OperationalError(message))
+                with self.assertRaises(LocalAdmissionBusy) as caught:
+                    RegisteredAnnualReportDraftWorker._before_model_call(
+                        worker, None, None, None, False)
+                self.assertIsInstance(caught.exception, BrokerDefinitelyNotSent)
+
+    def test_any_other_admission_failure_stays_a_rejection(self):
+        import sqlite3
+
+        for error in (sqlite3.OperationalError("no such table: x"),
+                      ValueError("mission authority drifted")):
+            with self.subTest(error=error):
+                worker = self._worker(error)
+                with self.assertRaises(OpenClawModelAdapterError) as caught:
+                    RegisteredAnnualReportDraftWorker._before_model_call(
+                        worker, None, None, None, False)
+                self.assertNotIsInstance(caught.exception, BrokerDefinitelyNotSent)

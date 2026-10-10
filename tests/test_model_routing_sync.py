@@ -38,10 +38,13 @@ from dalton_core.model_routing_sync import (
     LEGACY_ENVIRONMENT_ID,
     Environment,
     environment_for_state_dir,
+    _selection_landed,
     fan_out_selection,
     host_environments,
+    purpose_holders,
     selection_params,
     sync_note,
+    tier_holders,
 )
 from dalton_core.model_selection import publish_tier_selection
 from dalton_core.openclaw_catalog_reconcile import sync_openclaw_model_catalog
@@ -328,6 +331,247 @@ class AlignmentPlannerTests(unittest.TestCase):
         self.assertIn("现在：", rendered)
         self.assertIn("将改为：", rendered)
         self.assertIn("共 1 个环境与源环境不同。", rendered)
+
+
+def _add_lineage(environment: Environment, policy_id: str, *,
+                 brain_chain: list[str] | None = None) -> str:
+    """A second lineage in an already-seeded router.
+
+    ``brain_chain=None`` makes a *bare* lineage -- one profile pinned, no
+    ``fallback_chains`` at all -- the shape the service-pin lineages
+    (``dalton-openclaw``, ``-assessment``, ...) have in a workspace.
+    """
+
+    with ModelRouter(environment.router_db) as router:
+        if brain_chain is None:
+            return ensure_planner_policy(
+                router, profile_ids=["profile:deepseek-v4-flash"], now=NOW,
+                policy_id=policy_id)["policy_version_ref"]
+        ref = ensure_planner_policy(router, tier="brain", now=NOW,
+                                    policy_id=policy_id)["policy_version_ref"]
+        return publish_tier_selection(
+            router, policy_version_ref=ref, tier="brain", mode="explicit",
+            chain=brain_chain, now=NOW)["policy_version_ref"]
+
+
+def _record_decision(environment: Environment, policy_version_ref: str,
+                     created_at: str) -> None:
+    """One route decision made under ``policy_version_ref`` (test-only write)."""
+
+    import sqlite3
+    import uuid
+
+    connection = sqlite3.connect(environment.router_db)
+    # The router's append-only triggers ask the router process whether this
+    # write is authorised; a test fixture answers yes for itself.
+    connection.create_function("dalton_model_router_authorized", -1, lambda *_: 1)
+    try:
+        token = uuid.uuid4().hex
+        connection.execute(
+            "INSERT INTO model_route_decisions (decision_id, decision_kind, outcome, "
+            "work_order_id, work_order_hash, attempt_number, capability, "
+            "policy_version_ref, policy_hash, candidate_snapshot_hash, request_hash, "
+            "decision_hash, decision_json, created_at) "
+            "VALUES (?, 'initial', 'rejected', 'wo', 'h', 1, 'reasoning', ?, 'h', 'h', "
+            "'h', ?, '{}', ?)",
+            (f"decision:{token}", policy_version_ref, token, created_at))
+        connection.commit()
+    finally:
+        connection.close()
+
+
+class LineageParticipationTests(unittest.TestCase):
+    """2026-10-02: a lineage that declares no chain for a tier is not behind on it.
+
+    The source side always ignored such lineages; the target side counted them,
+    so after every successful apply the residual still read "还有 2 个环境与源环境
+    不同" -- for service-pin lineages no writer call can ever give that tier.
+    """
+
+    LANE = {"brain": ["a", "b"], "cheap": ["c"], "verifier": ["v1", "v2"]}
+
+    def setUp(self) -> None:
+        import align_model_routing
+
+        self.align = align_model_routing
+        self.target = _environment(Path(tempfile.mkdtemp()), "workspace", "ws-one")
+        self.source = {"tiers": {"cheap": ["c"], "verifier": ["v1", "v2"]},
+                       "purposes": {"research_language_check": ["x", "y"]}}
+
+    def _plan(self, tier_chains, overrides):
+        from unittest import mock
+
+        held = {"tier_chains": tier_chains, "purpose_overrides": overrides}
+        with mock.patch.object(self.align, "target_selections", return_value=held):
+            return self.align.plan_environment(self.source, self.target)
+
+    def test_holders_ignore_lineages_that_do_not_declare_the_tier(self) -> None:
+        chains = {"lane": dict(self.LANE), "openclaw": {},
+                  "verifier-pin": {"verifier": ["v1", "v2"]}}
+        self.assertEqual(tier_holders(chains, "cheap"), {"lane"})
+        self.assertEqual(tier_holders(chains, "verifier"), {"lane", "verifier-pin"})
+        # Nobody declares it: the environment is missing it, everyone counts.
+        self.assertEqual(tier_holders(chains, "deliverable"),
+                         {"lane", "openclaw", "verifier-pin"})
+
+    def test_a_stage_pin_counts_lineages_that_hold_it_or_declare_its_tier(self) -> None:
+        chains = {"lane": dict(self.LANE), "pinless-lane": dict(self.LANE),
+                  "openclaw": {}, "verifier-pin": {"verifier": ["v1"]}}
+        overrides = {"lane": {"research_language_check": {"mode": "explicit",
+                                                          "chain": ["x", "y"]}},
+                     "pinless-lane": {}, "openclaw": {}, "verifier-pin": {}}
+        # research_language_check is a cheap-tier stage: the lane that lost its
+        # pin to a cheap-tier save still counts; the service pins do not.
+        self.assertEqual(purpose_holders(chains, overrides, "research_language_check"),
+                         {"lane", "pinless-lane"})
+
+    def test_bare_service_pin_lineages_do_not_make_an_aligned_environment_differ(self) -> None:
+        lane = {"brain": ["a", "b"], "cheap": ["c"], "verifier": ["v1", "v2"]}
+        pin = {"research_language_check": {"mode": "explicit", "chain": ["x", "y"]}}
+        plan = self._plan(
+            {"model-routing-policy:dalton-openclaw-extraction": lane,
+             "model-routing-policy:dalton-openclaw-claim-index": dict(lane),
+             "model-routing-policy:dalton-openclaw": {},
+             "model-routing-policy:dalton-openclaw-assessment": {"brain": ["a", "b"]},
+             "model-routing-policy:dalton-openclaw-verifier": {"verifier": ["v1", "v2"]}},
+            {"model-routing-policy:dalton-openclaw-extraction": dict(pin),
+             "model-routing-policy:dalton-openclaw-claim-index": dict(pin),
+             "model-routing-policy:dalton-openclaw": {},
+             "model-routing-policy:dalton-openclaw-assessment": {},
+             "model-routing-policy:dalton-openclaw-verifier": {}})
+        self.assertEqual(plan["status"], "aligned")
+        self.assertEqual(plan["differences"], [])
+
+    def test_a_lane_that_is_really_behind_is_still_reported(self) -> None:
+        plan = self._plan(
+            {"lane": {"cheap": ["old"], "verifier": ["v1", "v2"]},
+             "pinless-lane": {"cheap": ["c"], "verifier": ["v1", "v2"]},
+             "openclaw": {}},
+            {"lane": {"research_language_check": {"mode": "explicit", "chain": ["x", "y"]}},
+             "pinless-lane": {}, "openclaw": {}})
+        self.assertEqual(plan["status"], "differs")
+        self.assertEqual(
+            sorted((item["kind"], item["subject"], item["policy_id"])
+                   for item in plan["differences"]),
+            [("purpose", "research_language_check", "pinless-lane"),
+             ("tier", "cheap", "lane")])
+
+    def test_an_environment_missing_a_tier_everywhere_is_behind(self) -> None:
+        plan = self._plan({"lane": {"cheap": ["c"]}, "openclaw": {}},
+                          {"lane": {"research_language_check": {
+                              "mode": "explicit", "chain": ["x", "y"]}}, "openclaw": {}})
+        self.assertEqual(plan["status"], "differs")
+        self.assertEqual(sorted(item["policy_id"] for item in plan["differences"]),
+                         ["lane", "openclaw"])
+        self.assertEqual(plan["publish"],
+                         [{"kind": "tier", "tier": "verifier", "chain": ["v1", "v2"]}])
+
+    def test_a_real_router_with_a_bare_lineage_reads_aligned(self) -> None:
+        root = Path(tempfile.mkdtemp())
+        source = _environment(root, "legacy", LEGACY_ENVIRONMENT_ID)
+        target = _environment(root, "workspace", "ws-one")
+        chain = ["profile:claude-fable-5-1", "profile:deepseek-v4-flash"]
+        _seed_router(source, chain=chain)
+        _add_lineage(source, "model-routing-policy:dalton-openclaw-smoke")
+        _seed_router(target, chain=chain)
+        _add_lineage(target, "model-routing-policy:dalton-openclaw")
+        selections = self.align.source_selections(source)
+        self.assertEqual(selections["conflicts"], [])
+        plan = self.align.plan_environment(selections, target)
+        self.assertEqual(plan["status"], "aligned", plan["differences"])
+        # The fan-out's own "already there" check agrees, so the quiet
+        # environment is not woken for a selection it already has.
+        self.assertTrue(_selection_landed(
+            target, selection_params(tier="brain", mode="explicit", chain=chain)))
+
+
+class IdleSourceLineageTests(unittest.TestCase):
+    """A source conflict caused only by lineages that never route."""
+
+    def setUp(self) -> None:
+        self.directory = tempfile.TemporaryDirectory()
+        self.addCleanup(self.directory.cleanup)
+        self.root = Path(self.directory.name)
+        self.source = _environment(self.root, "legacy", LEGACY_ENVIRONMENT_ID)
+        self.lane_chain = ["profile:claude-fable-5-1", "profile:deepseek-v4-flash"]
+        self.old_chain = ["profile:deepseek-v4-flash"]
+        self.lane_ref = _seed_router(self.source, chain=self.lane_chain)
+        self.old_ref = _add_lineage(self.source, "model-routing-policy:dalton-openclaw",
+                                    brain_chain=self.old_chain)
+        self.now = NOW + timedelta(days=30)
+
+    def _selections(self, **kwargs):
+        import align_model_routing
+
+        return align_model_routing.source_selections(self.source, now=self.now, **kwargs)
+
+    def test_without_the_idle_rule_it_is_the_old_conflict_with_details(self) -> None:
+        selections = self._selections(idle_days=0)
+        self.assertNotIn("brain", selections["tiers"])
+        self.assertTrue(any("brain" in item for item in selections["conflicts"]))
+        detail = selections["conflict_details"][0]
+        self.assertEqual(detail["subject"], "brain")
+        self.assertEqual(
+            sorted((tuple(item["chain"]), tuple(item["policy_ids"]))
+                   for item in detail["values"]),
+            [(tuple(self.lane_chain), ("model-routing-policy:sync-fixture",)),
+             (tuple(self.old_chain), ("model-routing-policy:dalton-openclaw",))])
+        self.assertIsNone(detail["values"][0]["routing"])
+
+    def test_an_idle_lineage_does_not_block_the_routing_lineages_chain(self) -> None:
+        recent = (self.now - timedelta(days=1)).isoformat(timespec="microseconds")
+        stale = (self.now - timedelta(days=20)).isoformat(timespec="microseconds")
+        _record_decision(self.source, self.lane_ref, recent)
+        _record_decision(self.source, self.old_ref, stale)
+        selections = self._selections(idle_days=14)
+        self.assertEqual(selections["tiers"]["brain"], self.lane_chain)
+        self.assertEqual(selections["conflicts"], [])
+        self.assertEqual(selections["idle_ignored"], [{
+            "kind": "tier", "subject": "brain", "chain": self.lane_chain,
+            "ignored": [{"policy_id": "model-routing-policy:dalton-openclaw",
+                         "chain": self.old_chain}]}])
+        self.assertEqual(selections["activity"]["model-routing-policy:sync-fixture"]
+                         ["decisions"], 1)
+
+    def test_two_routing_lineages_that_disagree_stay_the_owners_decision(self) -> None:
+        recent = (self.now - timedelta(days=1)).isoformat(timespec="microseconds")
+        _record_decision(self.source, self.lane_ref, recent)
+        _record_decision(self.source, self.old_ref, recent)
+        selections = self._selections(idle_days=14)
+        self.assertNotIn("brain", selections["tiers"])
+        self.assertEqual(selections["idle_ignored"], [])
+        routing = [item["routing"] for item in selections["conflict_details"][0]["values"]]
+        self.assertTrue(all(len(item) == 1 for item in routing))
+
+    def test_nobody_routing_resolves_nothing(self) -> None:
+        selections = self._selections(idle_days=14)
+        self.assertNotIn("brain", selections["tiers"])
+        self.assertTrue(selections["conflicts"])
+        self.assertEqual(selections["activity"], {})
+        rendered = self._render(selections)
+        self.assertIn("近 14 天都没有路由过", rendered)
+
+    def test_the_report_says_which_lineages_were_set_aside(self) -> None:
+        _record_decision(self.source, self.lane_ref,
+                         (self.now - timedelta(days=1)).isoformat(timespec="microseconds"))
+        rendered = self._render(self._selections(idle_days=14))
+        self.assertIn("ℹ 类别「brain」按近 14 天在路由的策略取值", rendered)
+        self.assertIn("dalton-openclaw", rendered)
+
+    def _render(self, selections):
+        import align_model_routing
+
+        return align_model_routing.render({
+            "source": {"environment_id": LEGACY_ENVIRONMENT_ID, "name": "现有研究环境",
+                       "state_dir": str(self.source.state_dir),
+                       "tiers": selections["tiers"], "purposes": selections["purposes"]},
+            "conflicts": selections["conflicts"],
+            "conflict_details": selections["conflict_details"],
+            "idle_ignored": selections["idle_ignored"],
+            "idle_days": 14,
+            "environments": [],
+            "environments_differing": 0,
+        })
 
 
 class CockpitSaveTests(unittest.TestCase):

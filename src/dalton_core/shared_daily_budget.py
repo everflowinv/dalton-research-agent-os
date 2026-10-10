@@ -479,13 +479,29 @@ def peer_ledgers(
 #: the ``outer_budget`` query inside ``admit`` -- an open reservation from
 #: yesterday is money that may still land, and a shared cap that forgot it
 #: would let the host overspend on exactly the day a lane crashed.
+#: 2026-10-07: the admissions that count against a day -- that day's, and
+#: every one still open (no settlement) from any day -- as an index-driven set.
+#: The same rows used to be selected by ``WHERE a.day=? OR s.admission_id IS
+#: NULL`` over the joined ledger, which no index can serve: a full scan of all
+#: ~70,000 admissions with three joins, run inside the ``BEGIN IMMEDIATE`` of
+#: every admission.  Measured on a copy of the legacy ledger: 0.46 s for the
+#: mission query and 0.11 s for this one, versus 0.03 s and 0.02 s as a set.
+#: One parameter: the day.  Every join below is one-to-one (each is keyed by a
+#: unique ``admission_id``), so the rows are exactly the rows of the old form.
+DAY_OR_OPEN_ADMISSIONS_SQL = (
+    "SELECT admission_id FROM thesis_impact_day_admissions WHERE day=? "
+    "UNION SELECT a0.admission_id FROM thesis_impact_day_admissions a0 "
+    "WHERE NOT EXISTS (SELECT 1 FROM thesis_impact_day_settlements s0 "
+    "WHERE s0.admission_id=a0.admission_id)"
+)
+
 _DAY_SPEND_SQL = (
+    f"WITH counted(admission_id) AS ({DAY_OR_OPEN_ADMISSIONS_SQL}) "
     "SELECT a.reserved_micros,"
     "COALESCE(c.corrected_micros,s.actual_micros) AS actual_micros "
-    "FROM thesis_impact_day_admissions a "
+    "FROM counted JOIN thesis_impact_day_admissions a ON a.admission_id=counted.admission_id "
     "LEFT JOIN thesis_impact_day_settlements s ON s.admission_id=a.admission_id "
-    "LEFT JOIN thesis_impact_settlement_corrections c ON c.admission_id=a.admission_id "
-    "WHERE a.day=? OR s.admission_id IS NULL"
+    "LEFT JOIN thesis_impact_settlement_corrections c ON c.admission_id=a.admission_id"
 )
 
 

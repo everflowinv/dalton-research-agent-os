@@ -309,6 +309,58 @@ def build_sec_filing_url_authorities(
     return authorities
 
 
+def build_sec_exhibit_url_authority(
+    primary_authority: Mapping[str, Any], exhibit_name: str
+) -> dict[str, Any]:
+    """The URL authority for one exhibit of a filing whose primary document it binds.
+
+    ADR-0015: the 8-K's Exhibit 99.1 (the earnings press release) lives beside
+    the primary document in the same accession directory, under a name the
+    8-K's own exhibit index gives.  The authority is the primary document's
+    with only the file name changed: same host, same directory, the same
+    discovery envelope and raw artifact bound.  A name with a path, a query or
+    an extension other than a document's is refused, so this can never name a
+    URL outside the filing that was discovered.
+    """
+
+    import re as _re
+
+    from .public_web_connector import (
+        public_web_url_ref, validate_public_web_url_authority,
+    )
+
+    if not isinstance(exhibit_name, str) or _re.fullmatch(
+            r"[A-Za-z0-9][A-Za-z0-9._-]{0,127}\.(?:htm|html|txt)", exhibit_name) is None:
+        raise SecFilingsIndexError("exhibit name must be a plain document file name")
+    primary = validate_public_web_url_authority(dict(primary_authority))
+    url = str(primary["canonical_url"])
+    prefix = f"https://{FILING_ARCHIVE_HOST}/Archives/edgar/data/"
+    directory, _, current = url.rpartition("/")
+    parts = directory[len(prefix):].split("/") if directory.startswith(prefix) else []
+    if (len(parts) != 2 or not parts[0].isdigit() or len(parts[1]) != 18
+            or not parts[1].isdigit() or not current):
+        raise SecFilingsIndexError("primary authority is not an EDGAR accession document")
+    exhibit = f"{directory}/{exhibit_name}"
+    url_ref = public_web_url_ref(exhibit)
+    base = {
+        "schema_version": "0.1",
+        "id": "public-web-url-authority:" + content_hash({
+            "url_ref": url_ref,
+            "source_envelope_hash": primary["discovery_source_envelope_hash"],
+        }),
+        "created_at": primary["created_at"],
+        "url_ref": url_ref,
+        "canonical_url": exhibit,
+        "url_hash": url_ref.removeprefix("public-web-url:sha256:"),
+        "host": FILING_ARCHIVE_HOST,
+        "discovery_source_envelope_ref": primary["discovery_source_envelope_ref"],
+        "discovery_source_envelope_hash": primary["discovery_source_envelope_hash"],
+        "discovery_raw_artifact_version_ref": primary["discovery_raw_artifact_version_ref"],
+        "search_record_ref": url_ref,
+    }
+    return validate_public_web_url_authority({**base, "content_hash": content_hash(base)})
+
+
 def _wire_time(value: datetime) -> str:
     return value.astimezone(timezone.utc).isoformat(timespec="microseconds")
 

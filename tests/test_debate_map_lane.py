@@ -186,7 +186,7 @@ class IndustryReattributionUrgencyTests(unittest.TestCase):
                     self.INDUSTRY, self.MISSION, {"claim:acn:1"})
                 urgent = coordinator._retired_cited(current, retired)
                 self.assertIsNone(urgent)
-                self.assertIn("next redraw is due",
+                self.assertIn("每 6 小时最多重画一次",
                               coordinator._paced(self.INDUSTRY, urgent))
                 # Withdraw the reattribution and the same citation is urgent.
                 urgent = coordinator._retired_cited(current, {"claim:acn:1"})
@@ -336,6 +336,8 @@ class ChildRunTests(unittest.TestCase):
         self.assertEqual(summary["map_status"], "fresh")
         self.assertEqual(summary["debates"], 1)
         self.assertEqual(summary["cost_micros"], 1_000)
+        self.assertEqual(summary["budget"]["run_cost_micros"], 28_000_000)
+        self.assertEqual(len(model.prompts), 2)
         current = DebateMapAuthority(self.harness.store).current(ACN)
         self.assertEqual(current["version"], 1)
         self.assertEqual(current["change_reason"], "evidence_thicker")
@@ -346,6 +348,29 @@ class ChildRunTests(unittest.TestCase):
         # The drafting prompt showed the claims and the constitution's lists.
         self.assertIn("Discretionary demand is decelerating.", model.prompts[0])
         self.assertIn("Bookings lead revenue", model.prompts[0])
+
+    def test_repair_reserves_its_own_call_and_the_verifier_inside_the_run(self):
+        self.harness.add_claims()
+        config = self.harness.with_model()
+        for run_cost, expected_calls, expected_status in ((2, 1, "refused"), (42, 3, "fresh")):
+            with self.subTest(run_cost=run_cost):
+                config.write_text(json.dumps({"model_router_db": str(self.harness.state_dir / "r.db"),
+                    "purpose_run_budgets": {"debate_map": {"max_cost_usd": run_cost}}}))
+                model = FakeModel(["not json", draft_reply(), PASS])
+                original = model.call
+                def charged(**kwargs):
+                    return {**original(**kwargs), "cost_micros": 14_000_000}
+                with patch.object(model, "call", side_effect=charged), \
+                        patch("dalton_core.debate_map_cli.CockpitModel", model), \
+                        patch("dalton_core.debate_map_cli.route_family",
+                              side_effect=lambda config, ref: "family-b" if ref == "route-2" else "family-a"):
+                    summary = self.harness.run(dry_run=False, model_config_path=config)
+                self.assertEqual(summary["map_status"], expected_status, summary)
+                self.assertEqual(len(model.prompts), expected_calls)
+                self.assertLessEqual(summary["cost_micros"], summary["budget"]["run_cost_micros"])
+                if expected_calls == 1:
+                    self.assertEqual(summary["contract_repair"]["status"], "budget_refused")
+                    self.assertIsNone(DebateMapAuthority(self.harness.store).current(ACN))
 
     def test_mission_only_rebind_appends_without_another_model_call(self):
         self.test_a_verified_draft_becomes_a_first_version()
@@ -776,7 +801,7 @@ class LaneCoordinatorTests(unittest.TestCase):
         self._new_claim("debate-third", "A third view arrives.")
         paced = self.coordinator.dispatch_once()
         self.assertEqual(paced["status"], "held")
-        self.assertIn("backing off after 1 draft", paced["reason"])
+        self.assertIn("连续 1 次起草没有发布", paced["reason"])
         self.now += timedelta(hours=6, seconds=1)
         self.assertEqual(self.coordinator.dispatch_once()["status"], "launched")
 

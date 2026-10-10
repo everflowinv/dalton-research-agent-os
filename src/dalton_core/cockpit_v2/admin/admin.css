@@ -1,0 +1,164 @@
+/* Cockpit v2 · 管理员设置, in the first cockpit's design language (deep navy,
+   glass panels, teal -> violet brand gradient; a light variant on
+   prefers-color-scheme: light with the old page's light tokens).
+   Scoped under .adm-root so it can sit inside the v2 shell without touching
+   the analyst pages; standalone it styles the page.  Every text/background
+   pair in ADMIN_AA_PAIRS (tests/test_cockpit_v2_admin.py) is at least 4.5:1
+   in both themes; one danger colour, always with words (review G07). */
+.adm-root,.dv2-admin-standalone{color-scheme:dark;
+  --adm-fg:#e8ecf7;--adm-muted:#a3adca;--adm-bg:#0d1326;--adm-card:#1d243c;--adm-raised:#2c3349;
+  --adm-accent:#5cc8ff;--adm-accent-ink:#08101f;--adm-grad-a:#3ee0c8;--adm-grad-b:#8b7cf6;
+  --adm-ok:#4ade80;--adm-ok-bg:#233e46;--adm-warn:#f5b64a;--adm-warn-bg:#3b383e;--adm-err:#ff8da5;--adm-danger-bg:#3d2e47;
+  --adm-danger:#ff8da5;--adm-danger-btn:#c8264a;--adm-danger-btn-ink:#ffffff;--adm-code:#2a3150;--adm-focus:#5cc8ff;
+  --adm-panel:rgba(255,255,255,.045);--adm-panel-2:rgba(255,255,255,.07);--adm-hover:rgba(255,255,255,.11);--adm-well:rgba(0,0,0,.22);
+  --adm-field:rgba(0,0,0,.25);--adm-line:rgba(255,255,255,.09);--adm-line-2:rgba(255,255,255,.16);
+  --adm-top:rgba(9,13,28,.78);--adm-shadow:0 20px 60px rgba(0,0,0,.35);
+  --adm-page:radial-gradient(1200px 800px at 10% -10%,#1a2350 0%,transparent 60%),radial-gradient(900px 700px at 110% 10%,#123a44 0%,transparent 55%),linear-gradient(180deg,#070b16 0%,#0d1326 45%,#121a33 100%)}
+@media (prefers-color-scheme: light){
+  .adm-root,.dv2-admin-standalone{color-scheme:light;
+    --adm-fg:#172033;--adm-muted:#5f6b7c;--adm-bg:#f5f7fa;--adm-card:#ffffff;--adm-raised:#eef2f7;
+    --adm-accent:#1769aa;--adm-accent-ink:#ffffff;--adm-grad-a:#0b7f73;--adm-grad-b:#4f4fc4;
+    --adm-ok:#176d43;--adm-ok-bg:#eff9f3;--adm-warn:#8d4d00;--adm-warn-bg:#fff8e9;--adm-err:#a92e48;--adm-danger-bg:#fff0f3;
+    --adm-danger:#a92e48;--adm-danger-btn:#b4233f;--adm-danger-btn-ink:#ffffff;--adm-code:#f1f4f8;--adm-focus:#1769aa;
+    --adm-panel:rgba(255,255,255,.82);--adm-panel-2:#eef2f7;--adm-hover:#e3e9f1;--adm-well:#f8fafc;
+    --adm-field:#ffffff;--adm-line:#e2e7ef;--adm-line-2:#cbd4e1;
+    --adm-top:rgba(247,249,252,.86);--adm-shadow:0 12px 38px rgba(37,50,74,.08);
+    --adm-page:radial-gradient(800px 520px at 75% -10%,rgba(109,108,232,.10),transparent 65%),radial-gradient(650px 500px at 8% 5%,rgba(26,169,153,.08),transparent 66%)}
+}
+.dv2-admin-standalone{margin:0;min-height:100vh;font:15px/1.6 -apple-system,BlinkMacSystemFont,"PingFang SC","Hiragino Sans GB","Helvetica Neue",Arial,"Noto Sans SC",sans-serif;
+  -webkit-font-smoothing:antialiased;color:var(--adm-fg);background-color:var(--adm-bg);background-image:var(--adm-page);background-repeat:no-repeat;background-attachment:fixed}
+.dv2-admin-standalone *{box-sizing:border-box}
+.adm-top{display:flex;flex-wrap:wrap;gap:10px 18px;align-items:center;padding:14px 32px;border-bottom:1px solid var(--adm-line);background:var(--adm-top);
+  -webkit-backdrop-filter:blur(14px);backdrop-filter:blur(14px);position:sticky;top:0;z-index:5}
+.adm-logo{width:36px;height:36px;flex:0 0 36px;border-radius:12px;background:linear-gradient(120deg,var(--adm-grad-a),var(--adm-grad-b));display:grid;place-items:center;
+  color:var(--adm-accent-ink);font-weight:900;font-size:17px;box-shadow:0 10px 30px rgba(62,224,200,.25)}
+.adm-back{color:var(--adm-accent);text-decoration:none;white-space:nowrap;order:3;margin-left:auto;font-size:14px;padding:6px 14px;border:1px solid var(--adm-line-2);border-radius:999px;transition:background .15s}
+.adm-back:hover{background:var(--adm-panel-2)}
+.adm-title{font-weight:800;font-size:18px;color:var(--adm-fg);min-width:0}
+.adm-sub{font-weight:400;color:var(--adm-muted);font-size:14px;margin-left:10px}
+.adm-root{max-width:1180px;margin:0 auto;padding:28px 32px 72px;min-width:0;box-sizing:border-box;color:var(--adm-fg)}
+.adm-root *{box-sizing:border-box}
+.adm-root a{color:var(--adm-accent)}
+.adm-head{display:flex;flex-wrap:wrap;gap:8px 16px;align-items:center;margin-bottom:16px;color:var(--adm-muted)}
+.adm-head b{color:var(--adm-fg)}
+.adm-banner{padding:12px 16px;border-radius:12px;margin:10px 0;border:1px solid var(--adm-line);background:var(--adm-panel)}
+.adm-banner.err{border-color:transparent;border-left:4px solid var(--adm-err);background:var(--adm-danger-bg);color:var(--adm-err)}
+.adm-banner.warn{border-color:transparent;border-left:4px solid var(--adm-warn);background:var(--adm-warn-bg);color:var(--adm-warn)}
+.adm-tabs{display:flex;flex-wrap:wrap;gap:6px;padding:6px;margin-bottom:18px;border:1px solid var(--adm-line);border-radius:16px;background:var(--adm-panel)}
+.adm-tabs button{border:0;background:none;padding:9px 16px;min-height:40px;font:inherit;color:var(--adm-muted);cursor:pointer;border-radius:12px;transition:background .15s,color .15s}
+.adm-tabs button:hover{background:var(--adm-panel-2);color:var(--adm-fg)}
+.adm-tabs button[aria-selected="true"]{color:var(--adm-fg);font-weight:650;background:linear-gradient(90deg,rgba(62,224,200,.16),rgba(139,124,246,.16));box-shadow:inset 0 0 0 1px rgba(62,224,200,.3)}
+.adm-tabs button:focus-visible,.adm-root button:focus-visible,.adm-root a:focus-visible,.adm-root input:focus-visible,
+.adm-root select:focus-visible,.adm-root textarea:focus-visible,.adm-root summary:focus-visible,.adm-back:focus-visible{outline:3px solid var(--adm-focus);outline-offset:2px}
+.adm-sec{background:var(--adm-panel);border:1px solid var(--adm-line);border-radius:18px;padding:20px 24px;margin:0 0 18px;box-shadow:var(--adm-shadow)}
+.adm-sec>h2{font-size:18px;margin:0 0 6px;color:var(--adm-fg)}
+.adm-sec>h3,.adm-sec h3{font-size:15px;margin:16px 0 8px;color:var(--adm-fg)}
+.adm-explain{color:var(--adm-muted);margin:0 0 12px;font-size:14px}
+.adm-empty{color:var(--adm-muted);padding:6px 0;margin:0}
+.adm-grid{display:grid;grid-template-columns:repeat(auto-fit,minmax(170px,1fr));gap:12px;margin:10px 0}
+.adm-cell{border:1px solid var(--adm-line);border-radius:16px;padding:14px 16px;background:var(--adm-well);min-width:0}
+.adm-cell .n{font-size:26px;font-weight:800;letter-spacing:-.5px;line-height:1.25;font-variant-numeric:tabular-nums}
+.adm-cell .l{color:var(--adm-muted);font-size:13px}
+.adm-cell.alarm{border-color:var(--adm-err)} .adm-cell.alarm .n{color:var(--adm-err)}
+.adm-table-wrap{overflow-x:auto;max-width:100%;border:1px solid var(--adm-line);border-radius:14px;background:var(--adm-well)}
+.adm-table{border-collapse:collapse;width:100%;font-size:14px;font-variant-numeric:tabular-nums}
+.adm-table th,.adm-table td{border-bottom:1px solid var(--adm-line);padding:9px 12px;text-align:left;vertical-align:top}
+.adm-table tbody tr:last-child>*{border-bottom:0}
+.adm-table th{color:var(--adm-muted);font-weight:650;white-space:nowrap;background:var(--adm-panel-2);font-size:13.5px}
+.adm-table td.num,.adm-table th.num{text-align:right;font-variant-numeric:tabular-nums}
+.adm-row{display:flex;flex-wrap:wrap;gap:10px;align-items:center;padding:12px 0;border-bottom:1px solid var(--adm-line)}
+.adm-row:last-child{border-bottom:0}
+.adm-row .grow{flex:1 1 260px;min-width:0;overflow-wrap:anywhere}
+.adm-meta{color:var(--adm-muted);font-size:13px}
+.adm-pill{display:inline-flex;align-items:center;padding:1px 10px;border-radius:999px;font-size:13px;line-height:1.5;border:1px solid currentColor;white-space:nowrap}
+.adm-pill.ok{color:var(--adm-ok);background:var(--adm-ok-bg);border-color:transparent}
+.adm-pill.warn{color:var(--adm-warn);background:var(--adm-warn-bg);border-color:transparent}
+.adm-pill.err{color:var(--adm-err);background:var(--adm-danger-bg);border-color:transparent}
+.adm-pill.muted{color:var(--adm-muted);border-color:var(--adm-line-2)}
+.adm-tech{font-size:13px;color:var(--adm-muted)}
+.adm-tech code,.adm-root code{background:var(--adm-code);color:var(--adm-fg);padding:1px 6px;border-radius:6px;font:12.5px/1.45 ui-monospace,SFMono-Regular,Menlo,monospace;word-break:break-all}
+.adm-root button.adm-btn{font:inherit;font-size:14px;min-height:36px;padding:6px 14px;border-radius:12px;border:1px solid var(--adm-line-2);background:var(--adm-panel-2);color:var(--adm-fg);cursor:pointer;transition:transform .15s,background .15s,filter .15s}
+.adm-root button.adm-btn:hover{background:var(--adm-hover)}
+.adm-root button.adm-btn:active{transform:translateY(1px)}
+.adm-root button.adm-btn.primary{background:linear-gradient(120deg,var(--adm-grad-a),var(--adm-grad-b));border-color:transparent;color:var(--adm-accent-ink);font-weight:700}
+.adm-root button.adm-btn.primary:hover{filter:brightness(1.08)}
+.adm-root button.adm-btn.danger{background:var(--adm-danger-btn);border-color:transparent;color:var(--adm-danger-btn-ink);font-weight:700}
+.adm-root button.adm-btn.danger:hover{filter:brightness(1.08)}
+.adm-root button.adm-btn[disabled]{opacity:.5;cursor:not-allowed;transform:none;filter:none}
+.adm-danger-zone{border:1px solid var(--adm-danger);border-left:4px solid var(--adm-danger);background:var(--adm-danger-bg);border-radius:14px;padding:14px 16px;margin:12px 0}
+.adm-danger-zone>h3{color:var(--adm-danger);margin-top:0}
+.adm-form{display:flex;flex-wrap:wrap;gap:10px 14px;align-items:flex-end;margin:10px 0}
+.adm-field{display:flex;flex-direction:column;gap:4px;min-width:0}
+.adm-field>span{font-size:13px;color:var(--adm-muted)}
+.adm-root input[type=text],.adm-root input[type=number],.adm-root select,.adm-root textarea{font:inherit;font-size:14px;padding:8px 12px;border:1px solid var(--adm-line-2);
+  border-radius:12px;background-color:var(--adm-field);color:var(--adm-fg);max-width:100%;transition:border-color .15s}
+.adm-root input:focus,.adm-root select:focus,.adm-root textarea:focus{border-color:var(--adm-grad-a)}
+/* the reason: a normal two-line box, never a full-width slab (review §10) */
+.adm-reason-field{flex:1 1 260px;min-width:220px;max-width:520px}
+.adm-root textarea.adm-reason{width:100%;min-width:0;min-height:56px;max-height:160px;resize:vertical;line-height:1.5}
+.adm-status{font-size:14px;color:var(--adm-muted)} .adm-status.ok{color:var(--adm-ok)} .adm-status.err{color:var(--adm-err)}
+.adm-receipt{border-left:4px solid var(--adm-ok);background:var(--adm-ok-bg);color:var(--adm-fg);padding:10px 14px;margin:10px 0;font-size:14px;border-radius:0 12px 12px 0}
+.adm-receipt.err{border-left-color:var(--adm-err);background:var(--adm-danger-bg)}
+.adm-receipt ul{margin:4px 0 0 18px;padding:0}
+.adm-cmd{border:1px solid var(--adm-line);border-radius:14px;padding:10px 14px;margin:10px 0;background:var(--adm-well)}
+.adm-cmd.danger{border-color:var(--adm-danger)}
+.adm-cmd pre{margin:6px 0;white-space:pre-wrap;word-break:break-all;background:var(--adm-code);color:var(--adm-fg);padding:8px 12px;border-radius:10px;
+  font:12.5px/1.5 ui-monospace,SFMono-Regular,Menlo,monospace;user-select:all}
+.adm-chain{list-style:none;margin:8px 0;padding:0;counter-reset:chain}
+.adm-chain li{display:flex;flex-wrap:wrap;gap:8px;align-items:center;padding:8px 12px;border:1px solid var(--adm-line);border-radius:12px;margin:6px 0;background:var(--adm-panel-2);font-size:14px}
+.adm-chain li.warn{border-color:var(--adm-warn);background:var(--adm-warn-bg)}
+.adm-chain li .name{flex:1 1 200px;min-width:0}
+.adm-chain li button{padding:2px 10px;min-height:30px}
+details.adm-more>summary{cursor:pointer;color:var(--adm-accent);margin:8px 0}
+.adm-filter{display:flex;flex-wrap:wrap;gap:8px;margin:8px 0}
+.adm-filter button{border-radius:999px!important}
+.adm-filter button[aria-pressed="true"]{background:var(--adm-ok-bg);color:var(--adm-fg);border-color:var(--adm-grad-a)}
+/* 2026-10-09: problem -> impact -> action first (review §10, 第三批) */
+.adm-issues{border-left:4px solid var(--adm-warn)} .adm-issues.ok{border-left-color:var(--adm-ok)}
+.adm-issue-list{list-style:none;margin:0;padding:0;display:grid;gap:10px}
+.adm-issue{border:1px solid var(--adm-line);border-radius:14px;padding:10px 14px;background:var(--adm-well)}
+.adm-issue.err{border-left:4px solid var(--adm-err)} .adm-issue.warn{border-left:4px solid var(--adm-warn)} .adm-issue.info{border-left:4px solid var(--adm-line-2)}
+.adm-issue-row{display:grid;grid-template-columns:5.5em 1fr;gap:8px;padding:2px 0;overflow-wrap:anywhere}
+.adm-issue-k{color:var(--adm-muted);font-size:13px;padding-top:1px}
+.adm-ok-line{margin:0;color:var(--adm-ok)}
+/* technical identifiers and notes: labelled 「标识」, collapsed */
+details.adm-id{display:inline-block;margin:2px 6px 0 0;font-size:13px;vertical-align:top}
+details.adm-id>summary{cursor:pointer;color:var(--adm-muted);list-style:none}
+details.adm-id>summary::-webkit-details-marker{display:none}
+details.adm-id>summary::before{content:"▸ ";font-size:11px}
+details.adm-id[open]>summary::before{content:"▾ "}
+details.adm-id[open]{display:block}
+details.adm-id .adm-tech{display:block;white-space:pre-wrap;margin-top:2px}
+/* commands: collapsed technical detail with an explicit 「显示命令」 */
+details.adm-cmds{border:1px dashed var(--adm-line-2);border-radius:12px;padding:6px 12px;margin:8px 0;background:var(--adm-well)}
+details.adm-cmds>summary{cursor:pointer;color:var(--adm-muted);font-size:13.5px}
+details.adm-cmds>p{margin:6px 0}
+.adm-cmd-body[hidden]{display:none}
+/* dangerous actions stand apart (MUSE §10.6) */
+.adm-danger-slot{margin-top:18px;padding-top:14px;border-top:1px dashed var(--adm-danger)}
+.adm-danger-zone{margin-top:28px}
+.adm-doors{display:flex;flex-direction:column;gap:6px;margin-top:8px}
+.adm-doors-danger{margin-top:20px;padding-top:12px;border-top:1px dashed var(--adm-danger)}
+.adm-doors-danger .adm-danger-slot{margin-top:0;padding-top:0;border-top:0}
+.adm-task{border:1px solid var(--adm-line);border-radius:16px;padding:14px 18px;margin:12px 0;background:var(--adm-well)}
+.adm-task>h3{margin:0 0 8px}
+.adm-facts{display:grid;grid-template-columns:7em 1fr;gap:4px 12px;margin:0 0 6px;font-size:14px}
+.adm-facts dt{color:var(--adm-muted)} .adm-facts dd{margin:0;overflow-wrap:anywhere}
+.adm-readat{display:flex;gap:10px;align-items:center;justify-content:flex-end;color:var(--adm-muted);font-size:13px;margin:-6px 0 10px}
+/* the confirmation dialog */
+.adm-overlay{position:fixed;inset:0;z-index:50;display:grid;place-items:center;padding:16px;background:rgba(5,8,18,.62)}
+.adm-dialog{width:min(520px,100%);background:var(--adm-card);color:var(--adm-fg);border:1px solid var(--adm-line-2);border-radius:18px;padding:20px 22px;box-shadow:var(--adm-shadow)}
+.adm-dialog.danger{border-top:4px solid var(--adm-danger)}
+.adm-dialog h2{font-size:17px;margin:0 0 10px}
+.adm-dialog-consequence{margin:0 0 12px;overflow-wrap:anywhere}
+.adm-dialog .adm-field{margin:8px 0 4px}
+.adm-dialog input{font:inherit;font-size:14px;padding:8px 12px;border:1px solid var(--adm-line-2);border-radius:12px;background-color:var(--adm-field);color:var(--adm-fg)}
+.adm-dialog-actions{display:flex;justify-content:flex-end;gap:12px;margin-top:16px;flex-wrap:wrap}
+.adm-dialog .adm-btn{font:inherit;font-size:14px;min-height:36px;padding:6px 14px;border-radius:12px;border:1px solid var(--adm-line-2);background:var(--adm-panel-2);color:var(--adm-fg);cursor:pointer}
+.adm-dialog .adm-btn.danger{background:var(--adm-danger-btn);border-color:transparent;color:var(--adm-danger-btn-ink);font-weight:700}
+.adm-dialog .adm-btn.primary{background:linear-gradient(120deg,var(--adm-grad-a),var(--adm-grad-b));border-color:transparent;color:var(--adm-accent-ink);font-weight:700}
+.adm-dialog .adm-btn[disabled]{opacity:.5;cursor:not-allowed}
+.adm-dialog .adm-btn:focus-visible,.adm-dialog input:focus-visible{outline:3px solid var(--adm-focus);outline-offset:2px}
+@media (prefers-reduced-motion: reduce){.adm-root *,.adm-top *{transition:none!important}}
+@media (max-width:1024px){.adm-root{padding:22px 20px 64px}.adm-top{padding:12px 20px}}
+@media (max-width:700px){.adm-root{padding:14px 12px 56px}.adm-tabs button{padding:8px 12px}.adm-top{padding:10px 12px}.adm-sub{display:block;margin:2px 0 0}.adm-sec{padding:16px}}

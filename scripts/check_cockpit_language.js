@@ -18,6 +18,12 @@ const checks = {
   unchangedApprovedTextVisible: gateContext.showFinal('表达已经清楚') === '表达已经清楚',
   changedApprovedTextVisible: gateContext.showFinal('old') === '已修改',
   absentReviewWaits: gateContext.showFinal('未经审查') === '正文正在检查文字表达，完成后会显示。',
+  // 2026-10-07 (BUG-01): the server's final_text state for the exact version
+  // decides; the dictionary is only the fallback when no state is sent.
+  serverReadyShows: gateContext.showFinal('未经审查', 'ready') === '未经审查' &&
+    gateContext.showFinal('old', 'ready') === '已修改',
+  serverDraftShows: gateContext.showFinal('未经审查', 'draft') === '未经审查',
+  serverPendingWaits: gateContext.showFinal('表达已经清楚', 'pending') === '正文正在检查文字表达，完成后会显示。',
   opaqueClaimCursor: html.includes('q.set("cursor",claimCursor)') && html.includes("r.next_cursor"),
   boundedClaimPage: html.includes('q.set("limit","50")'),
   technicalDetailsCollapsed: html.includes('node("details",null,"technical")'),

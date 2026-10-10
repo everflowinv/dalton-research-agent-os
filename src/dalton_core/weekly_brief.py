@@ -19,6 +19,7 @@ from pathlib import Path
 from typing import Any, Iterator
 
 from .contracts import ThesisVersion
+from .thesis_question_model import thesis_payload
 from .forecast_reconciliation import validate_forecast_reconciliation
 from .industry_research import IndustryResearchAuthority, IndustryResearchError
 from .store import (
@@ -219,6 +220,104 @@ def _replay_forecast_reconciliations(
             raise WeeklyBriefConflict("weekly brief forecast reconciliation summary drifted")
 
 
+#: ADR-0010: what a judgement other than NO_CHANGE left behind -- the
+#: governed follow-up the event-judgement lane writes -- read from the four
+#: places it can live. Each entry is an exact ref and hash, replayed on read.
+_FOLLOWUP_SOURCES = (
+    # kind, table, id column
+    ("thesis_revision_candidate", "thesis_revision_candidates", "candidate_id"),
+    ("forecast_revision_proposal", "forecast_revision_proposals", "proposal_id"),
+    ("judgement_followup_notice", "judgement_followup_notices", "notice_id"),
+    ("judgement_no_revision", "judgement_no_revision_followups", "followup_id"),
+    ("forecast_revised", "forecast_model_versions", "version_id"),
+)
+
+
+def _followup_summary(kind: str, record: Mapping[str, Any]) -> dict[str, Any] | None:
+    base = {"kind": kind, "ref": record["id"], "hash": record["content_hash"],
+            "company_ref": record.get("company_ref"), "decision": record.get("decision")}
+    if kind == "thesis_revision_candidate":
+        return {**base, "judgement_ref": record.get("judgement_ref"),
+                "thesis_version_ref": record.get("thesis_version_ref")}
+    if kind == "forecast_revision_proposal":
+        return {**base, "judgement_ref": record.get("judgement_ref"),
+                "driver_ref": record.get("driver_ref"),
+                "period_end": record.get("period_end"),
+                "proposed_value": record.get("proposed_value")}
+    if kind == "judgement_followup_notice":
+        return {**base, "judgement_ref": record.get("judgement_ref"),
+                "notice_kind": record.get("notice_kind"), "label": record.get("label")}
+    if kind == "judgement_no_revision":
+        return {**base, "judgement_ref": record.get("judgement_ref"),
+                "label": record.get("label"),
+                "thesis_version_refs": [
+                    item.get("thesis_version_ref")
+                    for item in record.get("maintained_theses") or ()
+                    if isinstance(item, Mapping)]}
+    # A forecast version is a follow-up only when a judgement moved it.
+    if record.get("change_reason") != "driver_event":
+        return None
+    events = [ref.get("ref") for ref in (record.get("evidence_refs") or ())
+              if isinstance(ref, Mapping) and ref.get("kind") == "event"]
+    return {**base, "event_refs": events}
+
+
+def _judgement_followups_in_window(
+    connection: sqlite3.Connection,
+    company_refs: list[str],
+    period_start: datetime,
+    period_end: datetime,
+) -> list[dict[str, Any]]:
+    entries: list[tuple[str, str, dict[str, Any]]] = []
+    for kind, table, key in _FOLLOWUP_SOURCES:
+        if not _table_exists(connection, table):
+            continue
+        query = f"SELECT {key} AS ref, record_json, content_hash, created_at FROM {table}"
+        if kind == "forecast_revised":
+            query += " WHERE json_extract(record_json, '$.change_reason')='driver_event'"
+        for row in connection.execute(query).fetchall():
+            if row["created_at"] is None:
+                continue
+            created = datetime.fromisoformat(row["created_at"])
+            if not period_start < created <= period_end:
+                continue
+            try:
+                record = json.loads(row["record_json"])
+            except (TypeError, json.JSONDecodeError):
+                continue
+            # A row that does not match its own hash is not listed rather
+            # than allowed to stop the whole issue; its authority reports it.
+            if record.get("content_hash") != row["content_hash"]:
+                continue
+            if record.get("company_ref") not in company_refs:
+                continue
+            summary = _followup_summary(kind, record)
+            if summary is not None:
+                entries.append((row["created_at"], row["ref"], summary))
+    entries.sort(key=lambda item: (item[0], item[1]))
+    return [summary for _created, _ref, summary in entries]
+
+
+def _replay_judgement_followups(connection: sqlite3.Connection, entries: Any) -> None:
+    if entries is None:
+        return
+    if not isinstance(entries, list):
+        raise WeeklyBriefConflict("weekly brief judgement follow-ups are malformed")
+    sources = {kind: (table, key) for kind, table, key in _FOLLOWUP_SOURCES}
+    for entry in entries:
+        if not isinstance(entry, dict) or entry.get("kind") not in sources:
+            raise WeeklyBriefConflict("weekly brief judgement follow-up is malformed")
+        table, key = sources[entry["kind"]]
+        row = connection.execute(
+            f"SELECT record_json, content_hash FROM {table} WHERE {key}=?",
+            (entry.get("ref"),),
+        ).fetchone() if _table_exists(connection, table) else None
+        if row is None or row["content_hash"] != entry.get("hash"):
+            raise WeeklyBriefConflict("weekly brief judgement follow-up no longer replays")
+        if _followup_summary(entry["kind"], json.loads(row["record_json"])) != entry:
+            raise WeeklyBriefConflict("weekly brief judgement follow-up summary drifted")
+
+
 def _snapshot_index(snapshot: Mapping[str, Any]) -> dict[str, Any]:
     companies = sorted(item["company_ref"] for item in snapshot["coverage_universe"])
     claims = sorted(item["claim_version_ref"] for item in snapshot["claim_versions"])
@@ -330,6 +429,9 @@ class WeeklyBriefAuthority:
         self._authorization_flag = authorization_flag(
             self.connection, "dalton_weekly_brief_authorized")
         self.connection.executescript(_SCHEMA_PATH.read_text(encoding="utf-8"))
+        self.connection.executescript(Path(__file__).with_name("weekly_brief_progress_schema.sql").read_text(encoding="utf-8"))
+        from .mission_progress_weekly import MissionProgressWeeklyAuthority
+        self.progress = MissionProgressWeeklyAuthority(self)
 
     @contextmanager
     def _transaction(self) -> Iterator[sqlite3.Cursor]:
@@ -456,9 +558,7 @@ class WeeklyBriefAuthority:
                     or content.get("thesis_ref") != thesis_ref
                     or content.get("version") != row["version_number"]
                     or content.get("content_hash") != version_hash
-                    or content_hash({
-                        name: content[name] for name in _THESIS_CONTENT_FIELDS
-                    }) != version_hash
+                    or content_hash(thesis_payload(content)) != version_hash
                     or binding.get("statement") != content.get("statement")
                     or binding.get("confidence") != content.get("confidence")
                 ):
@@ -524,9 +624,7 @@ class WeeklyBriefAuthority:
                 or content.get("thesis_ref") != thesis_ref
                 or content.get("version") != row["version_number"]
                 or content.get("content_hash") != row["content_hash"]
-                or content_hash({
-                    name: content[name] for name in _THESIS_CONTENT_FIELDS
-                }) != row["content_hash"]
+                or content_hash(thesis_payload(content)) != row["content_hash"]
             ):
                 raise WeeklyBriefConflict("current ThesisVersion content drifted")
             origin = cur.execute(
@@ -556,7 +654,7 @@ class WeeklyBriefAuthority:
             (cycle_id,),
         ).fetchone()
         if row is None:
-            raise WeeklyBriefNotFound("weekly brief cycle admission was not found")
+            return self.progress.cycle_admission(cycle_id)
         wire = _canonical_record(row["record_json"], "weekly brief cycle admission")
         for field, column in (
             ("id", "cycle_id"), ("plan_ref", "plan_ref"),
@@ -751,6 +849,8 @@ class WeeklyBriefAuthority:
                 "scheduled weekly brief publication requires the core actor"
             )
         admission = self.cycle_admission(cycle_id)
+        if admission.get("brief_kind") == "mission_progress":
+            return {"status": "duplicate", **self.progress.issue(admission["issue_version_ref"])}
         return self._publish_issue(
             admission["brief_ref"],
             period_start=admission["period"]["start"],
@@ -848,6 +948,41 @@ class WeeklyBriefAuthority:
         reconciliations = _forecast_reconciliations_in_window(
             self.connection, index["company_refs"], start, end
         )
+        from .model_cell_reconciliation import brief_entries as model_cell_brief_entries
+        model_cells = model_cell_brief_entries(self.connection, index["company_refs"], start, end)
+        from .research_followup import brief_entries as research_followup_entries
+        research_followups = research_followup_entries(self.connection, index["company_refs"], as_of=period_end)
+        followups = _judgement_followups_in_window(
+            self.connection, index["company_refs"], start, end
+        )
+        # ADR-0012: each company's adopted scenarios, every condition's status
+        # at the window's end, and what moved inside it -- exact refs, replayed.
+        # A Core that never had the scenario lanes carries no key at all, so
+        # its issues read exactly as they did.
+        from .company_scenario import brief_entries
+
+        scenario_tracking = (
+            brief_entries(self.connection, index["company_refs"], start, end)
+            if _table_exists(self.connection, "company_scenario_sets") else None
+        )
+        # ADR-0014: one line per company whose return decomposition moved
+        # materially inside the window -- exact refs and hashes, replayed.
+        # Absent (no key at all) on a Core that never ran the lane.
+        from .return_attribution import brief_entries as return_brief_entries
+
+        return_attribution = (
+            return_brief_entries(self.connection, index["company_refs"], start, end)
+            if _table_exists(self.connection, "holding_period_return_bridges") else None
+        )
+        # ADR-0015: 最新业绩（初步） -- each company's newest earnings release
+        # inside the window, preliminary until the 10-Q/10-K replaces it.
+        # Absent (no key at all) on a Core that never read a release.
+        from .earnings_release_intake import brief_entries as release_brief_entries
+
+        preliminary_results = (
+            release_brief_entries(self.connection, index["company_refs"], since=period_start)
+            if _table_exists(self.connection, "preliminary_actuals") else None
+        )
         created_at = _now()
         request = {
             "brief_ref": brief_ref,
@@ -912,6 +1047,15 @@ class WeeklyBriefAuthority:
                 "change_summary": changes,
                 "thesis_bindings": thesis_bindings,
                 "forecast_reconciliations": reconciliations,
+                **({} if model_cells is None else {"model_cell_reconciliations": model_cells}),
+                **({} if research_followups is None else {"research_followups": research_followups}),
+                "judgement_followups": followups,
+                **({} if scenario_tracking is None
+                   else {"scenario_tracking": scenario_tracking}),
+                **({} if return_attribution is None
+                   else {"return_attribution": return_attribution}),
+                **({} if preliminary_results is None
+                   else {"preliminary_results": preliminary_results}),
                 "sections": list(ISSUE_SECTIONS),
                 "actor_ref": actor_ref,
             })
@@ -950,6 +1094,9 @@ class WeeklyBriefAuthority:
 
     def issue(self, version_id: str) -> dict[str, Any]:
         version_id = _text(version_id, "version_id")
+        from .mission_progress_weekly import ISSUE_PREFIX
+        if version_id.startswith(ISSUE_PREFIX):
+            return self.progress.issue(version_id)
         cur = self.connection.cursor()
         wire = self._issue_row(cur, version_id)
         try:
@@ -975,6 +1122,43 @@ class WeeklyBriefAuthority:
             cur, wire["content_index"]["company_refs"], wire["thesis_bindings"]
         )
         _replay_forecast_reconciliations(self.connection, wire.get("forecast_reconciliations"))
+        if "research_followups" in wire:
+            from .research_followup import replay_brief_entries as replay_research_followups
+            try:
+                replay_research_followups(self.connection, wire["research_followups"],
+                                         wire["content_index"]["company_refs"], as_of=wire["period"]["end"])
+            except ValueError as exc:
+                raise WeeklyBriefConflict(str(exc)) from exc
+        if "model_cell_reconciliations" in wire:
+            from .model_cell_reconciliation import replay_brief_entries as replay_model_cells
+            try:
+                replay_model_cells(self.connection, wire["model_cell_reconciliations"])
+            except ValueError as exc:
+                raise WeeklyBriefConflict(str(exc)) from exc
+        _replay_judgement_followups(self.connection, wire.get("judgement_followups"))
+        if "return_attribution" in wire:
+            from .return_attribution import (
+                ReturnAttributionConflict, replay_brief_entries as replay_return_entries,
+            )
+
+            try:
+                replay_return_entries(self.connection, wire["return_attribution"])
+            except ReturnAttributionConflict as exc:
+                raise WeeklyBriefConflict(str(exc)) from exc
+        if "preliminary_results" in wire:
+            from .earnings_release_intake import EarningsReleaseError, replay_brief_entries as replay_release
+
+            try:
+                replay_release(self.connection, wire["preliminary_results"])
+            except EarningsReleaseError as exc:
+                raise WeeklyBriefConflict(str(exc)) from exc
+        if "scenario_tracking" in wire:
+            from .company_scenario import CompanyScenarioConflict, replay_brief_entries
+
+            try:
+                replay_brief_entries(self.connection, wire["scenario_tracking"])
+            except CompanyScenarioConflict as exc:
+                raise WeeklyBriefConflict(str(exc)) from exc
         prior = None
         prior_thesis = None
         if wire["prior_version_ref"] is not None:
@@ -1000,6 +1184,9 @@ class WeeklyBriefAuthority:
         return wire
 
     def render_markdown(self, version_id: str) -> dict[str, Any]:
+        from .mission_progress_weekly import ISSUE_PREFIX
+        if version_id.startswith(ISSUE_PREFIX):
+            return self.progress.render_markdown(version_id)
         issue = self.issue(version_id)
         snapshot = self.industry_research.industry_brief_snapshot(
             issue["evidence_pack_version_ref"],
@@ -1063,6 +1250,43 @@ class WeeklyBriefAuthority:
                     f"本期版本变化={'yes' if changed else 'no'})"
                 )
 
+        # ADR-0010: what this window's judgements other than NO_CHANGE left
+        # for a person. Issues published before the field existed carry no
+        # key and re-render byte for byte.
+        if "judgement_followups" in issue:
+            followups = issue["judgement_followups"] or []
+            lines.extend(["", "### 事件判断的后续（修订建议 / 预测修订 / 需要论点）", ""])
+            if not followups:
+                lines.append("- 本期没有非 NO_CHANGE 判断留下需要处理的后续。")
+            for item in followups:
+                decision = item.get("decision") or "-"
+                if item["kind"] == "thesis_revision_candidate":
+                    lines.append(
+                        f"- {item['company_ref']}：论点修订建议（{decision}），"
+                        f"针对 {item['thesis_version_ref']}，待人工决定｜{item['ref']}"
+                    )
+                elif item["kind"] == "forecast_revision_proposal":
+                    lines.append(
+                        f"- {item['company_ref']}：预测修订提议（{decision}），"
+                        f"{item['driver_ref']} {item['period_end']} → "
+                        f"{item['proposed_value']}，待人工决定｜{item['ref']}"
+                    )
+                elif item["kind"] == "judgement_no_revision":
+                    lines.append(
+                        f"- {item['company_ref']}：{item['label']}（{decision}），"
+                        f"维持 {', '.join(item.get('thesis_version_refs') or []) or '-'}"
+                        f"｜{item['ref']}"
+                    )
+                elif item["kind"] == "forecast_revised":
+                    lines.append(
+                        f"- {item['company_ref']}：预测已按判断修订（{decision}），"
+                        f"事件 {', '.join(item['event_refs']) or '-'}｜{item['ref']}"
+                    )
+                else:
+                    lines.append(
+                        f"- {item['company_ref']}：{item['label']}（{decision}）｜{item['ref']}"
+                    )
+
         # The section list is frozen in the issue record at publish time.
         # Issues published before P9c carry no 预测对账 section; re-rendering
         # them must reproduce the original bytes exactly, so the section is
@@ -1087,6 +1311,61 @@ class WeeklyBriefAuthority:
                     f"实际 {item['actual_value']}｜偏差 {item['deviation_percent']}%｜"
                     f"{item['direction']}｜{item['band']}{checkpoint}｜{item['ref']}"
                 )
+
+        if "research_followups" in issue:
+            lines.extend(["", "## 研究跟进与十四天治理", ""])
+            for request in issue["research_followups"]:
+                terminal = request.get("terminal_decision")
+                closed = f"；关闭理由：{terminal['reason']}；结果证据：{','.join(e['ref'] for e in terminal['closure_evidence'])}" if terminal else ""
+                overdue = "；已到十四天升级复核" if request['overdue'] else ""
+                lines.append(f"- {request['company_ref']}｜{request['state']}｜责任人 {request['owner_ref'] or '尚未分配'}｜期限 {request['due_on']}{overdue}{closed}｜{request['id']}")
+            if not issue["research_followups"]:lines.append("- 本期范围内没有已登记的研究跟进事项。")
+
+        if "model_cell_reconciliations" in issue:
+            entries = issue["model_cell_reconciliations"]
+            lines.extend(["", "## 模型单元对账", ""])
+            if not entries:
+                lines.append("- 本期范围内没有模型单元对账记录。")
+            for item in entries:
+                detail = (f"偏差 {item['deviation_percent']}%｜{item['band']}" if item['status'] == 'compared'
+                          else f"不可比较：{item['reason']}")
+                checkpoint = "；需重写预测草案并人工复核，当前模型未修改" if item['redraft_required'] else ""
+                lines.append(f"- {item['company_ref']}｜{item['model_version_ref']}｜{item['cell_ref']}｜{detail}{checkpoint}｜{item['ref']}")
+
+        # ADR-0012: 情景与触发.  Gated on the frozen key, so an issue published
+        # before scenarios existed re-renders byte for byte.  Not a rubric
+        # template slot (WEEKLY_BRIEF_SECTIONS): adding one is a rubric version.
+        if "scenario_tracking" in issue:
+            from .company_scenario import brief_lines
+
+            lines.extend(["", "## 情景与触发", ""])
+            lines.extend(brief_lines(
+                issue["scenario_tracking"] or [],
+                {item["company_ref"]: item["ticker"] for item in snapshot["coverage_universe"]},
+            ))
+
+        # ADR-0014: 回报归因.  Gated on the frozen key like the scenario
+        # section: an issue published before the lane existed re-renders byte
+        # for byte, and a quiet week says so in one line.
+        if "return_attribution" in issue:
+            from .return_attribution import brief_lines as return_brief_lines
+
+            lines.extend(["", "## 回报归因", ""])
+            lines.extend(return_brief_lines(
+                issue["return_attribution"] or [],
+                {item["company_ref"]: item["ticker"] for item in snapshot["coverage_universe"]},
+            ))
+
+        # ADR-0015: 最新业绩（初步）.  Gated on the frozen key, so an issue
+        # published before releases were read re-renders byte for byte.
+        if "preliminary_results" in issue:
+            from .earnings_release_intake import brief_lines as release_brief_lines
+
+            lines.extend(["", "## 最新业绩（初步）", ""])
+            lines.extend(release_brief_lines(
+                issue["preliminary_results"] or [],
+                {item["company_ref"]: item["ticker"] for item in snapshot["coverage_universe"]},
+            ))
 
         lines.extend(["", "## 公司与 driver 分化", ""])
         for driver in snapshot["driver_scoreboard"]:
@@ -1198,6 +1477,14 @@ class WeeklyBriefAuthority:
                 "scheduled weekly brief delivery requires the core actor"
             )
         admission = self.cycle_admission(cycle_id)
+        if admission.get("brief_kind") == "mission_progress":
+            return self.progress.record_delivery(
+                cycle_id=cycle_id, issue_version_ref=issue_version_ref,
+                issue_version_hash=issue_version_hash, destination_ref=destination_ref,
+                external_message_ref=external_message_ref, artifact_sha256=artifact_sha256,
+                delivered_at=delivered_at, delivery_id=delivery_id, actor_ref=actor_ref,
+                idempotency_key=idempotency_key,
+            )
         if (
             admission["issue_version_ref"] != issue_version_ref
             or admission["destination_ref"] != destination_ref

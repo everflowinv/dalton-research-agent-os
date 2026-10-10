@@ -78,9 +78,12 @@ OPENCLAW_WEB_SEARCH_PLUGIN_ID = "dalton-openclaw-web-search-broker"
 OPENCLAW_WEB_SEARCH_SOURCE_RELATIVE = "integrations/openclaw-web-search-broker"
 OPENCLAW_MODEL_PLUGIN_ID = "dalton-openclaw-model-broker"
 OPENCLAW_MODEL_SOURCE_RELATIVE = "integrations/openclaw-model-broker"
-OPENCLAW_WEB_SEARCH_LEGACY_PATH = (
-    "/Users/everflow/Projects/dalton-research-agent-os/"
-    "integrations/openclaw-web-search-broker"
+MODEL_BROKER_HOST_PATCH_HELPERS = {
+    "integrations/openclaw_host_patches/patch_provider_output_control_endpoint.py": "OK provider output control endpoint",
+    "integrations/openclaw_host_patches/patch_broker_reasoning_capability.py": "OK broker reasoning capability",
+}
+OPENCLAW_WEB_SEARCH_LEGACY_PATH = str(
+    Path.home() / "Projects/dalton-research-agent-os/integrations/openclaw-web-search-broker"
 )
 
 
@@ -503,8 +506,7 @@ def _validate_model_broker_host_patch(value: Any, *, packet_root: Path,
           "model broker host patch authority differs")
     helper = Path(str(value["helper_relative_path"]))
     target = Path(str(value["target_relative_path"]))
-    _need(helper.as_posix()
-          == "integrations/openclaw_host_patches/patch_provider_output_control_endpoint.py"
+    _need(helper.as_posix() in MODEL_BROKER_HOST_PATCH_HELPERS
           and not target.is_absolute() and ".." not in target.parts
           and target.parts and target.parts[0] == "dist",
           "model broker host patch path is outside reviewed scope")
@@ -521,13 +523,63 @@ def _validate_model_broker_host_patch(value: Any, *, packet_root: Path,
     return result
 
 
+def _host_patch_constants(helper: Path) -> dict[str, Any]:
+    """Read reviewed string constants without executing a host patch helper."""
+    names = {"ORIGINAL", "PATCHED", "PATCHED_BODY", "ORIGINAL_2026_9_5",
+             "PATCHED_2026_9_5", "HELPER_ANCHOR", "CALL_ANCHOR", "HELPER",
+             "SUPPORTED_VERSIONS", "BINDING_MARKERS", "EXECUTION_MARKERS", "RUNTIME_MARKERS", "TRANSPORT_MARKERS"}
+    values: dict[str, Any] = {}
+    def literal(node):
+        if isinstance(node, ast.Name) and node.id in values:
+            return values[node.id]
+        if isinstance(node, ast.BinOp) and isinstance(node.op, ast.Add):
+            left, right = literal(node.left), literal(node.right)
+            _need(isinstance(left, str) and isinstance(right, str), "host patch constant addition differs")
+            return left + right
+        return ast.literal_eval(node)
+    for statement in ast.parse(helper.read_text(encoding="utf-8")).body:
+        if isinstance(statement, ast.Assign):
+            for target in statement.targets:
+                if isinstance(target, ast.Name) and target.id in names:
+                    values[target.id] = literal(statement.value)
+    return values
+
+
+def _expected_model_broker_host_patch(helper: Path, before: bytes) -> bytes:
+    """Two explicitly reviewed transforms; arbitrary helper/path edits refuse."""
+    values = _host_patch_constants(helper)
+    source = before.decode("utf-8")
+    if helper.name == "patch_broker_reasoning_capability.py":
+        anchor, call, body = (values.get(key) for key in ("HELPER_ANCHOR", "CALL_ANCHOR", "HELPER"))
+        _need(all(isinstance(item, str) and item for item in (anchor, call, body))
+              and isinstance(values.get("RUNTIME_MARKERS"), tuple) and bool(values["RUNTIME_MARKERS"])
+              and source.count(anchor) == 1 and source.count(call) == 1
+              and "daltonBrokerModelForThinking" not in source
+              and call.count("model: prepared.model,") == 1
+              and all(source.count(marker) == 1 for marker in values.get("RUNTIME_MARKERS", ())),
+              "broker reasoning host patch anchors differ")
+        patched_call = call.replace("model: prepared.model,",
+            "model: daltonBrokerModelForThinking(prepared.model, pluginPolicyId, requestedThinking),", 1)
+        return source.replace(anchor, body + anchor, 1).replace(call, patched_call, 1).encode("utf-8")
+    _need(helper.name == "patch_provider_output_control_endpoint.py", "host patch helper is not reviewed")
+    pairs = [(values.get("ORIGINAL"), values.get("PATCHED")),
+             (values.get("ORIGINAL_2026_9_5"), values.get("PATCHED_2026_9_5"))]
+    matches = [(original, patched) for original, patched in pairs
+               if isinstance(original, str) and isinstance(patched, str)
+               and source.count(original) == 1 and source.count(patched) == 0]
+    _need(len(matches) == 1, "model broker host patch anchors differ")
+    original, patched = matches[0]
+    return source.replace(original, patched, 1).encode("utf-8")
+
+
 def build_model_broker_host_patch_artifact(
     *, packet_root: Path, source_root: Path, source_commit: str,
     target_relative_path: str, before_path: Path, after_path: Path,
+    helper_relative_path: str = "integrations/openclaw_host_patches/patch_provider_output_control_endpoint.py",
 ) -> dict[str, Any]:
     """Stage the closed metadata for the repo-owned, no-call host guard."""
-    helper_rel = Path(
-        "integrations/openclaw_host_patches/patch_provider_output_control_endpoint.py")
+    helper_rel = Path(helper_relative_path)
+    _need(helper_rel.as_posix() in MODEL_BROKER_HOST_PATCH_HELPERS, "model broker host patch helper differs")
     helper = source_root / helper_rel
     source_resolved = source_root.resolve(strict=True)
     packet_resolved = packet_root.resolve(strict=True)
@@ -543,18 +595,7 @@ def build_model_broker_host_patch_artifact(
           and before_path.resolve(strict=True).is_relative_to(packet_resolved)
           and after_path.resolve(strict=True).is_relative_to(packet_resolved),
           "model broker host patch source is not frozen")
-    assignments = {}
-    for statement in ast.parse(helper.read_text(encoding="utf-8")).body:
-        if isinstance(statement, ast.Assign):
-            for name in statement.targets:
-                if isinstance(name, ast.Name) and name.id in {"ORIGINAL", "PATCHED"}:
-                    assignments[name.id] = ast.literal_eval(statement.value)
-    original, patched = assignments.get("ORIGINAL"), assignments.get("PATCHED")
-    before_text = before_path.read_text(encoding="utf-8")
-    _need(isinstance(original, str) and isinstance(patched, str)
-          and before_text.count(original) == 1 and before_text.count(patched) == 0
-          and after_path.read_text(encoding="utf-8")
-              == before_text.replace(original, patched, 1),
+    _need(after_path.read_bytes() == _expected_model_broker_host_patch(helper, before_path.read_bytes()),
           "model broker host patch after artifact is not the exact helper transform")
     row = {
         "source_commit": source_commit,

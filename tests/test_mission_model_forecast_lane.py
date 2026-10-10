@@ -144,14 +144,16 @@ class LaneTests(unittest.TestCase):
             mission=lambda: self.mission)
 
     def digest(self):
-        return model_digest(self.spec, build_model_inputs(self.missions, self.spec))
+        from dalton_core.company_model_forecast import forecast_reporting_boundary
+        return model_digest(self.spec, build_model_inputs(self.missions, self.spec),
+            reporting_boundary=forecast_reporting_boundary(self.missions, self.models.connection, ACN))
 
     def test_a_company_with_no_model_is_launched_and_named_by_what_it_is_about(self):
         # Adding the note-backed digest authority must not rename historical
         # 0.1/0.2 forecast work.
         self.assertEqual(
-            self.digest(),
-            "05f1058cb7f373a89a2c038accb55f86448d730537240ed87d1a284bba395047",
+            model_digest(self.spec, build_model_inputs(self.missions, self.spec)),
+            "87cb9d748956254d773711330bfb15a0a3338be7f770a4bc56f4a17e85017a11",
         )
         outcome = self.lane.dispatch_once()
         self.assertEqual(outcome["status"], "launched")
@@ -161,6 +163,28 @@ class LaneTests(unittest.TestCase):
         self.assertEqual(self.launcher.started,
                          [{"company_ref": ACN, "model_digest": self.digest(),
                            "validator_contract_hash": FORECAST_INVARIANT_CONTRACT_HASH}])
+
+    def test_preliminary_actual_dispatches_once_and_settles_idle(self):
+        from unittest.mock import patch
+        from dalton_core.company_model_forecast import forecast_reporting_boundary
+        table = build_model_inputs(self.missions, self.spec)
+        first = self.models.publish(build_forecast_model(self.spec, table))
+        self.assertEqual(self.lane.dispatch_once()["status"], "idle")
+        preliminary = {"period_end": "2026-08-31", "accession": "synthetic-8k",
+                       "values": {"revenue": "1500000000"}}
+        with patch("dalton_core.forecast_assumption_sources.preliminary_quarter", return_value=preliminary):
+            dispatched = self.lane.dispatch_once()
+            self.assertEqual(dispatched["status"], "launched")
+            self.assertEqual(len(self.launcher.started), 1)
+            self.assertEqual(self.lane.dispatch_once()["status"], "running")
+            boundary = forecast_reporting_boundary(self.missions, self.models.connection, ACN, table=table)
+            body = build_forecast_model(self.spec, table, assumption_sources=boundary)
+            body["source_version_ref"] = first["id"]
+            self.models.publish(body)
+            self.launcher.finish(dispatched["ticket_ref"], summary={"forecast_status": "published"})
+            self.assertEqual(self.lane.dispatch_once()["status"], "idle")
+            self.assertEqual(self.lane.dispatch_once()["status"], "idle")
+            self.assertEqual(len(self.launcher.started), 1)
 
     def test_the_previous_child_is_settled_before_another_starts(self):
         first = self.lane.dispatch_once()

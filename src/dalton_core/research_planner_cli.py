@@ -56,6 +56,7 @@ from .research_state import (
     build_research_state,
     planning_core_hash as state_planning_core_hash,
     planning_hash as state_planning_hash,
+    planning_settlement_hash as state_planning_settlement_hash,
     state_digest,
 )
 from .service_config_location import service_config_path
@@ -75,7 +76,7 @@ MAX_LEDGER_ENTRIES = 16
 # Outcomes this exact state will produce again, every time, for ever.  A
 # refusal is a judgement about the state, and the state has not moved.
 TERMINAL_PLAN_STATUSES: frozenset[str] = frozenset({
-    "refused", "input_too_large",
+    "refused", "input_too_large", "output_recovery_failed",
 })
 # ...and the ones that are about this moment rather than this state: no route,
 # a spent pool, a lease held by another attempt.  Those are worth asking again
@@ -94,6 +95,13 @@ PLAN_LAST_DECISION = "research-plan-last-decision.json"
 # still re-plans on the next tick; everything else is folded into the next
 # plan at most this often.
 MIN_REPLAN_SECONDS = 7_200
+# 2026-10-01: the floor between the last decision and the one an owner
+# withdrawal or a newly settled admission buys.  Live 2026-09-30 legacy's
+# 27 withdrawals moved nothing the planner hashed, so they waited on the
+# two-hour interval -- and then on a prompt that never said they were open.
+# A settlement is material, but they arrive one child at a time; without a
+# floor every settled read would buy a plan.  At most one plan per floor.
+SETTLEMENT_REPLAN_SECONDS = 1_800
 # What one planner WorkOrder may carry.  The prompt *is* the work order's
 # question, and the state is inlined into it, so a 266KB prompt is a 266KB row
 # in scheduler.sqlite for every tick.  The projection is therefore fitted to
@@ -286,8 +294,33 @@ def build_state(store: DaltonStore, missions: CoverageMissionAuthority,
         disputed[company_ref] = contested(observations)
     from .dossier_repair_feedback import read_dossier_repair_feedback
     from .document_research_inventory import load_document_inventory
-    from .document_research_feedback import read_document_research_feedback
+    from .document_research_feedback import (
+        read_document_research_feedback, read_document_research_settlement,
+    )
 
+    # 2026-10-09: what the filed statements hold (segments included) and where
+    # each company's reading actually stands, with the automatic step that is
+    # holding any open review.  Both read-only; neither may stop a plan.
+    state_dir = Path(store.path).parent
+    filed_statements: dict[str, Any] = {}
+    try:
+        from .statement_segments import segment_summary, statement_segment_figures
+
+        for entry in checklist:
+            filed_statements[entry["company_ref"]] = segment_summary(
+                statement_segment_figures(store.connection, entry["company_ref"],
+                                          state_dir=state_dir))
+    except Exception as exc:  # noqa: BLE001 - unknown, never a zero
+        filed_statements = {entry["company_ref"]: {
+            "status": "unavailable", "reason": type(exc).__name__} for entry in checklist}
+    try:
+        from .research_reading_pipeline import reading_pipeline
+
+        reading = reading_pipeline(store.connection, mission["id"], state_dir=state_dir)
+    except Exception as exc:  # noqa: BLE001 - unknown, never a zero
+        reading = {entry["company_ref"]: {"status": "unavailable",
+                                          "reason": type(exc).__name__}
+                   for entry in checklist}
     if document_inventory is None:
         try:
             document_inventory = load_document_inventory(
@@ -295,7 +328,7 @@ def build_state(store: DaltonStore, missions: CoverageMissionAuthority,
         except Exception as exc:  # preserve ordinary planning, disclose unavailable original reads
             document_inventory = {"status": "unavailable", "reason": type(exc).__name__}
 
-    return build_research_state(
+    state = build_research_state(
         mission=mission, checklist=checklist, industry=industry,
         figures_by_company=figures, financial_models_by_company=financial_models,
         metrics_by_company=metrics,
@@ -310,11 +343,31 @@ def build_state(store: DaltonStore, missions: CoverageMissionAuthority,
             if key in document_inventory
         },
         document_research_feedback=read_document_research_feedback(store, mission),
+        document_research_settlement=read_document_research_settlement(
+            store, mission, as_of=as_of),
+        filed_statements_by_company=filed_statements,
+        reading_pipeline_by_company=reading,
         budget=mission["budget"],
         spend=read_spend(store, mission, budget_db=budget_db,
                          as_of=datetime.fromisoformat(as_of)),
         as_of=as_of,
     )
+    from .directed_numeric_research import CONTRACT_REF
+    state["document_research_numeric_contract_ref"] = CONTRACT_REF
+
+    from .canonical_document_questions import read_questions
+    questions = read_questions(store.connection, mission, now=datetime.fromisoformat(as_of))
+    for company in state["companies"]:
+        if company["company_ref"] in questions:
+            company["canonical_document_questions"] = questions[company["company_ref"]]
+
+    from .research_followup_automation import planner_context
+    from .research_state import state_content_hash
+    followups = planner_context(store.connection, mission)
+    if followups is not None:
+        state["reflection_followup_context"] = followups
+    state["content_hash"] = state_content_hash(state)
+    return state
 
 
 def read_attempt_ledger(state_dir: Path) -> dict[str, Any]:
@@ -338,6 +391,15 @@ def record_attempt(state_dir: Path, state_hash: str, summary: Mapping[str, Any])
         return
     ledger = read_attempt_ledger(state_dir)
     previous = ledger.get(state_hash) or {}
+    if (summary.get('plan_status') == 'held' and (
+            previous.get('plan_status') == 'output_recovery_failed'
+            or (summary.get('paid_output_recovery') is not None
+                and previous.get('plan_status') in {'model_unavailable', 'skipped:pool_exhausted'}))):
+        # A read of the terminal successor is not another attempt. Preserve
+        # its reason instead of turning it into a fresh transient backoff.
+        # The same applies to a proved successor waiting on a pre-send refusal:
+        # later reads must retain its identity and normal retry clock.
+        return
     ledger[state_hash] = {
         "at": summary.get("created_at"),
         "status": summary.get("status"),
@@ -417,12 +479,14 @@ def read_last_decision(state_dir: Path) -> dict[str, Any]:
 
 
 def record_decision(state_dir: Path, *, state_hash: str, planning_hash: str,
-                    at: str, planning_core_hash: str | None = None) -> None:
+                    at: str, planning_core_hash: str | None = None,
+                    settlement_hash: str | None = None) -> None:
     try:
         _write_owner_only(state_dir / PLAN_LAST_DECISION, {
             "schema_version": "0.1", "at": at, "state_hash": state_hash,
             "planning_hash": planning_hash,
             "planning_core_hash": planning_core_hash,
+            "settlement_hash": settlement_hash,
         })
     except Exception:  # noqa: BLE001 - a record we cannot write is still no crash
         return
@@ -431,6 +495,7 @@ def record_decision(state_dir: Path, *, state_hash: str, planning_hash: str,
 def replan_pacing_hold(
     last: Mapping[str, Any], planning_hash: str, *, now: datetime,
     planning_core_hash: str | None = None,
+    settlement_hash: str | None = None,
 ) -> dict[str, Any] | None:
     """Hold a re-plan whose state moved, but not in any way a plan is about.
 
@@ -445,6 +510,16 @@ def replan_pacing_hold(
 
     A decision recorded before the core hash existed has none; it is judged
     by the full ``planning_hash`` alone, as before.
+
+    2026-10-01: a change in which directed reads are done with -- an owner
+    withdrawal, or an admission reaching a terminal outcome (a different
+    ``settlement_hash``) -- is material and buys one fresh plan as soon as
+    ``SETTLEMENT_REPLAN_SECONDS`` have passed since the last decision, not
+    after ``MIN_REPLAN_SECONDS``.  The fresh decision records the new hash,
+    so the same settlement never buys a second plan.  A decision recorded
+    before the settlement hash existed counts as having seen none, so the
+    first tick after an upgrade folds every earlier withdrawal into one plan.
+    ``settlement_hash=None`` (no readable settlement) never counts as moved.
     """
 
     if not last.get("at"):
@@ -462,7 +537,20 @@ def replan_pacing_hold(
         since = (now - datetime.fromisoformat(str(last["at"]))).total_seconds()
     except (TypeError, ValueError):
         return None
-    if since < 0 or since >= MIN_REPLAN_SECONDS:
+    if since < 0:
+        return None
+    if settlement_hash is not None and last.get("settlement_hash") != settlement_hash:
+        if since >= SETTLEMENT_REPLAN_SECONDS:
+            return None
+        return {
+            "plan_status": "held",
+            "failure_reason": (
+                "有定向研读结束了（owner 撤回，或得到了终局结果），这是研究状态的变化；"
+                f"上一次规划在 {int(since)} 秒前，{SETTLEMENT_REPLAN_SECONDS} 秒后重新规划一次"),
+            "held_reason": "settlement_paced",
+            "held_attempts": 0,
+        }
+    if since >= MIN_REPLAN_SECONDS:
         return None
     if feedback_only:
         return {
@@ -544,6 +632,11 @@ def run_planner(
         # affordable on a five-minute tick.
         existing = missions.research_plan_for_state(mission["id"], state["content_hash"])
         if existing is not None:
+            if state.get("reflection_followup_context"):
+                from .research_followup_automation import FollowupAutomationAuthority
+                summary["followup_planner_observations"] = [x["id"] for x in
+                    FollowupAutomationAuthority(store).observe_planner(
+                        context=state["reflection_followup_context"], stored_plan=existing, full_state=state)]
             summary.update({
                 "status": "succeeded", "plan_status": "unchanged", "replayed": True,
                 "directives": len(existing["directives"]),
@@ -557,16 +650,30 @@ def run_planner(
             return summary
         # The same state that produced no plan last time will produce no plan
         # this time. Held here, before the model exists, so nothing is enqueued.
-        held = attempt_hold(read_attempt_ledger(state_dir), state["content_hash"], now=now)
-        if held is not None and not dry_run:
+        recovery = None
+        attempts = read_attempt_ledger(state_dir)
+        last_attempt = attempts.get(state['content_hash']) or {}
+        if (not dry_run and model_config_path is not None
+                and last_attempt.get('plan_status') in {'model_unavailable', 'skipped:pool_exhausted'}):
+            from .planner_paid_output_recovery import planner_candidate
+            recovery = planner_candidate(state_dir=state_dir, config_path=model_config_path,
+                mission=mission, state_hash=state['content_hash'], now=now,
+                scheduler_db=scheduler_db, include_payload=True)
+        if recovery is not None:
+            summary['paid_output_recovery'] = {k:v for k,v in recovery.items() if k!='_parent_prompt'}
+        held = attempt_hold(attempts, state["content_hash"], now=now)
+        retry_ready = recovery is not None and recovery['successor_status'] != 'failed'
+        if held is not None and not retry_ready and not dry_run:
             summary.update({"status": "held", **held})
             return summary
         summary["planning_hash"] = state_planning_hash(state)
         summary["planning_core_hash"] = state_planning_core_hash(state)
+        summary["settlement_hash"] = state_planning_settlement_hash(state)
         paced = replan_pacing_hold(
             read_last_decision(state_dir), summary["planning_hash"], now=now,
-            planning_core_hash=summary["planning_core_hash"])
-        if paced is not None and not dry_run:
+            planning_core_hash=summary["planning_core_hash"],
+            settlement_hash=summary["settlement_hash"])
+        if paced is not None and not retry_ready and not dry_run:
             summary.update({"status": "held", **paced})
             return summary
         if dry_run or model_config_path is None:
@@ -604,6 +711,10 @@ def run_planner(
             })
             return summary
         prompt = build_prompt(prompt_state)
+        if recovery is not None:
+            # Same full state, exact original prompt and one deterministic
+            # successor. A new read timestamp does not open another generation.
+            prompt = recovery['_parent_prompt']
         summary["prompt_bytes"] = len(prompt.encode("utf-8"))
         summary["work_order_prompt_bound"] = MAX_WORK_ORDER_PROMPT_BYTES
         summary["prompt_input"] = {
@@ -616,7 +727,8 @@ def run_planner(
                 purpose="plan",
                 # Keyed by the state, so the same world replays instead of
                 # being paid for again.
-                request_id=state["content_hash"][:32],
+                request_id=(state["content_hash"][:32] if recovery is None
+                            else recovery['parent_request_id']+recovery['suffix']),
                 prompt=prompt, mission=mission,
             )
         except SchedulerError as exc:
@@ -629,17 +741,30 @@ def run_planner(
                             "failure_reason": f"{type(exc).__name__}: {exc}"})
             return summary
         except CockpitModelError as exc:
+            from .cockpit_model import model_failure_trace
+            summary['model_failure_trace'] = model_failure_trace(exc)
             summary.update({
                 "status": "succeeded",
                 # C2: a spent pool is a budget decision, not an outage.
                 "plan_status": lane_status_for(exc, "model_unavailable"),
                 "failure_reason": f"{type(exc).__name__}: {exc}"})
+            trace = summary['model_failure_trace']
+            if (recovery is not None and trace is not None
+                    and ':paid-output-recovery:' in trace['work_request_id']):
+                from .planner_paid_output_recovery import proved_paid_successor
+                if proved_paid_successor(scheduler_db=model.scheduler_db,
+                        config=model.config,mission=mission,recovery=recovery,
+                        now=datetime.now(timezone.utc)):
+                    # Only another full-settled output overrun is terminal;
+                    # a pre-send pool/route refusal keeps ordinary reentry.
+                    summary['plan_status'] = 'output_recovery_failed'
             return summary
         summary["replayed"] = bool(call.get("replayed"))
         summary["cost_micros"] = int(call.get("cost_micros") or 0)
         record_decision(state_dir, state_hash=state["content_hash"],
                         planning_hash=summary["planning_hash"],
                         planning_core_hash=summary["planning_core_hash"],
+                        settlement_hash=summary["settlement_hash"],
                         at=now.isoformat(timespec="microseconds"))
         try:
             plan = plan_from_response(
@@ -654,6 +779,12 @@ def run_planner(
             plan, decided_by=mission["autonomy"]["automation_principal"],
             work_order_ref=call.get("work_order_ref"),
         )
+        from .research_followup_automation import FollowupAutomationAuthority
+        if state.get("reflection_followup_context"):
+            summary["followup_planner_observations"] = [x["id"] for x in
+                FollowupAutomationAuthority(store).observe_planner(
+                    context=state["reflection_followup_context"], stored_plan=stored, full_state=state,
+                    call=call, prompt=prompt)]
         summary.update({
             "status": "succeeded", "plan_status": stored["status"],
             "directives": len(plan["directives"]), "inquiries": len(plan["inquiries"]),
@@ -712,6 +843,6 @@ if __name__ == "__main__":  # pragma: no cover - exercised as a subprocess
 
 
 __all__ = [
-    "MAX_COST_USD", "MIN_REPLAN_SECONDS", "build_state", "main",
+    "MAX_COST_USD", "MIN_REPLAN_SECONDS", "SETTLEMENT_REPLAN_SECONDS", "build_state", "main",
     "replan_pacing_hold", "run_planner",
 ]

@@ -46,7 +46,7 @@ owner 批准两条治理记录后，本片按其指示完成 OpenClaw 侧激活�
 
 ## 首次真实搜索（live Core 只读副本，`ok=true`，条件具名全真）
 
-`scripts/run_p9d4e_live_web_search_canary.py`（仓库中唯一会花真实调用的脚本）：
+该阶段曾在只读来源的隔离副本验证真实搜索；其操作脚本与收据原件已私有归档：
 
 - 副本发布 `probe_only` mission 版本；owner 身份经**真实 launcher → 真实子进程 → 真实 broker → 真实 Gemini**；
 - transport `openclaw-search-broker`，**1 次 provider 调用**，query
@@ -79,16 +79,13 @@ owner 批准两条治理记录后，本片按其指示完成 OpenClaw 侧激活�
   首次真实抓取应单独授权。
 - 未验证 Gemini 在不同 query 下的引用质量与稳定性；单次成功不代表命中率。
 
-## 复跑
+## 保留的离线回归入口
 
-```bash
+历史付费复跑脚本已归档，不能据此重新调用来源。保留插件和 Python 合同测试：
+
+```sh
 (cd integrations/openclaw-web-search-broker && npm run check)
 .venv/bin/python -m unittest tests.test_public_web_connector tests.test_openclaw_web_search_broker_client -v
-# 会花 1 次真实 Gemini 搜索：
-.venv/bin/python scripts/run_p9d4e_live_web_search_canary.py \
-  --source-core "$HOME/Library/Application Support/Dalton/state/dalton-core/core.sqlite" \
-  --governance "$HOME/Library/Application Support/Dalton/state/dalton-core/connector-governance/gemini-web-search-v1.json" \
-  --broker-socket "$HOME/.openclaw/dalton-web-search-broker.sock" \
-  --broker-auth-key "$HOME/.openclaw/dalton-web-search-broker.sock.key" \
-  --output temp/p9d4e/live-search-canary.json
 ```
+
+本报告记载当时的协议修复与样本，不表示当前环境仍处于早期未部署状态。当前能力与限制见 [项目状态](../PROJECT_STATUS.md)。

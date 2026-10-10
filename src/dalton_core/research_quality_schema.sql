@@ -27,7 +27,8 @@ CREATE TABLE IF NOT EXISTS research_quality_score_versions (
         -- when it was widened, so no live database carries the narrower
         -- CHECK; a deployed one would have needed a migration, because
         -- CREATE TABLE IF NOT EXISTS does not revisit a constraint.
-        'initial_screen','ask_answer','company_dossier','weekly_brief'
+        'initial_screen','ask_answer','company_dossier','weekly_brief',
+        'debate_map','investment_memo','event_judgement'
     )),
     target_ref TEXT NOT NULL,
     target_hash TEXT NOT NULL,

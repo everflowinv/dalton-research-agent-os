@@ -73,7 +73,7 @@ class ReevaluationTests(_automation.AutomationDraftingTests):
             "SELECT record_json FROM coverage_mission_document_review_reopens").fetchall()
         record = json.loads(row["record_json"])
         self.assertEqual((record["basis"], record["decision_ref"], record["failed_windows"]),
-                         ("subject_rule_reevaluation", SUBJECT_RULE_REF, []))
+                         ("subject_rule_reevaluation", self.service.subject_rule_ref(self.mission), []))
         self.assertTrue(record["prior_review"]["rationale"].startswith("P13i:"))
         self.assertEqual(self._reevaluate()["reopened"], [])
 
@@ -84,7 +84,7 @@ class ReevaluationTests(_automation.AutomationDraftingTests):
         reopened = self.h.missions.document_review(self.review_id)
         self.h.missions.resolve_document_review(
             self.review_id, resolution="dismissed", actor_ref=self.actor,
-            rationale=f"P13i: {UNATTRIBUTED_REASON}", expected_review_hash=content_hash(reopened))
+            rationale=f"P13i: {UNATTRIBUTED_REASON} [{self.service.subject_rule_ref(self.mission)}]", expected_review_hash=content_hash(reopened))
         again = self._reevaluate()
         self.assertEqual((again["checked"], again["reopened"]), (0, []), again)
         review = self.h.missions.document_review(self.review_id)
@@ -93,6 +93,17 @@ class ReevaluationTests(_automation.AutomationDraftingTests):
                 self.review_id, expected_review_hash=content_hash(review), actor_ref=self.actor,
                 rule_ref=SUBJECT_RULE_REF, matched=["Accenture"])
         self.assertEqual(self.h.missions.document_review(self.review_id)["state"], "dismissed")
+
+    def test_changed_names_reopen_current_dismissal_but_unchanged_names_do_not(self):
+        self._reevaluate()
+        review=self.h.missions.document_review(self.review_id)
+        self.h.missions.resolve_document_review(self.review_id,resolution="dismissed",actor_ref=self.actor,
+            rationale=f"P13i: {UNATTRIBUTED_REASON} [{self.service.subject_rule_ref(self.mission)}]",expected_review_hash=content_hash(review))
+        self.assertEqual(self._reevaluate()["checked"],0)
+        names=dict(self.service.mission_names(self.mission))
+        names['ACN']=(*names.get('ACN',()),'埃森哲新别名')
+        with patch.object(self.service,'mission_names',return_value=names):
+            self.assertEqual(len(self._reevaluate()["reopened"]),1)
 
     def test_only_the_missions_principal_or_a_person_may_reopen(self) -> None:
         from dalton_core.coverage_mission import CoverageMissionValidationError

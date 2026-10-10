@@ -91,7 +91,7 @@ def answer(**overrides):
         "rewritten_lines": [{
             "thesis_ref": THESIS["ref"],
             "decision": "THESIS_WEAKENED",
-            "line": "利润率会抬高，但要三年而不是两年",
+            "line": "利润率会抬高，但要三年而不是两年", "proposed_confidence": "low",
             "because": "两个季度的实际都低于我们的曲线",
             "refs": ["claim-version:one"],
         }],
@@ -384,7 +384,7 @@ class ModelCallTests(unittest.TestCase):
     def test_an_independent_verifier_can_pass_all_four_answers(self) -> None:
         producer = review(context(), model=FakeModel(answer()), mission=MISSION,
                           request_id="r1")
-        verifier = FakeModel({"verdict": "pass", "findings": []})
+        verifier = FakeModel({"verdict": "pass", "findings": [], "direction_checks": [{"thesis_version_ref": THESIS["ref"], "relation": "same", "reason": "Timing changes but direction is retained."}]})
         original_call = verifier.call
         def call(**kwargs):
             result = original_call(**kwargs)

@@ -200,8 +200,79 @@ def transform_unquoted_prose(text: str, transform: Callable[[str], str]) -> str:
     return "".join(rendered)
 
 
+# 2026-10-09 (batch am, coordinator): no machine-precision number in analyst
+# prose.  A derived-ratio Claim states 「毛利率为 0.577264（即 57.73%）」 and a
+# drafter quotes it verbatim (numbers must match the Claim); an amount arrives
+# as 20167113474.15073849 or 24033000000.  For display only, never for the
+# stored value: a ratio glossed with its percent shows the percent; a decimal
+# with more than four places is rounded (two places from 1 up, four
+# significant digits below 1); an integer of seven or more digits (or a
+# grouped one of 1 亿 and up) is scaled to 万 / 亿 with about four significant
+# digits.  Identifiers are left alone: digits joined to letters, hyphens,
+# colons, slashes or dots (accession numbers, refs), a leading zero (CIK) and
+# an eight-digit date.  ``cockpit_v2/copy.js`` (humanizeNumbers) is the twin;
+# tests/test_terminology.py checks they agree.
+_RATIO_GLOSS = re.compile(
+    r"(?<![A-Za-z0-9_.,])-?\d+\.\d{4,}\s*[（(]\s*即\s*(?P<pct>-?\d+(?:\.\d+)?)\s*%\s*[）)]")
+_MACHINE_NUMBER = re.compile(
+    r"(?<![A-Za-z0-9_.,:/\-])(?P<num>-?(?:[1-9]\d{0,2}(?:,\d{3}){2,}|[1-9]\d{6,}|\d+\.\d{5,}|\d{5,}\.\d+))"
+    r"(?![A-Za-z0-9_.,:/\-])(?P<scale>\s*[万亿千百])?(?P<unit>\s*(?:美元|USD\b))?")
+
+
+def _date_like(digits: str) -> bool:
+    if len(digits) != 8 or digits[:2] not in {"19", "20"}:
+        return False
+    return 1 <= int(digits[4:6]) <= 12 and 1 <= int(digits[6:8]) <= 31
+
+
+def _round_places(value: Decimal, places: int) -> str:
+    return str(value.quantize(Decimal(1).scaleb(-places), rounding=ROUND_HALF_UP))
+
+
+def humanize_machine_numbers(text: str) -> str:
+    """Machine-precision numbers in one display fragment, as a reader says them."""
+
+    if not isinstance(text, str) or not text:
+        return text
+    out = _RATIO_GLOSS.sub(lambda m: f"{m.group('pct')}%", text)
+
+    def replace(match: re.Match[str]) -> str:
+        raw = match.group("num")
+        if match.group("scale"):
+            return match.group(0)
+        digits = raw.lstrip("-").replace(",", "")
+        whole = digits.split(".")[0]
+        if "." not in digits and _date_like(digits):
+            return match.group(0)
+        value = Decimal(raw.replace(",", ""))
+        unit = "美元" if match.group("unit") else ""
+        magnitude = abs(value)
+        if magnitude >= Decimal("100000000") and (len(whole) >= 7 or "," in raw):
+            return _scaled_amount(value, Decimal("100000000"), "亿" + unit)
+        if magnitude >= Decimal("10000") and len(whole) >= 5:
+            return _scaled_amount(value, Decimal("10000"), "万" + unit)
+        if "." not in digits:
+            return match.group(0)
+        if magnitude >= 1:
+            shown = _round_places(value, 2)
+        elif magnitude == 0:
+            shown = "0"
+        else:
+            shown = _round_places(value, max(0, 3 - magnitude.adjusted()))
+        return shown + (match.group("unit") or "")
+
+    return _MACHINE_NUMBER.sub(replace, out)
+
+
+def format_prose_machine_numbers(text: str) -> str:
+    """:func:`humanize_machine_numbers` over prose, outside quotations."""
+
+    return transform_unquoted_prose(text, humanize_machine_numbers)
+
+
 __all__ = ["NumericKind", "format_display_number", "format_prose_date_ranges", "format_prose_usd_amounts",
-           "transform_unquoted_prose",
+           "transform_unquoted_prose", "humanize_machine_numbers",
+           "format_prose_machine_numbers",
            "format_typed_value"]
 
 

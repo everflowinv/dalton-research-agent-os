@@ -10,6 +10,56 @@ from typing import Any, Mapping
 from .workspace import WorkspaceError, load_workspace_manifest
 
 
+def _legacy_host_roots(config: Any, environment: Mapping[str, str]) -> list[Path]:
+    """Where the legacy environment's host root may be, most authoritative first.
+
+    2026-09-30 (P1-4): this used to be ``DALTON_STATE_DIR/..`` only.  The live
+    legacy control plist sets no ``DALTON_STATE_DIR``, and the legacy state
+    directory does not sit inside the host root anyway (it is under
+    ``~/Library/Application Support``), so the header fell back to "研究系统"
+    while the workspace list -- which reads ``manager.json`` -- showed the
+    owner's name for it.  The manager configuration names the host root; the
+    configured state directory and the environment variable are fallbacks.
+    """
+
+    roots: list[Path] = []
+    manager = getattr(config, "workspace_manager_config_path", None)
+    if manager:
+        try:
+            raw = json.loads(Path(manager).expanduser().read_text())
+        except (OSError, ValueError):
+            raw = None
+        host_root = raw.get("host_root") if isinstance(raw, Mapping) else None
+        if isinstance(host_root, str) and host_root:
+            roots.append(Path(host_root).expanduser())
+        roots.append(Path(manager).expanduser().parent)
+    state_dir = getattr(config, "state_dir", None)
+    if state_dir:
+        roots.append(Path(state_dir).expanduser().parent)
+    if environment.get("DALTON_STATE_DIR"):
+        roots.append(Path(environment["DALTON_STATE_DIR"]).expanduser().parent)
+    unique: list[Path] = []
+    for root in roots:
+        if root not in unique:
+            unique.append(root)
+    return unique
+
+
+def legacy_display_name(config: Any, *, environ: Mapping[str, str] | None = None) -> str | None:
+    """The owner's name for the legacy environment, or ``None`` if never set."""
+
+    environment = os.environ if environ is None else environ
+    for root in _legacy_host_roots(config, environment):
+        try:
+            name = json.loads((root / "legacy-display" / "display.json").read_text()).get(
+                "display_name")
+        except (OSError, ValueError, AttributeError):
+            continue
+        if isinstance(name, str) and name.strip():
+            return name
+    return None
+
+
 def cockpit_workspace_context(
     config: Any, *, writer_socket: Path, token_config: Path,
     environ: Mapping[str, str] | None = None,
@@ -17,19 +67,9 @@ def cockpit_workspace_context(
     environment = os.environ if environ is None else environ
     manifest = environment.get("DALTON_WORKSPACE_MANIFEST")
     if manifest is None:
-        # The legacy environment has no workspace root of its own; its display
-        # name (when the owner has renamed it from a cockpit) lives in the
-        # host root the legacy state directory sits inside.
-        name = None
-        for legacy_display in (
-            Path(environment.get("DALTON_STATE_DIR", "")) / ".." / "legacy-display" / "display.json",
-        ):
-            try:
-                name = json.loads(legacy_display.resolve().read_text()).get("display_name")
-            except (OSError, ValueError):
-                continue
         return {"mode": "legacy", "slug": None, "workspace_id": None,
-                "name": name, "aggregate_capacity": "unknown"}
+                "name": legacy_display_name(config, environ=environment),
+                "aggregate_capacity": "unknown"}
     if not manifest:
         raise WorkspaceError("workspace manifest environment binding is empty")
     workspace = load_workspace_manifest(manifest)

@@ -96,7 +96,9 @@ class AnnualSourceHarness:
         self.connectors = ConnectorStore(fixture.store, clock=clock)
         self.observability = ObservabilityStore(fixture.store)
         self.journal = RunnerJournal(fixture.store, clock=clock)
-        self.spool = RawSpool(self.root / "spool", max_total_bytes=10_000_000)
+        # The SEC host's fetch reserves its whole body ceiling (32 MB since
+        # 2026-10-02) in the spool; the production spool is 1 GB.
+        self.spool = RawSpool(self.root / "spool", max_total_bytes=100_000_000)
         search_governance = WebSearchConnectorGovernance(
             build_web_search_governance_record(
                 approved_by="human:test-owner", status="approved"

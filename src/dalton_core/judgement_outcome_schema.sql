@@ -96,3 +96,17 @@ CREATE TRIGGER IF NOT EXISTS judgement_outcome_pointer_no_delete
 BEFORE DELETE ON judgement_outcome_check_pointer BEGIN
     SELECT RAISE(ABORT, 'judgement outcome pointer rows are never deleted');
 END;
+
+CREATE TABLE IF NOT EXISTS outcome_registrations (
+    registration_id TEXT PRIMARY KEY, judgement_ref TEXT NOT NULL UNIQUE,
+    company_ref TEXT NOT NULL, record_json TEXT NOT NULL,
+    content_hash TEXT NOT NULL, registered_at TEXT NOT NULL
+);
+CREATE TRIGGER IF NOT EXISTS outcome_registration_insert_guard
+BEFORE INSERT ON outcome_registrations WHEN dalton_authorized()=0 BEGIN
+    SELECT RAISE(ABORT, 'outcome registration requires authority');
+END;
+CREATE TRIGGER IF NOT EXISTS outcome_registration_no_update
+BEFORE UPDATE ON outcome_registrations BEGIN SELECT RAISE(ABORT, 'outcome targets are immutable'); END;
+CREATE TRIGGER IF NOT EXISTS outcome_registration_no_delete
+BEFORE DELETE ON outcome_registrations BEGIN SELECT RAISE(ABORT, 'outcome targets are immutable'); END;

@@ -168,6 +168,25 @@ function verifyHash(response) {
   assert.equal(actual, contentHash(body));
 }
 
+test("general request thinking controls take priority over the profile and change idempotency", async () => {
+  for (const level of ["off", "minimal", "low", "medium", "high"]) {
+    const calls = [];
+    const broker = new ModelBroker(fakeRuntime(async params => { calls.push(params); return result(); }, { thinking: true }),
+      config({ profiles: [{ id: "profile:research", model: "openai/gpt-5.6", maxTokens: 1000,
+        timeoutMs: 500, thinkingLevel: "high" }] }));
+    const input = request({ controls: { thinkingLevel: level } });
+    assert.equal((await broker.handle(input)).ok, true);
+    assert.equal(calls[0].thinkingLevel, level);
+    assert.equal((await broker.handle(request({ controls: { thinkingLevel: level === "low" ? "medium" : "low" } }))).error.code,
+      "IDEMPOTENCY_CONFLICT");
+  }
+  for (const controls of [{ thinkingLevel: "xhigh" }, { thinkingLevel: "low", agentId: "other" }, {}]) {
+    assert.throws(() => validateRequest(request({ controls }), 4096), ProtocolError);
+  }
+  assert.throws(() => validateRequest(request({ requiredControls: requiredControls(),
+    controls: { thinkingLevel: "medium" } }), 4096), /verifier thinking controls must be low/);
+});
+
 test("calls only host-owned completion with a fixed agent and exact allowed model", async () => {
   const calls = [];
   const runtime = fakeRuntime(async (params) => {
@@ -205,7 +224,9 @@ test("calls only host-owned completion with a fixed agent and exact allowed mode
 });
 
 test("preserves only the closed returned provider failure union", async () => {
-  for (const [httpStatus, code] of [[429, "RATE_LIMITED"], [503, "PROVIDER_INTERNAL_ERROR"]]) {
+  for (const [httpStatus, code] of [
+    [402, "PROVIDER_INSUFFICIENT_BALANCE"], [429, "RATE_LIMITED"], [503, "PROVIDER_INTERNAL_ERROR"],
+  ]) {
     const broker = new ModelBroker(fakeRuntime(async () => ({
       failure: { version: "0.1", state: "provider_completed_failure", httpStatus },
       provider: "openai", model: "gpt-5.6", agentId: "dalton-model-broker",
@@ -225,6 +246,7 @@ test("preserves only the closed returned provider failure union", async () => {
 test("does not promote malformed or non-retryable host failures", async () => {
   for (const [name, failure] of [
     ["unauthorized", { version: "0.1", state: "provider_completed_failure", httpStatus: 401 }],
+    ["forbidden", { version: "0.1", state: "provider_completed_failure", httpStatus: 403 }],
     ["string-status", { version: "0.1", state: "provider_completed_failure", httpStatus: "429" }],
     ["extra", { version: "0.1", state: "provider_completed_failure", httpStatus: 503, message: "x" }],
   ]) {
@@ -905,4 +927,63 @@ test("memory journal never turns expired pending uncertainty into a host replay"
   assert.equal(response.idempotencyStatus, "duplicate");
   assert.equal(calls, 0);
   assert.equal(journal.get(pendingRequest.invocationId).state, "pending");
+});
+
+test("an empty host completion is classified by what emptied it", async () => {
+  // Live 2026-09-28/29: glm-5.3 spent exactly maxTokens on reasoning and the
+  // host returned text "" (was INVALID_HOST_RESULT "host returned invalid
+  // text"); the Claude CLI gateway answered its weekly usage limit in-band and
+  // the host returned text "" with zero usage (the same generic code).
+  const cases = [
+    ["length-stop", result({ text: "", stopReason: "length" }), "HOST_OUTPUT_LIMIT_REACHED"],
+    [
+      "limit-tokens",
+      result({ text: "", usage: { inputTokens: 12, outputTokens: 256, totalTokens: 268 } }),
+      "HOST_OUTPUT_LIMIT_REACHED",
+    ],
+    [
+      "zero-usage",
+      result({ text: "", stopReason: "error", usage: { inputTokens: 0, outputTokens: 0, totalTokens: 0 } }),
+      "HOST_EMPTY_COMPLETION",
+    ],
+    ["no-usage", result({ text: "", usage: undefined }), "HOST_EMPTY_COMPLETION"],
+    [
+      "some-output",
+      result({ text: "", usage: { inputTokens: 12, outputTokens: 40, totalTokens: 52 } }),
+      "INVALID_HOST_RESULT",
+    ],
+    ["not-a-string", result({ text: null }), "INVALID_HOST_RESULT"],
+  ];
+  for (const [name, hostResult, code] of cases) {
+    const broker = new ModelBroker(fakeRuntime(async () => hostResult), config());
+    const response = await broker.handle(request({ invocationId: `invocation:empty-${name}` }));
+    assert.equal(response.ok, false, name);
+    assert.equal(response.error.code, code, name);
+    assert.equal(response.text, null, name);
+    assert.equal(response.dispatchProof, null, name);
+    assert.equal(response.usage.totalTokens, null, name);
+    assert.ok(response.error.message.length <= 512, name);
+    verifyHash(response);
+  }
+});
+
+test("an empty completion with the wrong attribution is still an attribution mismatch", async () => {
+  const broker = new ModelBroker(fakeRuntime(async () => result({
+    text: "", stopReason: "length", model: "gpt-other",
+  })), config());
+  const response = await broker.handle(request({ invocationId: "invocation:empty-attribution" }));
+  assert.equal(response.error.code, "HOST_ATTRIBUTION_MISMATCH");
+});
+
+test("C2 long-context profile admits a 900-second request before dispatch", async () => {
+  let called = 0;
+  const runtime = fakeRuntime();
+  const prior = runtime.llm.complete;
+  runtime.llm.complete = async (...args) => { called++; return prior(...args); };
+  const broker = new ModelBroker(runtime, config({ profiles: [{ id: "profile:research",
+    model: "openai/gpt-5.6", maxTokens: 1000, timeoutMs: 900000 }] }));
+  const result = await broker.handle(request({ invocationId: "invocation:long-c2", timeoutMs: 900000 }));
+  assert.notEqual(result.error?.code, "PROFILE_LIMIT_EXCEEDED");
+  assert.equal(called, 1);
+  broker.close();
 });

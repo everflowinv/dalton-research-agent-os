@@ -12,15 +12,17 @@ from pathlib import Path
 from typing import Any, Callable, Iterator, Mapping, Sequence
 
 from .annual_report_qualitative import (
-    AnnualReportQualitativeError, VERIFIER_PROVIDER_SCHEMA_HASH,
+    AnnualReportQualitativeError,
     qualitative_router_capability, validate_model_proof,
 )
 from .contracts import ModelInvocation, ResultEnvelope, WorkOrder
 from .document_research import DocumentResearchError, DocumentResearchRegistry
 from .document_research_qualitative import (
-    DRAFT_PURPOSE, VERIFIER_PURPOSE, MissionDocumentDraftWorker,
-    MissionDocumentVerifierWorker, _MissionDocumentCandidateAuthority,
-    _build_candidate_bundle, draft_prompt, verifier_prompt,
+    CURRENT_DRAFT_CONTRACT, CURRENT_VERIFIER_CONTRACT, DRAFT_CONTRACT_VERSION_V2,
+    DRAFT_PURPOSE, VERIFIER_CONTRACTS, VERIFIER_PURPOSE,
+    MissionDocumentDraftWorker, MissionDocumentVerifierWorker,
+    _MissionDocumentCandidateAuthority, _build_candidate_bundle, draft_prompt,
+    draft_prompt_v2, verifier_candidate_ref, verifier_prompt, verifier_prompt_v2,
 )
 from .mission_document_research import (
     MissionDocumentResearchAuthority, MissionDocumentResearchError,
@@ -103,6 +105,7 @@ AUTOMATIC_CONTRACT_RETRY_FIELDS = frozenset({
 # shape, a broken prompt -- fails every admission at once; without this cap one
 # tick would pay for the whole lane twice.
 DEFAULT_MAX_AUTOMATIC_CONTRACT_RETRIES_PER_DAY = 20
+MAX_AUTOMATIC_CONTRACT_RETRIES_PER_STAGE = 2
 # Recovery reasons the rest of the system matches on by name.
 AUTOMATIC_CONTRACT_RETRY_REASON = "automatic_bounded_contract_retry"
 CONTRACT_RETRY_DAY_CAP_REASON = "automatic_contract_retry_day_cap_reached"
@@ -181,6 +184,55 @@ UNPROVED_SEND_FAILED_AFTER_AUTOMATIC_RETRY = "unproved_send_failed_after_automat
 # owner, whose unproved-send door buys at most one more call.
 PROVIDER_BUDGET_EXCEEDED_CODE = "PROVIDER_BUDGET_EXCEEDED"
 PROVIDER_BUDGET_EXCEEDED_NOT_RETRIED = "provider_budget_exceeded_not_retried"
+# 2026-10-06: what replaced "not retried" for that state.  Live ws-7d, two
+# MSFT 10-K drafts on glm-5.3: the admitted WorkOrder froze max_input_tokens at
+# 64000, the 158 kB prompt (24 overlapping 6000-character excerpts of an
+# XBRL-heavy filing) read 64,341 and 64,534 provider tokens, and the router's
+# word-count estimate had called it 8,663 -- so each call was sent, charged
+# (~0.095 USD) and refused, and the admission stopped for a person whose only
+# door bought the same call at the same ceiling.  The provider's own count of
+# the exact prompt is on record, so the retry the stage needs is computable:
+# one fresh WorkOrder whose token ceilings are that count plus headroom, at the
+# same per-call cost ceiling, bounded, once per (admission, stage), and paid
+# through the same atomic day-budget admission as every call (a day the
+# mission cannot afford answers "tomorrow", not "a person").  Only what the
+# correction cannot cover -- an output or cost overrun, a needed ceiling past
+# the bound, or a corrected call that still overran -- reaches a person, with
+# the numbers.
+AUTOMATIC_BUDGET_CORRECTION_CLASSIFICATION = "automation_corrected_input_budget_retry"
+AUTOMATIC_BUDGET_CORRECTION_ACTOR = "automation:document-research-budget-correction"
+AUTOMATIC_BUDGET_CORRECTION_FIELDS = frozenset({
+    "schema_version", "id", "kind", "actor_ref", "admission_ref", "admission_hash",
+    "stage_ordinal", "failed_work_order_ref", "failed_work_order_hash",
+    "formal_result_ref", "formal_result_hash", "max_fresh_work_orders",
+    "max_cost_usd", "authorized_at", "day",
+    "max_automatic_budget_corrections_per_day",
+    "unproved_send_record_hash", "budget_overrun", "corrected_budget", "content_hash",
+})
+DEFAULT_MAX_AUTOMATIC_BUDGET_CORRECTIONS_PER_DAY = 5
+AUTOMATIC_BUDGET_CORRECTION_REASON = "automatic_corrected_budget_retry"
+BUDGET_CORRECTION_DAY_CAP_REASON = "automatic_corrected_budget_retry_day_cap_reached"
+PROVIDER_BUDGET_EXCEEDED_AFTER_CORRECTION = "provider_budget_exceeded_after_corrected_retry"
+PROVIDER_BUDGET_CORRECTION_REFUSED = "provider_budget_exceeded_correction_refused"
+# 2026-10-09: what this release writes when a corrected call overran again and
+# no further correction is allowed (the same model served it, or the stage has
+# had both of its corrections).  A distinct reason, so the lane can tell a
+# verdict of this release from the plain ``..._after_corrected_retry`` rows of
+# earlier ones, which it re-enters once for the second-correction check.
+PROVIDER_BUDGET_EXCEEDED_AFTER_FINAL_CORRECTION = (
+    "provider_budget_exceeded_after_corrected_retry_final")
+# The corrected ceiling is the provider's own count plus a quarter (another
+# model on the chain may tokenize the same text differently), rounded up to a
+# thousand, never below what was admitted, never more than twice what was
+# admitted and never past an absolute bound.  The per-call cost ceiling is not
+# touched: the router and the adapter still hold every call to it.
+BUDGET_CORRECTION_HEADROOM = (5, 4)
+BUDGET_CORRECTION_ROUNDING = 1000
+BUDGET_CORRECTION_MAX_FACTOR = 2
+BUDGET_CORRECTION_MAX_INPUT_TOKENS = 262_144
+#: 2026-10-09: a second correction only when another model served the
+#: corrected call (see ``_recover_provider_budget_overrun``).
+MAX_BUDGET_CORRECTIONS_PER_STAGE = 2
 # Written by every release before this one for exactly this state.  Such a hold
 # has not spent its automatic retry either, so the lane re-enters it once.
 LEGACY_UNPROVED_SEND_REASON = "send_state_unproved"
@@ -191,8 +243,439 @@ CONTROLLED_RETRY_CLASSIFICATIONS = frozenset({
     AUTOMATIC_CONTRACT_RETRY_CLASSIFICATION,
     AUTOMATIC_UNPROVED_SEND_RETRY_CLASSIFICATION,
     OWNER_UNPROVED_SEND_RETRY_CLASSIFICATION,
+    AUTOMATIC_BUDGET_CORRECTION_CLASSIFICATION,
     "reconstructed_historical_provider_controls_no_send",
+    "versioned_numeric_technical_maintenance",
 })
+
+
+# -- every reason a held admission can carry, and the doors each one opens --
+# 2026-10-09.  Live legacy, EPAM 09b4bb82 / 3c49a49c: batch ag's epoch-rebind
+# fix let the executor classify a route-rejected draft at last, and it
+# stopped it at once as ``fresh_work_recovery_exhausted`` -- the bound had
+# been spent on 10-06 (automatic retry) and 10-07 (the owner's door), before
+# the owner's 10-09 re-entry.  Neither the needs-human list nor 运行控制 knew
+# that reason, so the owner was told two tasks were waiting and was shown no
+# card and no button.  Every reason is listed here, and
+# :func:`available_doors` is the one place that says what each permits.
+FRESH_WORK_RECOVERY_DISABLED = "fresh_work_recovery_disabled"
+FRESH_WORK_RECOVERY_EXHAUSTED = "fresh_work_recovery_exhausted"
+FRESH_WORK_RECOVERY_DEADLINE_EXCEEDED = "fresh_work_recovery_deadline_exceeded"
+FRESH_WORK_RECOVERY_DAY_WINDOW_EXCEEDED = "fresh_work_recovery_day_window_exceeded"
+#: The stops that are a *policy cap* on fresh-work recovery, not a verdict on
+#: the failure: a bound on the number of fresh Works or on the time window.
+FRESH_WORK_CAP_REASONS: tuple[str, ...] = (
+    FRESH_WORK_RECOVERY_EXHAUSTED, FRESH_WORK_RECOVERY_DEADLINE_EXCEEDED,
+    FRESH_WORK_RECOVERY_DAY_WINDOW_EXCEEDED, FRESH_WORK_RECOVERY_DISABLED,
+)
+#: The cause the lane appends to a fresh-work cap whose last failure was a
+#: rejected route: every model of the chain was unavailable (cooldown, an
+#: expired key or availability window, a spent gateway budget), so nothing
+#: was sent.  That is not the owner's decision; the lane retries by itself
+#: once model availability changes, at most once per UTC day.
+ALL_MODELS_UNAVAILABLE_CAUSE = "all_models_unavailable"
+#: ``...:next=<RFC3339>`` -- the earliest automatic retry, when one is known.
+NEXT_AUTOMATIC_RETRY_MARK = "next="
+#: The lane's resume reason for a recorded recovery round.
+FRESH_WORK_RECOVERY_ROUND_REASON = "fresh_work_recovery_round"
+RECOVERY_ROUND_PREFIX = "mission-document-research-recovery-round"
+AUTOMATIC_RECOVERY_ROUND_ACTOR = "automation:document-research-fresh-work-round"
+MAX_AUTOMATIC_RECOVERY_ROUNDS_PER_DAY = 1
+_RECOVERY_ROUND_DDL = """
+CREATE TABLE IF NOT EXISTS mission_document_research_recovery_rounds (
+ round_id TEXT PRIMARY KEY, admission_ref TEXT NOT NULL,
+ stage_ordinal INTEGER NOT NULL CHECK(stage_ordinal IN (2,3)),
+ failed_work_order_ref TEXT NOT NULL UNIQUE,
+ kind TEXT NOT NULL CHECK(kind IN ('owner','automatic')),
+ actor_ref TEXT NOT NULL CHECK(
+  (kind='owner' AND actor_ref LIKE 'human:%')
+  OR (kind='automatic' AND actor_ref LIKE 'automation:%')),
+ day TEXT NOT NULL,
+ record_json TEXT NOT NULL, content_hash TEXT NOT NULL UNIQUE,
+ created_at TEXT NOT NULL
+);
+CREATE INDEX IF NOT EXISTS mission_document_research_recovery_rounds_day
+ ON mission_document_research_recovery_rounds(admission_ref, stage_ordinal, kind, day);
+CREATE TRIGGER IF NOT EXISTS mission_document_research_recovery_rounds_no_update
+BEFORE UPDATE ON mission_document_research_recovery_rounds BEGIN
+ SELECT RAISE(ABORT,'mission document recovery rounds are append-only'); END;
+CREATE TRIGGER IF NOT EXISTS mission_document_research_recovery_rounds_no_delete
+BEFORE DELETE ON mission_document_research_recovery_rounds BEGIN
+ SELECT RAISE(ABORT,'mission document recovery rounds are append-only'); END;
+"""
+_RECOVERY_ROUND_FIELDS = frozenset({
+    "schema_version", "id", "admission_ref", "admission_hash", "stage_ordinal",
+    "failed_work_order_ref", "failed_work_order_hash", "hold_reason", "kind",
+    "actor_ref", "day", "basis", "created_at", "content_hash",
+})
+
+#: Every reason the executor stops a stage's recovery with.  A test greps the
+#: executor for ``"stopped"`` verdicts and fails when one is missing here.
+STOPPED_REASONS: tuple[str, ...] = (
+    CONTRACT_FAILED_AFTER_AUTOMATIC_RETRY, CONTRACT_FAILED_AFTER_OWNER_RETRY,
+    LEGACY_PAID_CONTRACT_REASON, UNPROVED_SEND_FAILED_AFTER_AUTOMATIC_RETRY,
+    LEGACY_UNPROVED_SEND_REASON, PROVIDER_BUDGET_EXCEEDED_NOT_RETRIED,
+    PROVIDER_BUDGET_EXCEEDED_AFTER_CORRECTION,
+    PROVIDER_BUDGET_EXCEEDED_AFTER_FINAL_CORRECTION, PROVIDER_BUDGET_CORRECTION_REFUSED,
+    *FRESH_WORK_CAP_REASONS,
+)
+#: The reasons the document lane itself holds an admission ``recovery_required``
+#: with (``mission_document_research_lane``); spelled here so the policy has
+#: one list and the lane cannot add a reason the doors do not know.
+LANE_HOLD_REASONS: tuple[str, ...] = (
+    "reentry_failed_after_automatic_rebind",
+    "controlled_reentry_unavailable",
+    "controlled_reentry_ticket_unavailable",
+    "recovery_hint_unverifiable",
+    "started_without_owned_live_ticket",
+    "dispatch_error",
+    "budget_or_pool_refused",
+)
+HOLD_REASONS: tuple[str, ...] = STOPPED_REASONS + LANE_HOLD_REASONS
+#: The writer operation behind each owner door (``cockpit_owner_doors``).
+DOOR_OPERATIONS: Mapping[str, str | None] = {
+    "reentry": "authorize_mission_document_reentry",
+    # One more round of fresh-work recovery is opened through the same writer
+    # door as a re-entry: on a fresh-work cap, the lane's ``authorize_reentry``
+    # records the round (append-only) instead of a launcher grant.
+    "retry_round": "authorize_mission_document_reentry",
+    "paid": "authorize_mission_document_paid_recovery",
+    "unproved": "authorize_mission_document_unproved_recovery",
+    "withdraw": "withdraw_mission_document_admission",
+    # Not a writer operation: the card hands the hold to the technical
+    # administrator, with the raw reason under 技术详情.
+    "technical_help": None,
+}
+#: ``free`` buys no model call; ``within_budget`` may make the stage's one
+#: call again inside the cost ceiling the admission already carries; ``paid``
+#: buys a further call under a ceiling the owner types.
+DOOR_COSTS: Mapping[str, str] = {
+    "reentry": "free", "retry_round": "within_budget", "paid": "paid",
+    "unproved": "paid", "withdraw": "free", "technical_help": "free",
+}
+
+
+def hold_reason_code(reason: Any) -> str:
+    """The base reason of a hold: the known code it starts with, else its head."""
+
+    text = str(reason or "").strip()
+    for code in sorted(HOLD_REASONS, key=len, reverse=True):
+        if text == code or text.startswith(code + ":") or text.startswith(code + " "):
+            return code
+    for code in sorted(HOLD_REASONS, key=len, reverse=True):
+        if code in text:
+            return code
+    return text.split(":", 1)[0].strip()[:80]
+
+
+def next_automatic_retry(reason: Any) -> str | None:
+    """The ``next=`` instant the lane wrote into a hold reason, if any."""
+
+    for part in str(reason or "").split(":"):
+        if part.startswith(NEXT_AUTOMATIC_RETRY_MARK):
+            return str(reason).split(NEXT_AUTOMATIC_RETRY_MARK, 1)[1] or None
+    return None
+
+
+def available_doors(hold: Mapping[str, Any] | None) -> list[dict[str, Any]]:
+    """The doors this hold permits, primary first; withdrawal always last.
+
+    The single answer to "what may the owner press here".  The cards, the
+    administrator's 运行控制 list and the recovery CLI all ask this.  A reason
+    this release does not know still gets withdrawal and a hand-off to the
+    technical administrator -- never nothing.  Each door says whether it can
+    cost money (``cost``) and which writer operation opens it.
+    """
+
+    hold = hold or {}
+    reason = str(hold.get("reason") or "")
+    code = hold_reason_code(reason)
+    primary: list[str] = []
+    automatic = False
+    if code == CONTRACT_FAILED_AFTER_AUTOMATIC_RETRY:
+        primary = ["paid"]
+    elif code == UNPROVED_SEND_FAILED_AFTER_AUTOMATIC_RETRY:
+        # Which of these no purchase can fix (a prompt over the admitted
+        # input, a reply cap below the current one) is decided against the
+        # live budgets by ``document_recovery_cli.unrecoverable_holds``, and
+        # the writer refuses those; the door itself stays.
+        primary = ["unproved"]
+    elif code == "reentry_failed_after_automatic_rebind":
+        primary = ["reentry"]
+    elif code in FRESH_WORK_CAP_REASONS:
+        if ALL_MODELS_UNAVAILABLE_CAUSE in reason:
+            automatic = True          # the lane retries when a model is back
+        else:
+            primary = ["retry_round"]
+    elif code in (PROVIDER_BUDGET_EXCEEDED_NOT_RETRIED, LEGACY_UNPROVED_SEND_REASON,
+                  LEGACY_PAID_CONTRACT_REASON):
+        automatic = True              # legacy rows: the lane re-enters them itself
+    elif code in (CONTRACT_FAILED_AFTER_OWNER_RETRY,
+                  PROVIDER_BUDGET_EXCEEDED_AFTER_CORRECTION,
+                  PROVIDER_BUDGET_EXCEEDED_AFTER_FINAL_CORRECTION,
+                  PROVIDER_BUDGET_CORRECTION_REFUSED):
+        primary = []                  # the same purchase fails the same way
+    known = code in HOLD_REASONS
+    doors = [*primary, "withdraw"]
+    if not known or (not primary and not automatic and code in LANE_HOLD_REASONS):
+        doors.append("technical_help")
+    return [{"door": name, "operation": DOOR_OPERATIONS[name], "cost": DOOR_COSTS[name],
+             "reason_code": code, "known_reason": known, "automatic_retry": automatic,
+             "next_automatic_retry": next_automatic_retry(reason) if automatic else None}
+            for name in doors]
+
+
+def _round_row(row: Any) -> dict[str, Any]:
+    try:
+        record = json.loads(row["record_json"])
+    except (TypeError, ValueError, RecursionError) as exc:
+        raise MissionDocumentResearchExecutorError("recovery round is invalid") from exc
+    body = dict(record) if isinstance(record, Mapping) else {}
+    asserted = body.pop("content_hash", None)
+    if (not isinstance(record, Mapping) or set(record) != _RECOVERY_ROUND_FIELDS
+            or canonical_json(record) != row["record_json"]
+            or asserted != row["content_hash"] or asserted != content_hash(body)
+            or record.get("id") != row["round_id"]
+            or record.get("id") != _ref(RECOVERY_ROUND_PREFIX, {
+                key: value for key, value in body.items() if key != "id"})
+            or record.get("admission_ref") != row["admission_ref"]
+            or record.get("stage_ordinal") != row["stage_ordinal"]
+            or record.get("failed_work_order_ref") != row["failed_work_order_ref"]
+            or record.get("kind") != row["kind"]
+            or record.get("actor_ref") != row["actor_ref"]
+            or record.get("day") != row["day"]):
+        raise MissionDocumentResearchExecutorError("recovery round drifted")
+    return dict(record)
+
+
+def read_recovery_round(connection: Any, failed_work_order_ref: str) -> dict[str, Any] | None:
+    """The one recovery round recorded against this exact failed Work, re-hashed."""
+
+    try:
+        row = connection.execute(
+            "SELECT * FROM mission_document_research_recovery_rounds "
+            "WHERE failed_work_order_ref=?", (failed_work_order_ref,)).fetchone()
+    except Exception as exc:  # noqa: BLE001 - a Core from before rounds has none
+        if "no such table" in str(exc):
+            return None
+        raise
+    if row is None:
+        return None
+    if not hasattr(row, "keys"):
+        columns = ("round_id", "admission_ref", "stage_ordinal", "failed_work_order_ref",
+                   "kind", "actor_ref", "day", "record_json", "content_hash", "created_at")
+        row = dict(zip(columns, row))
+    return _round_row(row)
+
+
+def recovery_rounds_on(connection: Any, admission_ref: str, stage_ordinal: int,
+                       *, kind: str, day: str) -> int:
+    try:
+        return int(connection.execute(
+            "SELECT count(*) FROM mission_document_research_recovery_rounds "
+            "WHERE admission_ref=? AND stage_ordinal=? AND kind=? AND day=?",
+            (admission_ref, stage_ordinal, kind, day)).fetchone()[0])
+    except Exception as exc:  # noqa: BLE001
+        if "no such table" in str(exc):
+            return 0
+        raise
+
+
+def append_recovery_round(
+    connection: Any, *, admission_ref: str, admission_hash: str, stage_ordinal: int,
+    failed_work_order_ref: str, failed_work_order_hash: str, hold_reason: str,
+    kind: str, actor_ref: str, basis: Mapping[str, Any], now: datetime,
+) -> dict[str, Any]:
+    """Record one more round of fresh-work recovery for one exact failed Work.
+
+    Append-only and one per failed Work: a round the executor has turned into
+    a RecoveryLink moves the stage to a new Work, and only *its* failure can
+    carry the next round.  The same call again replays the stored round.  An
+    automatic round is refused past :data:`MAX_AUTOMATIC_RECOVERY_ROUNDS_PER_DAY`
+    for the stage; an owner's round only needs a human actor.
+    """
+
+    if kind not in {"owner", "automatic"}:
+        raise MissionDocumentResearchExecutorError("recovery round kind is invalid")
+    if kind == "owner" and not str(actor_ref).startswith("human:"):
+        raise MissionDocumentResearchExecutorError("an owner recovery round needs a human actor")
+    if kind == "automatic" and actor_ref != AUTOMATIC_RECOVERY_ROUND_ACTOR:
+        raise MissionDocumentResearchExecutorError("automatic recovery round actor is invalid")
+    if stage_ordinal not in (2, 3):
+        raise MissionDocumentResearchExecutorError("recovery round stage is invalid")
+    if connection.in_transaction:
+        raise MissionDocumentResearchExecutorError(
+            "a recovery round cannot be nested in an open transaction")
+    connection.executescript(_RECOVERY_ROUND_DDL)
+    existing = read_recovery_round(connection, failed_work_order_ref)
+    if existing is not None:
+        if (existing["admission_ref"] != admission_ref
+                or existing["stage_ordinal"] != stage_ordinal):
+            raise MissionDocumentResearchExecutorError("recovery round conflicted")
+        return {**existing, "status": "replayed"}
+    moment = _time(now)
+    day = moment[:10]
+    if kind == "automatic" and recovery_rounds_on(
+            connection, admission_ref, stage_ordinal, kind="automatic", day=day
+    ) >= MAX_AUTOMATIC_RECOVERY_ROUNDS_PER_DAY:
+        raise MissionDocumentResearchExecutorError(
+            "automatic recovery round already used today for this stage")
+    body = {
+        "schema_version": SCHEMA_VERSION, "admission_ref": admission_ref,
+        "admission_hash": admission_hash, "stage_ordinal": stage_ordinal,
+        "failed_work_order_ref": failed_work_order_ref,
+        "failed_work_order_hash": failed_work_order_hash,
+        "hold_reason": str(hold_reason)[:300], "kind": kind, "actor_ref": actor_ref,
+        "day": day, "basis": dict(basis), "created_at": moment,
+    }
+    body["id"] = _ref(RECOVERY_ROUND_PREFIX, body)
+    record = {**body, "content_hash": content_hash(body)}
+    connection.execute("BEGIN IMMEDIATE")
+    try:
+        connection.execute(
+            "INSERT INTO mission_document_research_recovery_rounds VALUES(?,?,?,?,?,?,?,?,?,?)",
+            (record["id"], admission_ref, stage_ordinal, failed_work_order_ref, kind,
+             actor_ref, day, canonical_json(record), record["content_hash"], moment))
+        connection.commit()
+    except BaseException:
+        connection.rollback()
+        raise
+    return {**record, "status": "recorded"}
+
+
+def model_availability_since(
+    router_db: Any, *, route_decision_ref: str, since: str,
+) -> dict[str, Any] | None:
+    """A model the router has served the same routing policy with since ``since``.
+
+    Read-only.  The failed route decision names its routing policy and
+    capability; a later *selected* decision for the same policy (any version)
+    and capability means a model of that chain is available again -- a
+    cooldown lifted, a key renewed, a gateway budget reset.  ``None`` when the
+    router cannot be read or nothing has been served since.
+    """
+
+    import sqlite3
+
+    if not router_db or not route_decision_ref:
+        return None
+    path = Path(str(router_db))
+    if not path.is_file():
+        return None
+    try:
+        connection = sqlite3.connect(f"file:{path}?mode=ro", uri=True, timeout=5.0)
+    except sqlite3.Error:
+        return None
+    try:
+        failed = connection.execute(
+            "SELECT decision_sequence, policy_version_ref, capability "
+            "FROM model_route_decisions WHERE decision_id=?",
+            (route_decision_ref,)).fetchone()
+        if failed is None:
+            return None
+        sequence, policy, capability = failed
+        family = str(policy).rsplit(":", 1)[0] + ":"
+        served = connection.execute(
+            "SELECT decision_id, selected_profile_version_ref, created_at "
+            "FROM model_route_decisions WHERE decision_sequence>? AND outcome='selected' "
+            "AND capability=? AND substr(policy_version_ref,1,?)=? AND created_at>=? "
+            "ORDER BY decision_sequence LIMIT 1",
+            (sequence, capability, len(family), family, str(since))).fetchone()
+    except sqlite3.Error:
+        return None
+    finally:
+        connection.close()
+    if served is None:
+        return None
+    return {"route_decision_ref": served[0], "profile_version_ref": served[1],
+            "selected_at": served[2], "routing_policy": family.rstrip(":")}
+
+
+def _round_up(value: int, step: int) -> int:
+    return -(-int(value) // step) * step
+
+
+def provider_budget_overrun(usages: Sequence[Mapping[str, Any]],
+                            budget: Mapping[str, Any]) -> dict[str, Any]:
+    """What the provider counted against what the WorkOrder admitted, and the fix.
+
+    ``usages`` are the usage entries of the failed Work's model invocations.
+    Input is measured the way the adapter measured it when it refused the
+    reply: uncached input plus cache read plus cache write.  The answer always
+    carries the numbers; ``corrected_budget`` is ``None`` with a ``refusal``
+    when a corrected ceiling cannot be computed or would not be enough.
+    """
+
+    def number(value: Any) -> int | None:
+        return value if isinstance(value, int) and not isinstance(value, bool) else None
+
+    provider_input = provider_output = provider_total = None
+    for usage in usages:
+        raw = usage.get("raw_usage") if isinstance(usage.get("raw_usage"), Mapping) else {}
+        parts = [number(usage.get(key)) for key in
+                 ("input_tokens", "cache_read_tokens", "cache_write_tokens")]
+        if all(part is None for part in parts):
+            continue
+        used_input = sum(part or 0 for part in parts)
+        used_output = number(usage.get("output_tokens"))
+        used_total = number(usage.get("total_tokens")) or number(raw.get("total_tokens"))
+        if used_total is None:
+            used_total = used_input + (used_output or 0)
+        provider_input = max(provider_input or 0, used_input)
+        provider_total = max(provider_total or 0, used_total)
+        if used_output is not None:
+            provider_output = max(provider_output or 0, used_output)
+    admitted = {key: int(budget[key]) for key in
+                ("max_input_tokens", "max_output_tokens", "max_total_tokens")}
+    overrun: dict[str, Any] = {
+        "provider_input_tokens": provider_input,
+        "provider_output_tokens": provider_output,
+        "provider_total_tokens": provider_total,
+        "admitted": admitted,
+        "exceeded": [],
+        "corrected_budget": None,
+        "refusal": None,
+    }
+    if provider_input is None:
+        overrun["refusal"] = "provider_usage_unavailable"
+        return overrun
+    exceeded = [name for name, used, limit in (
+        ("max_input_tokens", provider_input, admitted["max_input_tokens"]),
+        ("max_output_tokens", provider_output, admitted["max_output_tokens"]),
+        ("max_total_tokens", provider_total, admitted["max_total_tokens"]),
+    ) if used is not None and used > limit]
+    overrun["exceeded"] = exceeded
+    if "max_output_tokens" in exceeded:
+        # The model wrote past the ceiling it was asked for; more input room
+        # would not change that.
+        overrun["refusal"] = "output_overrun_not_correctable"
+        return overrun
+    if not exceeded:
+        # Refused on something else -- a cost ceiling, or a gateway prefix the
+        # budget already carries.  Raising token ceilings would not help.
+        overrun["refusal"] = "no_token_ceiling_exceeded"
+        return overrun
+    numerator, denominator = BUDGET_CORRECTION_HEADROOM
+    output = admitted["max_output_tokens"]
+    corrected_input = max(
+        admitted["max_input_tokens"],
+        _round_up(-(-provider_input * numerator // denominator), BUDGET_CORRECTION_ROUNDING),
+        _round_up(-(-provider_total * numerator // denominator) - output,
+                  BUDGET_CORRECTION_ROUNDING),
+    )
+    bound = min(admitted["max_input_tokens"] * BUDGET_CORRECTION_MAX_FACTOR,
+                BUDGET_CORRECTION_MAX_INPUT_TOKENS)
+    overrun["correction_bound_input_tokens"] = bound
+    if corrected_input > bound:
+        overrun["refusal"] = "corrected_input_beyond_bound"
+        overrun["needed_input_tokens"] = corrected_input
+        return overrun
+    corrected = dict(budget)
+    corrected["max_input_tokens"] = corrected_input
+    corrected["max_total_tokens"] = max(int(budget["max_total_tokens"]),
+                                        corrected_input + output)
+    overrun["corrected_budget"] = corrected
+    return overrun
 
 
 class MissionDocumentResearchExecutorError(RuntimeError):
@@ -249,14 +732,21 @@ def read_mission_document_research_candidate_rejections(
 
 def read_mission_document_research_observations(
     connection: Any, *, mission_version_ref: str | None = None,
+    admission_ref: str | None = None,
 ) -> list[dict[str, Any]]:
     """Read canonical immutable query outcomes for planner state projection."""
 
     query = "SELECT * FROM mission_document_research_observations"
     params: tuple[Any, ...] = ()
+    filters = []
     if mission_version_ref is not None:
-        query += " WHERE mission_version_ref=?"
-        params = (mission_version_ref,)
+        filters.append("mission_version_ref=?")
+        params += (mission_version_ref,)
+    if admission_ref is not None:
+        filters.append("admission_ref=?")
+        params += (admission_ref,)
+    if filters:
+        query += " WHERE " + " AND ".join(filters)
     query += " ORDER BY created_at,observation_id"
     try:
         rows = connection.execute(query, params).fetchall()
@@ -401,7 +891,10 @@ def read_mission_document_research_observations(
         outputs = envelope["outputs"]
         retrieval = (outputs if wire["outcome"] == "query_miss"
                      else work["metadata"].get("retrieval_proof"))
+        verifier_rejection = (wire["outcome"] == "no_verified_claim"
+                              and wire["stage"] == "independent_qualitative_verifier")
         expected_draft = (outputs if wire["outcome"] == "no_verified_claim"
+                          and not verifier_rejection
                           else work["metadata"].get("draft_proof"))
         if (not isinstance(retrieval, Mapping)
                 or retrieval.get("id") != wire["search_proof_ref"]
@@ -418,6 +911,15 @@ def read_mission_document_research_observations(
                     or outputs.get("content_hash") != wire["search_proof_hash"]
                     or outputs.get("matches") != []):
                 raise MissionDocumentResearchExecutorError("query-miss proof drifted")
+        elif verifier_rejection:
+            if (not isinstance(outputs, Mapping)
+                    or outputs.get("stage") != "independent_qualitative_verifier"
+                    or outputs.get("work_order_ref") != work["id"]
+                    or outputs.get("output_hash") != content_hash(outputs.get("output"))
+                    or not isinstance(outputs.get("output"), Mapping)
+                    or outputs["output"].get("verdict") != "reject"):
+                raise MissionDocumentResearchExecutorError(
+                    "verifier-rejection proof drifted")
         elif wire["outcome"] == "no_verified_claim":
             if (not isinstance(outputs, Mapping) or outputs.get("id") != wire["draft_proof_ref"]
                     or outputs.get("content_hash") != wire["draft_proof_hash"]
@@ -615,12 +1117,79 @@ def _pre_numeric_normalization_draft_prompt(
     return canonical_json(body)
 
 
+def _admission_verifier_contract(scheduler: Scheduler, admission_ref: str) -> str:
+    """The verifier contract this admission's verifier stage is asked under.
+
+    2026-09-30, contract 0.2.  An admission whose verifier stage already has a
+    stored Work under the retired 0.1 contract stays on 0.1 for its whole life:
+    its stored Work, its recovery Work and any epoch rebind are all re-derived
+    byte-for-byte as they were written, and none of it is re-asked under
+    another contract behind the ledger's back.  Every other admission -- every
+    new one, and every one whose verifier has not been asked yet -- uses the
+    current contract.  (A 0.1 hold that can only fail the same way again is
+    withdrawn by its owner and asked afresh; see ``document_recovery_cli``.)
+    """
+
+    rows = scheduler.connection.execute(
+        # Spelled like ``scheduler_work_orders_document_stage`` so it seeks.
+        "SELECT work_order_json FROM scheduler_work_orders "
+        "WHERE json_extract(work_order_json,"
+        "'$.metadata.mission_document_research_admission_ref')=? "
+        "AND json_extract(work_order_json,'$.metadata.stage')=?",
+        (admission_ref, "independent_qualitative_verifier"),
+    ).fetchall()
+    for row in rows:
+        try:
+            metadata = json.loads(row["work_order_json"])["metadata"]
+        except (TypeError, ValueError, KeyError, RecursionError) as exc:
+            raise MissionDocumentResearchExecutorError(
+                "stored verifier Work authority is invalid") from exc
+        if metadata.get("verifier_output_schema_version", "0.1") == "0.1":
+            return "0.1"
+    return CURRENT_VERIFIER_CONTRACT
+
+
+def _admission_draft_contract(scheduler: Scheduler, admission_ref: str) -> str:
+    """The draft contract this admission's draft stage is asked under.
+
+    2026-09-30, contract 0.2 (a self-contained statement).  Exactly the rule
+    ``_admission_verifier_contract`` follows: an admission whose draft stage
+    already has a stored Work under 0.1 -- any stored draft Work without
+    ``draft_contract_version`` -- stays on 0.1 for its whole life, so its
+    stored Work, recovery Work and epoch rebinds re-derive byte for byte; every
+    other admission is asked under the current contract.
+    """
+
+    rows = scheduler.connection.execute(
+        "SELECT work_order_json FROM scheduler_work_orders "
+        "WHERE json_extract(work_order_json,"
+        "'$.metadata.mission_document_research_admission_ref')=? "
+        "AND json_extract(work_order_json,'$.metadata.stage')=?",
+        (admission_ref, "qualitative_model_draft"),
+    ).fetchall()
+    for row in rows:
+        try:
+            metadata = json.loads(row["work_order_json"])["metadata"]
+        except (TypeError, ValueError, KeyError, RecursionError) as exc:
+            raise MissionDocumentResearchExecutorError(
+                "stored draft Work authority is invalid") from exc
+        if metadata.get("draft_contract_version", "0.1") == "0.1":
+            return "0.1"
+    return CURRENT_DRAFT_CONTRACT
+
+
 def _derive(admission: Mapping[str, Any], scheduler: Scheduler,
             registry: DocumentResearchRegistry, blueprints: Sequence[Mapping[str, Any]],
-            index: int, *, draft_prompt_builder: Callable[..., str] = draft_prompt,
+            index: int, *, draft_prompt_builder: Callable[..., str] | None = None,
+            verifier_contract: str | None = None, draft_contract: str | None = None,
             ) -> dict[str, Any]:
     if index == 0:
         return dict(blueprints[0])
+    if admission.get("numeric_authority") is not None:
+        from .directed_numeric_executor import derive_numeric_work
+        return derive_numeric_work(admission, scheduler, registry, blueprints, index,
+                                   draft_prompt_builder=draft_prompt_builder)
+
     upstream = scheduler.work_order_authority(blueprints[index - 1]["id"])
     formal = scheduler.formal_result(blueprints[index - 1]["id"])
     if upstream is None or formal is None or formal["terminal_state"] != "succeeded":
@@ -641,6 +1210,14 @@ def _derive(admission: Mapping[str, Any], scheduler: Scheduler,
             proof = registry.verify_search_proof(envelope["outputs"])
         except DocumentResearchError as exc:
             raise MissionDocumentResearchExecutorError(str(exc)) from exc
+        if draft_prompt_builder is not None:
+            # A closed historical template: always a 0.1 request.
+            draft_contract = "0.1"
+        elif draft_contract is None:
+            draft_contract = _admission_draft_contract(scheduler, admission["id"])
+        if draft_prompt_builder is None:
+            draft_prompt_builder = (draft_prompt_v2 if draft_contract
+                                    == DRAFT_CONTRACT_VERSION_V2 else draft_prompt)
         prompt = draft_prompt_builder(question=question, search_proof=proof)
         context_hash = content_hash(proof["matches"])
         binding = {
@@ -656,6 +1233,8 @@ def _derive(admission: Mapping[str, Any], scheduler: Scheduler,
             "retrieval_match_count": len(proof["matches"]), "context_hash": context_hash,
             "purpose": DRAFT_PURPOSE, "upstream_result_ref": envelope["id"],
             "upstream_result_hash": formal["result_envelope_hash"],
+            **({} if draft_contract == "0.1" else {
+                "draft_contract_version": draft_contract}),
         })
         refs.extend([proof["id"], envelope["id"]])
     elif index == 2:
@@ -664,8 +1243,12 @@ def _derive(admission: Mapping[str, Any], scheduler: Scheduler,
         proof = upstream_work["metadata"]["retrieval_proof"]
         producer = {key: draft[key] for key in (
             "route_decision_ref", "model_invocation_ref", "model_family", "request_binding_hash")}
-        prompt = verifier_prompt(question=question, search_proof=proof,
-                                 draft=draft["output"], producer_proof=producer)
+        if verifier_contract is None:
+            verifier_contract = _admission_verifier_contract(scheduler, admission["id"])
+        contract = VERIFIER_CONTRACTS[verifier_contract]
+        prompt = (verifier_prompt if verifier_contract == "0.1" else verifier_prompt_v2)(
+            question=question, search_proof=proof,
+            draft=draft["output"], producer_proof=producer)
         binding = {
             "prompt_hash": content_hash(prompt), "draft_hash": draft["output_hash"],
             "search_proof_hash": proof["content_hash"],
@@ -682,9 +1265,12 @@ def _derive(admission: Mapping[str, Any], scheduler: Scheduler,
             "retrieval_match_count": len(proof["matches"]), "draft": draft["output"],
             "draft_proof": draft, "producer_model_family": draft["model_family"],
             "producer_route_decision_ref": draft["route_decision_ref"],
-            "purpose": VERIFIER_PURPOSE, "verifier_output_schema_version": "0.1",
-            "verifier_provider_contract": "annual-report-verifier-provider-output-0.1",
-            "verifier_provider_schema_hash": VERIFIER_PROVIDER_SCHEMA_HASH,
+            "purpose": VERIFIER_PURPOSE,
+            "verifier_output_schema_version": verifier_contract,
+            "verifier_provider_contract": contract["provider_contract"],
+            "verifier_provider_schema_hash": contract["provider_schema_hash"],
+            **({} if verifier_contract == "0.1" else {
+                "verifier_candidate_ref": verifier_candidate_ref(draft["output"])}),
             "context_hash": upstream_work["metadata"]["context_hash"],
             "upstream_result_ref": envelope["id"],
             "upstream_result_hash": formal["result_envelope_hash"],
@@ -727,11 +1313,18 @@ def _historical_derived_work(
     """Re-derive a stored historical Work under a closed published template.
 
     The compatibility path is selected only when the exact immutable Scheduler
-    Work already exists and byte-matches the sole pre-ebf7273d draft template.
-    New Work always uses the current prompt through ``_derive``.
+    Work already exists and byte-matches a closed published draft template.
+    New Work always uses the current prompt and canonical provider-schema hash
+    through ``_derive``. Numeric verifier Work also recognizes the two published
+    raw-byte schema bindings, only by exact full immutable Work equality. This
+    read compatibility grants no new send/recovery authority.
     """
 
     current = _derive(admission, scheduler, registry, blueprints, index)
+    if index == 2 and admission.get("numeric_authority") is not None:
+        from .directed_numeric_executor import historical_numeric_verifier_work
+        return historical_numeric_verifier_work(
+            admission, scheduler, registry, blueprints, current)
     if index != 1:
         return current
     stored = scheduler.work_order_authority(current["id"])
@@ -739,13 +1332,18 @@ def _historical_derived_work(
                            and canonical_json(stored["work_order"])
                            == canonical_json(current))):
         return current
-    legacy = _derive(
-        admission, scheduler, registry, blueprints, index,
-        draft_prompt_builder=_pre_numeric_normalization_draft_prompt,
-    )
-    if (stored["work_order_hash"] == content_hash(legacy)
-            and canonical_json(stored["work_order"]) == canonical_json(legacy)):
-        return legacy
+    builders = [_pre_numeric_normalization_draft_prompt]
+    if admission.get("numeric_authority") is not None:
+        from .directed_numeric_output import legacy_draft_prompt_v0, legacy_draft_prompt_v1
+        builders = [legacy_draft_prompt_v1, legacy_draft_prompt_v0]
+    for builder in builders:
+        legacy = _derive(
+            admission, scheduler, registry, blueprints, index,
+            draft_prompt_builder=builder,
+        )
+        if (stored["work_order_hash"] == content_hash(legacy)
+                and canonical_json(stored["work_order"]) == canonical_json(legacy)):
+            return legacy
     return current
 
 
@@ -1353,8 +1951,32 @@ def _no_send_receipt(envelope: Mapping[str, Any], work: Mapping[str, Any],
     return "adapter_result"
 
 
+#: 2026-10-09: a failed Work whose route the router *rejected* -- no link was
+#: eligible at that minute (cooled down, out of gateway budget, availability
+#: expired) -- so nothing was invoked, sent or spent.  Live legacy 10-07, two
+#: EPAM admissions: the owner's door rebound each stage under the current
+#: model authority, the rebound Work's route was rejected, and the proof check
+#: (which accepted only a *selected* route) raised "failed route authority
+#: drifted" on every pass, so neither the lane nor the owner could move them.
+#: Such a failure is now proved not-sent like an adapter refusal and recovered
+#: with a fresh Work, routed again under the authority current at that time.
+ROUTE_REJECTED_NO_SEND_CLASSIFICATION = "route_rejected_definitely_not_sent"
+#: The control-plane codes a worker writes when the router selected nothing:
+#: a single route (``MODEL_ROUTE_REJECTED``) or a declared chain none of whose
+#: links was eligible (``MODEL_CHAIN_EXHAUSTED`` with a rejected decision).
+ROUTE_REJECTED_CODES = frozenset({"MODEL_ROUTE_REJECTED", "MODEL_CHAIN_EXHAUSTED"})
+
+
 def _failure_execution_authority(scheduler: Scheduler, work: Mapping[str, Any],
-                                 formal: Mapping[str, Any], worker: Any) -> None:
+                                 formal: Mapping[str, Any], worker: Any) -> bool:
+    """Prove the failed Work was this worker's; ``True`` when its route was rejected.
+
+    A rejected route is bound exactly like a selected one (decision id, Work
+    and hash, attempt, policy, lease owner) but has no endpoint, so the
+    credential-slot binding cannot apply; it is accepted only with the
+    control-plane ``MODEL_ROUTE_REJECTED`` envelope the worker writes for it.
+    """
+
     envelope = ResultEnvelope.from_dict(formal["result_envelope"]).to_dict()
     route_ref = envelope.get("metadata", {}).get("route_decision_ref")
     event = scheduler.connection.execute(
@@ -1375,17 +1997,24 @@ def _failure_execution_authority(scheduler: Scheduler, work: Mapping[str, Any],
         raise MissionDocumentResearchExecutorError("failed route authority is invalid") from exc
     route_body = dict(route)
     asserted = route_body.pop("content_hash", None)
+    rejected = (route.get("outcome") == "rejected"
+                and route.get("selected_endpoint") is None
+                and (envelope.get("error") or {}).get("code") in ROUTE_REJECTED_CODES
+                and envelope.get("metadata", {}).get("control_plane_failure") is True
+                and envelope.get("status") == "failed")
     if (canonical_json(route) != row["decision_json"]
             or asserted != row["decision_hash"] or asserted != content_hash(route_body)
-            or route.get("id") != route_ref or route.get("outcome") != "selected"
+            or route.get("id") != route_ref
+            or (route.get("outcome") != "selected" and not rejected)
             or route.get("work_order_ref") != work["id"]
             or route.get("work_order_hash") != content_hash(work)
             or route.get("attempt_number") != formal["attempt_number"]
             or event["attempt_number"] != formal["attempt_number"]
             or route.get("policy_version_ref") != work["metadata"]["routing_policy_ref"]
-            or route.get("selected_endpoint", {}).get("credential_slot_ref")
-            not in work["metadata"]["credential_slot_refs"]):
+            or (not rejected and (route.get("selected_endpoint") or {}).get(
+                "credential_slot_ref") not in work["metadata"]["credential_slot_refs"])):
         raise MissionDocumentResearchExecutorError("failed route authority drifted")
+    return rejected
 
 
 def _verify_recovery_failure_proof(authority: Any, scheduler: Scheduler,
@@ -1397,7 +2026,7 @@ def _verify_recovery_failure_proof(authority: Any, scheduler: Scheduler,
     if not isinstance(proof, Mapping) or formal is None:
         raise MissionDocumentResearchExecutorError("recovery failure proof is unavailable")
     envelope = ResultEnvelope.from_dict(formal["result_envelope"]).to_dict()
-    _failure_execution_authority(scheduler, failed, formal, worker)
+    route_rejected = _failure_execution_authority(scheduler, failed, formal, worker)
     common = {
         "failed_at": formal["created_at"],
         "formal_result_ref": _formal_ref(formal), "formal_result_hash": _formal_hash(formal),
@@ -1407,6 +2036,67 @@ def _verify_recovery_failure_proof(authority: Any, scheduler: Scheduler,
     }
     if any(proof.get(key) != value for key, value in common.items()):
         raise MissionDocumentResearchExecutorError("recovery formal proof drifted")
+    if proof.get("classification") == "versioned_numeric_technical_maintenance":
+        from .directed_numeric_maintenance import verify_authorization
+        verify_authorization(authority, scheduler, admission, failed, formal, index, worker, proof)
+        return
+    if proof.get("classification") == AUTOMATIC_BUDGET_CORRECTION_CLASSIFICATION:
+        row = authority.store.connection.execute(
+            "SELECT record_json,content_hash FROM "
+            "mission_document_research_controlled_recovery_authorizations "
+            "WHERE authorization_id=?", (proof.get("authorization_ref"),),
+        ).fetchone()
+        if row is None:
+            raise MissionDocumentResearchExecutorError(
+                "budget correction authorization is unavailable")
+        try:
+            authorization = json.loads(row["record_json"])
+        except (TypeError, ValueError, RecursionError) as exc:
+            raise MissionDocumentResearchExecutorError(
+                "budget correction authorization is invalid") from exc
+        body = dict(authorization)
+        asserted = body.pop("content_hash", None)
+        actual = _with_recorded_binding_hash(
+            _unproved_send_state_record(
+                authority, admission, failed, formal, index, worker),
+            proof.get("unproved_send_record"),
+            lambda: _authentic_binding_hashes(
+                authority, getattr(worker, "budget_store", None),
+                _expected_budget_binding(authority, admission, index)),
+        )
+        corrected = _checked_corrected_budget(
+            failed["budget"], authorization.get("corrected_budget"))
+        overrun = authorization.get("budget_overrun")
+        if (set(authorization) != AUTOMATIC_BUDGET_CORRECTION_FIELDS
+                or authorization.get("kind") != AUTOMATIC_BUDGET_CORRECTION_CLASSIFICATION
+                or authorization.get("schema_version") != SCHEMA_VERSION
+                or authorization.get("day") != str(authorization.get("authorized_at"))[:10]
+                or actual is None
+                or actual != proof.get("unproved_send_record")
+                or actual.get("error_code") != PROVIDER_BUDGET_EXCEEDED_CODE
+                or authorization.get("unproved_send_record_hash") != content_hash(actual)
+                or canonical_json(corrected) != canonical_json(proof.get("corrected_budget"))
+                or not isinstance(overrun, Mapping)
+                or canonical_json(overrun.get("corrected_budget")) != canonical_json(corrected)
+                or not isinstance(overrun.get("provider_input_tokens"), int)
+                or overrun["provider_input_tokens"] > corrected["max_input_tokens"]
+                or canonical_json(authorization) != row["record_json"]
+                or asserted != row["content_hash"] or asserted != content_hash(body)
+                or asserted != proof.get("authorization_hash")
+                or authorization.get("id") != proof.get("authorization_ref")
+                or authorization.get("actor_ref") != AUTOMATIC_BUDGET_CORRECTION_ACTOR
+                or authorization.get("admission_ref") != admission["id"]
+                or authorization.get("admission_hash") != admission["content_hash"]
+                or authorization.get("stage_ordinal") != index + 1
+                or authorization.get("failed_work_order_ref") != failed["id"]
+                or authorization.get("failed_work_order_hash") != content_hash(failed)
+                or authorization.get("formal_result_ref") != _formal_ref(formal)
+                or authorization.get("formal_result_hash") != _formal_hash(formal)
+                or authorization.get("max_fresh_work_orders") != 1
+                or authorization.get("max_cost_usd") != failed["budget"]["max_cost_usd"]):
+            raise MissionDocumentResearchExecutorError(
+                "budget correction authorization drifted")
+        return
     if proof.get("classification") in UNPROVED_SEND_RETRY_ACTORS:
         classification = proof["classification"]
         row = authority.store.connection.execute(
@@ -1516,6 +2206,10 @@ def _verify_recovery_failure_proof(authority: Any, scheduler: Scheduler,
                 or actual is None or actual != proof.get("paid_contract_proof")):
             raise MissionDocumentResearchExecutorError(
                 "paid recovery authorization drifted")
+        if "numeric_output_repair" in proof:
+            from .directed_numeric_recovery import build_numeric_output_repair
+            if proof["numeric_output_repair"] != build_numeric_output_repair(failed, formal):
+                raise MissionDocumentResearchExecutorError("numeric output repair differs from formal failure")
         return
     if proof.get("classification") == "reconstructed_historical_provider_controls_no_send":
         row = authority.store.connection.execute(
@@ -1563,6 +2257,16 @@ def _verify_recovery_failure_proof(authority: Any, scheduler: Scheduler,
             and proof.get("mission_binding_hash") not in _authentic_binding_hashes(
                 authority, budget_store, binding)):
         raise MissionDocumentResearchExecutorError("recovery mission binding drifted")
+    if classification == ROUTE_REJECTED_NO_SEND_CLASSIFICATION:
+        if (not route_rejected
+                or (envelope.get("error") or {}).get("code") not in ROUTE_REJECTED_CODES
+                or proof.get("budget_authority_ref") is not None
+                or proof.get("budget_settlement_ref") is not None
+                or budget_store.admission(
+                    work_order_ref=failed["id"], attempt_number=formal["attempt_number"],
+                    phase=phase) is not None):
+            raise MissionDocumentResearchExecutorError("route-rejected no-send proof drifted")
+        return
     if classification == "adapter_proved_definitely_not_sent":
         if (_no_send_receipt(envelope, failed, common["route_decision_ref"])
                 != "typed_transport_exception"
@@ -1745,14 +2449,70 @@ def _recovery_work(base: Mapping[str, Any], link: Mapping[str, Any]) -> dict[str
         "policy_hash": link["policy_hash"],
         "window_started_at": link["window_started_at"],
     }
+    budget = dict(base["budget"])
+    proof = link.get("failure_proof")
+    if (isinstance(proof, Mapping)
+            and proof.get("classification") == AUTOMATIC_BUDGET_CORRECTION_CLASSIFICATION):
+        # The one recovery whose Work differs from its predecessor's ceiling:
+        # its token ceilings are the corrected ones its authorization froze.
+        budget = _checked_corrected_budget(base["budget"], proof.get("corrected_budget"))
+    question = base["question"]
+    if isinstance(proof, Mapping) and "numeric_output_repair" in proof:
+        if proof.get("classification") not in CONTRACT_RETRY_ACTORS:
+            raise MissionDocumentResearchExecutorError("numeric output repair is not a paid contract retry")
+        from .directed_numeric_recovery import replay_numeric_output_repair
+        question, repaired_metadata = replay_numeric_output_repair(
+            base, proof["numeric_output_repair"])
+        metadata.update(repaired_metadata)
+        metadata["mission_document_recovery"] = {
+            "schema_version": SCHEMA_VERSION,
+            "recovery_link_ref": link["id"],
+            "recovery_link_hash": link["content_hash"],
+            "recovery_number": link["recovery_number"],
+            "policy_hash": link["policy_hash"],
+            "window_started_at": link["window_started_at"],
+        }
+    if isinstance(proof, Mapping) and proof.get("classification") == "versioned_numeric_technical_maintenance":
+        from .directed_numeric_maintenance import transform
+        question, repaired_metadata = transform(base, proof["technical_evidence"])
+        recovery_marker = metadata["mission_document_recovery"]
+        metadata.update(repaired_metadata)
+        metadata["mission_document_recovery"] = recovery_marker
     return WorkOrder.from_dict({
-        **dict(base), "id": link["recovery_work_order_ref"],
+        **dict(base), "id": link["recovery_work_order_ref"], "budget": budget,
+        "question": question,
         "idempotency_key": "mission-document-recovery:" + link["id"],
         "input_refs": list(dict.fromkeys([
             *base["input_refs"], link["failed_work_order_ref"], link["id"],
         ])),
         "metadata": metadata,
     }).to_dict()
+
+
+def _checked_corrected_budget(failed: Mapping[str, Any], corrected: Any) -> dict[str, Any]:
+    """A corrected budget raises the token ceilings within the bound, and nothing else."""
+
+    if not isinstance(corrected, Mapping) or set(corrected) != set(failed):
+        raise MissionDocumentResearchExecutorError("corrected budget shape drifted")
+    for key, value in failed.items():
+        if key in {"max_input_tokens", "max_total_tokens"}:
+            continue
+        if corrected[key] != value:
+            raise MissionDocumentResearchExecutorError(
+                "corrected budget changed more than its token ceilings")
+    try:
+        before = int(failed["max_input_tokens"])
+        after = int(corrected["max_input_tokens"])
+        total = int(corrected["max_total_tokens"])
+    except (KeyError, TypeError, ValueError) as exc:
+        raise MissionDocumentResearchExecutorError("corrected budget is invalid") from exc
+    if (after <= before
+            or after > min(before * BUDGET_CORRECTION_MAX_FACTOR,
+                           BUDGET_CORRECTION_MAX_INPUT_TOKENS)
+            or total < int(failed["max_total_tokens"])
+            or total < after + int(failed["max_output_tokens"])):
+        raise MissionDocumentResearchExecutorError("corrected budget is outside its bound")
+    return dict(corrected)
 
 
 _EPOCH_REBIND_BUDGET_FIELDS = (
@@ -1788,7 +2548,7 @@ def _epoch_rebind_identity(
     if not isinstance(proof, Mapping):
         raise MissionDocumentResearchExecutorError(
             "model authority epoch rebind lacks recovery proof")
-    return {
+    identity = {
         "admission_ref": admission["id"],
         "admission_hash": admission["content_hash"],
         "stage_ordinal": index + 1,
@@ -1807,6 +2567,12 @@ def _epoch_rebind_identity(
         "authorized_budget": old_budget,
         "current_budget": new_budget,
     }
+
+    from .directed_numeric_maintenance import epoch_input
+    technical_input = epoch_input(authorized, current_base)
+    if technical_input is not None:
+        identity["numeric_maintenance_input"] = technical_input
+    return identity
 
 
 def _epoch_rebind_record(
@@ -1833,7 +2599,8 @@ def _epoch_rebind_record(
 def _epoch_rebound_work(
     current_base: Mapping[str, Any], record: Mapping[str, Any],
 ) -> dict[str, Any]:
-    metadata = dict(current_base["metadata"])
+    from .directed_numeric_maintenance import rebind_input
+    question, metadata = rebind_input(current_base, record)
     metadata["mission_document_model_authority_epoch_rebind"] = {
         "schema_version": SCHEMA_VERSION,
         "rebind_ref": record["id"],
@@ -1845,7 +2612,7 @@ def _epoch_rebound_work(
             "authorized_recovery_work_hash"],
     }
     return WorkOrder.from_dict({
-        **dict(current_base),
+        **dict(current_base), "question": question,
         "id": record["rebound_work_order_ref"],
         "idempotency_key": "mission-document-model-authority-epoch-rebind:"
         + record["id"],
@@ -1962,6 +2729,10 @@ def _read_stored_epoch_rebind(
     except (TypeError, ValueError) as exc:
         raise MissionDocumentResearchExecutorError(
             "model authority epoch rebind base Work is invalid") from exc
+    from .directed_numeric_maintenance import epoch_input
+    expected_input = None if authorized is None else epoch_input(authorized["work_order"], current_base)
+    if record.get("numeric_maintenance_input") != expected_input:
+        raise MissionDocumentResearchExecutorError("stored numeric maintenance rebind input differs")
     expected_marker = {
         "schema_version": SCHEMA_VERSION,
         "rebind_ref": record.get("id"),
@@ -1996,6 +2767,45 @@ def _read_stored_epoch_rebind(
     return dict(record)
 
 
+def _terminally_failed(scheduler: Scheduler, work: Mapping[str, Any]) -> bool:
+    """Has this Work ended without success (a failed formal or exhausted retries)?"""
+
+    formal = scheduler.formal_result(work["id"])
+    if formal is not None:
+        return formal["terminal_state"] != "succeeded"
+    return _terminal_model_failure(scheduler, work) is not None
+
+
+def _superseded_rebound_work(
+    connection: Any, scheduler: Scheduler, link: Mapping[str, Any],
+    authorized: Mapping[str, Any], next_failed_ref: str | None,
+) -> dict[str, Any] | None:
+    """The prior-epoch rebound Work a later RecoveryLink was opened against.
+
+    2026-10-09 (legacy EPAM 09b4bb82 / 3c49a49c): the owner's door on 10-07
+    rebound a stage under the then-current model authority; the rebound
+    Work's route was rejected (nothing sent), and the owner changed the model
+    chains again afterwards.  Its failure is classified like any other --
+    a RecoveryLink against the rebound Work itself -- and every walk of the
+    chain follows the mapping to that exact stored Work.  Only when the next
+    link names it, the mapping is the one for ``link`` and ``authorized``,
+    and the rebound Work ended without success; anything else is ``None``.
+    """
+
+    row = _epoch_rebind_row(connection, link["id"])
+    if row is None or not next_failed_ref or row["rebound_work_order_ref"] != next_failed_ref:
+        return None
+    stored = scheduler.work_order_authority(row["rebound_work_order_ref"])
+    if stored is None:
+        return None
+    record = _read_stored_epoch_rebind(connection, scheduler, stored["work_order"])
+    if (record.get("recovery_link_ref") != link["id"]
+            or record.get("authorized_recovery_work_ref") != authorized["id"]
+            or not _terminally_failed(scheduler, stored["work_order"])):
+        return None
+    return dict(stored["work_order"])
+
+
 def _verify_epoch_rebind_source_chain(
     authority: Any, scheduler: Scheduler, admission: Mapping[str, Any],
     admitted: Mapping[str, Any], index: int, historical: Mapping[str, Any],
@@ -2006,11 +2816,13 @@ def _verify_epoch_rebind_source_chain(
     base = dict(historical)
     links: list[dict[str, Any]] = []
     found = False
-    for row in _recovery_rows(authority.connection, admission, index):
+    rows = list(_recovery_rows(authority.connection, admission, index))
+    rebound = False
+    for position, row in enumerate(rows):
         if row["failed_work_order_ref"] != base["id"]:
             break
         link = _read_recovery_link(
-            authority.connection, admitted, index, row, base, links)
+            authority.connection, admission if rebound else admitted, index, row, base, links)
         _verify_recovery_failure_proof(
             authority, scheduler, admission, index, base, link, worker)
         base = _recovery_work(base, link)
@@ -2018,6 +2830,11 @@ def _verify_epoch_rebind_source_chain(
         if link["id"] == record.get("recovery_link_ref"):
             found = True
             break
+        following = rows[position + 1]["failed_work_order_ref"] if position + 1 < len(rows) else None
+        superseded = _superseded_rebound_work(
+            authority.connection, scheduler, link, base, following)
+        if superseded is not None:
+            base, rebound = superseded, True
     if (not found
             or base["id"] != record.get("authorized_recovery_work_ref")
             or content_hash(base)
@@ -2072,6 +2889,20 @@ def _read_recovery_link(
     owner_authorized = (isinstance(proof, Mapping)
                         and proof.get("classification")
                         in CONTROLLED_RETRY_CLASSIFICATIONS)
+    # 2026-10-09: a link opened by a recorded recovery round carries its bound
+    # in that round (one per failed Work), like an authorization row: the
+    # window starts at the round and the link is eligible at once.
+    if isinstance(proof, Mapping) and proof.get("recovery_round_ref") is not None:
+        recovery_round = read_recovery_round(connection, base["id"])
+        if (recovery_round is None
+                or recovery_round["id"] != proof.get("recovery_round_ref")
+                or recovery_round["content_hash"] != proof.get("recovery_round_hash")
+                or recovery_round["admission_ref"] != admission["id"]
+                or recovery_round["stage_ordinal"] != index + 1
+                or recovery_round["failed_work_order_hash"] != content_hash(base)
+                or recovery_round["created_at"] != wire.get("window_started_at")):
+            raise MissionDocumentResearchExecutorError("recovery link authority drifted")
+        owner_authorized = True
     failed_formal_time = (
         _parse_time(wire["failure_proof"].get("failed_at"), "failed formal time")
         if isinstance(proof, Mapping) and proof.get("failed_at") is not None else None
@@ -2098,7 +2929,8 @@ def _read_recovery_link(
                 else failed_formal_time,
             ))
             or (owner_authorized and (created != started
-                                or proof.get("authorization_ref") is None))
+                                or (proof.get("authorization_ref") is None
+                                    and proof.get("recovery_round_ref") is None)))
             or created < started
             or created >= allowed_deadline):
         raise MissionDocumentResearchExecutorError("recovery link authority drifted")
@@ -2152,13 +2984,31 @@ def _effective_stage(authority: Any, scheduler: Scheduler,
             *(row["rebound_work_order_ref"] for row in epoch_rows
               if row["current_base_work_ref"] == current_base["id"]),
         }
+        # 2026-10-09: a prior-epoch rebound Work that ended without success is
+        # part of the recovery chain (followed by ``_epoch_rebound_base``),
+        # not an unresolved stray epoch.
+        for row in epoch_rows:
+            if row["current_base_work_ref"] == current_base["id"]:
+                continue
+            stored_rebound = scheduler.work_order_authority(row["rebound_work_order_ref"])
+            if (stored_rebound is not None
+                    and scheduler.formal_result(row["rebound_work_order_ref"]) is not None
+                    and _terminally_failed(scheduler, stored_rebound["work_order"])):
+                known_epoch_work_refs.add(row["rebound_work_order_ref"])
+            elif (stored_rebound is not None
+                  and _terminal_model_failure(scheduler, stored_rebound["work_order"]) is not None):
+                known_epoch_work_refs.add(row["rebound_work_order_ref"])
         stage = originals[current]["metadata"]["stage"]
         prior_succeeded_epoch = None
         for stored_row in scheduler.connection.execute(
+            # Spelled exactly as ``scheduler_work_orders_document_stage``
+            # (``migrations``) so the lookup is a seek, not a parse of every
+            # work order's JSON; rowid order is the order the scan returned.
             "SELECT work_order_json FROM scheduler_work_orders "
-            "WHERE json_extract(work_order_json, "
+            "WHERE json_extract(work_order_json,"
             "'$.metadata.mission_document_research_admission_ref')=? "
-            "AND json_extract(work_order_json, '$.metadata.stage')=?",
+            "AND json_extract(work_order_json,'$.metadata.stage')=? "
+            "ORDER BY rowid",
             (admission["id"], stage),
         ).fetchall():
             try:
@@ -2223,6 +3073,12 @@ def _effective_stage(authority: Any, scheduler: Scheduler,
             [*effective, admitted_originals[current]], current,
         )
         historical_base = historical
+        if (admission.get("numeric_authority") is not None
+                and not isinstance(admission.get("model_authority_refresh"), Mapping)
+                and historical["id"] == base["id"]):
+            # Only a fully re-derived, exact stored published numeric template
+            # can preserve an existing initial/leased Work across wording updates.
+            base = historical
         while remaining and remaining[0]["failed_work_order_ref"] == historical_base["id"]:
             row = remaining.pop(0)
             link = _read_recovery_link(
@@ -2259,14 +3115,13 @@ def _effective_stage(authority: Any, scheduler: Scheduler,
                 if (prior_links
                         and historical_base["id"]
                         == prior_links[-1]["recovery_work_order_ref"]):
-                    rebound = _read_epoch_rebind(
-                        authority.connection, scheduler, admission, current,
-                        prior_links[-1], historical_base, current_base,
-                    )
-                    if rebound is None:
+                    base = _epoch_rebound_base(
+                        authority, scheduler, admission, admitted, current,
+                        prior_links[-1], historical_base, current_base, historical,
+                        worker, remaining)
+                    if base is None:
                         raise MissionDocumentResearchExecutorError(
                             "authorized recovery awaits model authority epoch rebind")
-                    _record, base = rebound
                     while remaining:
                         row = remaining.pop(0)
                         link = _read_recovery_link(
@@ -2278,6 +3133,13 @@ def _effective_stage(authority: Any, scheduler: Scheduler,
                                 base, link, worker)
                         base = _recovery_work(base, link)
                         prior_links.append(link)
+                        # 2026-10-09: a recovery of a superseded rebound Work
+                        # is itself rebound under the current authority.
+                        if _epoch_rebind_row(authority.connection, link["id"]) is not None:
+                            base = _epoch_rebound_base(
+                                authority, scheduler, admission, admitted, current,
+                                link, base, current_base, historical, worker,
+                                remaining) or base
                 else:
                     # A merely enqueued/claimed historical Work has no
                     # terminal proof and no exact RecoveryLink to transfer.
@@ -2306,6 +3168,51 @@ def _effective_stage(authority: Any, scheduler: Scheduler,
                 selected_links.append(link)
         effective.append(base)
     return effective[index], selected_links
+
+
+def _epoch_rebound_base(
+    authority: Any, scheduler: Scheduler, admission: Mapping[str, Any],
+    admitted: Mapping[str, Any], current: int, link: Mapping[str, Any],
+    authorized: Mapping[str, Any], current_base: Mapping[str, Any],
+    historical: Mapping[str, Any], worker: Any, remaining: Sequence[Any],
+) -> dict[str, Any] | None:
+    """The Work ``link``'s recovery runs as after its model-authority mapping.
+
+    Under the current base, the exact rebound Work.  Under an older base
+    (the owner changed the model chains again after the mapping), the stored
+    rebound Work of that epoch -- but only once it has ended: a success is
+    reused, a terminal failure is handed to the recovery classifier (and,
+    once classified, followed through its own RecoveryLink).  A mapping whose
+    Work is still open under a superseded base cannot be resolved here.
+    """
+
+    row = _epoch_rebind_row(authority.connection, link["id"])
+    if row is None:
+        return None
+    if row["current_base_work_ref"] == current_base["id"]:
+        rebound = _read_epoch_rebind(
+            authority.connection, scheduler, admission, current, link,
+            authorized, current_base)
+        return None if rebound is None else rebound[1]
+    stored = scheduler.work_order_authority(row["rebound_work_order_ref"])
+    if stored is None:
+        raise MissionDocumentResearchExecutorError(
+            "model authority epoch rebind Work is unavailable")
+    record = _read_stored_epoch_rebind(authority.connection, scheduler, stored["work_order"])
+    if (record.get("recovery_link_ref") != link["id"]
+            or record.get("authorized_recovery_work_ref") != authorized["id"]):
+        raise MissionDocumentResearchExecutorError("model authority epoch rebind drifted")
+    if worker is not None:
+        _verify_epoch_rebind_source_chain(
+            authority, scheduler, admission, admitted, current, historical, record, worker)
+    work = dict(stored["work_order"])
+    formal = scheduler.formal_result(work["id"])
+    if formal is not None and formal["terminal_state"] == "succeeded":
+        return work
+    if not _terminally_failed(scheduler, work):
+        raise MissionDocumentResearchExecutorError(
+            "model authority recovery is bound to an unresolved prior epoch")
+    return work
 
 
 def _sealed_epoch_chain_root(
@@ -2490,7 +3397,9 @@ class MissionDocumentResearchExecutor:
                  max_automatic_contract_retries_per_day: int =
                  DEFAULT_MAX_AUTOMATIC_CONTRACT_RETRIES_PER_DAY,
                  max_automatic_unproved_send_retries_per_day: int =
-                 DEFAULT_MAX_AUTOMATIC_UNPROVED_SEND_RETRIES_PER_DAY):
+                 DEFAULT_MAX_AUTOMATIC_UNPROVED_SEND_RETRIES_PER_DAY,
+                 max_automatic_budget_corrections_per_day: int =
+                 DEFAULT_MAX_AUTOMATIC_BUDGET_CORRECTIONS_PER_DAY):
         if not isinstance(authority, MissionDocumentResearchAuthority):
             raise TypeError("authority has the wrong type")
         if not isinstance(scheduler, Scheduler) or not isinstance(registry, DocumentResearchRegistry):
@@ -2525,9 +3434,17 @@ class MissionDocumentResearchExecutor:
                 "non-negative integer")
         self.max_automatic_unproved_send_retries_per_day = (
             max_automatic_unproved_send_retries_per_day)
+        if (isinstance(max_automatic_budget_corrections_per_day, bool)
+                or not isinstance(max_automatic_budget_corrections_per_day, int)
+                or max_automatic_budget_corrections_per_day < 0):
+            raise TypeError(
+                "max_automatic_budget_corrections_per_day must be a non-negative integer")
+        self.max_automatic_budget_corrections_per_day = (
+            max_automatic_budget_corrections_per_day)
         self._authorization_flag = authorization_flag(
             self.connection, "dalton_mission_document_research_executor_authorized")
         self.connection.executescript(_SCHEMA_PATH.read_text(encoding="utf-8"))
+        self.connection.executescript(_RECOVERY_ROUND_DDL)
         # The packaged schema is also applied by fresh bootstrap and by
         # schema-only deployment rehearsal, before Scheduler tables exist in
         # the Core database.  Install the cross-authority lease CAS only here:
@@ -2640,6 +3557,44 @@ class MissionDocumentResearchExecutor:
         return _ref("mission-document-research-run", {
             "admission_ref": admission["id"], "admission_hash": admission["content_hash"]})
 
+    def _record_epoch_rebind_supersession(
+        self, admission: Mapping[str, Any], index: int, record: Mapping[str, Any],
+        failure_link_row: Any, current_base: Mapping[str, Any],
+    ) -> dict[str, Any]:
+        """Append, once, that a prior-epoch mapping was superseded by a failure link."""
+
+        body = {
+            "schema_version": SCHEMA_VERSION,
+            "admission_ref": admission["id"], "admission_hash": admission["content_hash"],
+            "stage_ordinal": index + 1,
+            "rebind_ref": record["id"], "rebind_hash": record["content_hash"],
+            "rebound_work_order_ref": record["rebound_work_order_ref"],
+            "failure_link_ref": failure_link_row["recovery_link_id"],
+            "failure_link_hash": failure_link_row["content_hash"],
+            "current_base_work_ref": current_base["id"],
+            "reason": "prior_epoch_rebound_work_ended_without_success",
+        }
+        body["id"] = _ref("mission-document-model-authority-epoch-rebind-supersession", body)
+        body["created_at"] = failure_link_row["created_at"]
+        body["content_hash"] = content_hash(body)
+        with self._transaction() as cur:
+            row = cur.execute(
+                "SELECT record_json FROM "
+                "mission_document_research_model_authority_epoch_rebind_supersessions "
+                "WHERE rebind_ref=?", (record["id"],)).fetchone()
+            if row is None:
+                cur.execute(
+                    "INSERT INTO "
+                    "mission_document_research_model_authority_epoch_rebind_supersessions "
+                    "VALUES(?,?,?,?,?,?,?,?,?)",
+                    (body["id"], admission["id"], index + 1, record["id"],
+                     record["rebound_work_order_ref"], body["failure_link_ref"],
+                     canonical_json(body), body["content_hash"], body["created_at"]))
+            elif json.loads(row[0]).get("failure_link_ref") != body["failure_link_ref"]:
+                raise MissionDocumentResearchExecutorError(
+                    "model authority epoch rebind supersession conflicted")
+        return body
+
     def _ensure_model_authority_epoch_rebind(
         self, admission: Mapping[str, Any], index: int,
     ) -> dict[str, Any] | None:
@@ -2699,9 +3654,11 @@ class MissionDocumentResearchExecutor:
         if (self.scheduler.formal_result(authorized["id"]) is not None
                 or _terminal_model_failure(self.scheduler, authorized) is not None):
             return None
-        existing_row = _epoch_rebind_row(self.connection, links[-1]["id"])
-        if (existing_row is not None
-                and existing_row["current_base_work_ref"] != current_base["id"]):
+        while True:
+            existing_row = _epoch_rebind_row(self.connection, links[-1]["id"])
+            if (existing_row is None
+                    or existing_row["current_base_work_ref"] == current_base["id"]):
+                break
             stored = self.scheduler.work_order_authority(
                 existing_row["rebound_work_order_ref"])
             if stored is None:
@@ -2717,8 +3674,34 @@ class MissionDocumentResearchExecutor:
             if formal is not None and formal["terminal_state"] == "succeeded":
                 _exact_model_result(stored["work_order"], formal, worker)
                 return record
-            raise MissionDocumentResearchExecutorError(
-                "model authority recovery is bound to an unresolved prior epoch")
+            if not _terminally_failed(self.scheduler, stored["work_order"]):
+                raise MissionDocumentResearchExecutorError(
+                    "model authority recovery is bound to an unresolved prior epoch")
+            # 2026-10-09: the prior-epoch rebound Work ended without success
+            # (live EPAM: its route was rejected, nothing sent) and the model
+            # authority has moved on since.  Its failure first reaches the
+            # typed recovery classifier as the effective Work; once that has
+            # opened a RecoveryLink against it, the mapping is superseded --
+            # recorded, append-only -- and the link's fresh Work is rebound
+            # under the current authority below.
+            rebound_work = dict(stored["work_order"])
+            if not remaining or remaining[0]["failed_work_order_ref"] != rebound_work["id"]:
+                return record
+            self._record_epoch_rebind_supersession(
+                admission, index, record, remaining[0], current_base)
+            authorized = rebound_work
+            while remaining and remaining[0]["failed_work_order_ref"] == authorized["id"]:
+                row = remaining.pop(0)
+                link = _read_recovery_link(
+                    self.connection, admission, index, row, authorized, links)
+                _verify_recovery_failure_proof(
+                    self.authority, self.scheduler, admission, index,
+                    authorized, link, worker)
+                authorized = _recovery_work(authorized, link)
+                links.append(link)
+            if (self.scheduler.formal_result(authorized["id"]) is not None
+                    or _terminal_model_failure(self.scheduler, authorized) is not None):
+                return None
         existing = _read_epoch_rebind(
             self.connection, self.scheduler, admission, index, links[-1],
             authorized, current_base, require_stored_work=False,
@@ -3160,13 +4143,31 @@ class MissionDocumentResearchExecutor:
             return None
         ceiling = int(Decimal(str(work["budget"]["max_cost_usd"])) * 1_000_000)
         expected_binding = _expected_budget_binding(self.authority, admission, index)
-        _failure_execution_authority(self.scheduler, work, formal, worker)
+        route_rejected = _failure_execution_authority(self.scheduler, work, formal, worker)
         try:
             budget = budget_store.admission(
                 work_order_ref=work["id"], attempt_number=formal["attempt_number"], phase=phase)
         except Exception as exc:
             raise MissionDocumentResearchExecutorError(
                 "recovery budget admission authority drifted") from exc
+        if route_rejected:
+            # No endpoint, no invocation (checked above), no budget admission:
+            # nothing was sent and nothing was spent.
+            if budget is not None:
+                return None
+            return {
+                "classification": ROUTE_REJECTED_NO_SEND_CLASSIFICATION,
+                "failed_at": formal["created_at"],
+                "formal_result_ref": _formal_ref(formal),
+                "formal_result_hash": _formal_hash(formal),
+                "result_envelope_ref": envelope["id"],
+                "result_envelope_hash": formal["result_envelope_hash"],
+                "route_decision_ref": route_ref,
+                "budget_authority_ref": None, "budget_authority_hash": None,
+                "budget_settlement_ref": None, "budget_settlement_hash": None,
+                "mission_binding_hash": content_hash(expected_binding),
+                "refusal_day": None,
+            }
         receipt_kind = _no_send_receipt(envelope, work, route_ref)
         if (budget is None
                 and receipt_kind == "typed_transport_exception"):
@@ -3626,9 +4627,12 @@ class MissionDocumentResearchExecutor:
         """
 
         envelope = ResultEnvelope.from_dict(formal["result_envelope"]).to_dict()
+        from .directed_numeric_recovery import build_numeric_output_repair
+        repair = build_numeric_output_repair(work, formal)
         return self._append_controlled_retry(
             admission, work, formal, index, links, authorization, proof={
                 "classification": classification,
+                **({"numeric_output_repair": repair} if repair is not None else {}),
                 "failed_at": formal["created_at"],
                 "formal_result_ref": _formal_ref(formal),
                 "formal_result_hash": _formal_hash(formal),
@@ -3738,7 +4742,8 @@ class MissionDocumentResearchExecutor:
         if existing_link is None:
             with self._transaction() as cur:
                 cur.execute(
-                    "INSERT INTO mission_document_research_recovery_links "
+                    ("INSERT OR IGNORE INTO " if proof.get("classification") == "versioned_numeric_technical_maintenance"
+                     else "INSERT INTO ") + "mission_document_research_recovery_links "
                     "VALUES(?,?,?,?,?,?,?,?,?)",
                     (link["id"], admission["id"], index + 1, len(links) + 1, work["id"],
                      recovered["id"], canonical_json(link), link["content_hash"],
@@ -3781,7 +4786,10 @@ class MissionDocumentResearchExecutor:
                 record = json.loads(row["record_json"])
             except (TypeError, ValueError, RecursionError):
                 continue
-            if isinstance(record, Mapping) and record.get("kind") == kind:
+            if isinstance(record, Mapping) and (
+                    record.get("kind") == kind or
+                    kind == AUTOMATIC_CONTRACT_RETRY_CLASSIFICATION and
+                    record.get("kind") == "versioned_numeric_technical_maintenance"):
                 total += 1
         return total
 
@@ -3843,19 +4851,8 @@ class MissionDocumentResearchExecutor:
         return body
 
     def _contract_retry_disposition(self, links):
-        """Decide which contract door, if any, this stage still has open."""
-
-        classifications = {
-            link.get("failure_proof", {}).get("classification") for link in links
-        }
-        if OWNER_CONTRACT_RETRY_CLASSIFICATION in classifications:
-            # Both doors are spent.  Nothing here may buy a third reply.
-            return CONTRACT_FAILED_AFTER_OWNER_RETRY
-        if AUTOMATIC_CONTRACT_RETRY_CLASSIFICATION in classifications:
-            # The bounded automatic retry was already bought and also failed
-            # the contract.  This is the only state the owner is asked about.
-            return CONTRACT_FAILED_AFTER_AUTOMATIC_RETRY
-        return None
+        from .directed_numeric_recovery import contract_retry_disposition
+        return contract_retry_disposition(links)
 
     def _automatic_unproved_send_retry_authorization(
         self, admission, work, formal, index, record, *, day, authorized_at,
@@ -4011,6 +5008,9 @@ class MissionDocumentResearchExecutor:
         # instant, and rewriting yesterday's row would be a drift error.
         if recovery.get("day") is not None:
             identity["day"] = recovery["day"]
+        # A recovery round is its own fact about the same failed Work.
+        if recovery.get("recovery_round_ref") is not None:
+            identity["recovery_round_ref"] = recovery["recovery_round_ref"]
         body = {
             "schema_version": SCHEMA_VERSION,
             "id": _ref("mission-document-research-recovery-observation", identity),
@@ -4076,6 +5076,30 @@ class MissionDocumentResearchExecutor:
                 "were charged. Automation stops here; only an owner authorization may "
                 "buy a further reply."
                 if reason == UNPROVED_SEND_FAILED_AFTER_AUTOMATIC_RETRY else
+                "The provider counted more tokens than the WorkOrder admitted and the "
+                "paid reply was refused, so the lane issued its one automatic budget "
+                "correction: one fresh WorkOrder whose token ceilings are the provider's "
+                "own count plus headroom, at the same per-call cost ceiling, paid through "
+                "the mission's daily budget like every call."
+                if reason == AUTOMATIC_BUDGET_CORRECTION_REASON else
+                "The provider counted more tokens than the WorkOrder admitted, but this "
+                "install has already issued its daily maximum of automatic budget "
+                "corrections. The correction is taken automatically after the UTC day "
+                "resets; no person is needed."
+                if reason == BUDGET_CORRECTION_DAY_CAP_REASON else
+                "The automatic budget correction for this stage was already issued and "
+                "the corrected call overran its ceiling as well. Both calls were charged. "
+                "Automation stops here; the numbers are in budget_overrun."
+                if reason == PROVIDER_BUDGET_EXCEEDED_AFTER_CORRECTION else
+                "The automatic budget correction was issued and the corrected call "
+                "overran as well, served by the same model whose count it was sized "
+                "from (or after the stage's second correction). Every call was "
+                "charged. Automation stops here; the numbers are in budget_overrun."
+                if reason == PROVIDER_BUDGET_EXCEEDED_AFTER_FINAL_CORRECTION else
+                "The provider counted more tokens than the WorkOrder admitted, and no "
+                "corrected ceiling can be issued automatically (see budget_overrun: "
+                "refusal names why). Automation stops here."
+                if reason == PROVIDER_BUDGET_CORRECTION_REFUSED else
                 "The model stage failed without authority for a safe replay; its send and "
                 "charging state remains frozen for review."
                 if reason == LEGACY_UNPROVED_SEND_REASON else
@@ -4089,7 +5113,42 @@ class MissionDocumentResearchExecutor:
             admission, index, body)
         if recorded is not None:
             return recorded
+        if status == "stopped":
+            stored = self._stopped_observation_same_but_deadline(body)
+            if stored is not None:
+                return stored
         return self._write_observation(body)
+
+    def _stopped_observation_same_but_deadline(self, body):
+        """The stored stop of this same Work when only its clock-taken deadline differs.
+
+        2026-10-09: releases before this one took a route-rejected stage's
+        deadline from the clock even when the verdict was a stop (live EPAM:
+        ``fresh_work_recovery_exhausted`` with ``deadline`` = the moment of the
+        10-09 re-entry), so reading the same stop again could only drift.  A
+        stop's deadline is no part of the verdict.
+        """
+
+        row = self.connection.execute(
+            "SELECT record_json FROM mission_document_research_observations "
+            "WHERE observation_id=?", (body["id"],)).fetchone()
+        if row is None:
+            return None
+        try:
+            stored = json.loads(row["record_json"])
+        except (TypeError, ValueError, RecursionError):
+            return None
+        if not isinstance(stored, Mapping) or not isinstance(stored.get("recovery"), Mapping):
+            return None
+        mine = {**body, "recovery": {**body["recovery"], "deadline": None}}
+        theirs = {key: value for key, value in stored.items() if key != "content_hash"}
+        theirs["recovery"] = {**stored["recovery"], "deadline": None}
+        if canonical_json(mine) != canonical_json(theirs):
+            return None
+        exact = [item for item in read_mission_document_research_observations(
+            self.connection, mission_version_ref=body["mission_version_ref"]
+        ) if item["id"] == body["id"]]
+        return exact[0] if len(exact) == 1 else None
 
     def _recorded_observation_under_rolled_envelope(self, admission, index, body):
         """The stored observation of this same fact, written before a roll.
@@ -4140,15 +5199,11 @@ class MissionDocumentResearchExecutor:
 
     def _recover_paid_contract_failure(self, admission, work, formal, index, links,
                                        paid, *, now, deadline):
-        """Retry a proved paid contract rejection once, then ask a person.
+        """Issue at most two proved contract repairs within the daily cap.
 
-        The owner's instruction, after nineteen admissions piled up waiting for
-        a signature that says the same thing every time: a reply that failed
-        the output contract is the one paid failure worth replaying without
-        asking.  The request is proved, the charge is settled, and only the
-        reply was unusable -- so the lane buys exactly one fresh WorkOrder at
-        the same ceiling, under its own recorded authorization row, and
-        escalates to the owner only when that second reply fails too.
+        Each repair retains its own immutable authorization and one-WorkOrder
+        ceiling.  Neither the daily fee authority nor uncertain-send recovery
+        is expanded by this bounded second repair.
         """
 
         stage = work["metadata"]["stage"]
@@ -4241,9 +5296,11 @@ class MissionDocumentResearchExecutor:
             # One Work carries one authorization; automation never adds a
             # second and never overwrites a person's.
             spent = UNPROVED_SEND_FAILED_AFTER_AUTOMATIC_RETRY
-        if (spent is None and authorization is None and isinstance(record, Mapping)
+        if (authorization is None and isinstance(record, Mapping)
                 and record.get("error_code") == PROVIDER_BUDGET_EXCEEDED_CODE):
-            spent = PROVIDER_BUDGET_EXCEEDED_NOT_RETRIED
+            return self._recover_provider_budget_overrun(
+                admission, work, formal, index, links, record,
+                now=now, deadline=deadline)
         if spent is not None:
             recovery = {
                 "status": "stopped", "reason": spent, "eligible": False,
@@ -4302,6 +5359,174 @@ class MissionDocumentResearchExecutor:
                 "work_order_ref": issued["work_order_ref"],
                 "authorization_ref": issued["authorization_ref"], "stage": stage}
 
+    def _provider_budget_overrun(self, work, index, record):
+        """The provider's own count of the refused call, read from its usage."""
+
+        worker = self.draft_worker if index == 1 else self.verifier_worker
+        observability = getattr(worker, "observability", None)
+        usages = []
+        for invocation_ref in record.get("model_invocation_refs") or ():
+            try:
+                usages.append(observability.latest_usage(invocation_ref))
+            except Exception:  # noqa: BLE001 - unreadable usage is "no numbers"
+                continue
+        return provider_budget_overrun(usages, work["budget"])
+
+    def _served_by_another_model(self, index, correction_link, formal) -> bool:
+        """Did a different model serve the call that overran after a correction?
+
+        Read from the two immutable route decisions: the one whose provider
+        count the correction was sized from, and the one of the corrected
+        call.  Unreadable or unselected decisions answer ``False`` -- the old
+        verdict (stop) stands whenever this cannot be shown.
+        """
+
+        worker = self.draft_worker if index == 1 else self.verifier_worker
+        router = getattr(worker, "router", None)
+        before = (correction_link.get("failure_proof") or {}).get("route_decision_ref")
+        try:
+            envelope = ResultEnvelope.from_dict(formal["result_envelope"]).to_dict()
+        except Exception:  # noqa: BLE001
+            return False
+        after = envelope.get("metadata", {}).get("route_decision_ref")
+        if router is None or not before or not after:
+            return False
+
+        def served(ref):
+            try:
+                decision = router.get_decision(ref)
+            except Exception:  # noqa: BLE001
+                return None
+            if decision.get("outcome") != "selected":
+                return None
+            endpoint = decision.get("selected_endpoint") or {}
+            return (decision.get("selected_profile_version_ref") or endpoint.get("profile_id"),
+                    endpoint.get("family"))
+
+        first, second = served(before), served(after)
+        if first is None or second is None:
+            return False
+        profile = lambda value: str(value[0] or "").rsplit(":", 1)[0]  # noqa: E731
+        return profile(first) != profile(second) or first[1] != second[1]
+
+    def _recover_provider_budget_overrun(self, admission, work, formal, index, links,
+                                         record, *, now, deadline):
+        """Retry a provider-budget refusal once under a corrected ceiling.
+
+        The call was sent and charged and the provider said exactly how many
+        tokens the prompt is, so the same WorkOrder would be refused the same
+        way -- but a WorkOrder sized to that count would not.  One such
+        correction per (admission, stage), recorded in an authorization row
+        the link and its Work are bound to, counted against a daily cap of its
+        own.  Everything the correction cannot settle stops with the numbers.
+        """
+
+        stage = work["metadata"]["stage"]
+        overrun = self._provider_budget_overrun(work, index, record)
+
+        def answer(status, reason, *, retry_at=None, day=None, extra=None):
+            recovery = {
+                "status": status, "reason": reason, "eligible": False,
+                "used_fresh_work_orders": len(links), "max_fresh_work_orders": 1,
+                "retry_at": retry_at, "deadline": _time(deadline), "proof": record,
+                "budget_overrun": overrun,
+                **({"day": day} if day is not None else {}),
+            }
+            self._recovery_observation(admission, work, formal, index, recovery)
+            return {"status": status, "reason": reason, "work_order_ref": work["id"],
+                    "stage": stage, "budget_overrun": overrun,
+                    **({"retry_at": retry_at} if retry_at is not None else {}),
+                    **(extra or {})}
+
+        authorization = self._existing_automatic_authorization(
+            work["id"], AUTOMATIC_BUDGET_CORRECTION_CLASSIFICATION)
+        if authorization is None:
+            corrections = [
+                link for link in links
+                if link.get("failure_proof", {}).get("classification")
+                == AUTOMATIC_BUDGET_CORRECTION_CLASSIFICATION]
+            # 2026-10-09: the correction is sized from one model's count of the
+            # prompt, but the corrected Work may be served by another link of
+            # the chain.  Live ws-7d (MSFT): glm-5.3 counted 64,341, the
+            # corrected Work (81,000) was served by claude-opus-5 through the
+            # gateway, which counted the same prompt as 115,500 -- and the
+            # stage stopped for a person.  When the model that overran again is
+            # not the one whose count was corrected, its own count is a new
+            # fact, and one more correction from it is allowed: at most
+            # MAX_BUDGET_CORRECTIONS_PER_STAGE per stage, same cost ceiling,
+            # same day cap.
+            if corrections and (
+                    len(corrections) >= MAX_BUDGET_CORRECTIONS_PER_STAGE
+                    or not self._served_by_another_model(
+                        index, corrections[-1], formal)):
+                return answer("stopped", PROVIDER_BUDGET_EXCEEDED_AFTER_FINAL_CORRECTION)
+            if self.connection.execute(
+                "SELECT 1 FROM mission_document_research_controlled_recovery_authorizations "
+                "WHERE failed_work_order_ref=? LIMIT 1", (work["id"],),
+            ).fetchone() is not None or overrun["corrected_budget"] is None:
+                # Another authorization already names this exact Work, or no
+                # corrected ceiling can be computed within the bound.
+                return answer("stopped", PROVIDER_BUDGET_CORRECTION_REFUSED)
+            day = _time(now)[:10]
+            if self._automatic_retries_today(
+                    day, AUTOMATIC_BUDGET_CORRECTION_CLASSIFICATION
+            ) >= self.max_automatic_budget_corrections_per_day:
+                resets_at = datetime(
+                    now.year, now.month, now.day, tzinfo=timezone.utc) + timedelta(days=1)
+                return answer("waiting", BUDGET_CORRECTION_DAY_CAP_REASON,
+                              retry_at=_time(resets_at), day=day)
+            body = {
+                "schema_version": SCHEMA_VERSION,
+                "kind": AUTOMATIC_BUDGET_CORRECTION_CLASSIFICATION,
+                "actor_ref": AUTOMATIC_BUDGET_CORRECTION_ACTOR,
+                "admission_ref": admission["id"], "admission_hash": admission["content_hash"],
+                "stage_ordinal": index + 1, "failed_work_order_ref": work["id"],
+                "failed_work_order_hash": content_hash(work),
+                "formal_result_ref": _formal_ref(formal),
+                "formal_result_hash": _formal_hash(formal),
+                "max_fresh_work_orders": 1,
+                "max_cost_usd": work["budget"]["max_cost_usd"],
+                "authorized_at": _time(now), "day": day,
+                "max_automatic_budget_corrections_per_day":
+                    self.max_automatic_budget_corrections_per_day,
+                "unproved_send_record_hash": content_hash(record),
+                "budget_overrun": overrun,
+                "corrected_budget": overrun["corrected_budget"],
+            }
+            body["id"] = _ref("mission-document-automatic-budget-correction-authorization", body)
+            body["content_hash"] = content_hash(body)
+            if set(body) != AUTOMATIC_BUDGET_CORRECTION_FIELDS:
+                raise MissionDocumentResearchExecutorError(
+                    "budget correction authorization schema is invalid")
+            authorization = body
+        overrun = authorization["budget_overrun"]
+        answer("admitted", AUTOMATIC_BUDGET_CORRECTION_REASON)
+        envelope = ResultEnvelope.from_dict(formal["result_envelope"]).to_dict()
+        issued = self._append_controlled_retry(
+            admission, work, formal, index, links, authorization, proof={
+                "classification": AUTOMATIC_BUDGET_CORRECTION_CLASSIFICATION,
+                "failed_at": formal["created_at"],
+                "formal_result_ref": _formal_ref(formal),
+                "formal_result_hash": _formal_hash(formal),
+                "result_envelope_ref": envelope["id"],
+                "result_envelope_hash": formal["result_envelope_hash"],
+                "route_decision_ref": envelope.get("metadata", {}).get(
+                    "route_decision_ref"),
+                "authorization_ref": authorization["id"],
+                "authorization_hash": authorization["content_hash"],
+                "unproved_send_record": record,
+                "mission_binding_hash": record["mission_binding_hash"],
+                "corrected_budget": authorization["corrected_budget"],
+                "budget_authority_ref": None, "budget_authority_hash": None,
+                "budget_settlement_ref": record["budget_settlement_ref"],
+                "budget_settlement_hash": record["budget_settlement_hash"],
+                "refusal_day": None,
+            })
+        return {"status": "admitted", "reason": AUTOMATIC_BUDGET_CORRECTION_REASON,
+                "work_order_ref": issued["work_order_ref"],
+                "authorization_ref": issued["authorization_ref"], "stage": stage,
+                "budget_overrun": overrun}
+
     def _recover_failed_model(self, admission, work, formal, index):
         policy = _recovery_policy(admission, index)
         worker = self.draft_worker if index == 1 else self.verifier_worker
@@ -4309,6 +5534,11 @@ class MissionDocumentResearchExecutor:
             self.authority, self.scheduler, admission, index, worker=worker)
         if canonical_json(current) != canonical_json(work):
             raise MissionDocumentResearchExecutorError("effective recovery Work drifted")
+        if admission.get("numeric_authority") is not None:
+            from .directed_numeric_maintenance import attempt
+            technical = attempt(self, admission, work, formal, index, links)
+            if technical is not None:
+                return technical
         proof = self._safe_failure_proof(admission, work, formal, index)
         now = self.clock().astimezone(timezone.utc)
         owner_started = (proof.get("authorized_at") if isinstance(proof, Mapping)
@@ -4358,16 +5588,47 @@ class MissionDocumentResearchExecutor:
                 day_after = datetime.fromisoformat(proof["refusal_day"]).replace(
                     tzinfo=timezone.utc) + timedelta(days=1)
                 eligible_at = max(eligible_at, day_after)
-            if policy["max_fresh_work_orders"] == 0:
-                state, reason = "stopped", "fresh_work_recovery_disabled"
+            capped = (policy["max_fresh_work_orders"] == 0
+                      or len(links) >= policy["max_fresh_work_orders"])
+            if (proof.get("classification") == ROUTE_REJECTED_NO_SEND_CLASSIFICATION
+                    and not capped):
+                # A rejected route spent nothing, so its recovery is bounded by
+                # the count of fresh Works, not by its age: the route that was
+                # impossible on 10-07 is asked again under today's authority
+                # when the owner re-enters it days later.  (Not for a stop: a
+                # stopped verdict is one immutable fact, and a deadline taken
+                # from the clock would make every re-reading of it drift.)
+                deadline = max(deadline, now + timedelta(
+                    seconds=max(1, policy["retry_backoff_seconds"]) + 1))
+            # 2026-10-09: one more round of fresh-work recovery, recorded
+            # append-only against this exact failed Work -- by the owner's door
+            # on a policy cap, or by the lane once model availability changed
+            # after every model was unavailable.  It opens exactly one fresh
+            # Work at the failed Work's own ceiling, from the round's instant.
+            recovery_round = read_recovery_round(self.connection, work["id"])
+            if recovery_round is not None and (
+                    recovery_round["admission_ref"] != admission["id"]
+                    or recovery_round["admission_hash"] != admission["content_hash"]
+                    or recovery_round["stage_ordinal"] != index + 1
+                    or recovery_round["failed_work_order_hash"] != content_hash(work)):
+                raise MissionDocumentResearchExecutorError("recovery round drifted")
+            if recovery_round is not None:
+                started = eligible_at = _parse_time(
+                    recovery_round["created_at"], "recovery round time")
+                deadline = started + timedelta(seconds=policy["max_elapsed_seconds"])
+                proof = {**proof, "recovery_round_ref": recovery_round["id"],
+                         "recovery_round_hash": recovery_round["content_hash"]}
+                state, reason = "eligible", "proved_no_send_or_budget_refusal"
+            elif policy["max_fresh_work_orders"] == 0:
+                state, reason = "stopped", FRESH_WORK_RECOVERY_DISABLED
             elif len(links) >= policy["max_fresh_work_orders"]:
-                state, reason = "stopped", "fresh_work_recovery_exhausted"
+                state, reason = "stopped", FRESH_WORK_RECOVERY_EXHAUSTED
             elif now >= deadline or eligible_at >= deadline:
                 state = "stopped"
                 reason = (
-                    "fresh_work_recovery_day_window_exceeded"
+                    FRESH_WORK_RECOVERY_DAY_WINDOW_EXCEEDED
                     if _has_day_budget_recovery_anchor(proof, links)
-                    else "fresh_work_recovery_deadline_exceeded"
+                    else FRESH_WORK_RECOVERY_DEADLINE_EXCEEDED
                 )
             elif now < eligible_at:
                 state, reason = "waiting", "fresh_work_recovery_backoff"
@@ -4379,6 +5640,8 @@ class MissionDocumentResearchExecutor:
                 "max_fresh_work_orders": policy["max_fresh_work_orders"],
                 "retry_at": _time(eligible_at), "deadline": _time(deadline),
                 "proof": proof,
+                **({"recovery_round_ref": recovery_round["id"]}
+                   if recovery_round is not None else {}),
             }
         self._recovery_observation(admission, work, formal, index, recovery)
         if not recovery["eligible"]:
@@ -4440,10 +5703,22 @@ class MissionDocumentResearchExecutor:
         return {"status": "admitted", "reason": "fresh_work_recovery",
                 "work_order_ref": checked["id"], "stage": checked["metadata"]["stage"]}
 
-    def _research_feedback(self, admission, proof, work, formal, *, outcome, draft_proof=None):
+    def _research_feedback(self, admission, proof, work, formal, *, outcome, draft_proof=None,
+                           verifier_proof=None):
         if outcome not in {"query_miss", "no_verified_claim"}:
             raise MissionDocumentResearchExecutorError("unsupported research feedback outcome")
+        if verifier_proof is not None and (
+                outcome != "no_verified_claim" or draft_proof is None
+                or verifier_proof["output"]["verdict"] != "reject"):
+            raise MissionDocumentResearchExecutorError(
+                "only a rejecting verifier ends research without a verified claim")
         missing = [] if draft_proof is None else list(draft_proof["output"]["missing"])
+        if verifier_proof is not None:
+            # What the verifier said is wrong with the draft is exactly what
+            # a later inquiry would have to find: every error finding, verbatim.
+            missing += [f"{item['code']}: {item['detail']}"
+                        for item in verifier_proof["output"]["findings"]
+                        if item["severity"] == "error"]
         body = {
             "schema_version": SCHEMA_VERSION,
             "id": _ref("mission-document-research-feedback", {
@@ -4465,6 +5740,8 @@ class MissionDocumentResearchExecutor:
             "draft_proof_hash": None if draft_proof is None else draft_proof["content_hash"],
             "missing_evidence": missing, "outcome": outcome,
             "producer_ref": (self.actor_ref if outcome == "query_miss"
+                             else self.verifier_worker.worker_ref
+                             if verifier_proof is not None
                              else self.draft_worker.worker_ref),
             "stage": work["metadata"]["stage"], "work_order_ref": work["id"],
             "work_order_hash": content_hash(work),
@@ -4478,6 +5755,10 @@ class MissionDocumentResearchExecutor:
                 "The bounded query found no matching excerpt; this does not prove the "
                 "registered full text lacks an answer."
                 if outcome == "query_miss" else
+                "The independent verifier rejected the drafted answer against the cited "
+                "excerpts; this does not prove the registered full text or another document "
+                "lacks an answer."
+                if verifier_proof is not None else
                 "The retrieved excerpts were readable but did not support a verified answer; "
                 "this does not prove the registered full text or another document lacks one."
             ),
@@ -4489,6 +5770,10 @@ class MissionDocumentResearchExecutor:
             "created_at": admission["created_at"],
         }
         exact = self._write_observation(body)
+        if admission.get("numeric_authority") is not None:
+            from .directed_numeric_executor import query_miss_requests
+            return {"status":"complete", "research_status":"numeric_query_miss", "feedback_ref":exact["id"],
+                    "feedback_hash":exact["content_hash"], "numeric_material_requests":query_miss_requests(self,admission)}
         return {"status": "complete", "research_status": outcome,
                 "feedback_ref": exact["id"], "feedback_hash": exact["content_hash"]}
 
@@ -4800,12 +6085,15 @@ class MissionDocumentResearchExecutor:
                 raise MissionDocumentResearchExecutorError(
                     "document promotion cannot nest an open transaction")
             ensure_promotion_authority(self.connection)
-            claim = self.staging.exact_candidate_bundle(
+            bundle = self.staging.exact_candidate_bundle(
                 evidence_ref=records["candidate_evidence_ref"],
                 claim_ref=records["candidate_claim_ref"],
                 idempotency_key=(
-                    f"mission-document-research-candidate:{admission['id']}"))["claim"]
-            reason = document_qualitative_content_rejection(claim)
+                    f"mission-document-research-candidate:{admission['id']}"))
+            from .document_research_qualitative import restated_question_figures
+            reason = document_qualitative_content_rejection(
+                bundle["claim"],
+                restated_figures=restated_question_figures(bundle.get("material")))
             # A candidate promoted before a content rule was added keeps its
             # promotion: the rule decides what enters, and a replay of an
             # admission already in the Ledger must converge on the same record
@@ -4862,6 +6150,9 @@ class MissionDocumentResearchExecutor:
                     except AnnualReportQualitativeError as exc:
                         raise MissionDocumentResearchExecutorError(str(exc)) from exc
                     return {**result, "work_order_ref": work["id"], "stage": work["metadata"]["stage"]}
+                if admission.get("numeric_authority") is not None:
+                    from .directed_numeric_executor import complete_numeric_stage
+                    return complete_numeric_stage(self, admission, effective)
                 return self._complete_staging(admission, effective)
             if formal["terminal_state"] != "succeeded":
                 if index in (1, 2):
@@ -4879,13 +6170,28 @@ class MissionDocumentResearchExecutor:
                 validate_mission_document_work_authority(
                     self.authority, self.scheduler, work, worker=worker)
                 model_proof = _exact_model_result(work, formal, worker)
-                if index == 1 and model_proof["output"]["status"] == "insufficient_evidence":
+                if index == 1 and admission.get("numeric_authority") is None and model_proof["output"]["status"] == "insufficient_evidence":
                     return self._research_feedback(
                         admission, work["metadata"]["retrieval_proof"],
                         work, formal, outcome="no_verified_claim",
                         draft_proof=model_proof)
+                if index == 2 and admission.get("numeric_authority") is None and model_proof["output"]["verdict"] == "reject":
+                    # A valid rejection is a verdict, not a failure: the
+                    # admission is answered "no verified claim", like an
+                    # insufficient-evidence draft.  It used to fall through
+                    # to staging, which raised and left a terminal hold.
+                    # (A malformed reply or a wrong candidate_ref never gets
+                    # here: it is a contract failure of the verifier Work.)
+                    return self._research_feedback(
+                        admission, work["metadata"]["retrieval_proof"],
+                        work, formal, outcome="no_verified_claim",
+                        draft_proof=work["metadata"]["draft_proof"],
+                        verifier_proof=model_proof)
             else:
                 self._stage_owned(work, formal)
+                if admission.get("numeric_authority") is not None:
+                    from .directed_numeric_executor import read_numeric_result
+                    return read_numeric_result(self, admission, effective, formal)
                 self._candidate_observation(
                     admission, work, formal, formal["result_envelope"]["outputs"])
                 return self._finish_candidate(
@@ -4910,6 +6216,16 @@ __all__ = ["AUTHORITY_KIND",
            "OWNER_UNPROVED_SEND_RETRY_CLASSIFICATION",
            "UNPROVED_SEND_FAILED_AFTER_AUTOMATIC_RETRY",
            "PROVIDER_BUDGET_EXCEEDED_NOT_RETRIED",
+           "AUTOMATIC_BUDGET_CORRECTION_CLASSIFICATION",
+           "AUTOMATIC_BUDGET_CORRECTION_REASON",
+           "BUDGET_CORRECTION_DAY_CAP_REASON",
+           "DEFAULT_MAX_AUTOMATIC_BUDGET_CORRECTIONS_PER_DAY",
+           "PROVIDER_BUDGET_CORRECTION_REFUSED",
+           "PROVIDER_BUDGET_EXCEEDED_AFTER_CORRECTION",
+           "PROVIDER_BUDGET_EXCEEDED_AFTER_FINAL_CORRECTION",
+           "MAX_BUDGET_CORRECTIONS_PER_STAGE",
+           "ROUTE_REJECTED_NO_SEND_CLASSIFICATION",
+           "provider_budget_overrun",
            "UNPROVED_SEND_RETRY_DAY_CAP_REASON",
            "MissionDocumentResearchExecutor",
            "MissionDocumentResearchExecutorError",

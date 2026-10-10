@@ -72,6 +72,18 @@ def _with_output_floor(budget: Any) -> Any:
 def export_service_template(source_config: str | Path,
                             output_path: str | Path) -> dict[str, Any]:
     """Export model-engine settings, excluding subjects and destinations."""
+    result = build_service_template(source_config)
+    _write(Path(output_path).expanduser().resolve(), result)
+    return result
+
+
+def build_service_template(source_config: str | Path) -> dict[str, Any]:
+    """The service template ``export_service_template`` would write, unwritten.
+
+    Separate so the freshness check (``workspace_template_freshness``) can ask
+    "would exporting today give the template the manager pins?" by comparing
+    content hashes, without writing anything.
+    """
     source = Path(source_config).expanduser().resolve()
     ServiceConfig.from_file(source)
     raw = _read(source)
@@ -165,7 +177,6 @@ def export_service_template(source_config: str | Path,
     source_state = str(Path(raw["core_db"]).resolve().parent)
     if source_state in rendered:
         raise WorkspaceServiceSetupError("template retained source state path")
-    _write(Path(output_path).expanduser().resolve(), result)
     return result
 
 
@@ -232,6 +243,15 @@ def install_service_template(workspace_manifest: str | Path,
     if shared_policy is not None:
         planner["shared_call_budget_policy_path"] = shared_policy
     thesis = operating["thesis_impact"]["config"]
+    # 2026-09-30 (b3): the day cap thesis-impact runs on is the head of the
+    # budget lineage this workspace's ledger was given by the model template,
+    # resolved here -- not the id the service template was exported with.
+    # Template v6 carried ``production:3`` ($180) while every lane config and
+    # the host ran on $500, and ws-e399 came up with both.
+    from .workspace_model_setup import installed_budget_policy_id
+    budget_head = installed_budget_policy_id(state / "thesis-impact-budget.sqlite")
+    if budget_head is not None:
+        thesis["budget_policy_version_id"] = budget_head
     thesis.update({
         "scheduler_db": str(state / "scheduler.sqlite"),
         "writer_socket": str(workspace.writer_socket),
@@ -244,6 +264,21 @@ def install_service_template(workspace_manifest: str | Path,
     if shared_policy is not None:
         thesis["shared_call_budget_policy_path"] = shared_policy
     operating["backup"]["root"] = str(state / "backups")
+    # 2026-09-30 (d2): the weekly brief coordinator runs from the first day,
+    # reading its plan from a file the owner publishes from the cockpit
+    # (writer op ``publish_workspace_weekly_brief_plan``).  Until a plan is
+    # published it answers ``no_plan``; a plan with no Discord destination is
+    # delivered into ``<state>/weekly-briefs`` and shown on /weekly-brief.
+    # Before this there was no way at all to turn a workspace's brief on.
+    operating["weekly_brief"] = {
+        "enabled": True,
+        "interval_seconds": operating["weekly_brief"].get("interval_seconds", 300),
+        "config": {
+            "writer_socket": str(workspace.writer_socket),
+            "token_config": str(state / "writer-tokens.json"),
+            "plan_path": str(state / "weekly-brief-plan.json"),
+        },
+    }
     extensions = operating.pop("control_extensions")
     document_research = operating.pop("document_research")
     try:
@@ -337,7 +372,8 @@ def install_service_template(workspace_manifest: str | Path,
         raise WorkspaceServiceSetupError("installed workspace service config is invalid") from exc
     return {"status": "installed", "workspace_id": workspace.workspace_id,
             "template_hash": template["content_hash"], "service_config": str(workspace.config_path),
-            "research_state": "empty", "outbox": "disabled", "weekly_brief": "awaiting_mission"}
+            "research_state": "empty", "outbox": "disabled", "weekly_brief": "awaiting_plan",
+            "budget_policy_version_id": thesis.get("budget_policy_version_id")}
 
 
 def main(argv: list[str] | None = None) -> int:

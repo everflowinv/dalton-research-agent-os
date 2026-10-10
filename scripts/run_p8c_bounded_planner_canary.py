@@ -218,9 +218,7 @@ def run(source_core: Path, source_scheduler: Path) -> dict:
 
 def main() -> int:
     parser = argparse.ArgumentParser(description=__doc__)
-    state = Path(
-        "/Users/everflow/Library/Application Support/Dalton/state/dalton-core"
-    )
+    state = (Path.home() / "Library/Application Support/Dalton/state/dalton-core")
     parser.add_argument("--source-core", type=Path, default=state / "core.sqlite")
     parser.add_argument(
         "--source-scheduler", type=Path, default=state / "scheduler.sqlite"

@@ -65,24 +65,62 @@ class ThesisImpactBudgetValidationError(ThesisImpactBudgetError):
 class ThesisImpactDayBudgetExceeded(ThesisImpactBudgetError):
     """The exact admission would exceed the immutable day cap."""
 
-    def __init__(self, rejection: Mapping[str, Any]) -> None:
-        # P13n: say which cap refused it. Three different caps can raise this --
-        # the day policy, the mission budget, the outer cascade -- and the
-        # message only ever printed the day policy's numbers. A planner call
-        # refused by a $5 mission cap reported "5684316 > 25000000", which is
-        # arithmetic that does not support its own conclusion and sends the
-        # reader looking in the wrong place.
+    def __init__(self, rejection: Mapping[str, Any],
+                 tier: Mapping[str, Any] | None = None) -> None:
+        # P13n: say which cap refused it. Four different caps can raise this --
+        # the day policy, the mission budget, the outer cascade, the host's
+        # shared day cap -- and the message only ever printed the day policy's
+        # numbers. A planner call refused by a $5 mission cap reported
+        # "5684316 > 25000000", which is arithmetic that does not support its
+        # own conclusion and sends the reader looking in the wrong place.
+        # 2026-09-30 (P1-6): ws-e399's setup mission tripped its own $1 cap and
+        # the message still read "... against day cap 180000000".  ``tier`` is
+        # the cap that actually fired, with its own numbers; the day numbers
+        # are printed only when the day cap is the one that fired.
         reason = rejection.get("reason") or "day_budget_exceeded"
-        detail = (
-            f"committed {rejection['day_committed_micros']} + reserved "
-            f"{rejection['reserved_micros']} against day cap "
-            f"{rejection['day_cap_micros']}"
-        )
+        self.tier = dict(tier) if isinstance(tier, Mapping) else _day_tier(rejection)
+        detail = _tier_detail(self.tier, rejection)
         binding = rejection.get("mission_binding")
         if isinstance(binding, Mapping) and binding.get("mission_ref"):
             detail += f"; mission {binding['mission_ref']}"
         super().__init__(f"thesis-impact budget refused the call ({reason}): {detail}")
         self.rejection = dict(rejection)
+
+
+class OwnerEmergencyStopRefused(ThesisImpactDayBudgetExceeded):
+    """2026-10-06 (vision-gap #11): the owner's emergency stop is set.
+
+    A day-budget refusal by shape -- nothing is reserved, nothing is billed,
+    every caller already treats it as "not sent" -- with its own reason word,
+    ``owner_emergency_stop``, which the lane failure classifier reads as
+    transient so the work comes back after ``resume_all`` instead of being
+    parked on the model budget.
+    """
+
+
+TIER_NAMES = {"mission": "mission cap", "outer": "outer research cap",
+              "shared": "shared host day cap", "day": "day cap"}
+
+
+def _day_tier(rejection: Mapping[str, Any]) -> dict[str, Any]:
+    return {"tier": "day", "committed_micros": rejection.get("day_committed_micros"),
+            "cap_micros": rejection.get("day_cap_micros"), "limit": "cost"}
+
+
+def _tier_detail(tier: Mapping[str, Any], rejection: Mapping[str, Any]) -> str:
+    name = TIER_NAMES.get(str(tier.get("tier")), str(tier.get("tier")))
+    reserved = rejection.get("reserved_micros")
+    parts = []
+    if tier.get("cap_micros") is not None:
+        parts.append(f"committed {tier.get('committed_micros')} + reserved {reserved} "
+                     f"against {name} {tier.get('cap_micros')}")
+    if tier.get("call_cap") is not None:
+        parts.append(f"{tier.get('calls')} paid calls + 1 against {name} "
+                     f"call limit {tier.get('call_cap')}")
+    if tier.get("limit") in {"calls", "cost"} and len(parts) == 2:
+        # Both numbers are useful, but say which one tripped.
+        parts.append(f"tripped on {tier['limit']}")
+    return "; ".join(parts) or f"refused by {name}"
 
 
 class ThesisImpactBudgetConflict(ThesisImpactBudgetError):
@@ -117,6 +155,85 @@ def _day(value: Any) -> str:
     except ValueError as exc:
         raise ThesisImpactBudgetValidationError("day is not a real date") from exc
     return value
+
+
+OPEN_RESERVATION_INDEX_SQL = (
+    "CREATE INDEX IF NOT EXISTS idx_thesis_impact_admission_policy_open_cover "
+    "ON thesis_impact_day_admissions(policy_version_id, admission_id, reserved_micros)"
+)
+
+
+def maintain_open_reservation_index(path: str | Path, *, apply: bool = False,
+                                    busy_timeout_ms: int = 5000,
+                                    deadline_seconds: float = 15.0) -> dict[str, Any]:
+    """Preview/apply one covering index; never migrate or alter ledger rows.
+
+    Deployment maintenance may use this before restarting an old paid worker:
+    SQLite's planner sees the new index on its next query without a code reload.
+    Only the reviewed budget schema/table is eligible. Lock wait and execution
+    are bounded, and interruption rolls back the DDL. No cost is released.
+    """
+    import stat
+    import time
+    from .readonly_sqlite import connect_read_only
+
+    if (type(apply) is not bool
+            or type(busy_timeout_ms) is not int or not 1 <= busy_timeout_ms <= 5000
+            or type(deadline_seconds) not in (int, float)
+            or not 0 < deadline_seconds <= 30):
+        raise ThesisImpactBudgetValidationError("index maintenance bounds are invalid")
+    target = Path(path).expanduser().resolve(strict=True)
+    info = target.stat()
+    if not stat.S_ISREG(info.st_mode) or info.st_uid != os.getuid():
+        raise ThesisImpactBudgetValidationError("index maintenance requires an owned regular ledger")
+    connection = (sqlite3.connect(target.as_uri() + "?mode=rw", uri=True,
+                                  isolation_level=None, timeout=busy_timeout_ms / 1000)
+                  if apply else connect_read_only(target))
+    try:
+        connection.execute(f"PRAGMA busy_timeout={busy_timeout_ms}")
+        columns = {row[1]: row[2] for row in connection.execute(
+            "PRAGMA table_info(thesis_impact_day_admissions)")}
+        required = {"admission_id":"TEXT", "policy_version_id":"TEXT",
+                    "reserved_micros":"INTEGER", "record_json":"TEXT", "content_hash":"TEXT"}
+        triggers = {row[0] for row in connection.execute(
+            "SELECT name FROM sqlite_master WHERE type='trigger' AND tbl_name='thesis_impact_day_admissions'")}
+        if (any(columns.get(k) != v for k, v in required.items())
+                or not {"thesis_impact_day_admissions_no_update",
+                        "thesis_impact_day_admissions_no_delete"} <= triggers):
+            raise ThesisImpactBudgetValidationError("index maintenance budget schema is unavailable")
+        index = "idx_thesis_impact_admission_policy_open_cover"
+        existing = connection.execute(
+            "SELECT sql,tbl_name FROM sqlite_master WHERE type='index' AND name=?", (index,)).fetchone()
+        if existing is not None and (
+                existing[1] != "thesis_impact_day_admissions"
+                or [r[2] for r in connection.execute(f"PRAGMA index_info({index})")]
+                   != ["policy_version_id", "admission_id", "reserved_micros"]
+                or any(row[2] or row[4] for row in connection.execute(
+                    "PRAGMA index_list(thesis_impact_day_admissions)") if row[1] == index)):
+            raise ThesisImpactBudgetValidationError("open reservation index definition drifted")
+        result = {"resolved_database": str(target), "device": info.st_dev,
+                  "inode": info.st_ino, "sql": OPEN_RESERVATION_INDEX_SQL,
+                  "index_present_before": existing is not None, "applied": False,
+                  "budget_rows_changed": False, "busy_timeout_ms": busy_timeout_ms,
+                  "deadline_seconds": deadline_seconds}
+        if apply:
+            started = time.monotonic()
+            connection.set_progress_handler(
+                lambda: int(time.monotonic() - started >= deadline_seconds), 1000)
+            connection.execute("BEGIN IMMEDIATE")
+            try:
+                connection.execute(OPEN_RESERVATION_INDEX_SQL)
+                connection.commit()
+            except BaseException:
+                connection.rollback()
+                raise
+            finally:
+                connection.set_progress_handler(None, 0)
+            result["applied"] = True
+            result["duration_seconds"] = time.monotonic() - started
+        return result
+    finally:
+        connection.close()
 
 
 class ThesisImpactBudgetStore:
@@ -396,6 +513,9 @@ class ThesisImpactBudgetStore:
         route_decision_ref: str,
         reserved_micros: int,
         mission_binding: Mapping[str, Any] | None = None,
+        purpose: str | None = None,
+        thinking_level: str | None = None,
+        publication: Mapping[str, Any] | None = None,
     ) -> dict[str, Any]:
         """Reserve against the day cap or persist a durable rejection.
 
@@ -403,6 +523,20 @@ class ThesisImpactBudgetStore:
         over-cap committed total; the exception is raised only after that
         decision is durable.
         """
+
+        if not self.read_only and self.path != ":memory:":
+            # The day ledger lives beside the Core in every environment (the
+            # same convention the shared day cap's binding file uses), so the
+            # owner's emergency stop is read from there: one gate every paid
+            # model call already passes, in whichever process makes it.
+            from .owner_levers import emergency_refusal_for_state_dir
+
+            refusal = emergency_refusal_for_state_dir(Path(self.path).parent)
+            if refusal is not None:
+                raise OwnerEmergencyStopRefused(
+                    {"status": "rejected", "reason": "owner_emergency_stop",
+                     "work_order_ref": work_order_ref, "day": day, "detail": refusal},
+                    tier={"tier": "owner emergency stop", "limit": "emergency_stop"})
 
         if mission_binding is not None:
             mission_binding = dict(mission_binding)
@@ -490,10 +624,45 @@ class ThesisImpactBudgetStore:
             "reserved_micros": reserved_micros,
             "created_at": _utc(self.clock()),
         }
+        if purpose is not None or thinking_level is not None:
+            from .call_budget import resolve_thinking_level
+            if purpose is not None:
+                _text(purpose, "purpose")
+            wire["purpose"] = purpose
+            wire["thinking_level"] = resolve_thinking_level(purpose, requested=thinking_level,
+                                                          verifier=phase == "verification")
+        if publication is not None:
+            if (not isinstance(publication,Mapping)
+                    or set(publication)!={'source_hash','rules_version','stage','prompt_bytes'}
+                    or type(publication['prompt_bytes']) is not int or publication['prompt_bytes']<0):
+                raise ThesisImpactBudgetValidationError('invalid publication fee binding')
+            for key in ('source_hash','rules_version','stage'): _text(publication[key],key)
+            wire['publication']=dict(publication)
         wire["content_hash"] = content_hash(wire)
         rejection: dict[str, Any] | None = None
+        fired: dict[str, Any] | None = None
         pool_name: str | None = None
         borrowed_from: str | None = None
+        # 2026-10-07: the host's shared cap and the other environments' spend
+        # are read *before* this ledger's write lock is taken.  They are other
+        # files (opened ``mode=ro`` with their own 5 s wait each), and this
+        # transaction holds no lock on them, so reading them inside it bought
+        # no atomicity -- it only stretched every admission's hold on the one
+        # lock every paid call on this host queues for.
+        # An unusable binding is still refused at the point it always was (a
+        # replayed admission returns before it), so the error is held, not
+        # raised, here.
+        shared: dict[str, Any] | None = None
+        shared_error: ThesisImpactBudgetValidationError | None = None
+        peers: dict[str, Any] | None = None
+        try:
+            shared = self.shared_daily_gate()
+        except ThesisImpactBudgetValidationError as exc:
+            shared_error = exc
+        if shared is not None:
+            from .shared_daily_budget import cross_environment_spend
+
+            peers = cross_environment_spend(shared["peer_ledgers"], day)
         with self._transaction() as cur:
             existing = cur.execute(
                 "SELECT record_json,pool,borrowed_from FROM thesis_impact_day_admissions "
@@ -518,6 +687,9 @@ class ThesisImpactBudgetStore:
                     raise ThesisImpactBudgetConflict(
                         "admission identity was reused with different semantics"
                     )
+                if any(persisted.get(field) is not None and persisted.get(field) != wire.get(field)
+                       for field in ("purpose", "thinking_level", "publication")):
+                    raise ThesisImpactBudgetConflict("thinking dimension changed on admission replay")
                 binding_row = cur.execute("SELECT record_json FROM model_mission_budget_bindings WHERE admission_id=?", (persisted["admission_id"],)).fetchone()
                 saved_binding = None if binding_row is None else json.loads(binding_row["record_json"])
                 comparable = mission_binding
@@ -594,13 +766,21 @@ class ThesisImpactBudgetStore:
                 if mission_binding is not None:
                     # Same immutable paid-call ledger, atomic with the owner cap.
                     # Open reservations from older days remain charged after rollover.
+                    # 2026-10-07: the day's and the still-open admissions
+                    # as an index-driven set (see DAY_OR_OPEN_ADMISSIONS_SQL);
+                    # the same rows as the old ``a.day=? OR s.admission_id IS
+                    # NULL`` full scan, which held this write lock ~0.5 s.
+                    from .shared_daily_budget import DAY_OR_OPEN_ADMISSIONS_SQL
+
                     rows = cur.execute(
-                        "SELECT a.reserved_micros,COALESCE(c.corrected_micros,s.actual_micros) AS actual_micros FROM thesis_impact_day_admissions a "
+                        f"WITH counted(admission_id) AS ({DAY_OR_OPEN_ADMISSIONS_SQL}) "
+                        "SELECT a.reserved_micros,COALESCE(c.corrected_micros,s.actual_micros) AS actual_micros "
+                        "FROM counted JOIN thesis_impact_day_admissions a ON a.admission_id=counted.admission_id "
                         "LEFT JOIN model_mission_budget_bindings b ON a.admission_id=b.admission_id "
                         "LEFT JOIN thesis_impact_day_settlements s ON s.admission_id=a.admission_id "
                         "LEFT JOIN thesis_impact_settlement_corrections c ON c.admission_id=a.admission_id "
-                        "WHERE (b.mission_ref=? OR b.admission_id IS NULL) AND (a.day=? OR s.admission_id IS NULL)",
-                        (mission_binding["mission_ref"], day),
+                        "WHERE (b.mission_ref=? OR b.admission_id IS NULL)",
+                        (day, mission_binding["mission_ref"]),
                     ).fetchall()
                     mission_cost = sum(r["reserved_micros"] if r["actual_micros"] is None else r["actual_micros"] for r in rows)
                     mission_exceeded = (len(rows) + 1 > mission_binding["max_daily_paid_calls"] or
@@ -614,15 +794,13 @@ class ThesisImpactBudgetStore:
                 # named by the cockpit: an unplugged disk is not spending, and
                 # refusing every call on this host because of it would be a
                 # worse failure than the overspend.
-                shared = self.shared_daily_gate()
+                if shared_error is not None:
+                    raise shared_error
                 shared_exceeded = False
-                if shared is not None:
-                    from .shared_daily_budget import (
-                        _DAY_SPEND_SQL, cross_environment_spend, day_spend_rows,
-                    )
+                if shared is not None and peers is not None:
+                    from .shared_daily_budget import _DAY_SPEND_SQL, day_spend_rows
 
                     local = day_spend_rows(cur.execute(_DAY_SPEND_SQL, (day,)).fetchall())
-                    peers = cross_environment_spend(shared["peer_ledgers"], day)
                     shared_calls = local["calls"] + peers["calls"] + 1
                     shared_cost = (local["cost_micros"] + peers["cost_micros"]
                                    + reserved_micros)
@@ -635,17 +813,47 @@ class ThesisImpactBudgetStore:
                     # Conservative across ALL missions sharing this paid ledger,
                     # including unbound legacy entries and open prior-day calls.
                     # This cannot reset on mission/mandate/governance version changes.
-                    outer_rows = cur.execute(
-                        "SELECT a.reserved_micros,COALESCE(c.corrected_micros,s.actual_micros) AS actual_micros FROM thesis_impact_day_admissions a "
-                        "LEFT JOIN thesis_impact_day_settlements s ON s.admission_id=a.admission_id "
-                        "LEFT JOIN thesis_impact_settlement_corrections c ON c.admission_id=a.admission_id "
-                        "WHERE a.day=? OR s.admission_id IS NULL", (day,),
-                    ).fetchall()
+                    from .shared_daily_budget import _DAY_SPEND_SQL
+
+                    outer_rows = cur.execute(_DAY_SPEND_SQL, (day,)).fetchall()
                     outer_cost = sum(r["reserved_micros"] if r["actual_micros"] is None else r["actual_micros"] for r in outer_rows)
                     outer_exceeded = (len(outer_rows) + 1 > outer["max_daily_paid_calls"] or
                                       outer_cost + reserved_micros > outer["max_daily_cost_micros"])
                 if (mission_exceeded or outer_exceeded or shared_exceeded
                         or committed + reserved_micros > policy["day_cap_micros"]):
+                    # The cap that fired, in the same precedence as ``reason``
+                    # below, with its own numbers (P1-6).  In memory only: the
+                    # persisted rejection record keeps its closed shape.
+                    if mission_exceeded:
+                        fired = {
+                            "tier": "mission", "committed_micros": mission_cost,
+                            "cap_micros": mission_binding["max_daily_cost_micros"],
+                            "calls": len(rows),
+                            "call_cap": mission_binding["max_daily_paid_calls"],
+                            "limit": ("calls" if len(rows) + 1 > mission_binding["max_daily_paid_calls"]
+                                      else "cost"),
+                        }
+                    elif outer_exceeded:
+                        fired = {
+                            "tier": "outer", "committed_micros": outer_cost,
+                            "cap_micros": outer["max_daily_cost_micros"],
+                            "calls": len(outer_rows), "call_cap": outer["max_daily_paid_calls"],
+                            "limit": ("calls" if len(outer_rows) + 1 > outer["max_daily_paid_calls"]
+                                      else "cost"),
+                        }
+                    elif shared_exceeded:
+                        fired = {
+                            "tier": "shared",
+                            "committed_micros": shared_cost - reserved_micros,
+                            "cap_micros": int(shared["max_daily_cost_micros"]),
+                            "calls": shared_calls - 1,
+                            "call_cap": int(shared["max_daily_paid_calls"]),
+                            "limit": ("calls" if shared_calls > int(shared["max_daily_paid_calls"])
+                                      else "cost"),
+                        }
+                    else:
+                        fired = {"tier": "day", "committed_micros": committed,
+                                 "cap_micros": policy["day_cap_micros"], "limit": "cost"}
                     rejection = {
                         "schema_version": SCHEMA_VERSION,
                         "rejection_id": "thesis-impact-rejection:"
@@ -727,7 +935,7 @@ class ThesisImpactBudgetStore:
                     cur.execute("INSERT INTO model_mission_budget_bindings(admission_id,mission_ref,record_json) VALUES(?,?,?)",
                                 (wire["admission_id"], mission_binding["mission_ref"], canonical_json(mission_binding)))
         if rejection is not None:
-            raise ThesisImpactDayBudgetExceeded(rejection)
+            raise ThesisImpactDayBudgetExceeded(rejection, fired)
         if pool_name is None:
             return {**wire, "status": "fresh"}
         return {**wire, "status": "fresh", "pool": pool_name,
@@ -1261,4 +1469,5 @@ __all__ = [
     "ThesisImpactBudgetStore",
     "ThesisImpactBudgetValidationError",
     "ThesisImpactDayBudgetExceeded",
+    "OwnerEmergencyStopRefused",
 ]

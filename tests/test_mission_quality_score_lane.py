@@ -117,7 +117,7 @@ def _core(path: Path) -> sqlite3.Connection:
         "CREATE TABLE mission_deliverable_pointer(deliverable_ref TEXT PRIMARY KEY, "
         "version_id TEXT);"
         "CREATE TABLE research_quality_score_versions(version_id TEXT PRIMARY KEY, "
-        "target_ref TEXT, target_hash TEXT, rubric_ref TEXT);")
+        "target_ref TEXT, target_hash TEXT, rubric_ref TEXT, rubric_hash TEXT DEFAULT 'f5645dc5bc0513a6dfdfefe573979b6c150b7f60c6206dca23826aad4ec36f0c', judge_status TEXT);")
     return connection
 
 
@@ -140,16 +140,16 @@ class PendingTargetTests(unittest.TestCase):
             _publish(core, "mission-deliverable:initial_screen:2", "v2", "h2", "2026-09-16")
             _publish(core, "mission-deliverable:event_note:1", "e1", "he", "2026-09-17")
             _publish(core, "mission-deliverable:initial_screen:3", "v3", "h3", "2026-09-13")
-            core.execute("INSERT INTO research_quality_score_versions VALUES(?,?,?,?)",
+            core.execute("INSERT INTO research_quality_score_versions(version_id,target_ref,target_hash,rubric_ref) VALUES(?,?,?,?)",
                          ("s1", "v2", "h2", rubric_ref))
             # Scored under another rubric is not scored under this one.
-            core.execute("INSERT INTO research_quality_score_versions VALUES(?,?,?,?)",
+            core.execute("INSERT INTO research_quality_score_versions(version_id,target_ref,target_hash,rubric_ref) VALUES(?,?,?,?)",
                          ("s2", "v3", "h3", "rubric:weekly-brief"))
             pending = lane.pending_targets(core)
             core.close()
         self.assertEqual([item["target_ref"] for item in pending], ["v3", "v1b"])
         self.assertEqual(pending[1], {"deliverable_ref": "mission-deliverable:initial_screen:1",
-                                      "target_ref": "v1b", "target_hash": "h1b"})
+                                      "target_ref": "v1b", "target_hash": "h1b", "rubric": "initial_screen"})
 
 
 class FakeLauncher:
@@ -197,7 +197,7 @@ class CoordinatorTests(unittest.TestCase):
         if scored:
             from dalton_core.research_quality_rubrics import rubric
 
-            self.core.execute("INSERT INTO research_quality_score_versions VALUES(?,?,?,?)", (
+            self.core.execute("INSERT INTO research_quality_score_versions(version_id,target_ref,target_hash,rubric_ref) VALUES(?,?,?,?)", (
                 f"s-{ticket['target_ref']}", ticket["target_ref"], ticket["target_hash"],
                 rubric("initial_screen").rubric_ref))
 

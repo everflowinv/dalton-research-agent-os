@@ -651,6 +651,82 @@ class FetchCoordinatorTests(unittest.TestCase):
         ))
 
 
+    def test_a_document_that_keeps_failing_rests_under_the_failure_cap(self) -> None:
+        """P2-5: ws-7d fetched the same two MSFT 10-K pages every hour for days.
+
+        After FETCH_FAILURE_CAP failures in a row a document rests for
+        FETCH_FAILURE_COOLDOWN, the idle tick says which documents are held,
+        the owner's list shows them, and after the cooldown one retry is made.
+        """
+
+        from dalton_core.coverage_mission import FETCH_FAILURE_CAP, FETCH_FAILURE_COOLDOWN
+        from dalton_core.needs_human import capped_fetches
+
+        # The ledger stamps attempts with the authority's own clock; this test
+        # spans days, so that clock has to move with the coordinator's.
+        clock_patch = patch("dalton_core.coverage_mission._now",
+                            lambda: self.clock().isoformat(timespec="microseconds"))
+        clock_patch.start()
+        self.addCleanup(clock_patch.stop)
+        self.fetch_launcher.fail = True
+        self.fetch_launcher.fail_summary = {
+            "failure_reason": ("fetch outcome retryable; PublicTransportResponseTooLarge: "
+                               "response body exceeds the configured limit"),
+            "failure_retryable": True,
+        }
+
+        def attempts(ref: str) -> int:
+            return sum(1 for call in self.fetch_launcher.calls if call["document_ref"] == ref)
+
+        for _ in range(40):
+            self.coordinator.dispatch_once()
+            if min(attempts(URL_A), attempts(URL_B)) >= FETCH_FAILURE_CAP:
+                break
+            self.clock.advance(hours=1, minutes=1)
+        self.assertEqual(attempts(URL_A), FETCH_FAILURE_CAP)
+        self.assertEqual(attempts(URL_B), FETCH_FAILURE_CAP)
+        self.coordinator.dispatch_once()  # settle the last one
+        capped = self.missions.capped_failed_documents(
+            as_of=self.clock(), source_ref=WEB_SEARCH_SOURCE_REF)
+        self.assertEqual(sorted(item["document_ref"] for item in capped), sorted([URL_A, URL_B]))
+        self.assertTrue(all(item["consecutive_failures"] == FETCH_FAILURE_CAP for item in capped))
+
+        # The hourly retry no longer fetches them, and the idle tick says why.
+        before = len(self.fetch_launcher.calls)
+        for _ in range(5):
+            self.clock.advance(hours=2)
+            tick = self.coordinator.dispatch_once()
+        self.assertEqual(len(self.fetch_launcher.calls), before)
+        self.assertEqual(tick["acquisition"]["status"], "idle")
+        self.assertEqual(sorted(item["document_ref"]
+                                for item in tick["acquisition"]["held_by_failure_cap"]),
+                         sorted([URL_A, URL_B]))
+
+        # The owner's to-do list names both, with the reason, as a backlog item.
+        items = capped_fetches(self.h.core.connection, now=self.clock())
+        self.assertEqual(len(items), 2)
+        self.assertTrue(all(item["kind"] == "fetch_failure_capped" for item in items))
+        self.assertTrue(all(item["urgency"] == 4 for item in items))
+        self.assertIn("目标文件过大", items[0]["why_blocked"])
+        self.assertIn("PublicTransportResponseTooLarge", items[0]["detail"]["reason"])
+
+        # Once the cooldown ends, one more try each; failing again rests again.
+        self.clock.advance(seconds=int(FETCH_FAILURE_COOLDOWN.total_seconds()))
+        for _ in range(4):
+            self.coordinator.dispatch_once()
+        self.assertEqual(len(self.fetch_launcher.calls), before + 2)
+        self.clock.advance(hours=2)
+        self.coordinator.dispatch_once()
+        self.assertEqual(len(self.fetch_launcher.calls), before + 2)
+
+        # A success clears the streak: nothing is listed any more.
+        self.fetch_launcher.fail = False
+        self.clock.advance(seconds=int(FETCH_FAILURE_COOLDOWN.total_seconds()) + 60)
+        for _ in range(4):
+            self.coordinator.dispatch_once()
+        self.assertEqual(self.missions.capped_failed_documents(
+            as_of=self.clock(), source_ref=WEB_SEARCH_SOURCE_REF), [])
+
     def test_a_restart_retries_earlier_failures_without_waiting_the_interval(self) -> None:
         """P11b: a restart means new code, so retry what failed under the old.
 

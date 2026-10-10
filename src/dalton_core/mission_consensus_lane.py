@@ -117,8 +117,12 @@ class MissionConsensusLaneCoordinator:
         next_context: Callable[[str, set[str]], Mapping[str, Any] | None],
         clock: Callable[[], datetime] | None = None,
         failure_ledger_dir: Any | None = None,
+        table_scan: Callable[[Sequence[Mapping[str, str]]], dict[str, Any] | None] | None = None,
     ) -> None:
         self.authority = authority
+        # Batch B: when every held note's page one has been read, one note a
+        # tick is read again for its estimates table (street_estimate_tables).
+        self.table_scan = table_scan
         self.street_store = street_store
         self.launcher = launcher
         self.mission = mission
@@ -428,6 +432,12 @@ class MissionConsensusLaneCoordinator:
                             :MAX_FAILURE_DETAIL_CHARS],
                     }
             return scan
+        if self.table_scan is not None:
+            try:
+                return self.table_scan(universe)
+            except Exception as exc:  # noqa: BLE001 - the table pass never fails the tick
+                return {"outcome": "table_scan_failed",
+                        "reason": f"{type(exc).__name__}: {exc}"[:MAX_FAILURE_DETAIL_CHARS]}
         return None
 
     # -- the tick ----------------------------------------------------------
@@ -528,15 +538,103 @@ def _fiscal_calendar_reader(server: Any) -> Callable[[str], dict[str, str] | Non
             basis = "quarterly_grid"
         if not year_end:
             return None
+        # Batch B (2026-10-09): the last reported period advances on the 8-K
+        # earnings release (ADR-0015) and the XBRL lines too, not only on the
+        # 10-Q/10-K.  Accenture reported FY2026 Q4 on 2026-10-01; until its
+        # 10-K the filings alone said 2026-05-31, and every vendor 0q was
+        # filed one quarter early (FY2027Q1 labelled FY2026Q4).
+        last = str(newest["report_date"])
+        last_bases = ["sec_periodic_filing"]
+        try:
+            from .financial_period import last_reported_period
+
+            evidence = last_reported_period(connection, company_ref)
+        except Exception:  # noqa: BLE001 - the filed calendar still stands
+            evidence = None
+        if evidence is not None and evidence["period_end"] > last:
+            last, last_bases = evidence["period_end"], evidence["bases"]
         return {
             "fiscal_year_end": year_end,
-            "last_reported_period_end": str(newest["report_date"]),
+            "last_reported_period_end": last,
             # Which of the two routes answered, so a wrong calendar is
             # traceable to the rule that produced it rather than guessed at.
             "fiscal_year_end_basis": basis,
+            "last_reported_bases": last_bases,
         }
 
     return read
+
+
+def _table_scanner(server: Any) -> Callable[[Sequence[Mapping[str, str]]], dict[str, Any] | None] | None:
+    """Batch B: one held broker note a tick, read for its estimates table.
+
+    Deterministic first. An unresolved held table may launch one independently
+    checked model child when both installed model configurations are present.
+    No model transport runs on the writer's store thread.
+    """
+
+    state_dir = getattr(server, "state_dir", None)
+    if state_dir is None:
+        return None
+    holder: dict[str, Any] = {}
+
+    def scan(universe: Sequence[Mapping[str, str]]) -> dict[str, Any] | None:
+        from .financial_period import fiscal_year_end
+        from .street_estimate_tables import StreetEstimateFigureStore, scan_company
+
+        store = holder.get("store")
+        if store is None:
+            store = holder["store"] = StreetEstimateFigureStore(server.store)
+        from .street_estimate_table_launcher import StreetEstimateTableLauncher
+        from .street_estimate_table_cli import pending_notes, request_for
+        from .lane_child_launcher import LaneChildConflict
+        from .store import content_hash
+        from pathlib import Path
+        launcher = holder.get("model_launcher")
+        if launcher is None:
+            launcher = holder["model_launcher"] = StreetEstimateTableLauncher(state_dir=state_dir)
+        day = datetime.now(timezone.utc).date().isoformat()
+        attempted = holder.setdefault("fallback_attempted", set())
+        if launcher.configured:
+            pointer = server.store.connection.execute(
+                "SELECT mission_version_id FROM coverage_mission_pointer ORDER BY mission_ref LIMIT 1").fetchone()
+            mission_ref = pointer[0] if pointer else None
+            for company in universe:
+                for note in pending_notes(store.connection, company["company_ref"]):
+                    try:
+                        request = request_for(store.connection, Path(state_dir), company["company_ref"], note["document_ref"])
+                        key = (day, mission_ref, content_hash(request), launcher.configuration_identity())
+                        if key in attempted or mission_ref is None:
+                            continue
+                        ticket = launcher.start(request=request, day=day, mission_version_ref=mission_ref)
+                    except LaneChildConflict:
+                        return {"company_ref": company["company_ref"], "outcome": "table_model_busy"}
+                    except Exception as exc:
+                        key = (day, mission_ref, note["document_ref"])
+                        if key in attempted:
+                            continue
+                        attempted.add(key)
+                        return {"company_ref": company["company_ref"], "outcome": "table_model_gated", "reason": str(exc)}
+                    attempted.add(key)
+                    return {"company_ref": company["company_ref"], "outcome": "table_model_launched", "ticket": ticket}
+        done: dict[str, str] = holder.setdefault("done", {})
+        for company in universe:
+            company_ref = company["company_ref"]
+            from .street_estimate_tables import held_broker_notes
+            notes_hash = content_hash(held_broker_notes(store.connection, company_ref))
+            if done.get(company_ref) == notes_hash:
+                continue
+            fye = fiscal_year_end(server.store.connection, company_ref)
+            if fye is None:
+                continue
+            results = scan_company(store, state_dir, company_ref, fye_month=fye["month"], limit=1)
+            if not results:
+                done[company_ref] = notes_hash
+                continue
+            return {"company_ref": company_ref, "outcome": "table_scanned", "results": results}
+        return None
+
+    return scan
 
 
 def _context_reader(server: Any) -> Callable[[str, set[str]], dict[str, Any] | None]:
@@ -711,6 +809,7 @@ def dispatch(server: Any, params: Mapping[str, Any]) -> dict[str, Any]:
             # state directory, and a lane that refuses to run without a
             # ledger would be a lane that fails closed on its bookkeeping.
             failure_ledger_dir=getattr(server, "state_dir", None),
+            table_scan=_table_scanner(server),
         )
         server.lane_state[LAUNCHER_KWARG] = coordinator
     return coordinator.dispatch_once()
@@ -748,6 +847,7 @@ def argv_fragment(context: Any) -> list[str]:
 
 LANE = register_lane(LaneSpec(
     operation="dispatch_mission_consensus",
+    failure_ledger="mission_consensus",
     # After the price lane and its neighbours, before the model specification:
     # what the street expects is read against what the shares trade at, and
     # both of them want the tick's single child slot less than a filing does.

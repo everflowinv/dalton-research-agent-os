@@ -26,14 +26,20 @@ LEGACY_SCHEMA_VERSION = "0.1"
 ANNUAL_SCHEMA_VERSION = "0.2"
 TYPED_NOTE_SCHEMA_VERSION = "0.3"
 DIRECT_GROSS_PRETAX_SCHEMA_VERSION = "0.4"
-SCHEMA_VERSION = "0.5"
-STRUCTURE_AUTHORITY_REF = "company-financial-statement-structure:0.5"
+REVENUE_PRETAX_SCHEMA_VERSION = "0.5"
+# 0.6: every reported line with enough history carries a forecast method, the
+# cash and balance statements are open for leaf lines, and the code completes
+# and repairs a drafted structure (``forecast_coverage``) before it binds.
+COVERAGE_SCHEMA_VERSION = "0.6"
+SCHEMA_VERSION = COVERAGE_SCHEMA_VERSION
+STRUCTURE_AUTHORITY_REF = "company-financial-statement-structure:0.6"
 _STRUCTURE_AUTHORITY_REFS = {
     LEGACY_SCHEMA_VERSION: "company-financial-statement-structure:0.1",
     ANNUAL_SCHEMA_VERSION: "company-financial-statement-structure:0.2",
     TYPED_NOTE_SCHEMA_VERSION: "company-financial-statement-structure:0.3",
     DIRECT_GROSS_PRETAX_SCHEMA_VERSION: "company-financial-statement-structure:0.4",
-    SCHEMA_VERSION: STRUCTURE_AUTHORITY_REF,
+    REVENUE_PRETAX_SCHEMA_VERSION: "company-financial-statement-structure:0.5",
+    COVERAGE_SCHEMA_VERSION: STRUCTURE_AUTHORITY_REF,
 }
 
 STATEMENTS = ("income", "balance", "cash")
@@ -54,9 +60,39 @@ ROLES = (
     "other_operating_income_expense", "other_nonoperating_income_expense",
     "company_presented_component", "company_presented_subtotal",
 )
+# Cash-flow and balance-sheet leaf roles (structure 0.6). They are filed
+# leaves forecast by a method; they are never terms of an income formula.
+CASH_LEAF_ROLES = ("share_repurchase", "dividends_paid", "acquisitions",
+                   "depreciation_amortization", "finance_lease_principal", "capitalized_software", "capitalized_contract_costs")
+BALANCE_LEAF_ROLES = (
+    "cash_and_equivalents", "debt_current", "debt_noncurrent",
+    "accounts_receivable", "accounts_payable", "deferred_revenue", "depreciable_assets", "amortizable_assets",
+)
+STATEMENT_LEAF_ROLES = CASH_LEAF_ROLES + BALANCE_LEAF_ROLES
+COVERAGE_ROLES = ROLES + STATEMENT_LEAF_ROLES
+# 2026-10-09 (P0): roles only the deterministic coverage completion adds from
+# the filings (``forecast_coverage.add_statement_leaves``); a materialized
+# structure may carry them, the drafter's schema does not offer them, so the
+# drafting task (and its hash) is unchanged.
+COMPLETION_ONLY_ROLES = ("depreciation_amortization",)
+DRAFTED_COVERAGE_ROLES = tuple(role for role in COVERAGE_ROLES
+                               if role not in COMPLETION_ONLY_ROLES)
 FORMULA_OPERATORS = ("sum", "divide")
-FORECAST_METHODS = ("quarterly_growth", "share_of_line", "formula", "unavailable")
-ANNUAL_FORECAST_METHODS = ("day_weighted_quarters", "unavailable")
+LEGACY_FORECAST_METHODS = ("quarterly_growth", "share_of_line", "formula", "unavailable")
+# 0.6 methods.  ``share_of_line`` is the ratio-to-line method (a share of
+# revenue for a cost, a rate of pretax income for tax).  The rest:
+# ``carry_forward_mean`` holds the trailing-four-quarter mean amount (flagged
+# 延续); ``zero_one_off`` forecasts zero for a line the spec calls one-off;
+# ``rate_times_balance`` is an interest rate times a balance-sheet line;
+# ``hold_last`` carries the last filed balance; ``roll_forward`` is the cash
+# balance rolled by the forecast cash flow.
+COVERAGE_FORECAST_METHODS = (
+    "carry_forward_mean", "zero_one_off", "rate_times_balance", "hold_last",
+    "roll_forward", "year_over_year_growth", "seasonal_factor",
+)
+FORECAST_METHODS = LEGACY_FORECAST_METHODS + COVERAGE_FORECAST_METHODS
+BASED_FORECAST_METHODS = ("share_of_line", "rate_times_balance")
+ANNUAL_FORECAST_METHODS = ("day_weighted_quarters", "annual_growth_from_filed", "unavailable")
 MAX_STRUCTURE_LINES = 48
 MAX_STRUCTURE_FORMULAS = 32
 _LEGACY_LINE_FIELDS = {
@@ -64,6 +100,9 @@ _LEGACY_LINE_FIELDS = {
     "period_kind", "annual_semantics", "forecast_method", "forecast_base_ref",
 }
 _LINE_FIELDS = _LEGACY_LINE_FIELDS | {"annual_forecast_method"}
+# Code-written provenance of a 0.6 structure: what the completion changed and
+# the method, history depth and reason of every line.
+_COVERAGE_STRUCTURE_FIELDS = {"auto_repairs", "coverage"}
 _SUM_FIELDS = {"output_ref", "operator", "terms", "tie_out_concept", "evidence_refs"}
 _DIVIDE_FIELDS = {
     "output_ref", "operator", "numerator_ref", "denominator_ref",
@@ -81,11 +120,18 @@ FINANCIAL_NOTE_EVIDENCE_BINDING_VERSION = "financial-note-evidence-binding-0.1"
 DILUTED_EPS_NUMERATOR_NOTE_TARGET = "financial_note:diluted_eps_numerator:0.1"
 _ANNUAL_STRUCTURE_VERSIONS = {
     ANNUAL_SCHEMA_VERSION, TYPED_NOTE_SCHEMA_VERSION,
-    DIRECT_GROSS_PRETAX_SCHEMA_VERSION, SCHEMA_VERSION,
+    DIRECT_GROSS_PRETAX_SCHEMA_VERSION, REVENUE_PRETAX_SCHEMA_VERSION,
+    COVERAGE_SCHEMA_VERSION,
 }
 _TYPED_NOTE_STRUCTURE_VERSIONS = {
-    TYPED_NOTE_SCHEMA_VERSION, DIRECT_GROSS_PRETAX_SCHEMA_VERSION, SCHEMA_VERSION,
+    TYPED_NOTE_SCHEMA_VERSION, DIRECT_GROSS_PRETAX_SCHEMA_VERSION,
+    REVENUE_PRETAX_SCHEMA_VERSION, COVERAGE_SCHEMA_VERSION,
 }
+_REVENUE_PRETAX_VERSIONS = {REVENUE_PRETAX_SCHEMA_VERSION, COVERAGE_SCHEMA_VERSION}
+
+
+def is_coverage_structure(value: Any) -> bool:
+    return value == COVERAGE_SCHEMA_VERSION
 
 
 def _schema_object(properties: Mapping[str, Any], required: Sequence[str]) -> dict[str, Any]:
@@ -104,13 +150,20 @@ _STRUCTURE_LINE_SCHEMA = _schema_object(
     {
         "ref": _SCHEMA_REF,
         "role": {
-            "enum": list(ROLES),
+            "enum": list(DRAFTED_COVERAGE_ROLES),
             "description": (
                 "Use company_presented_component for an exact filed currency amount whose "
-                "company-specific bridge position is expressed by a tied formula; when "
-                "that company-specific total is filed, keep it filed and unavailable. "
-                "Use company_presented_subtotal only for a derived filed currency subtotal. "
-                "Neither role represents shares, per-share figures, ratios or percentages."
+                "company-specific bridge position is expressed by a tied formula. "
+                "A company-specific total (for example total operating expenses) is a "
+                "company_presented_subtotal: make it a derived line whose sum formula "
+                "adds its filed components and ties to the filed total; never use a "
+                "filed total as a formula term. "
+                "Neither role represents shares, per-share figures, ratios or percentages. "
+                "Cash-flow leaves use share_repurchase, dividends_paid or acquisitions; "
+                "balance-sheet leaves use cash_and_equivalents, debt_current, "
+                "debt_noncurrent, accounts_receivable, accounts_payable or "
+                "deferred_revenue. Include diluted_weighted_average_shares and a "
+                "derived diluted_eps (divide) whenever the company files them."
             ),
         },
         "label": _SCHEMA_TEXT,
@@ -131,7 +184,14 @@ _STRUCTURE_LINE_SCHEMA = _schema_object(
                 "formula.tie_out_concept."
             ),
         },
-        "statement": {"enum": ["income"]},
+        "statement": {
+            "enum": list(STATEMENTS),
+            "description": (
+                "income for every income-statement line. cash and balance lines are "
+                "filed leaves only (never formula terms): cash lines are quarterly "
+                "durations, balance lines are instants."
+            ),
+        },
         "unit": {
             "type": "string", "minLength": 3, "maxLength": 24,
             "description": (
@@ -141,15 +201,39 @@ _STRUCTURE_LINE_SCHEMA = _schema_object(
                 "Do not change a source unit to fit a role."
             ),
         },
-        "period_kind": {"const": "duration"},
+        "period_kind": {
+            "enum": list(PERIOD_KINDS),
+            "description": "instant only for balance-sheet lines; duration otherwise.",
+        },
         "annual_semantics": {"enum": list(ANNUAL_SEMANTICS)},
         "forecast_method": {
             "enum": list(FORECAST_METHODS),
             "description": (
-                "A filed standard subtotal is historical/tie authority and must use "
-                "unavailable. Forecasting a subtotal requires an explicit derived formula "
-                "that ties in every applicable source period. Historical replay readiness "
-                "does not mean unavailable inputs have forecasts."
+                "Every filed line with at least eight quarters of history needs a "
+                "forecast method; unavailable is only for a line with less history, "
+                "and the code records why. year_over_year_growth or seasonal_factor for "
+                "stable seasonal distributions; average quarterly_growth is prohibited "
+                "for significant seasonality. quarterly_growth for other revenue and share "
+                "counts; share_of_line (ratio to a line) for costs (base revenue), "
+                "income tax (base pretax income) and noncontrolling interest (base "
+                "net income); zero_one_off for a line the spec calls one_off; "
+                "rate_times_balance (base a balance-sheet line) or carry_forward_mean "
+                "for interest and other non-operating items; carry_forward_mean for "
+                "other recurring income-statement lines and cash-flow leaves, never "
+                "for balance-sheet instants. Balance-sheet leaves (including accounts_receivable, "
+                "accounts_payable, deferred_revenue, debt and other assets/liabilities) use "
+                "hold_last, share_of_line with an exact legitimate revenue base, or unavailable "
+                "when the actual base is missing. Only cash_and_equivalents may additionally "
+                "use roll_forward. Balance leaves have annual_semantics not_applicable and "
+                "never use carry_forward_mean. A filed standard subtotal is tie "
+                "authority only: forecast it as a derived formula line instead "
+                "(operating income = revenue minus each cost line; pretax income = "
+                "operating income plus every non-operating item; net income = pretax "
+                "income minus tax; attributable = net income minus noncontrolling "
+                "interest). Every formula term must itself be forecastable. The code "
+                "completes missing methods and repairs a filed subtotal used as a "
+                "term, but a structure whose earnings chain still cannot be computed "
+                "is refused."
             ),
         },
         "forecast_base_ref": {"type": ["string", "null"], "maxLength": 80},
@@ -186,8 +270,10 @@ _SUM_FORMULA_SCHEMA = _schema_object(
             "description": (
                 "Exact filed historical result tied by this formula; do not copy "
                 "it into the derived output line's concept field. A derived sum "
-                "must tie exactly in every applicable source period; presentation "
-                "rounding does not permit arbitrary tolerance or a balancing term."
+                "must tie in every applicable source period. The only tolerance is "
+                "the filed presentation rounding of that period (each presented "
+                "line rounded to the same unit, at most (n + 1) / 2 units for n "
+                "filed leaves); never an arbitrary tolerance or a balancing term."
             ),
         },
         "evidence_refs": {"type": "array", "minItems": 1, "maxItems": 24,
@@ -253,6 +339,11 @@ _SUM_ROLE_INPUTS: dict[str, frozenset[str]] = {
     "diluted_eps_numerator": frozenset({
         "parent_net_income", "preferred_dividends",
         "participating_securities_allocation", "dilutive_securities_adjustment",
+        # A filer with no noncontrolling interest divides net income itself; a
+        # filer with exchangeable shares (Accenture Canada) adds that
+        # interest back because those shares are in the diluted count.  The
+        # filed diluted-EPS tie decides which, never the role table.
+        "net_income", "noncontrolling_interest",
     }),
 }
 _COMPANY_COMPONENT_ROLE = "company_presented_component"
@@ -539,16 +630,27 @@ def _normalize_line(
     }
     if schema_version in _ANNUAL_STRUCTURE_VERSIONS:
         line["annual_forecast_method"] = wire["annual_forecast_method"]
+    coverage = is_coverage_structure(schema_version)
     for field, allowed in (
-        ("role", ROLES), ("kind", LINE_KINDS), ("statement", STATEMENTS),
+        ("role", COVERAGE_ROLES if coverage else ROLES), ("kind", LINE_KINDS),
+        ("statement", STATEMENTS),
         ("period_kind", PERIOD_KINDS), ("annual_semantics", ANNUAL_SEMANTICS),
-        ("forecast_method", FORECAST_METHODS),
+        ("forecast_method", FORECAST_METHODS if coverage else LEGACY_FORECAST_METHODS),
     ):
         if line[field] not in allowed:
             raise FinancialStatementStructureError(f"lines[{index}].{field} is invalid")
+    if line["role"] in STATEMENT_LEAF_ROLES:
+        _normalize_statement_leaf(line, index, filed)
+        return line
     if line["statement"] != "income" or line["period_kind"] != "duration":
         raise FinancialStatementStructureError(
             "financial statement structure 0.1 supports duration income lines only"
+        )
+    from .forecast_coverage import COVERAGE_CONCEPTS
+    depreciation = line.get("concept") in COVERAGE_CONCEPTS["depreciation_amortization"]
+    if line["forecast_method"] in {"hold_last", "roll_forward"} and not (depreciation and line["forecast_method"] == "roll_forward"):
+        raise FinancialStatementStructureError(
+            f"lines[{index}] {line['forecast_method']} is reserved for balance-sheet lines"
         )
     if (
         line["role"] == _COMPANY_COMPONENT_ROLE and line["kind"] != "filed"
@@ -588,18 +690,26 @@ def _normalize_line(
         if (
             line["role"] in _FORMULA_TOTAL_ROLES
             and line["forecast_method"] != "unavailable"
+            and not (
+                # 0.6: a filed "interest and other income, net" is the
+                # company's own non-operating leaf; its place in the pretax
+                # bridge is still proven by the tied pretax formula.
+                coverage and line["role"] == "nonoperating_income_expense"
+                and line["forecast_method"] in {
+                    "carry_forward_mean", "rate_times_balance", "zero_one_off"}
+            )
         ):
             raise FinancialStatementStructureError(
                 "a filed subtotal may only be actual/tie authority or unavailable; "
                 "forecasted subtotals require an explicit formula"
             )
-    if line["forecast_method"] == "share_of_line":
+    if line["forecast_method"] in BASED_FORECAST_METHODS or (depreciation and line["forecast_method"] == "roll_forward"):
         line["forecast_base_ref"] = _text(
             line["forecast_base_ref"], f"lines[{index}].forecast_base_ref"
         )
     elif line["forecast_base_ref"] is not None:
         raise FinancialStatementStructureError(
-            "only share_of_line may carry forecast_base_ref"
+            "only share_of_line or rate_times_balance may carry forecast_base_ref"
         )
     if line["role"] == "diluted_weighted_average_shares":
         if (
@@ -632,7 +742,7 @@ def _normalize_line(
             line["annual_forecast_method"] = annual_method
             if (
                 annual_method == "day_weighted_quarters"
-                and line["forecast_method"] not in {"quarterly_growth", "share_of_line"}
+                and line["forecast_method"] not in {"quarterly_growth", "year_over_year_growth", "seasonal_factor", "share_of_line"}
             ):
                 raise FinancialStatementStructureError(
                     "day-weighted annual shares require an explicit quarterly forecast method"
@@ -665,6 +775,62 @@ def _normalize_line(
                 "income statement amounts require explicit amount annual semantics"
             )
     return line
+
+
+def _normalize_statement_leaf(
+    line: dict[str, Any], index: int, filed: Mapping[str, Mapping[str, Any]],
+) -> None:
+    """A 0.6 cash-flow or balance-sheet leaf: filed, method-forecast, no formula."""
+
+    cash = line["role"] in CASH_LEAF_ROLES
+    expected = ("cash", "duration", "sum_quarters") if cash else (
+        "balance", "instant", "not_applicable")
+    if (line["statement"], line["period_kind"], line["annual_semantics"]) != expected:
+        raise FinancialStatementStructureError(
+            f"lines[{index}] {line['role']} must be a {expected[0]} {expected[1]} "
+            f"line with {expected[2]} annual semantics"
+        )
+    if line["kind"] != "filed":
+        raise FinancialStatementStructureError(
+            f"lines[{index}] cash-flow and balance-sheet lines must be filed leaves"
+        )
+    allowed = (
+        {"carry_forward_mean", "year_over_year_growth", "seasonal_factor", "share_of_line", "unavailable"} if cash else
+        {"hold_last", "share_of_line", "unavailable"}
+        | ({"roll_forward"} if line["role"] == "cash_and_equivalents" else set())
+    )
+    if line["role"] == "depreciation_amortization":
+        allowed |= {"roll_forward"}
+    if line["forecast_method"] not in allowed:
+        raise FinancialStatementStructureError(
+            f"lines[{index}] {line['role']} cannot use {line['forecast_method']}"
+        )
+    if line["forecast_method"] == "share_of_line" or (line["role"] == "depreciation_amortization" and line["forecast_method"] == "roll_forward"):
+        line["forecast_base_ref"] = _text(
+            line["forecast_base_ref"], f"lines[{index}].forecast_base_ref"
+        )
+    elif line["forecast_base_ref"] is not None:
+        raise FinancialStatementStructureError(
+            "only share_of_line may carry forecast_base_ref"
+        )
+    if line.get("annual_forecast_method") is not None:
+        raise FinancialStatementStructureError(
+            "only diluted weighted-average shares may carry annual_forecast_method"
+        )
+    concept = _text(line["concept"], f"lines[{index}].concept")
+    source = filed.get(concept)
+    if source is None or source.get("status") != "filed":
+        raise FinancialStatementStructureError(
+            f"lines[{index}].concept is not a filed line in this input authority"
+        )
+    if source.get("statement") != line["statement"]:
+        raise FinancialStatementStructureError("filed line statement differs from authority")
+    if source.get("period_basis") != line["period_kind"]:
+        raise FinancialStatementStructureError("filed line period kind differs from authority")
+    units = _units(source)
+    if units != {line["unit"]} or not _is_currency_unit(line["unit"]):
+        raise FinancialStatementStructureError("filed line unit differs or is ambiguous")
+    line["concept"] = concept
 
 
 def _normalize_formula(
@@ -707,8 +873,13 @@ def _normalize_formula(
         schema_version in _TYPED_NOTE_STRUCTURE_VERSIONS
         and operator == "sum"
         and lines[output]["role"] == "diluted_eps_numerator"
-        and note_evidence
-        and any(ref in note_evidence for ref in refs)
+        and (
+            (note_evidence and any(ref in note_evidence for ref in refs))
+            # 0.6: a numerator with no filed total of its own (net income
+            # attributable plus exchangeable-share interest) is proven by the
+            # filed diluted EPS it divides into, period by period.
+            or is_coverage_structure(schema_version)
+        )
     ):
         raise FinancialStatementStructureError(
             "every derived formula must tie to an exact filed concept"
@@ -747,10 +918,11 @@ def _normalize_formula(
         )
         direct_pretax_role = (
             "gross_profit"
-            if schema_version in {DIRECT_GROSS_PRETAX_SCHEMA_VERSION, SCHEMA_VERSION}
+            if schema_version in {DIRECT_GROSS_PRETAX_SCHEMA_VERSION,
+                                  *_REVENUE_PRETAX_VERSIONS}
             else None
         )
-        if schema_version == SCHEMA_VERSION:
+        if schema_version in _REVENUE_PRETAX_VERSIONS:
             direct_pretax_roles = {"gross_profit", "revenue"}
         else:
             direct_pretax_roles = {direct_pretax_role} if direct_pretax_role else set()
@@ -783,14 +955,17 @@ def _normalize_formula(
             )
         if tie is None:
             cited_notes = [ref for ref in refs if ref in (note_evidence or {})]
-            if not cited_notes:
+            if cited_notes:
+                if any(lines[term["line_ref"]]["kind"] != "filed" for term in normalized):
+                    raise FinancialStatementStructureError(
+                        "note-backed diluted EPS numerator terms must be exact filed lines"
+                    )
+            elif not is_coverage_structure(schema_version):
                 raise FinancialStatementStructureError(
                     "untied diluted EPS numerator needs exact typed note evidence"
                 )
-            if any(lines[term["line_ref"]]["kind"] != "filed" for term in normalized):
-                raise FinancialStatementStructureError(
-                    "note-backed diluted EPS numerator terms must be exact filed lines"
-                )
+            # else: 0.6 EPS-proven numerator; the consuming divide must tie
+            # to the filed diluted EPS (checked with the whole structure).
         result["terms"] = normalized
     elif operator == "divide":
         numerator = _text(wire["numerator_ref"], "formula numerator_ref")
@@ -857,6 +1032,67 @@ def _filed_period_facts(
     ]
 
 
+def _rounding_unit(values: Sequence[Decimal]) -> Decimal:
+    for exponent in (6, 5, 4, 3):
+        unit = Decimal(10) ** exponent
+        if all(value % unit == 0 for value in values):
+            return unit
+    return Decimal(1)
+
+
+def presentation_rounding_ties(
+    calculated: Decimal, filed: Decimal, leaf_values: Sequence[Decimal],
+) -> bool:
+    """Whether a sum misses its filed total only by the filed rounding.
+
+    Each of ``n`` presented leaves and the presented total is rounded to the
+    period's presentation unit (the largest of 1e3..1e6 dividing every one of
+    them), so their sum can differ from the total by at most ``(n + 1) / 2``
+    units.  Below a thousand there is no presentation rounding to allow.
+    """
+
+    if calculated == filed:
+        return True
+    unit = _rounding_unit([filed, *leaf_values])
+    if unit < 1000 or not leaf_values:
+        return False
+    return abs(calculated - filed) <= unit * Decimal(len(leaf_values) + 1) / 2
+
+
+def _filed_leaves(output: str, lines: Mapping[str, Mapping[str, Any]],
+                  formulas: Mapping[str, Mapping[str, Any]]) -> list[str]:
+    found: list[str] = []
+
+    def walk(ref: str, trail: frozenset[str]) -> None:
+        if ref in trail:
+            return
+        line = lines.get(ref) or {}
+        formula = formulas.get(ref)
+        if line.get("kind") == "filed" or formula is None:
+            found.append(ref)
+            return
+        if formula.get("operator") != "sum":
+            found.append(ref)
+            return
+        for term in formula.get("terms") or []:
+            walk(str(term["line_ref"]), trail | {ref})
+
+    walk(output, frozenset())
+    return found
+
+
+def _eps_proven(structure: Mapping[str, Any], formula: Mapping[str, Any]) -> bool:
+    """A 0.6 untied numerator proven only through its filed diluted-EPS divide."""
+
+    notes = {item["ref"] for item in structure.get("note_evidence") or []}
+    return (
+        is_coverage_structure(structure.get("schema_version"))
+        and formula.get("operator") == "sum"
+        and formula.get("tie_out_concept") is None
+        and not any(ref in notes for ref in formula.get("evidence_refs") or [])
+    )
+
+
 def _note_backed_eps_replay(
     structure: Mapping[str, Any], filed: Mapping[str, Mapping[str, Any]],
 ) -> list[dict[str, Any]]:
@@ -871,6 +1107,8 @@ def _note_backed_eps_replay(
     seen: set[tuple[str, str, str]] = set()
     for formula in formulas:
         if formula.get("tie_out_concept") is not None:
+            continue
+        if _eps_proven(structure, formula):
             continue
         output = formula["output_ref"]
         if lines[output]["role"] != "diluted_eps_numerator":
@@ -1079,17 +1317,33 @@ def _validate_typed_note_use(
 def _validate_forecast_bases(lines: Sequence[Mapping[str, Any]]) -> None:
     by_ref = {line["ref"]: line for line in lines}
     for line in lines:
-        if line["forecast_method"] != "share_of_line":
+        if line["forecast_method"] not in BASED_FORECAST_METHODS and not (line["forecast_method"] == "roll_forward" and line.get("forecast_base_ref")):
             continue
         base = by_ref.get(line["forecast_base_ref"])
         if base is None or base["ref"] == line["ref"]:
             raise FinancialStatementStructureError(
-                "share_of_line forecast base must name another structure line"
+                f"{line['forecast_method']} forecast base must name another structure line"
             )
-        if (
-            base["unit"] != line["unit"]
-            or base["period_kind"] != line["period_kind"]
-        ):
+        if line["forecast_method"] == "roll_forward":
+            if base["role"] != "depreciable_assets":
+                raise FinancialStatementStructureError("depreciation roll_forward needs its depreciable asset base")
+            continue
+        if line["forecast_method"] == "rate_times_balance":
+            if (
+                base["statement"] != "balance" or base["unit"] != line["unit"]
+                or line["statement"] != "income"
+            ):
+                raise FinancialStatementStructureError(
+                    "rate_times_balance needs an income line and a balance-sheet base "
+                    "in the same currency"
+                )
+            continue
+        # A balance-sheet line may be a ratio of a quarter's revenue (working
+        # capital as a share of revenue); every other ratio keeps its kind.
+        same_kind = base["period_kind"] == line["period_kind"] or (
+            line["statement"] == "balance" and base["period_kind"] == "duration"
+        )
+        if base["unit"] != line["unit"] or not same_kind:
             raise FinancialStatementStructureError(
                 "share_of_line forecast base must use the same unit and period kind"
             )
@@ -1105,9 +1359,13 @@ def _presentation_filed(state: Mapping[str, Any]) -> tuple[dict[str, dict[str, A
     }
     if len(accessions) != len(filings):
         raise FinancialStatementStructureError("company presentation filing authority is ambiguous")
-    rows = (state.get("statements") or {}).get("income") or []
+    statements = state.get("statements") or {}
+    rows = [("income", raw) for raw in (statements.get("income") or [])] + [
+        (name, raw) for name in ("cash", "balance")
+        for raw in (statements.get(name) or [])
+    ]
     filed: dict[str, dict[str, Any]] = {}
-    for raw in rows:
+    for statement, raw in rows:
         if (
             not isinstance(raw, Mapping) or raw.get("is_breakdown")
             or raw.get("dimension_axis")
@@ -1122,7 +1380,7 @@ def _presentation_filed(state: Mapping[str, Any]) -> tuple[dict[str, dict[str, A
             "company presentation period_kind",
         )
         candidate = {
-            "status": "filed", "statement": "income",
+            "status": "filed", "statement": statement,
             "period_basis": period_kind,
             "cells": {accession: {
                 "unit": unit, "value": "1", "period_start": "2000-01-01",
@@ -1131,6 +1389,10 @@ def _presentation_filed(state: Mapping[str, Any]) -> tuple[dict[str, dict[str, A
         }
         previous = filed.get(concept)
         if previous is not None and previous != candidate:
+            if statement != "income":
+                # A cash or balance concept that is ambiguous is simply not
+                # offered as a leaf; the income presentation stays strict.
+                continue
             raise FinancialStatementStructureError(
                 f"company presentation concept {concept} is ambiguous"
             )
@@ -1140,6 +1402,43 @@ def _presentation_filed(state: Mapping[str, Any]) -> tuple[dict[str, dict[str, A
             "company presentation has no consolidated income lines"
         )
     return filed, accessions
+
+
+def _refuse_uncomputable_chain(
+    lines: Sequence[Mapping[str, Any]], formulas: Sequence[Mapping[str, Any]],
+) -> None:
+    """Every formula term must be forecastable, or the proposal is refused.
+
+    A filed earnings or cost total used as a term is tolerated here: the
+    materialized completion replaces it by its tied sum of components once the
+    filed history is bound.  Anything else that blocks a derived line is the
+    drafter's to fix.
+    """
+
+    from .forecast_coverage import TOTAL_COST_CONCEPTS, forecast_computability
+
+    blocked = forecast_computability(lines, formulas)
+    by_ref = {line["ref"]: line for line in lines}
+    repairable = {
+        ref for ref, line in by_ref.items()
+        if line["kind"] == "filed" and (
+            line["role"] in _FORMULA_TOTAL_ROLES
+            or line["role"] == _COMPANY_COMPONENT_ROLE
+            or str(line.get("concept")) in TOTAL_COST_CONCEPTS
+        )
+    }
+    for formula in formulas:
+        output = formula["output_ref"]
+        reason = blocked.get(output)
+        if reason is None:
+            continue
+        leaf = reason.split(" ", 1)[0]
+        if leaf in repairable:
+            continue
+        raise FinancialStatementStructureError(
+            f"formula {output} cannot be forecast: {reason}; give every term a "
+            "forecast method (see forecast_method)"
+        )
 
 
 def validate_structure_proposal(
@@ -1155,6 +1454,16 @@ def validate_structure_proposal(
     schema_version = body["schema_version"]
     if schema_version not in _STRUCTURE_AUTHORITY_REFS:
         raise FinancialStatementStructureError("unsupported structure proposal version")
+    if is_coverage_structure(schema_version) and isinstance(body["lines"], list):
+        # The code completes methods by role as soon as the drafter answers;
+        # the history-dependent repairs run when the filings are bound.
+        from .forecast_coverage import complete_methods_by_role
+
+        body = complete_methods_by_role(body, spec_one_off=[
+            str(item.get("basis_concept")) for item in expense_lines
+            if isinstance(item, Mapping) and item.get("behaviour") == "one_off"
+            and item.get("basis_concept")
+        ])
     raw_lines = body["lines"]
     raw_formulas = body["formulas"]
     if (
@@ -1234,6 +1543,8 @@ def validate_structure_proposal(
         )
     _validate_formula_evidence(formulas, by_ref, filed, set(note_by_ref))
     _validate_typed_note_use(formulas, by_ref, note_by_ref)
+    if is_coverage_structure(schema_version):
+        _refuse_uncomputable_chain(lines, formulas)
     result = {"schema_version": schema_version, "lines": lines, "formulas": formulas}
     if schema_version in _TYPED_NOTE_STRUCTURE_VERSIONS and notes:
         result["note_evidence"] = notes
@@ -1257,6 +1568,7 @@ def replay_historical_structure(
     }
     reports: list[dict[str, Any]] = []
     pending = {formula["output_ref"]: formula for formula in structure["formulas"]}
+    formula_by_output = dict(pending)
     while pending:
         progressed = False
         for output, formula in list(pending.items()):
@@ -1300,7 +1612,8 @@ def replay_historical_structure(
                     - date.fromisoformat(period[0])
                 ).days + 1 <= QUARTER_MAX_DAYS
             }
-            if formula.get("tie_out_concept") is None:
+            if formula.get("tie_out_concept") is None and not _eps_proven(
+                    structure, formula):
                 # An annual note may prove the annual numerator, but it does
                 # not authorize applying that relationship to a quarter.  A
                 # dependent formula can see only independently validated note
@@ -1318,9 +1631,27 @@ def replay_historical_structure(
                 and candidate_quarters == note_quarters
                 and set(calculated) == note_quarters
             )
+            rounded_periods: set[tuple[str | None, str]] = set()
+
             def matches(period: tuple[str | None, str]) -> bool:
                 if formula["operator"] != "divide":
-                    return calculated[period] == tied[period]
+                    if calculated[period] == tied[period]:
+                        return True
+                    if not is_coverage_structure(structure.get("schema_version")):
+                        return False
+                    # 0.6: a company that rounds every presented line (IBM
+                    # files millions) cannot tie its own totals exactly.  The
+                    # bound comes from the filed precision of that period.
+                    leaves = _filed_leaves(output, lines, formula_by_output)
+                    leaf_values = [values[leaf][period] for leaf in leaves
+                                   if period in values.get(leaf, {})]
+                    if len(leaf_values) != len(leaves):
+                        return False
+                    if presentation_rounding_ties(
+                            calculated[period], tied[period], leaf_values):
+                        rounded_periods.add(period)
+                        return True
+                    return False
                 # Filed per-share values are rounded disclosures.  Use the
                 # exponent the company actually filed for that period rather
                 # than inventing one global EPS precision.
@@ -1337,6 +1668,9 @@ def replay_historical_structure(
                 )
             reports.append({
                 "output_ref": output,
+                **({"tie_mode": ("presentation_rounding" if rounded_periods & set(tested)
+                                 else "exact")}
+                   if is_coverage_structure(structure.get("schema_version")) else {}),
                 "status": "validated" if tested or note_validated else "unavailable",
                 "tested_periods": [
                     {"period_start": period[0], "period_end": period[1]}
@@ -1352,8 +1686,40 @@ def replay_historical_structure(
             progressed = True
         if not progressed:
             raise FinancialStatementStructureError("formula graph contains a cycle")
+    for formula in structure["formulas"]:
+        if not _eps_proven(structure, formula):
+            continue
+        output = formula["output_ref"]
+        divides = [
+            item for item in structure["formulas"]
+            if item["operator"] == "divide" and item.get("numerator_ref") == output
+            and item.get("tie_out_concept") is not None
+        ]
+        divide_reports = [item for item in reports
+                          if divides and item["output_ref"] == divides[0]["output_ref"]]
+        proven = (
+            len(divides) == 1 and len(divide_reports) == 1
+            and divide_reports[0]["status"] == "validated"
+            and bool(divide_reports[0]["tested_periods"])
+        )
+        for item in reports:
+            if item["output_ref"] == output:
+                item.update({
+                    "status": "validated" if proven else "unavailable",
+                    "tested_periods": (list(divide_reports[0]["tested_periods"])
+                                       if proven else []),
+                    "reason": (
+                        "proven period by period through the filed diluted EPS tie"
+                        if proven else
+                        "an untied numerator needs one filed diluted EPS divide that ties"
+                    ),
+                })
     forecast_reports: list[dict[str, Any]] = []
     annual_ready = True
+    coverage_reasons = {
+        str(item.get("line_ref")): item.get("reason")
+        for item in (structure.get("coverage") or []) if isinstance(item, Mapping)
+    }
     for ref, line in sorted(lines.items()):
         method = line["forecast_method"]
         if method == "formula":
@@ -1372,7 +1738,8 @@ def replay_historical_structure(
             forecast_reports.append({
                 "line_ref": ref, "method": method, "base_ref": None,
                 "status": "unavailable", "observations": [],
-                "reason": "the company spec selected no forecast basis for this filed line",
+                "reason": coverage_reasons.get(ref) or (
+                    "the company spec selected no forecast basis for this filed line"),
             })
             if structure.get("schema_version") in _ANNUAL_STRUCTURE_VERSIONS:
                 forecast_reports[-1]["annual_method"] = line.get(
@@ -1381,7 +1748,30 @@ def replay_historical_structure(
             continue
         cells = values[ref]
         observations: list[dict[str, Any]] = []
-        if method == "quarterly_growth":
+        if method in {"carry_forward_mean", "hold_last", "roll_forward"}:
+            ordered = sorted(cells.items(), key=lambda item: item[0][1])
+            observations = [
+                {"period_start": period[0], "period_end": period[1], "value": str(value)}
+                for period, value in ordered
+            ][-(1 if method != "carry_forward_mean" else 4):]
+        elif method == "zero_one_off":
+            forecast_reports.append({
+                "line_ref": ref, "method": method, "base_ref": None,
+                "status": "validated", "observations": [],
+                "reason": coverage_reasons.get(ref) or "one-off line forecast at zero",
+            })
+            if structure.get("schema_version") in _ANNUAL_STRUCTURE_VERSIONS:
+                forecast_reports[-1]["annual_method"] = line.get("annual_forecast_method")
+            continue
+        elif method in {"year_over_year_growth", "seasonal_factor"}:
+            from .forecast_seasonality import year_ago
+            by_end = {period[1]: value for period, value in cells.items()}
+            for end, value in sorted(by_end.items()):
+                prior = year_ago(end, by_end)
+                if prior and by_end[prior] != 0:
+                    observations.append({"period_start": prior, "period_end": end,
+                                         "value": str(value / by_end[prior] - 1)})
+        elif method == "quarterly_growth":
             ordered = sorted(cells.items(), key=lambda item: item[0][1])
             for (prior_period, prior), (current_period, current) in zip(
                 ordered, ordered[1:]
@@ -1392,6 +1782,19 @@ def replay_historical_structure(
                         "period_start": prior_period[1],
                         "period_end": current_period[1],
                         "value": str((current - prior) / prior),
+                    })
+        elif is_coverage_structure(structure.get("schema_version")):
+            # Ratios may pair an instant with a duration (a balance as a share
+            # of the quarter's revenue, interest over a balance): match on the
+            # period end.
+            base_ref = line["forecast_base_ref"]
+            base_by_end = {period[1]: value for period, value in values[base_ref].items()}
+            for period in sorted(cells, key=lambda item: item[1]):
+                base = base_by_end.get(period[1])
+                if base is not None and base != 0:
+                    observations.append({
+                        "period_start": period[0], "period_end": period[1],
+                        "value": str(cells[period] / base),
                     })
         else:
             base_ref = line["forecast_base_ref"]
@@ -1427,6 +1830,9 @@ def replay_historical_structure(
                 else {"status": "unavailable", "observations": [],
                       "reason": "annual diluted-share forecast is explicitly unavailable"}
             )
+            if annual_method == "annual_growth_from_filed":
+                from .annual_share_forecast import annual_share_source
+                annual_report = annual_share_source(filed[line["concept"]])
             forecast_reports[-1].update({
                 "annual_status": annual_report["status"],
                 "annual_observations": annual_report["observations"],
@@ -1434,10 +1840,15 @@ def replay_historical_structure(
             })
             if annual_method == "day_weighted_quarters":
                 annual_ready = annual_report["status"] == "validated"
+            elif annual_method == "annual_growth_from_filed":
+                forecast_reports[-1]["annual_forecast_source"] = annual_report
+                annual_ready = annual_report["status"] == "validated"
     result = {
         "schema_version": (
-            "financial-statement-structure-replay-0.5"
-            if structure.get("schema_version") == SCHEMA_VERSION
+            "financial-statement-structure-replay-0.6"
+            if structure.get("schema_version") == COVERAGE_SCHEMA_VERSION
+            else "financial-statement-structure-replay-0.5"
+            if structure.get("schema_version") == REVENUE_PRETAX_SCHEMA_VERSION
             else "financial-statement-structure-replay-0.4"
             if structure.get("schema_version") == DIRECT_GROSS_PRETAX_SCHEMA_VERSION
             else "financial-statement-structure-replay-0.3"
@@ -1455,6 +1866,11 @@ def replay_historical_structure(
     }
     if structure.get("schema_version") in _TYPED_NOTE_STRUCTURE_VERSIONS:
         result["note_formula_periods"] = note_formula_reports
+    if is_coverage_structure(structure.get("schema_version")):
+        from .forecast_coverage import forecast_computability
+
+        result["forecast_computability"] = forecast_computability(
+            structure["lines"], structure["formulas"])
     return result
 
 
@@ -1470,6 +1886,13 @@ def validate_financial_statement_structure(
         "schema_version", "structure_ref", "company_ref", "spec_ref", "spec_hash",
         "financial_input_hash", "lines", "formulas", "created_by",
     }
+    if isinstance(proposal, Mapping) and is_coverage_structure(
+            proposal.get("schema_version")):
+        # The code-written provenance is present on a materialized 0.6
+        # structure; a hand-built one without it describes itself as drafted.
+        if not any(name in proposal for name in _COVERAGE_STRUCTURE_FIELDS):
+            proposal = {**dict(proposal), "auto_repairs": [], "coverage": None}
+        fields = fields | _COVERAGE_STRUCTURE_FIELDS
     body = _closed(proposal, fields, "financial statement structure")
     authority = financial_input_authority(financial_inputs)
     spec_authority = _spec_authority(company_spec)
@@ -1563,29 +1986,85 @@ def validate_financial_statement_structure(
         "note_evidence": notes,
         "created_by": actor,
     }
+    if is_coverage_structure(schema_version):
+        normalized["auto_repairs"] = _coverage_list(
+            body["auto_repairs"], "auto_repairs",
+            {"kind", "line_ref", "detail", "tie_out_concept"})
+        normalized["coverage"] = _coverage_list(
+            body["coverage"] if body["coverage"] is not None else [
+                {"line_ref": line["ref"], "statement": line["statement"],
+                 "method": line["forecast_method"], "history_quarters": None,
+                 "source": "drafted", "reason": None}
+                for line in lines
+            ], "coverage",
+            {"line_ref", "statement", "method", "history_quarters", "source", "reason"})
+        if [item["line_ref"] for item in normalized["coverage"]] != [
+                line["ref"] for line in lines]:
+            raise FinancialStatementStructureError(
+                "structure coverage must describe every line in order")
     normalized["content_hash"] = content_hash(normalized)
     replay = replay_historical_structure(normalized, financial_inputs)
     return normalized, replay
+
+
+def _coverage_list(value: Any, name: str, fields: set[str]) -> list[dict[str, Any]]:
+    if not isinstance(value, list):
+        raise FinancialStatementStructureError(f"structure {name} must be a list")
+    return [_closed(item, fields, f"{name}[{index}]") for index, item in enumerate(value)]
 
 
 def materialize_financial_statement_structure(
     company_spec: Mapping[str, Any], financial_inputs: Mapping[str, Any], *,
     note_evidence: Sequence[Mapping[str, Any]] = (),
     note_evidence_resolver: Callable[[str], Mapping[str, Any] | None] | None = None,
+    complete: bool = True,
 ) -> tuple[dict[str, Any], dict[str, Any]]:
-    """Bind a persisted spec definition to the current filed financial inputs."""
+    """Bind a persisted spec definition to the current filed financial inputs.
+
+    A 0.3-0.6 definition is first completed and repaired by
+    ``forecast_coverage`` (structure 0.6).  The persisted spec definition is
+    unchanged; the bound structure is the completed form, so a new coverage
+    rule reaches every company without a re-drafted spec.  Should the
+    completed form ever fail validation, the drafted definition is bound as
+    before -- the completion may add coverage, never remove a working model.
+    """
 
     definition = company_spec.get("financial_statement_structure")
     if not isinstance(definition, Mapping):
         raise FinancialStatementStructureError(
             "company spec has no financial statement structure definition"
         )
-    authority = financial_input_authority(financial_inputs)
-    schema_version = definition.get("schema_version")
-    if schema_version not in _STRUCTURE_AUTHORITY_REFS:
+    if definition.get("schema_version") not in _STRUCTURE_AUTHORITY_REFS:
         raise FinancialStatementStructureError(
             "company spec has an unsupported statement structure definition"
         )
+    from .forecast_coverage import (
+        UPGRADEABLE_STRUCTURE_VERSIONS, complete_structure_definition,
+    )
+
+    if complete and definition.get("schema_version") in UPGRADEABLE_STRUCTURE_VERSIONS:
+        try:
+            completed = complete_structure_definition(
+                definition, company_spec=company_spec, financial_inputs=financial_inputs)
+            return _materialize_definition(
+                company_spec, financial_inputs, definition, completed,
+                note_evidence=note_evidence, note_evidence_resolver=note_evidence_resolver)
+        except (FinancialStatementStructureError, ValueError, KeyError, TypeError,
+                ArithmeticError):
+            pass
+    return _materialize_definition(
+        company_spec, financial_inputs, definition, None,
+        note_evidence=note_evidence, note_evidence_resolver=note_evidence_resolver)
+
+
+def _materialize_definition(
+    company_spec: Mapping[str, Any], financial_inputs: Mapping[str, Any],
+    definition: Mapping[str, Any], completed: Mapping[str, Any] | None, *,
+    note_evidence: Sequence[Mapping[str, Any]],
+    note_evidence_resolver: Callable[[str], Mapping[str, Any] | None] | None,
+) -> tuple[dict[str, Any], dict[str, Any]]:
+    authority = financial_input_authority(financial_inputs)
+    schema_version = (completed or definition).get("schema_version")
     effective_note_evidence = list(note_evidence)
     if schema_version in _TYPED_NOTE_STRUCTURE_VERSIONS:
         held_notes = definition.get("note_evidence")
@@ -1614,10 +2093,13 @@ def materialize_financial_statement_structure(
         "spec_ref": company_spec.get("spec_id"),
         "spec_hash": company_spec.get("content_hash"),
         "financial_input_hash": authority["content_hash"],
-        "lines": definition.get("lines"),
-        "formulas": definition.get("formulas"),
+        "lines": (completed or definition).get("lines"),
+        "formulas": (completed or definition).get("formulas"),
         "created_by": company_spec.get("decided_by"),
     }
+    if completed is not None:
+        proposal["auto_repairs"] = completed["auto_repairs"]
+        proposal["coverage"] = completed["coverage"]
     return validate_financial_statement_structure(
         proposal, company_spec, financial_inputs,
         note_evidence=effective_note_evidence,
@@ -1936,8 +2418,10 @@ def forecast_structure_binding(
         raise FinancialStatementStructureError("statement structure is not ready for forecast")
     projection = {
         "schema_version": (
-            "forecast-statement-structure-binding-0.5"
-            if structure.get("schema_version") == SCHEMA_VERSION
+            "forecast-statement-structure-binding-0.6"
+            if structure.get("schema_version") == COVERAGE_SCHEMA_VERSION
+            else "forecast-statement-structure-binding-0.5"
+            if structure.get("schema_version") == REVENUE_PRETAX_SCHEMA_VERSION
             else "forecast-statement-structure-binding-0.4"
             if structure.get("schema_version") == DIRECT_GROSS_PRETAX_SCHEMA_VERSION
             else "forecast-statement-structure-binding-0.3"

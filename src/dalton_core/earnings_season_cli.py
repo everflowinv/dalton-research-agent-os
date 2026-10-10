@@ -33,7 +33,7 @@ import sys
 import tempfile
 from datetime import datetime, timezone
 from pathlib import Path
-from typing import Any
+from typing import Any, Mapping
 
 from .cockpit_model import CockpitModel
 from .call_budget import default_call_budget, resolve_call_budget
@@ -182,9 +182,11 @@ def earnings_window_input_fingerprint(
 
     from .model_forecast_driver import ForecastModelAuthority
     from .research_event import ResearchEventAuthority
+    from .forecast_reconciliation import ForecastReconciliationAuthority
 
     company_ref = str(occurrence["company_ref"])
     forecast = ForecastModelAuthority(store).latest(company_ref)
+    consensus_reader = consensus_reader_for(store)
     payload: dict[str, Any] = {
         "schema_version": "0.1", "occurrence": dict(occurrence),
         "mission": {"ref": mission["id"], "hash": mission["content_hash"]},
@@ -192,7 +194,7 @@ def earnings_window_input_fingerprint(
         "theses": company_theses(store.connection, company_ref),
         "claims": recent_claims(store.connection, company_ref),
         "guidance_profile": guidance_profile_for(store, company_ref),
-        "consensus": consensus_reader_for(store)(company_ref),
+        "consensus": consensus_reader(company_ref) if consensus_reader else None,
     }
     if occurrence["window"] == "preview":
         payload["debates"] = open_debates_for(store, company_ref)
@@ -200,7 +202,8 @@ def earnings_window_input_fingerprint(
         events = ResearchEventAuthority(store)
         payload.update({
             "input_table": input_table_for(missions, company_ref),
-            "reconciliations": reconcile_for(store, mission, company_ref),
+            "reconciliations": ForecastReconciliationAuthority.read_existing(
+                store.connection, company_ref=company_ref),
             "market_view": market_view_rows(events.events(company_ref=company_ref, limit=40)),
             "source_keys": _source_keys(policy_path),
         })
@@ -294,9 +297,20 @@ def consensus_reader_for(store: DaltonStore) -> Any:
         from .consensus_estimate import latest_consensus  # type: ignore[attr-defined]
     except ImportError:
         return None
+    try:
+        from .consensus_estimate import period_consensus
+    except ImportError:  # pragma: no cover - an older consensus module
+        period_consensus = None
 
     def read(company_ref: str) -> Any:
-        return latest_consensus(store, company_ref)
+        found = latest_consensus(store, company_ref)
+        # Batch B: the per-period street rows ``consensus_block`` reads
+        # (``estimates``), on the re-derived fiscal calendar, so a preview of
+        # FY2027Q1 finds the FY2027Q1 consensus instead of "no consensus".
+        estimates = period_consensus(store, company_ref) if period_consensus else []
+        if not found and not estimates:
+            return found
+        return {**(found or {}), "estimates": estimates}
 
     return read
 
@@ -714,6 +728,21 @@ def _one_window(
             "actualisation": actualisation.get("status"),
             "waits_until_days": CALIBRATION_DEADLINE_DAYS,
         })
+        # ADR-0015: the release's own numbers may already be here.  They are
+        # said, not calibrated against: the calibration is written once, on
+        # the filed quarter, and the window stays open until it lands.
+        try:
+            from .earnings_release_intake import latest_preliminary
+
+            preliminary = latest_preliminary(store.connection, company_ref)
+        except Exception:  # noqa: BLE001 - informational only
+            preliminary = None
+        if preliminary is not None and preliminary["status"] == "preliminary":
+            result["preliminary"] = {
+                "period": preliminary["period"], "accession": preliminary["accession"],
+                "rows": len(preliminary["rows"]),
+                "note": "业绩稿初步数已到；校准等 10-Q/10-K 申报数落地后写",
+            }
         return result
     try:
         context = build_calibration_context(

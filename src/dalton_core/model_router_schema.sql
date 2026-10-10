@@ -362,3 +362,29 @@ CREATE TRIGGER IF NOT EXISTS model_profile_cooldown_no_delete
 BEFORE DELETE ON model_profile_cooldowns BEGIN
     SELECT RAISE(ABORT, 'model profile cooldowns are append-only');
 END;
+
+-- Exact purpose/configuration compatibility; never global provider health.
+CREATE TABLE IF NOT EXISTS model_output_contract_holds (
+    hold_id TEXT PRIMARY KEY,
+    scope_hash TEXT NOT NULL,
+    profile_version_ref TEXT NOT NULL REFERENCES model_endpoint_profile_versions(profile_version_ref),
+    route_ref TEXT NOT NULL REFERENCES model_route_decisions(decision_id),
+    observed_at TEXT NOT NULL,
+    until TEXT NOT NULL,
+    content_hash TEXT NOT NULL UNIQUE,
+    record_json TEXT NOT NULL
+);
+CREATE INDEX IF NOT EXISTS model_output_contract_holds_by_scope
+    ON model_output_contract_holds(scope_hash, until);
+CREATE TRIGGER IF NOT EXISTS model_output_contract_hold_insert_authorized
+BEFORE INSERT ON model_output_contract_holds WHEN dalton_model_router_authorized() != 1 BEGIN
+    SELECT RAISE(ABORT, 'output contract holds require ModelRouter');
+END;
+CREATE TRIGGER IF NOT EXISTS model_output_contract_hold_no_update
+BEFORE UPDATE ON model_output_contract_holds BEGIN
+    SELECT RAISE(ABORT, 'output contract holds are immutable');
+END;
+CREATE TRIGGER IF NOT EXISTS model_output_contract_hold_no_delete
+BEFORE DELETE ON model_output_contract_holds BEGIN
+    SELECT RAISE(ABORT, 'output contract holds are append-only');
+END;

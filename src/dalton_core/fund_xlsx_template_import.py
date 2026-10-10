@@ -56,9 +56,25 @@ def _source_bytes(path: Path) -> bytes:
     held = path.lstat()
     _need(stat.S_ISREG(held.st_mode) and held.st_size <= MAX_ARCHIVE_BYTES,
           "source workbook is unavailable or too large")
-    data = path.read_bytes()
-    _need(path.lstat() == held, "source workbook changed while read")
-    return data
+    def identity(info: os.stat_result) -> tuple[int, ...]:
+        # Reading may update atime itself. Content/identity changes must still
+        # be caught, including a same-size write whose mtime was restored.
+        return (info.st_dev, info.st_ino, info.st_mode, info.st_size,
+                info.st_mtime_ns, info.st_ctime_ns)
+
+    try:
+        fd = os.open(path, os.O_RDONLY | os.O_NOFOLLOW | getattr(os, "O_CLOEXEC", 0))
+        with os.fdopen(fd, "rb") as source:
+            _need(identity(os.fstat(source.fileno())) == identity(held),
+                  "source workbook changed while read")
+            data = source.read(MAX_ARCHIVE_BYTES + 1)
+            _need(len(data) == held.st_size
+                  and identity(os.fstat(source.fileno())) == identity(held)
+                  and identity(path.lstat()) == identity(held)
+                  and path == path.resolve(), "source workbook changed while read")
+            return data
+    except OSError as exc:
+        raise FundXlsxTemplateImportError("source workbook changed while read") from exc
 
 
 def _safe_archive(data: bytes) -> str:

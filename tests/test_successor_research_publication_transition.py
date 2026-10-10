@@ -43,8 +43,8 @@ class ResearchPublicationTransitionTest(unittest.TestCase):
                      "work_dir": str(self.state / "research-publication-work"),
                      "output_directory": str(self.state / "research-localization"), "workers": 4,
                      "chunk_chars": 4500, "max_cost_per_call": 1.0, "draft_attempts": 2,
-                     "publication_gate": {"release_pointer": "/Users/everflow/Projects/dalton-owner-activation-20260910/current-release.json",
-                     "runtime_pointer": "/Users/everflow/Projects/dalton-owner-activation-20260910/current-runtime-config.json",
+                     "publication_gate": {"release_pointer": str(Path.home() / "Projects/dalton-owner-activation-20260910/current-release.json"),
+                     "runtime_pointer": str(Path.home() / "Projects/dalton-owner-activation-20260910/current-runtime-config.json"),
                      "expected_release_ref": "foundation-r25", "expected_source_commit": "e" * 40}},
                      sort_keys=True).encode() if name == "research-publication-worker-config.json"
                      else (name + "\n").encode()))
@@ -78,7 +78,7 @@ class ResearchPublicationTransitionTest(unittest.TestCase):
         # release.  Everywhere else the case is inert, not broken.
         runtime_root = Path(os.environ.get(
             "DALTON_ACCEPTED_RUNTIME_SOURCE_ROOT",
-            "/Users/everflow/Projects/dalton-foundation-r25-final-v11-worktree"))
+            str(Path.home() / "Projects/dalton-foundation-r25-final-v11-worktree")))
         if not (runtime_root / "src/dalton_core/research_output_preparation.py").is_file():
             self.skipTest(
                 "accepted runtime source root is absent; point "

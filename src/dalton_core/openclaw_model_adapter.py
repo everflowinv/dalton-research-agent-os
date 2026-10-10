@@ -14,6 +14,7 @@ authority to adjudicate.
 from __future__ import annotations
 
 import hashlib
+import copy
 import hmac
 import json
 import math
@@ -38,6 +39,7 @@ from .contracts import (
     ResultEnvelope,
     WorkOrder,
 )
+from .call_budget import CallBudgetError, THINKING_LEVELS, resolve_thinking_level
 from .model_router import (
     ModelRouterValidationError,
     _profile_wire,
@@ -70,6 +72,21 @@ ProviderControlMode = Literal[
     "calibration-posthoc-v1",
 ]
 _VERIFIER_PROVIDER_CONTRACTS = {
+    "mission-document-numeric-verifier-provider-output-0.1": (
+        "0.1", "mission-document-numeric-verifier-provider-output-v0.1.schema.json",
+        "mission_document_numeric_verifier_provider_output_v0_1",
+        frozenset({"mission_directed_document_verifier"}),
+    ),
+    "street-estimate-verifier-provider-output-0.1": (
+        "0.1", "street-estimate-verifier-provider-output-v0.1.schema.json",
+        "street_estimate_verifier_provider_output_v0_1",
+        frozenset({"street_estimate_verifier"}),
+    ),
+    "initial-screen-verifier-provider-output-0.1": (
+        "0.1", "initial-screen-verifier-provider-output-v0.1.schema.json",
+        "initial_screen_verifier_provider_output_v0_1",
+        frozenset({"initial_screen_verifier"}),
+    ),
     "annual-report-verifier-provider-output-0.1": (
         "0.1",
         "annual-report-verifier-provider-output-v0.1.schema.json",
@@ -78,6 +95,15 @@ _VERIFIER_PROVIDER_CONTRACTS = {
             "registered_annual_report_verifier",
             "mission_directed_document_verifier",
         }),
+    ),
+    # 2026-09-30: the directed-document verifier's own contract -- a verdict
+    # and a reference to the one candidate, never a copy of the statement.
+    # Stored 0.1 verifier Work keeps the annual-report contract above.
+    "mission-document-verifier-provider-output-0.2": (
+        "0.2",
+        "mission-document-verifier-provider-output-v0.2.schema.json",
+        "mission_document_verifier_provider_output_v0_2",
+        frozenset({"mission_directed_document_verifier"}),
     ),
     "dossier-verifier-provider-output-0.1": (
         "0.1",
@@ -126,6 +152,14 @@ _VERIFIER_PROVIDER_CONTRACTS = {
         "0.1",
         "conviction-call-verifier-provider-output-v0.1.schema.json",
         "conviction_call_verifier_provider_output_v0_1",
+        frozenset({"conviction_call_verifier"}),
+    ),
+    # ADR-0013: Conviction v2's verifier codes beside v1's.  Stored 0.1 work
+    # keeps the contract above.
+    "conviction-call-verifier-provider-output-0.2": (
+        "0.2",
+        "conviction-call-verifier-provider-output-v0.2.schema.json",
+        "conviction_call_verifier_provider_output_v0_2",
         frozenset({"conviction_call_verifier"}),
     ),
     "research-localization-verifier-provider-output-0.1": (
@@ -226,6 +260,18 @@ class BrokerConnectionError(OpenClawModelAdapterError):
 
 class BrokerDefinitelyNotSent(BrokerConnectionError):
     """The broker request was proven not to have reached ``sendall``."""
+
+
+class LocalAdmissionBusy(BrokerDefinitelyNotSent):
+    """A local ledger the call must be admitted in was busy; nothing was sent.
+
+    Raised from a ``before_send`` hook, which runs before the request frame is
+    written, so it is a proved no-send exactly like a socket that would not
+    connect -- and as transient: the same call admitted a minute later goes
+    through.  Live legacy 2026-10-06 01:14Z: the shared day-budget ledger was
+    write-locked past its 30 s busy timeout twice in a row, the draft was
+    recorded as MODEL_ADAPTER_REJECTED and its admission held for a person.
+    """
 
 
 class BrokerTimeout(BrokerConnectionError):
@@ -467,7 +513,7 @@ def _validate_route(
             "content_hash",
         }
     )
-    if not isinstance(route, Mapping) or set(route) != set(keys):
+    if not isinstance(route, Mapping) or set(route) - {"thinking_level"} != set(keys):
         raise ModelAdmissionError("route decision has an unexpected shape")
     wire = dict(route)
     if wire["schema_version"] != PROTOCOL_VERSION or wire["outcome"] != "selected":
@@ -678,6 +724,7 @@ def _required_provider_controls(
     route: Mapping[str, Any],
     max_output_tokens: int,
     provider_control_mode: ProviderControlMode,
+    provider_cost_admission: Mapping[str, Any] | None = None,
 ) -> dict[str, Any] | None:
     """Bind independent verification to controls the current host must prove.
 
@@ -772,6 +819,11 @@ def _required_provider_controls(
             "WorkOrder total token budget is smaller than required input plus output controls"
         )
     max_cost_usd = float(work.budget["max_cost_usd"])
+    if provider_cost_admission is not None:
+        if provider_cost_admission["work_order_ref"] != work.id:
+            raise ModelAdmissionError("provider cost admission belongs to another WorkOrder")
+        max_cost_usd = min(max_cost_usd,
+            float(Decimal(provider_cost_admission["reserved_micros"]) / Decimal(1_000_000)))
     controls: dict[str, Any] = {
         "maxInputTokens": max_input_tokens,
         "maxOutputTokens": max_output_tokens,
@@ -783,14 +835,25 @@ def _required_provider_controls(
             "jsonSchema": dict(schema),
         },
     }
-    thinking_level = work.metadata.get("verifier_thinking_level")
-    if thinking_level is not None:
-        if thinking_level not in VERIFIER_THINKING_LEVELS:
-            raise ModelAdmissionError(
-                "verifier WorkOrder freezes an unsupported thinking level"
-            )
-        controls["thinkingLevel"] = thinking_level
+    controls["thinkingLevel"] = _thinking_level(work, route)
     return controls
+
+
+def _thinking_level(work: WorkOrder, route: Mapping[str, Any]) -> str:
+    generic = work.metadata.get("thinking_level")
+    verification = work.metadata.get("verifier_thinking_level")
+    if generic is not None and verification is not None and generic != verification:
+        raise ModelAdmissionError("general and verifier thinking controls conflict")
+    requested = generic if generic is not None else verification
+    if requested is not None and route.get("thinking_level") is not None and requested != route["thinking_level"]:
+        raise ModelAdmissionError("WorkOrder and route thinking controls conflict")
+    if requested is None:
+        requested = route.get("thinking_level")
+    try:
+        return resolve_thinking_level(work.metadata.get("purpose"), requested=requested,
+                                      verifier=route["constraints"]["producer_family"] is not None)
+    except CallBudgetError as exc:
+        raise ModelAdmissionError(str(exc)) from exc
 
 
 def _remaining_timeout(
@@ -826,6 +889,7 @@ class OpenClawModelAdapter:
         max_frame_bytes: int = DEFAULT_BROKER_MAX_FRAME_BYTES,
         expected_agent_id: str = BROKER_AGENT_ID,
         provider_control_mode: ProviderControlMode = PROVIDER_CONTROL_MODE_REQUIRED,
+        provider_cost_admission: Mapping[str, Any] | None = None,
         clock: Callable[[], datetime] | None = None,
         monotonic: Callable[[], float] | None = None,
     ) -> None:
@@ -874,6 +938,19 @@ class OpenClawModelAdapter:
             PROVIDER_CONTROL_MODE_CALIBRATION_POSTHOC,
         }:
             raise ValueError("provider_control_mode is unsupported")
+        if provider_cost_admission is not None:
+            fields = {"admission_id", "work_order_ref", "reserved_micros", "content_hash"}
+            if (not isinstance(provider_cost_admission, Mapping)
+                    or set(provider_cost_admission) != fields
+                    or not isinstance(provider_cost_admission["admission_id"], str)
+                    or not provider_cost_admission["admission_id"].startswith("thesis-impact-admission:")
+                    or not isinstance(provider_cost_admission["work_order_ref"], str)
+                    or not _WORK_ID_RE.fullmatch(provider_cost_admission["work_order_ref"])
+                    or type(provider_cost_admission["reserved_micros"]) is not int
+                    or provider_cost_admission["reserved_micros"] <= 0
+                    or not isinstance(provider_cost_admission["content_hash"], str)
+                    or not re.fullmatch(r"[a-f0-9]{64}", provider_cost_admission["content_hash"])):
+                raise ValueError("provider cost admission is not an exact positive day-ledger binding")
         self._socket_path = path
         self._timeout_seconds = float(timeout_seconds)
         self._queue_wait_seconds = float(queue_wait_seconds)
@@ -883,8 +960,22 @@ class OpenClawModelAdapter:
         self._auth_client_id = auth_client_id
         self._auth_key_provider = auth_key_provider
         self._provider_control_mode = provider_control_mode
+        self._provider_cost_admission = (dict(provider_cost_admission)
+                                         if provider_cost_admission is not None else None)
         self._clock = clock or (lambda: datetime.now(timezone.utc))
         self._monotonic = monotonic or time.monotonic
+
+    def with_provider_cost_admission(self, admission: Mapping[str, Any]) -> OpenClawModelAdapter:
+        """A request-local binding, including for trusted injected real adapters."""
+        # Reuse constructor validation without mutating a possibly shared
+        # adapter or its transport/auth configuration.
+        validated = OpenClawModelAdapter(
+            self._socket_path, route_resolver=self._route_resolver,
+            auth_client_id=self._auth_client_id, auth_key_provider=self._auth_key_provider,
+            provider_cost_admission=admission)
+        local = copy.copy(self)
+        local._provider_cost_admission = validated._provider_cost_admission
+        return local
 
     def _resolve_authoritative_route(
         self, supplied: Mapping[str, Any]
@@ -1281,6 +1372,7 @@ class OpenClawModelAdapter:
         }
         usage_ref = f"usage:{invocation_id}"
         usage = {
+            "thinking_level": request["controls"]["thinkingLevel"],
             "input_tokens": None,
             "output_tokens": None,
             "cache_read_tokens": None,
@@ -1344,6 +1436,7 @@ class OpenClawModelAdapter:
             },
             metadata={
                 "route_decision_ref": route["id"],
+                "thinking_level": request["controls"]["thinkingLevel"],
                 "profile_version_ref": profile["profile_version_ref"],
                 "broker_request_mode": "execute",
                 "dispatch_proof": {
@@ -1352,6 +1445,9 @@ class OpenClawModelAdapter:
                     "version": "0.1",
                 },
                 "post_send_unknown": proof,
+                **({"provider_cost_admission": self._provider_cost_admission}
+                   if request.get("requiredControls") is not None
+                   and self._provider_cost_admission is not None else {}),
             },
         )
         return invocation, result
@@ -1457,11 +1553,17 @@ class OpenClawModelAdapter:
             route,
             max_tokens,
             self._provider_control_mode,
+            self._provider_cost_admission,
         )
+        if required_controls is not None:
+            required_controls["maxCostUsd"] = min(
+                required_controls["maxCostUsd"], float(profile["limits"]["max_cost_usd"]))
+        thinking_level = _thinking_level(work, route)
         invocation_identity = {
             "route_decision_ref": route["id"],
             "work_order_ref": work.id,
             "profile_version_ref": profile["profile_version_ref"],
+            "thinking_level": thinking_level,
         }
         workspace = None
         workspace_manifest = os.environ.get("DALTON_WORKSPACE_MANIFEST")
@@ -1472,10 +1574,22 @@ class OpenClawModelAdapter:
             except WorkspaceError as exc:
                 raise ModelAdmissionError("workspace manifest is invalid") from exc
             invocation_identity["workspace_id"] = workspace.workspace_id
+            if not replay_only:
+                # 2026-10-06 (vision-gap #11): belt to the day ledger's braces.
+                # A workspace-bound process knows its Core, so the owner's
+                # emergency stop is refused here too, before anything is sent.
+                from .owner_levers import emergency_refusal_for_state_dir
+
+                refusal = emergency_refusal_for_state_dir(workspace.state_dir)
+                if refusal is not None:
+                    raise ModelAdmissionError(refusal)
         if required_controls is not None:
             invocation_identity["required_provider_controls_hash"] = _dalton_hash(
                 required_controls
             )
+            if self._provider_cost_admission is not None:
+                invocation_identity["provider_cost_admission_hash"] = _dalton_hash(
+                    self._provider_cost_admission)
         if route["constraints"]["producer_family"] is not None:
             invocation_identity["provider_control_mode"] = self._provider_control_mode
         invocation_id = "invocation:" + _dalton_hash(invocation_identity)[:32]
@@ -1488,12 +1602,13 @@ class OpenClawModelAdapter:
             "prompt": work.question,
             "maxTokens": max_tokens,
             "timeoutMs": max(1, int(timeout * 1000)),
+            "controls": {"thinkingLevel": thinking_level},
         }
         if self._queue_wait_seconds:
             core_request["queueWaitMs"] = int(self._queue_wait_seconds * 1000)
         if required_controls is not None:
             core_request["requiredControls"] = required_controls
-        expected_core_keys = set(_CORE_REQUEST_KEYS) | (
+        expected_core_keys = set(_CORE_REQUEST_KEYS) | {"controls"} | (
             {"requiredControls"} if required_controls is not None else set()
         )
         if self._queue_wait_seconds:
@@ -1504,7 +1619,7 @@ class OpenClawModelAdapter:
         request = self._authenticate_request(
             core_request, timestamp_ms, replay_only=replay_only
         )
-        expected_request_keys = set(_REQUEST_KEYS)
+        expected_request_keys = set(_REQUEST_KEYS) | {"controls"}
         if replay_only:
             expected_request_keys.add("replayOnly")
         if required_controls is not None:
@@ -1636,6 +1751,9 @@ class OpenClawModelAdapter:
         budget_error: BrokerBudgetExceeded | None = None
         try:
             self._assert_budget(usage, cost, work, profile, max_tokens)
+            if (required_controls is not None and cost["available"]
+                    and Decimal(str(cost["usd"])) > Decimal(str(required_controls["maxCostUsd"]))):
+                raise BrokerBudgetExceeded("provider cost telemetry exceeds admitted provider-control reservation")
         except BrokerBudgetExceeded as exc:
             budget_error = exc
         completed_at = _timestamp(self._clock())
@@ -1650,6 +1768,7 @@ class OpenClawModelAdapter:
         )
         all_unknown = all(value is None for value in usage.values()) and not cost["available"]
         invocation_usage = {
+            "thinking_level": thinking_level,
             "input_tokens": usage["inputTokens"],
             "output_tokens": usage["outputTokens"],
             "cache_read_tokens": usage["cacheReadTokens"],
@@ -1693,6 +1812,7 @@ class OpenClawModelAdapter:
             environment_hash=environment_hash,
         )
         common_metadata = {
+            "thinking_level": thinking_level,
             "route_decision_ref": route["id"],
             "profile_version_ref": profile["profile_version_ref"],
             "broker_version": response["brokerVersion"],
@@ -1711,6 +1831,10 @@ class OpenClawModelAdapter:
                 if required_controls is not None
                 else None
             ),
+            **({"provider_cost_admission": self._provider_cost_admission,
+                "provider_control_max_cost_usd": required_controls["maxCostUsd"]}
+               if required_controls is not None
+               and self._provider_cost_admission is not None else {}),
         }
         if budget_error is not None:
             outputs = {}
@@ -1760,6 +1884,7 @@ __all__ = [
     "BrokerProtocolError",
     "BrokerConnectionError",
     "BrokerDefinitelyNotSent",
+    "LocalAdmissionBusy",
     "BrokerTimeout",
     "BrokerFrameTooLarge",
     "BrokerRequestFrameTooLarge",
@@ -1769,5 +1894,6 @@ __all__ = [
     "PROVIDER_CONTROL_MODE_REQUIRED",
     "PROVIDER_CONTROL_MODE_CALIBRATION_POSTHOC",
     "VERIFIER_THINKING_LEVELS",
+    "THINKING_LEVELS",
     "owner_only_secret_file_provider",
 ]

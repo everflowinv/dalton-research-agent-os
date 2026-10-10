@@ -159,7 +159,11 @@ UNATTRIBUTED_REASON = (
 # 2026-09-24: subject relationship, absolute periods against the document
 # date, a verbatim excerpt that narrows the citation, sentence-aligned quotes.
 # 2026-09-24b: restate only; no inference beyond the cited sentences.
-PROMPT_CONTRACT_REF = "document-reading-foundation:2026-09-24b"
+# 2026-09-29: risk-factor hedging, forward-looking-statement text and
+# accounting-policy description are not findings (EPAM's 10-K went in as 79
+# Claims, most of them exactly that), and a filing's period is its period of
+# report, not the day it was fetched.
+PROMPT_CONTRACT_REF = "document-reading-foundation:2026-09-29"
 TASK_HASH = content_hash({"task": TASK_REF, "prompt_contract": PROMPT_CONTRACT_REF,
                           "output": OUTPUT_SCHEMA, "window_chars": WINDOW_CHARS,
                           "quote_chars": QUOTE_CHARS, "quote_slicing": QUOTE_SLICING_REF,
@@ -450,7 +454,7 @@ def acquisition_spool(writer, launcher, source_ref):
     """The spool this source's acquisition child put the document bytes in."""
 
     writer_spool = writer._transcript_spool
-    if source_ref not in FEED_SOURCE_REFS and source_ref != GUIDEPOINT_SOURCE_REF:
+    if source_ref not in FEED_SOURCE_REFS and source_ref not in FETCHED_SOURCE_REFS and source_ref != GUIDEPOINT_SOURCE_REF:
         return writer_spool
     from .raw_spool import RawSpoolError, RawSpoolReader
 
@@ -502,6 +506,30 @@ def verified_original(writer, review, row, limits, receipt_reader):
     source_ref = review["source_ref"]
     document_ref = review["document_ref"]
     launcher = acquisition_ticket_reader(writer, source_ref)
+    if source_ref == SEC_EDGAR_SOURCE_REF and document_ref.startswith('sec:exhibit:'):
+        from .sec_annual_report_exhibit import verified_exhibit_source, AnnualReportExhibitConflict
+        accession=document_ref.split(':',3)[2]
+        parent_ref='sec:filing:'+accession
+        parent=writer.store.connection.execute(
+            'SELECT * FROM coverage_mission_discovered_documents WHERE document_ref=? AND ticket_ref=? '
+            'AND company_ref=? AND mission_version_ref=? AND source_ref=? AND status=\'acquired\'',
+            (parent_ref,row['ticket_ref'],review['company_ref'],review['mission_version_ref'],source_ref)).fetchone()
+        if parent is None:
+            raise ResearchVerificationConflict('annual report attachment has no acquired parent in this review scope')
+        try:
+            exact=verified_exhibit_source(writer.store,acquisition_spool(writer,launcher,source_ref),writer.state_dir,
+                ticket_ref=row['ticket_ref'],parent_document_ref=parent_ref,company_ref=review['company_ref'],
+                receipt_reader=receipt_reader,max_source_chars=limits['max_document_chars'],
+                max_pdf_pages=limits['max_pdf_pages'],max_decompressed_bytes=limits['max_decompressed_bytes'])
+        except AnnualReportExhibitConflict as exc:
+            raise ResearchVerificationConflict(str(exc)) from exc
+        if exact is None or exact['document_ref']!=document_ref:
+            raise ResearchVerificationConflict('annual report attachment source identity differs')
+        manifest=exact['manifest'];rendering=exact['rendering'];text=rendering['text']
+        return manifest,text,_hash_text(text),{'canonical_url':manifest['canonical_url'],'host':manifest['host'],
+            'raw_media_type':manifest['raw_media_type'],'body_sha256':manifest['body_sha256'],
+            'source_renderer':rendering['renderer'],'source_truncated':False,
+            'annual_report_attachment':exact['binding']}
     manifest = completed_acquisition_manifest(
         launcher, ticket_ref=row["ticket_ref"], document_ref=document_ref)
     store = writer.store
@@ -580,6 +608,26 @@ _BOILERPLATE_RE = re.compile(
     r"receive back less than|conflicts? of interest|regulatory disclosures?",
     re.IGNORECASE,
 )
+
+
+def issuer_context_fact(attribution: Mapping[str, Any]) -> str:
+    """One line of document metadata for the support check: whose passage this is.
+
+    Only for a statement about financials the issuer-attribution rule could
+    not decide (``claim_issuer_attribution``, verdict ``ambiguous``).
+    """
+
+    named = attribution.get("named_locally") or {}
+    parts = []
+    primary = attribution.get("primary_issuer") or {}
+    if primary.get("issuer"):
+        parts.append(f"document primary issuer: {primary['issuer']} ({primary.get('basis')})")
+    if named:
+        parts.append("issuers named near the cited passage: " + ", ".join(
+            f"{key} ({value.get('where')})" for key, value in sorted(named.items())))
+    else:
+        parts.append("no issuer is named near the cited passage")
+    return "; ".join(parts)[:400]
 
 
 def statement_is_boilerplate(statement: str) -> bool:
@@ -737,6 +785,40 @@ def normalize_period(period: str, *, document_date: str | None,
     return period[: max(1, 200 - len(suffix))].rstrip() + suffix
 
 
+def filing_dating(source_ref: Any, url: Any, text: Any) -> dict[str, Any]:
+    """An SEC periodic report's date: its period of report, not its fetch day.
+
+    2026-09-29: a filing is read as a fetched page, whose manifest has no
+    published date, so ``_document_dating`` fell back to the day it was
+    fetched ("retrieved").  EPAM's 10-K for fiscal 2025, fetched on
+    2026-09-08, was then read as a document of 2026-09-08, and 4 of its 79
+    Claims were filed under "FY2026 filing (as of 2026-09-08)" and 10 under
+    "as of 2026-09-08".  The cover page says what the filing covers
+    (``document_admission_scope.sec_filing_period``); that period's end is
+    the document's date, and ``filing_period`` rides along so the prompt and
+    the admission can file every statement under it.  Nothing for anything
+    that is not an SEC filing, or a filing whose cover cannot be read.
+    """
+
+    from .document_admission_scope import is_sec_filing, sec_filing_period
+
+    if not is_sec_filing(source_ref, url):
+        return {}
+    filing = sec_filing_period(text, url)
+    if filing is None:
+        return {}
+    # A filing is as of its period, however long ago it was filed: never
+    # "historical" in the stale-note sense.
+    return {"document_date": filing["period_end"], "document_date_basis": "period_of_report",
+            "document_age_days": None, "document_stale": False, "filing_period": filing}
+
+
+def admission_scope_key(suggestion: Mapping[str, Any], subject_ref: Any) -> str:
+    """One statement filed under one subject, as the document's admission plan names it."""
+
+    return f"{suggestion['id']}|{subject_ref}"
+
+
 def unwrap_model_json(text: str) -> str:
     """Strip one surrounding markdown code fence; the persisted text is untouched.
 
@@ -756,6 +838,19 @@ def unwrap_model_json(text: str) -> str:
 def _date_instruction(context: Mapping[str, Any]) -> str:
     """What the model is told about when the document was written."""
 
+    filing = context.get("filing_period")
+    if isinstance(filing, Mapping) and filing.get("label"):
+        # 2026-09-29: a filing fetched from sec.gov has no published date on
+        # its manifest, and the fetch date stood in for one: EPAM's 10-K for
+        # fiscal 2025, fetched 2026-09-08, came back "FY2026 filing (as of
+        # 2026-09-08)".  The period of report is what the cover says.
+        return (f"The document is the company's Form {filing.get('form') or 'filing'} for the "
+                f"{filing.get('covers') or filing['label']} (its period of report). Every "
+                f"statement is filed under the period "
+                f"'{filing['label']}': resolve 'this year', 'the current quarter' and the like "
+                "against that period of report, never against the day the filing was fetched, and "
+                "name any other period the text states (an earlier year compared with, a date a "
+                "restriction runs to) as an absolute year or date in the statement itself. ")
     date = context.get("document_date")
     if not date:
         return ("The document's date is unknown. Every period must name an absolute year, "
@@ -787,6 +882,20 @@ NO_INFERENCE_INSTRUCTION = (
     "the step out or leave the finding out.")
 
 
+#: 2026-09-29.  The prompt used to say that accounting policies, revenue
+#: recognition and risk disclosures "can be material findings even in legally
+#: required sections"; EPAM's 10-K then went in as 79 Claims, most of them
+#: "EPAM states that ... could materially adversely affect ..." and "EPAM
+#: states that it recognizes ...".  A filing's findings are what happened,
+#: changed or was decided -- the same bar as any other document's.
+BOILERPLATE_INSTRUCTION = (
+    "Risk-factor hedging (what could, may or might happen, or what the company faces if something "
+    "occurs), forward-looking-statement disclaimers and accounting-policy descriptions (how revenue "
+    "is recognized, how assets are amortized or valued) are not findings: leave them out unless the "
+    "text says what actually happened, changed or was decided for this company. Prefer what "
+    "changed, why, and what management plans; never restate a finding another quote already gives.")
+
+
 def build_prompt(context: Mapping[str, Any]) -> str:
     subject = context.get("company_label") or context.get("company_ticker") or context["company_ref"]
     focus = context.get("mission_focus") or {}
@@ -805,10 +914,7 @@ def build_prompt(context: Mapping[str, Any]) -> str:
         "that the text does not connect to the subject company is not a finding about it -- leave it out. "
         "If this window is about a different "
         "company, or contains only generic disclaimers or publishing boilerplate, return "
-        "empty suggestions. Company-specific accounting policies, revenue recognition, "
-        "contract terms, business economics, competitive advantages, customer behavior "
-        "and risk disclosures can be material findings even in legally required sections. "
-        "Do not dismiss them merely because the prose is formal or contains no numbers. "
+        "empty suggestions. " + BOILERPLATE_INSTRUCTION + " "
         + focus_text +
         "Produce qualitative research suggestions only, never an accepted Claim. "
         "Return raw strict JSON matching OUTPUT_SCHEMA, with no markdown fence and no prose. "
@@ -1241,7 +1347,8 @@ class DocumentExtractionModelWorker(RoutedTranscriptPolishModelWorker):
             self.admission = self.budget_store.admit(
                 policy_version_id=self.budget_policy_ref, day=day, work_order_ref=work.id,
                 attempt_number=route["attempt_number"], phase="assessment", route_decision_ref=route["id"],
-                reserved_micros=reserve, mission_binding=scope)
+                reserved_micros=reserve, mission_binding=scope,
+                purpose=work.metadata.get("purpose"), thinking_level=route.get("thinking_level"))
             if self.admission.get("status") == "rejected":
                 # The coverage pool is spent for today. Refused before the
                 # call, like every other budget refusal on this path, but
@@ -1289,8 +1396,12 @@ class DocumentExtractionModelWorker(RoutedTranscriptPolishModelWorker):
                         "amount_micros": cost["amount_micros"], "reserved_micros": self.admission["reserved_micros"]})
             return "MODEL_COST_EXCEEDED_RESERVATION"
         if cost["cost_status"] == "actual":
-            self.budget_store.settle(self.admission["admission_id"], actual_micros=cost["amount_micros"],
-                                     usage_entry_ref=accounting["usage"]["id"])
+            from .document_extraction_settlement import settle_accounted_window, retry_within_lease
+            settle_accounted_window(self.budget_store, self.admission,
+                actual_micros=cost["amount_micros"],
+                usage_entry_ref=accounting["usage"]["id"],
+                retry_seconds=retry_within_lease(self.scheduler, work.id,
+                    route["attempt_number"], self.clock()))
 
     def _after_capacity_deferred(self, work, route, adapter_result):
         if self.budget_store is not None and self.admission is not None:
@@ -1519,6 +1630,7 @@ class DocumentExtractionService:
         mission = writer.coverage_mission.mission(grant["mission_version_ref"])
         member = next((m for m in mission["universe"] if m["company_ref"] == review["company_ref"]), {})
         dating = self._document_dating(manifest, review, reading_config)
+        dating.update(filing_dating(review["source_ref"], web_fields.get("canonical_url"), text))
         base = {
             "schema_version": "0.1", "review_id": review_id, "review_hash": expected_review_hash,
             "created_at": review["created_at"], "mission_version_ref": grant["mission_version_ref"],
@@ -1565,6 +1677,9 @@ class DocumentExtractionService:
                     plans.append(plan)
             self._plans_cache = plans
         return plans
+
+    def subject_rule_ref(self, mission):
+        return SUBJECT_RULE_REF + ":names-" + content_hash(self.mission_names(mission))[:16]
 
     def mission_names(self, mission):
         """Ticker -> every name this mission calls the company, merged across plans.
@@ -1880,8 +1995,15 @@ class DocumentExtractionService:
         config = getattr(self.writer, "_document_extraction_model_config", None)
         if not config:
             return None
-        from .thesis_impact_budget import ThesisImpactBudgetStore
         work = build_work(context, model_config=getattr(self.writer, "_document_extraction_model_config", None))
+        return self._budget_status_for_work(work)
+
+    def _budget_status_for_work(self, work):
+        config = getattr(self.writer, "_document_extraction_model_config", None)
+        if not config:
+            return None
+        from .thesis_impact_budget import ThesisImpactBudgetStore
+
         with ThesisImpactBudgetStore(config["budget_db"], read_only=True) as budget:
             row = budget.connection.execute(
                 "SELECT a.admission_id,a.reserved_micros,a.day,COALESCE(c.corrected_micros,s.actual_micros) AS actual_micros,s.usage_entry_ref "
@@ -2250,6 +2372,7 @@ class DocumentExtractionService:
         if text is None:
             return {"status": "no_result", "verified": [], "refused": [],
                     "recorded": [], "replayed": replayed, "work_order_ref": work.id,
+                    **self._secondary_failure_details(work, "numeric"),
                     "formal_authority_writes": 0}
         result = extract_from_window(work.metadata["request"], text)
         journal = {"recorded": [], "duplicates": []}
@@ -2314,6 +2437,7 @@ class DocumentExtractionService:
         if text is None:
             return {"status": "no_result", "proposals": [], "refused": [],
                     "recorded": [], "replayed": replayed, "work_order_ref": work.id,
+                    **self._secondary_failure_details(work, "metric discovery"),
                     "formal_authority_writes": 0}
         result = proposals_from_window(work.metadata["request"], text)
         journal = {"recorded": [], "duplicates": []}
@@ -2352,6 +2476,39 @@ class DocumentExtractionService:
                 worker.scheduler.enqueue(work)
                 worker.run_once(work)
         return self._secondary_text(work, label), replayed
+
+    def _secondary_failure_details(self, work, label):
+        """Bind an absent secondary answer to its exact formal failure/fee.
+
+        A missing formal result can be an active/orphaned lease, even if some
+        budget row settled. It is not proof of a terminal failed window.
+        """
+        scheduler = self.writer._scheduler
+        formal = None if scheduler is None else scheduler.formal_result(work.id)
+        if formal is None:
+            return {"formal_terminal": False, "model_budget": None}
+        # Reuse the exact Work/envelope/text validation; never trust a summary.
+        self._secondary_text(work, label)
+        result = ResultEnvelope.from_dict(formal["result_envelope"])
+        terminal = formal["terminal_state"] == "failed" and result.status == "failed"
+        if not terminal:
+            return {"formal_terminal": False, "model_budget": None}
+        return {
+            "formal_terminal": True,
+            "formal_result_ref": formal["result_envelope_id"],
+            "formal_result_hash": formal["result_envelope_hash"],
+            "error_code": (result.error or {}).get("code"),
+            "not_sent_proved": (
+                result.metadata.get("dispatch_proof") == {
+                    "authority": "openclaw-model-adapter",
+                    "state": "definitely_not_sent", "version": "0.1",
+                }
+                or ((result.error or {}).get("code") == "MODEL_ROUTE_REJECTED"
+                    and result.metadata.get("control_plane_failure") is True
+                    and result.invocation_ref.startswith("invocation:not-started:"))
+            ),
+            "model_budget": self._budget_status_for_work(work),
+        }
 
     def _secondary_text(self, work, label):
         """The model's exact answer for one secondary order, or None.
@@ -2404,6 +2561,9 @@ class DocumentExtractionService:
         with ExitStack() as stack:
             router = stack.enter_context(ModelRouter(config["model_router_db"]))
             budget = stack.enter_context(ThesisImpactBudgetStore(config["budget_db"]))
+            from .document_extraction_settlement import drain_accounted_windows
+            # Replay exact pending costs without dispatching another model call.
+            drain_accounted_windows(budget)
             adapter = OpenClawModelAdapter(config["broker_socket"], route_resolver=router.get_decision,
                 auth_client_id=config["broker_client_id"], auth_key_provider=lambda: Path(config["broker_auth_key"]).read_bytes().strip(),
                 expected_agent_id=config["expected_agent_id"],
@@ -2448,7 +2608,7 @@ class DocumentExtractionService:
 
     ADMISSION_GRANTS = frozenset({"claim", "evidence", "stage_record"})
 
-    def admit_suggestions(self, *, review_id, expected_review_hash, offset, actor_ref):
+    def admit_suggestions(self, *, review_id, expected_review_hash, offset, actor_ref, scope=None):
         """ADR-0005 / P9d-17b: stage and policy-admit one window's drafted suggestions.
 
         Mission automation only.  For each persisted suggestion of the exact
@@ -2464,13 +2624,47 @@ class DocumentExtractionService:
         source outside that set is gated with a reason rather than attempted.
         """
 
+        window = self._admission_window(review_id, expected_review_hash, offset, actor_ref)
+        if "result" in window:
+            return window["result"]
+        context, mission, pairs = window["context"], window["mission"], window["pairs"]
+        # 2026-09-29: what this document may still add to the Ledger
+        # (``document_admission_scope``): never a span or a finding it already
+        # has, and at most a dozen per subject.  The extraction child plans a
+        # whole review at once (``review_admission_scope``); a caller admitting
+        # one window gets the plan of that window against the Ledger.
+        if scope is None:
+            scope = self.admission_scope([window])
+        decisions = scope.get("decisions") or {}
+        dropped = {}
+        for index, (suggestion, subject_ref, _basis, held) in enumerate(pairs):
+            decision = decisions.get(admission_scope_key(suggestion, subject_ref))
+            if held is None and decision is not None and decision["decision"] != "admit":
+                dropped[index] = decision
+        return self._commit_window(review_id, context, mission, pairs, dropped, actor_ref)
+
+    def _admission_window(self, review_id, expected_review_hash, offset, actor_ref):
+        """One window's would-be admissions: ``{"context", "mission", "pairs"}``, or ``{"result"}``.
+
+        ``pairs`` is ``(suggestion, subject_ref, basis, held_reason)`` per
+        statement and subject.  A window that cannot be admitted at all
+        (gated, not attributed, not drafted) carries the result to report.
+        Kept for the review's admission pass so the window is not verified
+        and read twice (``review_admission_scope``).
+        """
+
+        cache = self.__dict__.setdefault("_window_cache", {})
+        key = (review_id, expected_review_hash, offset, actor_ref)
+        if key in cache:
+            return cache.pop(key)
         if not isinstance(actor_ref, str) or not actor_ref.startswith("automation:"):
             raise ResearchVerificationError("suggestion admission is a mission automation action")
         context = self.context(review_id, expected_review_hash, offset, actor_ref)
         mission = self.writer.coverage_mission.mission(context["mission_version_ref"])
         missing = sorted(self.ADMISSION_GRANTS - set(mission["autonomy"]["may_write"]))
         if missing:
-            return {"status": "gated", "reason": f"mission does not grant {missing}", "admitted": []}
+            return {"result": {"status": "gated", "reason": f"mission does not grant {missing}",
+                               "admitted": []}}
         # P13i: the same question the figures pass asks, asked before a
         # statement is admitted against a company. A free-text search filed a
         # Haier earnings call and an EOS call under EPAM; the figures pass now
@@ -2487,28 +2681,201 @@ class DocumentExtractionService:
         if attribution_for(spec_ref) is None:
             subject = self.document_names_subject(context)
             if subject.get("checked") and not subject.get("names_subject"):
-                return {"status": "not_attributed", "admitted": [],
-                        "reason": UNATTRIBUTED_REASON, "subject": subject}
+                return {"result": {"status": "not_attributed", "admitted": [],
+                                   "reason": UNATTRIBUTED_REASON + " [" + self.subject_rule_ref(mission) + "]", "subject": subject}}
         from .research_auto_commit import DOCUMENT_QUALITATIVE_RULE_REF
         policy = self.writer.store.active_policy_version().to_dict()["policy"]
         rule = policy.get("research_candidate_auto_commit") or {}
         if rule.get("enabled") is not True or DOCUMENT_QUALITATIVE_RULE_REF not in (rule.get("rules") or []):
             # A missing policy rule is a gate on the mission, not a judgment on
             # the suggestions: hold the window rather than refuse each one.
-            return {"status": "gated", "reason": "active governance policy does not list "
-                    + DOCUMENT_QUALITATIVE_RULE_REF, "admitted": []}
+            return {"result": {"status": "gated", "reason": "active governance policy does not list "
+                               + DOCUMENT_QUALITATIVE_RULE_REF, "admitted": []}}
         drafted = self._suggestions(context)
         if drafted["status"] != "succeeded":
-            return {"status": drafted["status"], "admitted": []}
+            return {"result": {"status": drafted["status"], "admitted": []}}
         if context["source_ref"] not in STAGEABLE_SOURCE_REFS:
             # P13ap: this source can be read, quoted and drafted from, and its
             # figures land in their own journal, but it has no citation
             # authority a Claim could be published through yet.  A gate with a
             # reason, not a crash into the AlphaEngine manifest validator.
-            return {"status": "gated", "admitted": [],
-                    "reason": f"{SOURCE_STAGING_GATE_REASON}: {context['source_ref']} "
-                              "documents can be read and drafted from, but have no "
-                              "candidate citation authority to be staged through"}
+            return {"result": {"status": "gated", "admitted": [],
+                               "reason": f"{SOURCE_STAGING_GATE_REASON}: {context['source_ref']} "
+                                         "documents can be read and drafted from, but have no "
+                                         "candidate citation authority to be staged through"}}
+        # P10x: who each statement is about, rather than who the search was
+        # about.  A statement naming only the review's company resolves to
+        # exactly the one subject it always did, so every key below is
+        # byte-identical for it and a replay is still a duplicate.
+        resolve_subjects = self.statement_subjects(context, spec_ref)
+        span_names = self.admission_subject_check(context, spec_ref)
+        # 2026-09-25b: what the statement's own words cannot show -- a page
+        # that is an SEO statistics compilation, a statement impossible at the
+        # document's date, a relative year -- is asked here, before the
+        # support check spends anything, and answered with a hold.
+        quality = self.admission_quality_check(context)
+        # 2026-10-09 (P0): whose financial table a statement cites.  A
+        # statement about financials whose passage sits in another issuer's
+        # document and never names the subject is held; one the rule cannot
+        # decide (a digest naming another company next to it) is asked of the
+        # independent support check with the issuer context as a fact.
+        attribution = self.admission_attribution_check(context, spec_ref, mission)
+        pairs = []
+        for suggestion in drafted["suggestions"]:
+            suggestion, quality_hold = quality(suggestion)
+            plan = resolve_subjects(suggestion["normalized_statement"])
+            for subject_ref in plan["subjects"]:
+                held = (span_names(subject_ref, suggestion["citation"].get("raw_text"))
+                        or quality_hold)
+                verdict = attribution(subject_ref, suggestion)
+                if held is None and verdict is not None and verdict["verdict"] == "misattributed":
+                    from .claim_issuer_attribution import misattribution_rationale
+
+                    held = ("held for human review: issuer misattribution -- "
+                            + misattribution_rationale(
+                                verdict, str(subject_ref).rsplit(":", 1)[-1].upper()))
+                pairs.append((suggestion, subject_ref, plan["basis"], held))
+        return {"context": context, "mission": mission, "pairs": pairs}
+
+    def admission_attribution_check(self, context, spec_ref, mission):
+        """A checker: ``(subject_ref, suggestion) -> attribution verdict or None``.
+
+        ``claim_issuer_attribution.attribute`` over the whole document the
+        window came from, with every issuer the mission knows.  The verdict is
+        remembered (``attribution_evidence``) so the commit records it beside
+        the admission and the support check can see what the rule could not
+        decide.  An unreadable document answers None: the other checks run.
+        """
+
+        from .claim_issuer_attribution import attribute
+        from .claim_subject import mission_subject_needles, name_needles
+        from .document_figure_grade import attribution_for
+
+        store = self.__dict__.setdefault("_attribution_evidence", {})
+        issuer_document = attribution_for(spec_ref) is not None
+        table = mission_subject_needles(mission.get("universe") or (), plans=self._mission_plans())
+        names = self.mission_names(mission)
+        for member in mission.get("universe") or ():
+            ref = str(member.get("company_ref") or "")
+            ticker = str(member.get("ticker") or "").strip().upper()
+            if ref and names.get(ticker):
+                table[ref] = sorted(set(table.get(ref, ())) | set(name_needles(names[ticker])))
+        state: dict[str, Any] = {}
+
+        def text_and_title():
+            if "text" not in state:
+                try:
+                    state["text"] = self._document_text(context)
+                except Exception:  # noqa: BLE001 - unreadable: no attribution verdict
+                    state["text"] = None
+                try:
+                    row = self.writer.store.connection.execute(
+                        "SELECT title FROM document_provenance_records WHERE document_ref=?",
+                        (context["document_ref"],)).fetchone()
+                    state["title"] = None if row is None else row["title"]
+                except sqlite3.Error:
+                    state["title"] = None
+            return state["text"], state["title"]
+
+        def check(subject_ref, suggestion):
+            if str(subject_ref).startswith("industry:"):
+                return None
+            citation = suggestion.get("citation") or {}
+            start, end = citation.get("source_start"), citation.get("source_end")
+            if not (isinstance(start, int) and isinstance(end, int)):
+                return None
+            from .claim_issuer_attribution import is_financial_statement
+
+            if not is_financial_statement(suggestion.get("normalized_statement")):
+                return None
+            text, title = text_and_title()
+            if text is None:
+                return None
+            verdict = attribute(
+                text=text, start=start, end=end,
+                statement=suggestion["normalized_statement"], subject_ref=str(subject_ref),
+                issuers=table, title=title, issuer_document=issuer_document)
+            store[(context.get("content_hash"), suggestion.get("id"), str(subject_ref))] = verdict
+            return verdict
+
+        return check
+
+    def attribution_evidence(self, context, suggestion, subject_ref):
+        """The attribution verdict the window's check recorded, or None."""
+
+        return self.__dict__.get("_attribution_evidence", {}).get(
+            (context.get("content_hash"), suggestion.get("id"), str(subject_ref)))
+
+    def review_admission_scope(self, *, review_id, expected_review_hash, offsets, actor_ref):
+        """The document's admission plan over every window of one review.
+
+        Each window is prepared once and kept for ``admit_suggestions``; a
+        window that cannot be admitted contributes nothing.
+        """
+
+        cache = self.__dict__.setdefault("_window_cache", {})
+        cache.clear()
+        windows = []
+        for offset in offsets:
+            window = self._admission_window(review_id, expected_review_hash, offset, actor_ref)
+            cache[(review_id, expected_review_hash, offset, actor_ref)] = window
+            if "result" not in window:
+                windows.append(window)
+        return self.admission_scope(windows)
+
+    def admission_scope(self, windows):
+        """``document_admission_scope.plan_document_admissions`` over these windows.
+
+        Statements already held (the span or quality checks) are staged for a
+        person as before and are not part of the plan.
+        """
+
+        from .document_admission_scope import (
+            MAX_CLAIMS_PER_DOCUMENT, RULE_REF, document_claims, plan_document_admissions,
+        )
+
+        candidates, seen, hashes = [], set(), set()
+        for window in windows:
+            hashes.add(window["context"]["source_content_hash"])
+            for suggestion, subject_ref, _basis, held in window["pairs"]:
+                key = admission_scope_key(suggestion, subject_ref)
+                if held is not None or key in seen:
+                    continue
+                seen.add(key)
+                citation = suggestion["citation"]
+                candidates.append({"key": key, "subject_ref": subject_ref,
+                                   "statement": suggestion["normalized_statement"],
+                                   "start": citation["source_start"], "end": citation["source_end"]})
+        if not candidates:
+            return {"rule_ref": RULE_REF, "decisions": {}, "counts": {}}
+        live = document_claims(self.writer.store.connection, hashes, ledger=self._ledger_index())
+        decisions = plan_document_admissions(candidates, live, cap=MAX_CLAIMS_PER_DOCUMENT)
+        counts: dict[str, int] = {}
+        for decision in decisions.values():
+            name = decision["decision"]
+            if name == "duplicate":
+                name += ":" + decision["basis"]
+            counts[name] = counts.get(name, 0) + 1
+        return {"rule_ref": RULE_REF, "cap": MAX_CLAIMS_PER_DOCUMENT, "decisions": decisions,
+                "counts": counts, "live_claims": len(live)}
+
+    def _ledger_index(self):
+        """``document_admission_scope.ledger_bindings``, re-read only when the Ledger moved."""
+
+        from .claim_retirement import retirement_state_probe
+        from .document_admission_scope import ledger_bindings
+
+        connection = self.writer.store.connection
+        probe = (connection.execute("SELECT max(rowid) FROM claim_versions").fetchone()[0],
+                 retirement_state_probe(connection))
+        cached = getattr(self, "_ledger_cache", None)
+        if cached is None or cached[0] != probe:
+            cached = self._ledger_cache = (probe, ledger_bindings(connection))
+        return cached[1]
+
+    def _commit_window(self, review_id, context, mission, pairs, dropped, actor_ref):
+        """Check, stage and commit one window's pairs; ``dropped`` are out of the document's scope."""
+
         staging = self.writer.candidate_staging
         reviewer = self.writer.candidate_review
         row = self.writer.store.connection.execute(
@@ -2547,29 +2914,13 @@ class DocumentExtractionService:
             authority, _ = self.writer._transcript_corrections(manifest)
             source_kind, source_envelope_ref = "alphaengine", None
         from .transcript_candidate_staging import stage_transcript_qualitative_candidate
-        # P10x: who each statement is about, rather than who the search was
-        # about.  A statement naming only the review's company resolves to
-        # exactly the one subject it always did, so every key below is
-        # byte-identical for it and a replay is still a duplicate.
-        resolve_subjects = self.statement_subjects(context, spec_ref)
-        span_names = self.admission_subject_check(context, spec_ref)
-        # 2026-09-25b: what the statement's own words cannot show -- a page
-        # that is an SEO statistics compilation, a statement impossible at the
-        # document's date, a relative year -- is asked here, before the
-        # support check spends anything, and answered with a hold.
-        quality = self.admission_quality_check(context)
-        pairs = []
-        for suggestion in drafted["suggestions"]:
-            suggestion, quality_hold = quality(suggestion)
-            plan = resolve_subjects(suggestion["normalized_statement"])
-            for subject_ref in plan["subjects"]:
-                pairs.append((suggestion, subject_ref, plan["basis"],
-                              span_names(subject_ref, suggestion["citation"].get("raw_text"))
-                              or quality_hold))
         # 2026-09-24: the independent support check, one call for the window.
         # Asked only about what would otherwise be committed, and before any
         # write: a window that cannot be checked now is not admitted now.
-        support = self.support_verdicts(context, mission, pairs)
+        # Nothing out of the document's scope is asked about (or paid for).
+        support = self.support_verdicts(context, mission, [
+            (pair[0], pair[1], pair[2], "out of the document's admission scope")
+            if index in dropped else pair for index, pair in enumerate(pairs)])
         if support["status"] == "deferred":
             return {"status": "verification_deferred", "admitted": [],
                     "reason": "claim_support_verification_deferred: " + str(support.get("reason")),
@@ -2580,9 +2931,26 @@ class DocumentExtractionService:
             start, end = quote["source_start"], quote["source_end"]
             entry = {"suggestion_ref": suggestion["id"], "source_start": start, "source_end": end,
                      "subject_ref": subject_ref, "subject_basis": basis}
+            if index in dropped:
+                decision = dropped[index]
+                entry["scope"] = {key: value for key, value in decision.items() if key != "decision"}
+                if decision["decision"] == "duplicate" and str(decision.get("duplicate_of", "")) \
+                        .startswith("claim-version:"):
+                    # The Ledger already has it: this read's conclusion is that
+                    # Claim's, and nothing is staged or committed again.
+                    entry.update({"status": "duplicate", "claim_version_ref": decision["duplicate_of"],
+                                  "candidate_claim_ref": decision.get("candidate_ref")})
+                else:
+                    entry["status"] = ("truncated" if decision["decision"] == "truncated"
+                                       else "scope_duplicate")
+                results.append(entry)
+                continue
             verdict = support["verdicts"].get(index)
             if verdict is not None:
                 entry["support_verdict"] = verdict
+            attribution = self.attribution_evidence(context, suggestion, subject_ref)
+            if attribution is not None:
+                entry["attribution_evidence"] = attribution
             held_reason = held_reason or support["holds"].get(index)
             # Only a subject other than the review's own company widens the
             # identity; the primary one keeps the key it has always had.
@@ -2647,7 +3015,8 @@ class DocumentExtractionService:
             results.append(entry)
         status = "admitted" if any(r["status"] in ("admitted", "duplicate") for r in results) else (
             "held" if any(r["status"] == "held" for r in results) else (
-                "rejected" if results else "nothing_to_admit"))
+                "rejected" if any(r["status"] == "rejected" for r in results) else (
+                    "out_of_scope" if results else "nothing_to_admit")))
         return {"status": status, "admitted": results, "suggestion_count": len(results)}
 
     def support_verdicts(self, context, mission, pairs):
@@ -2670,11 +3039,20 @@ class DocumentExtractionService:
         )
 
         result = {"status": "not_applicable", "verdicts": {}, "holds": {}}
-        if context["source_ref"] not in VERIFIED_SOURCE_REFS:
-            return result
+
+        def undecided(suggestion, subject_ref):
+            # 2026-10-09 (P0): a statement about financials whose issuer the
+            # deterministic rule could not decide is asked of the support
+            # check whatever its source (the company wiki is not otherwise
+            # covered), with the issuer context as a document fact.
+            found = self.attribution_evidence(context, suggestion, subject_ref)
+            return found is not None and found.get("verdict") == "ambiguous"
+
+        covered = context["source_ref"] in VERIFIED_SOURCE_REFS
         candidates = [
-            index for index, (_suggestion, subject_ref, _basis, held) in enumerate(pairs)
+            index for index, (suggestion, subject_ref, _basis, held) in enumerate(pairs)
             if held is None and not str(subject_ref).startswith("industry:")
+            and (covered or undecided(suggestion, subject_ref))
         ]
         if not candidates:
             return result
@@ -2695,6 +3073,9 @@ class DocumentExtractionService:
                 names[subject_ref] = (self._company_label(mission, member)
                                       if member and member.get("ticker") else subject_ref)
             cited, facts = passage(suggestion)
+            attribution = self.attribution_evidence(context, suggestion, subject_ref)
+            if attribution is not None and attribution.get("verdict") == "ambiguous":
+                facts = {**facts, "issuer_context": issuer_context_fact(attribution)}
             items[index] = support_item(
                 subject_ref=subject_ref, subject_name=names[subject_ref],
                 statement=suggestion["normalized_statement"],
@@ -2801,17 +3182,29 @@ class DocumentExtractionService:
                 page_hold = statistics_compilation_hold(evidence)
         document_date = context.get("document_date")
         date_basis = context.get("document_date_basis")
+        filing = context.get("filing_period") if isinstance(context.get("filing_period"), Mapping) else None
+        # The temporal check asks what the author could have known on the
+        # document's date; a filing's author wrote after the period ended, up
+        # to its filing deadline (``known_by``).
+        known_by = (filing or {}).get("known_by") or document_date
 
         def check(suggestion):
             anchored = anchor_relative_years(
                 statement=suggestion["normalized_statement"], period=suggestion["period"],
-                document_date=document_date, date_basis=date_basis)
+                document_date=document_date,
+                # A filing's period of report anchors "the following year" as
+                # a published date does.
+                date_basis="published" if filing is not None else date_basis)
             if anchored["anchored"] is not None:
                 suggestion = {**suggestion, "normalized_statement": anchored["statement"],
                               "period": anchored["period"]}
+            if filing is not None and suggestion.get("period") != filing["label"]:
+                # 2026-09-29: every statement of a filing is filed under the
+                # filing's period of report -- EPAM's 10-K had 21 spellings.
+                suggestion = {**suggestion, "period": filing["label"]}
             hold = page_hold or temporal_impossibility(
                 statement=suggestion["normalized_statement"], period=suggestion["period"],
-                document_date=document_date,
+                document_date=known_by,
                 cited_span=(suggestion.get("citation") or {}).get("raw_text"),
             ) or anchored["hold"]
             return suggestion, hold

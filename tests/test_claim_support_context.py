@@ -54,6 +54,54 @@ LINE_LABELLED = (
 )
 
 
+#: ws-7d, guidepoint-excerpt:sha256:dd56efff... (MSFT): the question at offset 0
+#: was admitted as "一名受访者表示 ... Copilot 在中国国内无法被广泛使用".
+INTERVIEW = (
+    "Q: Since Microsoft's Copilot cannot be widely used domestically due to compliance issues, "
+    "many feel this presents a valuable window for domestic office software. Do you think "
+    "companies like Alibaba could leverage this time?\n\n"
+    "A: They can't skip over traditional office software; they can only take over the "
+    "operations.\n\nI personally believe that taking over operations doesn't create any "
+    "customer loyalty.\n\n"
+    "Q: What about pricing?\n\nA: Pricing is not the issue."
+)
+
+
+class InterviewSpeakerTests(unittest.TestCase):
+    """2026-09-29: an interviewer's question is not what the respondent said."""
+
+    def test_question_and_answer_turns_name_interviewer_and_expert(self) -> None:
+        self.assertEqual(speaker_at(INTERVIEW, 0), "interviewer (asking the question)")
+        self.assertEqual(speaker_at(INTERVIEW, INTERVIEW.index("compliance")),
+                         "interviewer (asking the question)")
+        # A turn runs on over blank lines until the next label.
+        self.assertEqual(speaker_at(INTERVIEW, INTERVIEW.index("I personally")), "expert (answering)")
+        self.assertEqual(speaker_at(INTERVIEW, INTERVIEW.index("What about")),
+                         "interviewer (asking the question)")
+        self.assertEqual(speaker_at(INTERVIEW, INTERVIEW.index("Pricing is")), "expert (answering)")
+        passage = cited_passage(INTERVIEW, 0, INTERVIEW.index(" Do you"), max_chars=2400)
+        self.assertEqual(passage["speaker"], "interviewer (asking the question)")
+        # A text with only one kind of label is not an interview.
+        self.assertIsNone(speaker_at("Q: one\nQ: two", 3))
+        chinese = "问：价格如何？\n答：不是问题。"
+        self.assertEqual(speaker_at(chinese, 2), "interviewer (asking the question)")
+        self.assertEqual(speaker_at(chinese, chinese.index("不是")), "expert (answering)")
+
+    def test_the_question_says_a_premise_is_the_interviewers(self) -> None:
+        item = support_item(
+            subject_ref="company:ticker:msft", subject_name="Microsoft (MSFT)",
+            statement="一名受访者表示，由于合规问题，Microsoft 的 Copilot 在中国国内无法被广泛使用。",
+            cited_text=INTERVIEW[:INTERVIEW.index(" Do you")],
+            document={"date": "2026-05-19", "speaker": speaker_at(INTERVIEW, 0)},
+            producer_route_ref="route-decision:drafter")
+        prompt = build_prompt([item])
+        for phrase in ("(b3) in an expert interview", "is the interviewer's words, never the expert's",
+                       "what only the question says is not_supported"):
+            self.assertIn(phrase, prompt)
+        payload = json.loads(prompt[prompt.rindex("UNTRUSTED_ITEMS=") + len("UNTRUSTED_ITEMS="):])
+        self.assertEqual(payload[0]["document"]["speaker"], "interviewer (asking the question)")
+
+
 class SpeakerLabelTests(unittest.TestCase):
     """2026-09-28: "the CFO said" rejected on DXC's calls although the words were his."""
 
@@ -219,7 +267,7 @@ class PromptTests(unittest.TestCase):
         self.assertNotIn("including its direction, negation, uncertainty and who said it", prompt)
 
     def test_the_question_is_keyed_by_contract_and_facts(self) -> None:
-        self.assertEqual(CONTRACT_REF, "claim-support-verification:v4")
+        self.assertEqual(CONTRACT_REF, "claim-support-verification:v5")
         base = dict(subject_ref="s", statement="a", cited_text="b")
         self.assertNotEqual(item_key(**base), item_key(**base, document={"period": "Q2"}))
         self.assertEqual(item_key(**base, document={}), item_key(**base))

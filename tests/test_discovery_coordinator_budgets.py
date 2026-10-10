@@ -243,9 +243,11 @@ class LedgerTests(unittest.TestCase):
         with TickLedger(self.state / "tick-ledger.sqlite") as ledger:
             ledger.append_tick({"status": "ok", "mission_source_discovery":
                                 self._lane({"web_search"})},
-                               started_at=datetime(2026, 9, 29, tzinfo=timezone.utc))
+                               started_at=datetime(2026, 9, 29, tzinfo=timezone.utc),
+                               ended_at=datetime(2026, 9, 29, tzinfo=timezone.utc))
             ledger.append_tick({"status": "ok", "mission_source_discovery": self._lane(set())},
-                               started_at=datetime(2026, 9, 29, 0, 5, tzinfo=timezone.utc))
+                               started_at=datetime(2026, 9, 29, 0, 5, tzinfo=timezone.utc),
+                               ended_at=datetime(2026, 9, 29, 0, 5, tzinfo=timezone.utc))
             ticks = ledger.ticks(None, now=datetime(2026, 9, 29, 1, tzinfo=timezone.utc))["ticks"]
         lanes = [tick["lanes"][0] for tick in ticks]
         self.assertEqual([lane["idle"] for lane in lanes], [False, True])

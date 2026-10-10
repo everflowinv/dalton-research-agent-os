@@ -1,6 +1,6 @@
 # Verifier recovery acceptance — 2026-09-10
 
-Frozen source: `a108f0e11750afe4e6fcab1923bcd2fa7fd2775e` at `/Users/everflow/Projects/dalton-verifier-recovery-acceptance-worktree`. This freezes ClaimIndex permission recovery, the approval/Ask functional fixes, ResearchTask configurable bounds, and event/dossier/Deep Insight/industry framework provider contracts. Memo, filing proofs, CTSH pagination and subsequent verifier schemas are not part of this freeze.
+Frozen source: `a108f0e11750afe4e6fcab1923bcd2fa7fd2775e` at `$HOME/Projects/dalton-verifier-recovery-acceptance-worktree`. This freezes ClaimIndex permission recovery, the approval/Ask functional fixes, ResearchTask configurable bounds, and event/dossier/Deep Insight/industry framework provider contracts. Memo, filing proofs, CTSH pagination and subsequent verifier schemas are not part of this freeze.
 
 - Full test suite is running; no deployment has been performed for this candidate.
 - Wheel built successfully: `f42a220f23b60cdf189108a98e58e6442198cafb0e9be843f4766c1e9adfd6b1`. All **521 runtime files** (367 Python, 67 SQL, 3 HTML, 84 JSON) match frozen source byte for byte. Three inline JavaScript syntax checks pass.

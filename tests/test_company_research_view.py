@@ -2,6 +2,8 @@
 
 from __future__ import annotations
 
+from tests.thesis_question_fixtures import formal_content
+
 import tempfile
 import unittest
 from pathlib import Path
@@ -53,7 +55,7 @@ class CompanyResearchViewTests(unittest.TestCase):
             mandate_version_hash=self.mandate["content_hash"],
             driver_pack_version_ref=pack["id"],
             driver_pack_version_hash=pack["content_hash"],
-            content={
+            content=formal_content(self.store, {
                 "statement": "AI demand can support growth.",
                 "mechanism": "Bookings convert into revenue.",
                 "confidence": "low",
@@ -62,7 +64,7 @@ class CompanyResearchViewTests(unittest.TestCase):
                 "catalyst_refs": [],
                 "falsifier_refs": ["falsifier:conversion-breaks"],
                 "change_reason": "View test admission.",
-            },
+            }, question="question:" + "thesis:acn:view", industry=(INDUSTRY if str(ACN).startswith("industry:") else None)),
             actor_ref=OWNER, idempotency_key="thesis-admission-candidate:acn:view",
         )
         self.admitted = fixture.fixture.coverage.decide_thesis_admission(

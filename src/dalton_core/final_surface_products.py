@@ -62,7 +62,7 @@ def truncated_copy_of(candidate: str, other: str) -> bool:
     return len(a) >= MIN_TRUNCATED_COPY_CHARS and len(a) < len(b) and b.startswith(a)
 
 
-def _sections(title: str, *values: Any) -> list[dict[str, Any]]:
+def _sections(title: str, *values: Any, role: str = "display_field") -> list[dict[str, Any]]:
     """One exact source string per section so UI displayText can key it.
 
     A value that repeats, or is a truncated copy of, a value already kept is
@@ -82,7 +82,7 @@ def _sections(title: str, *values: Any) -> list[dict[str, Any]]:
             kept[shorter] = value
             continue
         kept.append(value)
-    return [{"title": title, "body": value, "gaps": []} for value in kept]
+    return [{"title": title, "body": value, "gaps": [], "localization_role": role} for value in kept]
 
 
 def _prose_cell(value: Any) -> bool:
@@ -99,7 +99,9 @@ def _product(kind: str, subject: str, version: str, binding_hash: str,
     kept = list(sections)
     if not kept:
         return None
-    value = {"kind": kind, "subject_ref": subject, "version_ref": version,
+    from .research_source_projection import PROJECTION_VERSION
+    value = {"projection_contract": PROJECTION_VERSION,
+             "kind": kind, "subject_ref": subject, "version_ref": version,
              "authority_content_hash": binding_hash, "status": "available",
              "sections": kept}
     value["content_hash"] = _hash(value)
@@ -113,13 +115,106 @@ def _record(row: Any) -> dict[str, Any]:
     return value
 
 
+#: The tables each product kind reads; a table no wanted kind reads is
+#: reported absent to the builder, so its queries are skipped.
+_KIND_TABLES = {
+    "surface_thesis": {"current_pointers", "thesis_versions"},
+    "surface_weekly_brief": {"weekly_brief_issue_versions"},
+    "surface_event_judgement": {"event_judgements"},
+    "surface_thesis_reflection": {"thesis_reflections"},
+    "surface_deep_insight": {"deep_insight_gate_versions", "deep_insight_gate_decisions"},
+    "surface_zero_base_review": {"zero_base_revision_candidates", "zero_base_review_versions",
+                                 "thesis_revision_decisions"},
+    "surface_conviction": {"conviction_call_proposals", "conviction_call_decisions"},
+    "surface_cycle_reflection": {"research_cycle_reflection_versions"},
+    "surface_earnings_preview": {"mission_deliverable_pointer", "mission_deliverable_versions"},
+    "surface_earnings_calibration": {"mission_deliverable_pointer", "mission_deliverable_versions"},
+    "surface_model_notes": {"forecast_model_versions"},
+}
+
+
+class _KindFilter:
+    """A connection that hides the tables no wanted kind reads."""
+
+    def __init__(self, connection: Any, kinds: frozenset[str]) -> None:
+        self._connection = connection
+        self._tables = set().union(*(_KIND_TABLES.get(kind, set()) for kind in kinds))
+
+    def execute(self, sql: str, parameters: Any = ()) -> Any:
+        if (sql.startswith("SELECT 1 FROM sqlite_master WHERE type='table' AND name=?")
+                and parameters and parameters[0] not in self._tables):
+            return self._connection.execute("SELECT 1 WHERE 0")
+        return self._connection.execute(sql, parameters)
+
+
+def cycle_reflection_product(connection: Any, mission: Mapping[str, Any]) -> dict[str, Any] | None:
+    """The weekly reflection as the publication worker reviews it.
+
+    One projection for the worker (which reviews it) and the cockpit's
+    ``/v1/cockpit/reflection`` (which asks the localization ledger whether
+    these exact bytes were reviewed); see ``final_text_state``.
+    """
+
+    if not _has(connection, "research_cycle_reflection_versions"):
+        return None
+    row = connection.execute(
+        "SELECT version_id,content_hash,record_json FROM research_cycle_reflection_versions "
+        "WHERE mission_ref=? ORDER BY iso_week DESC,version_number DESC LIMIT 1",
+        (mission["mission_ref"],)).fetchone()
+    if not row:
+        return None
+    body = _record(row); narrative = body.get("narrative") or {}
+    # Labels are cells of the metric table, never stand-alone body sections.
+    # Sending the title itself as body created empty-looking weekly reports.
+    values = [narrative.get("prose"), *(body.get("policy_suggestions") or []), body.get("authority_note")]
+    for item in body.get("backlog_candidates") or []:
+        if isinstance(item, Mapping):
+            values.extend((item.get("question"), item.get("because")))
+    columns=("研究项目","研究车道","调用次数","费用（美元）","费用占比","任务预算占比")
+    table=["| "+" | ".join(columns)+" |","| "+" | ".join(["---"]*len(columns))+" |"]
+    from .research_cycle_reflection import WORK_ORDER_FAMILY_LABELS
+    for item in narrative.get("table") or []:
+        if not isinstance(item,Mapping): continue
+        values.extend(value for key,value in item.items() if key not in {"pool","lane","pool_label","calls","cost_usd","share_of_spend","share_of_mission_cap"}
+                      and _prose_cell(value))
+        if not any(key in item for key in ("calls", "cost_usd", "share_of_spend", "share_of_mission_cap")):
+            continue
+        lane=str(item.get("lane") or "—")
+        cells=[item.get("pool_label") or item.get("pool") or "—",WORK_ORDER_FAMILY_LABELS.get(lane,lane),
+               item.get("calls","—"),item.get("cost_usd","—"),item.get("share_of_spend","—"),
+               item.get("share_of_mission_cap","—")]
+        table.append("| "+" | ".join(str(value).replace("|","\\|").replace("\n"," ") for value in cells)+" |")
+    if len(table)>2:
+        sections=[*_sections(narrative.get("title") or "每周研究复盘", *values),
+                  {"title":"研究投入指标表","body":"\n".join(table),"gaps":[]}]
+    else:
+        # Older reflections carry narrative notes rather than metric cells.
+        # They remain readable, and absent figures never become invented zeroes.
+        sections=_sections(narrative.get("title") or "每周研究复盘", narrative.get("title"), *values)
+    return _product("surface_cycle_reflection", mission["mission_ref"],
+                    row["version_id"], row["content_hash"],
+                    sections)
+
+
 def final_surface_products(connection: Any, mission: Mapping[str, Any],
                            company_ref: str, *,
-                           weekly_renderer: Any | None = None) -> list[dict[str, Any]]:
-    """Return only prose currently exposed by Cockpit for one covered company."""
+                           weekly_renderer: Any | None = None,
+                           kinds: Any = None) -> list[dict[str, Any]]:
+    """Return only prose currently exposed by Cockpit for one covered company.
+
+    ``kinds`` (optional) keeps only those product kinds; a reader that asks
+    "was this one reviewed?" builds the same projection the worker reviewed
+    without paying for the others.
+    """
 
     if company_ref not in {row.get("company_ref") for row in mission.get("universe") or []}:
         raise ValueError("company is outside the current research mission")
+    if kinds is not None:
+        wanted = frozenset(kinds)
+        return [product for product in final_surface_products(
+                    _KindFilter(connection, wanted), mission, company_ref,
+                    weekly_renderer=weekly_renderer)
+                if product["kind"] in wanted]
     products: list[dict[str, Any] | None] = []
 
     if _has(connection, "current_pointers") and _has(connection, "thesis_versions"):
@@ -157,7 +252,7 @@ def final_surface_products(connection: Any, mission: Mapping[str, Any],
                 rendered = weekly_renderer(row["version_id"])
                 rendered_body = (rendered.get("body") if isinstance(rendered, Mapping)
                                  else rendered)
-                weekly_sections = _sections("每周研究简报", rendered_body)
+                weekly_sections = _sections("每周研究简报", rendered_body, role="narrative")
             # A rendered issue is the same complete document on every company
             # card; use its mission identity so it is reviewed only once.
             subject = mission['mission_ref'] if weekly_renderer is not None else company_ref
@@ -268,33 +363,15 @@ def final_surface_products(connection: Any, mission: Mapping[str, Any],
             "SELECT p.proposal_id,p.content_hash,p.record_json FROM conviction_call_proposals p"
             + join + "ORDER BY p.created_at DESC LIMIT 1", (company_ref,)).fetchall()
         for row in rows:
-            body = _record(row); variant = body.get("variant_view") or {}
+            # ADR-0013: one reader for v0.1 and v0.2 calls.
+            from .conviction_call import proposal_summary
+            view = proposal_summary(_record(row))
             products.append(_product("surface_conviction", company_ref, row["proposal_id"],
                 row["content_hash"], [*_sections("投资判断",
-                    *((variant.get(key) or {}).get("statement") or (variant.get(key) or {}).get("reason")
-                      for key in ("our_view", "market_view", "where_market_is_wrong")),
-                    *(item.get("signal") for item in body.get("event_pathway") or []
-                      if isinstance(item, Mapping)))]))
+                    view["our_view"], view["market_view"], view["where_market_is_wrong"],
+                    *(signal for signal in view["signals"] if signal))]))
 
-    if _has(connection, "research_cycle_reflection_versions"):
-        row = connection.execute(
-            "SELECT version_id,content_hash,record_json FROM research_cycle_reflection_versions "
-            "WHERE mission_ref=? ORDER BY iso_week DESC,version_number DESC LIMIT 1",
-            (mission["mission_ref"],)).fetchone()
-        if row:
-            body = _record(row); narrative = body.get("narrative") or {}
-            values = [narrative.get("title"), narrative.get("prose"),
-                      *(body.get("policy_suggestions") or []),
-                      body.get("authority_note")]
-            for item in narrative.get("table") or []:
-                if isinstance(item, Mapping):
-                    values.extend(value for value in item.values() if _prose_cell(value))
-            for item in body.get("backlog_candidates") or []:
-                if isinstance(item, Mapping):
-                    values.extend((item.get("question"), item.get("because")))
-            products.append(_product("surface_cycle_reflection", mission["mission_ref"],
-                row["version_id"], row["content_hash"],
-                [*_sections(narrative.get("title") or "每周研究复盘", *values)]))
+    products.append(cycle_reflection_product(connection, mission))
 
     if _has(connection, "mission_deliverable_pointer") and _has(connection, "mission_deliverable_versions"):
         rows = connection.execute(
@@ -307,8 +384,16 @@ def final_surface_products(connection: Any, mission: Mapping[str, Any],
             sections = []
             for item in body.get("sections") or []:
                 if isinstance(item, Mapping):
-                    sections.extend(_sections(item.get("title") or row["kind"],
-                                              item.get("body"), *(item.get("gaps") or [])))
+                    title = item.get("title") or row["kind"]
+                    # This is a real research section, not a label. Keep an
+                    # empty body visible to the substance gate; gap notes do
+                    # not turn it into a completed narrative.
+                    if not str(item.get("body") or "").strip():
+                        sections.append({"title":title,"body":"","gaps":[],
+                                         "localization_role":"required_empty_body"})
+                    else:
+                        sections.extend(_sections(title, item.get("body"), role="narrative"))
+                    sections.extend(_sections(title, *(item.get("gaps") or []), role="gap_note"))
             products.append(_product("surface_" + row["kind"], company_ref, row["version_id"],
                                      row["content_hash"], sections))
     if _has(connection, "forecast_model_versions"):

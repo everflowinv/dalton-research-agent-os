@@ -27,9 +27,17 @@ from dalton_core.quantitative_claim_promotion import (
     QuantitativeClaimPromotionError,
     QuantitativeClaimPromotionLedger,
     canonical_decimal,
+    NON_SEGMENT_MEMBERS,
+    SEGMENT_AXES,
+    SEGMENT_CLASSIFICATION_RULE,
     derived_ratio_proposals,
     document_figure_proposal,
+    is_segment_line,
+    legacy_promotion_id,
+    legacy_segment_metric,
     metric_for_line,
+    renamed_line_proposal,
+    statement_line_idempotency_key,
     period_wire,
     promotion_id_for,
     statement_line_proposal,
@@ -189,6 +197,204 @@ class StatementLineProposalTests(unittest.TestCase):
         self.assertEqual(proposal["metric_or_aspect"], "diluted eps")
         self.assertEqual((proposal["value"], proposal["unit"], proposal["currency"]),
                          ("3.47", "USD per share", "USD"))
+
+
+class SegmentAxisRuleTests(unittest.TestCase):
+    """2026-09-30: only a real segment axis makes a filed line a segment number.
+
+    Live: "segment net income: Retained Earnings" for every covered company
+    (the Retained Earnings column of the equity roll-forward), Alphabet's EPS
+    by share class, AOCI reclassifications -- 204 equity-component Claims and
+    577 more across legacy and ws-7d, all read as "业务构成".
+    """
+
+    def _dim(self, axis, member, label, **extra):
+        return line(line_id="l:dim", ordinal=210, is_breakdown=1, dimension_axis=axis,
+                    dimension_member=member, label=label, **extra)
+
+    def test_the_retained_earnings_column_is_never_a_segment(self) -> None:
+        # EPAM 10-Q 0001352010-26-000046, line 210, as filed.
+        row = self._dim("us-gaap:StatementEquityComponentsAxis",
+                        "us-gaap:RetainedEarningsMember", "Retained Earnings",
+                        concept="us-gaap:NetIncomeLoss", value="73482000")
+        self.assertFalse(is_segment_line(row))
+        self.assertIsNone(metric_for_line(row))
+        self.assertIsNone(statement_line_proposal(row, FILING))
+
+    def test_no_equity_component_member_becomes_a_segment_claim(self) -> None:
+        for member, label in (
+            ("us-gaap:RetainedEarningsMember", "Retained Earnings"),
+            ("us-gaap:AdditionalPaidInCapitalMember", "Additional Paid-in Capital"),
+            ("us-gaap:AccumulatedOtherComprehensiveIncomeMember", "AOCI"),
+            ("us-gaap:TreasuryStockCommonMember", "Treasury Stock"),
+            ("us-gaap:CommonStockMember", "Common Stock"),
+            ("us-gaap:ParentMember", "Total IBM Stockholders' Equity"),
+            ("us-gaap:NoncontrollingInterestMember", "Noncontrolling Interests"),
+        ):
+            row = self._dim("us-gaap:StatementEquityComponentsAxis", member, label,
+                            concept="us-gaap:NetIncomeLoss")
+            self.assertIsNone(statement_line_proposal(row, FILING), member)
+            # Recorded under a segment axis (the parser keeps one axis of a
+            # multi-dimensional fact), the member still refuses it.
+            row = self._dim("srt:ProductOrServiceAxis", member, label,
+                            concept="us-gaap:NetIncomeLoss")
+            self.assertIsNone(statement_line_proposal(row, FILING), member)
+
+    def test_other_attribute_axes_do_not_leak_as_segments(self) -> None:
+        for axis, member, label, concept in (
+            ("us-gaap:ReclassificationOutOfAccumulatedOtherComprehensiveIncomeAxis",
+             "us-gaap:ReclassificationOutOfAccumulatedOtherComprehensiveIncomeMember",
+             "Reclassification out of AOCI - Unrealized gains", "us-gaap:NetIncomeLoss"),
+            ("us-gaap:ChangeInAccountingEstimateByTypeAxis", "us-gaap:ServiceLifeMember",
+             "Service Life", "us-gaap:OperatingIncomeLoss"),
+            ("us-gaap:DerivativeInstrumentRiskAxis", "us-gaap:ForeignExchangeContractMember",
+             "Foreign exchange contracts", "us-gaap:Revenues"),
+            ("us-gaap:OtherCommitmentsAxis", "epam:HumanitarianCommitmentMember",
+             "Humanitarian Commitment", "us-gaap:CostOfRevenue"),
+            ("us-gaap:EquityMethodInvestmentNonconsolidatedInvesteeAxis",
+             "us-gaap:EquityMethodInvestmentNonconsolidatedInvesteeOrGroupOfInvesteesMember",
+             "Equity method investee", "us-gaap:NetIncomeLoss"),
+            ("srt:RestatementAxis", "srt:ScenarioPreviouslyReportedMember",
+             "As previously reported", "us-gaap:Revenues"),
+            ("srt:ConsolidationItemsAxis", "us-gaap:CorporateNonSegmentMember",
+             "Unallocated Amounts", "us-gaap:OperatingIncomeLoss"),
+            # A revenue-mix axis names revenue only; a share class names EPS only.
+            ("us-gaap:ContractWithCustomerBasisOfPricingAxis",
+             "us-gaap:FixedPriceContractMember", "Fixed-price - Americas",
+             "us-gaap:CostOfRevenue"),
+            ("us-gaap:StatementClassOfStockAxis", "us-gaap:CommonClassAMember",
+             "Class A", "us-gaap:NetIncomeLoss"),
+        ):
+            row = self._dim(axis, member, label, concept=concept)
+            self.assertFalse(is_segment_line(row), axis)
+            self.assertIsNone(statement_line_proposal(row, FILING), axis)
+        # An axis the parser did not record cannot be shown to be a segment.
+        self.assertFalse(is_segment_line(line(dimension_member="ibm:SalesMember")))
+
+    def test_an_aoci_reclassification_filed_beside_a_product_axis_is_refused(self) -> None:
+        # IBM 10-Q, legacy: CostOfRevenue on ProductOrServiceAxis x
+        # ReclassificationOutOfAOCIAxis, stored under the product axis only.
+        row = self._dim("srt:ProductOrServiceAxis", "us-gaap:ProductMember",
+                        "Sales - Reclassification out of Accumulated Other Comprehensive "
+                        "Income - Net Unrealized Gains/(Losses) on Cash Flow Hedges",
+                        concept="us-gaap:CostOfRevenue", value="-12000000")
+        self.assertIsNone(statement_line_proposal(row, FILING))
+
+    def test_real_segment_axes_still_promote_exactly_as_before(self) -> None:
+        # Hashes computed with the 2026-09-29 promoter (main dc7db14e): the
+        # admission replay of Claims already admitted must stay byte-identical.
+        cases = (
+            ("us-gaap:StatementBusinessSegmentsAxis", "ibm:SoftwareSegmentMember", "Software",
+             "segment revenue: Software",
+             "f1647f7b7a635e9fdace2a601878997fc759cd59e027387c02d318e0f7d2e2b1"),
+            ("srt:ConsolidationItemsAxis", "us-gaap:OperatingSegmentsMember",
+             "Operating Segments - Software", "segment revenue: Operating Segments - Software",
+             "251919b659aed2c40b29c49384befab9959207259c463a5dccb36432c0a6d3a6"),
+            ("srt:StatementGeographicalAxis", "country:US", "United States",
+             "segment revenue: United States",
+             "5f32978995ee45d8a210f62269f0d2030f46176d2fef21187c55c427ffa3d73b"),
+        )
+        for axis, member, label, metric, digest in cases:
+            proposal = statement_line_proposal(line(
+                line_id="l:k", ordinal=7, dimension_axis=axis, dimension_member=member,
+                label=label, is_breakdown=1), FILING)
+            self.assertEqual(proposal["metric_or_aspect"], metric)
+            self.assertEqual(content_hash(proposal), digest, axis)
+        for axis in SEGMENT_AXES:
+            self.assertTrue(is_segment_line(self._dim(axis, "x:PartMember", "Part")), axis)
+
+    def test_the_operating_segments_column_alone_is_the_sum_not_a_segment(self) -> None:
+        crossed = self._dim("srt:ConsolidationItemsAxis", "us-gaap:OperatingSegmentsMember",
+                            "Operating Segments - Google Services", dimension_count=2)
+        alone = self._dim("srt:ConsolidationItemsAxis", "us-gaap:OperatingSegmentsMember",
+                          "Operating Segments", dimension_count=1)
+        self.assertTrue(is_segment_line(crossed))
+        self.assertFalse(is_segment_line(alone))
+
+    def test_the_rule_agrees_with_the_additive_segment_axes(self) -> None:
+        from dalton_core.economic_invariants import ADDITIVE_SEGMENT_AXES
+
+        self.assertEqual(SEGMENT_AXES, ADDITIVE_SEGMENT_AXES)
+        self.assertIn("segment-axes:2026-09-30b", SEGMENT_CLASSIFICATION_RULE)
+        self.assertIn("us-gaap:RetainedEarningsMember", NON_SEGMENT_MEMBERS)
+
+    def test_revenue_mix_lines_keep_an_honest_non_segment_name(self) -> None:
+        for axis, member, label, metric, chinese in (
+            ("us-gaap:EquitySecuritiesByIndustryAxis", "us-gaap:FinancialServicesSectorMember",
+             "Financial Services - Americas", "revenue by industry: Financial Services - Americas",
+             "营业收入（按行业：Financial Services - Americas）"),
+            ("us-gaap:ContractWithCustomerBasisOfPricingAxis",
+             "us-gaap:TimeAndMaterialsContractMember", "Time-and-material - Americas",
+             "revenue by pricing basis: Time-and-material - Americas",
+             "营业收入（按定价方式：Time-and-material - Americas）"),
+            ("us-gaap:TimingOfTransferOfGoodOrServiceAxis",
+             "us-gaap:TransferredOverTimeMember", "Transferred over time",
+             "revenue by timing of transfer: Transferred over time",
+             "营业收入（按履约时点：Transferred over time）"),
+        ):
+            row = self._dim(axis, member, label,
+                            concept="us-gaap:RevenueFromContractWithCustomerExcludingAssessedTax")
+            self.assertFalse(is_segment_line(row))
+            proposal = statement_line_proposal(row, FILING)
+            self.assertEqual(proposal["metric_or_aspect"], metric)
+            self.assertFalse(proposal["metric_or_aspect"].startswith("segment"))
+            self.assertIn(chinese, proposal["normalized_statement"])
+            self.assertNotIn("分部", proposal["normalized_statement"])
+            self.assertEqual(quantitative_aspect(metric), "segments_and_mix")
+            self.assertTrue(renamed_line_proposal(proposal))
+            self.assertEqual(legacy_segment_metric(row), "segment revenue: " + label)
+            # A zero cell of the cross-tab is still nothing.
+            self.assertIsNone(statement_line_proposal({**row, "value": "0"}, FILING))
+
+    def test_share_class_eps_is_promoted_only_when_the_class_is_the_only_dimension(self) -> None:
+        for concept, metric in (("us-gaap:EarningsPerShareBasic", "basic eps"),
+                                ("us-gaap:EarningsPerShareDiluted", "diluted eps")):
+            row = self._dim("us-gaap:StatementClassOfStockAxis",
+                            "us-gaap:CommonClassAMember", "Class A Common Stock",
+                            concept=concept, value="8.13", unit="usdPerShare",
+                            dimension_count=1)
+            proposal = statement_line_proposal(row, FILING)
+            self.assertEqual(proposal["metric_or_aspect"], f"{metric} (Class A Common Stock)")
+            self.assertEqual(quantitative_aspect(proposal["metric_or_aspect"]),
+                             quantitative_aspect(metric))
+            for count in (None, 2):
+                self.assertIsNone(statement_line_proposal(
+                    {**row, "dimension_count": count}, FILING), count)
+
+    def test_renamed_lines_get_their_own_staging_identity_and_segments_keep_theirs(self) -> None:
+        renamed = statement_line_proposal(self._dim(
+            "us-gaap:EquitySecuritiesByIndustryAxis", "epam:SoftwareAndHiTechSectorMember",
+            "Software & Hi-Tech - Americas"), FILING)
+        segment = statement_line_proposal(self._dim(
+            "us-gaap:StatementBusinessSegmentsAxis", "epam:EuropeSegmentMember", "Europe"),
+            FILING)
+        undimensioned = statement_line_proposal(line(), FILING)
+        self.assertEqual(statement_line_idempotency_key(segment),
+                         "statement-line-promotion:l:dim")
+        self.assertEqual(statement_line_idempotency_key(undimensioned),
+                         "statement-line-promotion:mission-statement-line:ibm-1")
+        self.assertTrue(statement_line_idempotency_key(renamed).startswith(
+            "statement-line-promotion:l:dim#"))
+        self.assertFalse(renamed_line_proposal(segment))
+        self.assertFalse(renamed_line_proposal(undimensioned))
+        self.assertNotEqual(legacy_promotion_id(renamed), promotion_id_for(renamed))
+        self.assertEqual(
+            legacy_promotion_id(renamed),
+            promotion_id_for({**renamed,
+                              "metric_or_aspect": "segment revenue: Software & Hi-Tech - Americas"}))
+
+    def test_a_renamed_line_is_never_divided_into_a_margin(self) -> None:
+        mix = statement_line_proposal(self._dim(
+            "us-gaap:TimingOfTransferOfGoodOrServiceAxis", "us-gaap:TransferredOverTimeMember",
+            "Transferred over time", concept="us-gaap:Revenues"), FILING)
+        profit = statement_line_proposal(line(
+            line_id="l:gp", concept="us-gaap:GrossProfit", label="Gross profit",
+            value="18008000000"), FILING)
+        self.assertEqual(derived_ratio_proposals([mix, profit], FILING), [])
+
+    def test_an_undimensioned_line_is_untouched(self) -> None:
+        self.assertEqual(metric_for_line(line(concept="us-gaap:NetIncomeLoss")),
+                         ("net income", "净利润"))
 
 
 class DerivedRatioTests(unittest.TestCase):
@@ -404,6 +610,52 @@ class StatementSweepTests(unittest.TestCase):
         second = [ledger.record(item, disposition="blocked", reason="waiting")
                   for item in statement_line_proposals(self.connection)]
         self.assertEqual({item["status"] for item in second}, {"duplicate"})
+
+    def _insert_line(self, row) -> None:
+        self.connection.execute(
+            "INSERT INTO coverage_mission_statement_lines VALUES(?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?)",
+            tuple(row[key] for key in (
+                "line_id", "ingest_id", "statement", "ordinal", "concept", "label",
+                "level", "parent_concept", "is_breakdown", "dimension_axis",
+                "dimension_member", "dimension_count", "period_start", "period_end",
+                "value", "unit", "balance")),
+        )
+        self.connection.commit()
+
+    def test_a_renamed_line_waits_until_its_misnamed_claim_is_retired(self) -> None:
+        # 2026-09-30b: the row is live as "segment revenue: ..." (the old
+        # rule).  Its honest name is not promoted beside it -- only once the
+        # owner has retired the old Claim, and then it is not blocked by the
+        # old row's promotion either.
+        self._insert_line(line(
+            line_id="l:vertical", ordinal=9, label="Financial Services - Americas",
+            is_breakdown=1, dimension_axis="us-gaap:EquitySecuritiesByIndustryAxis",
+            dimension_member="us-gaap:FinancialServicesSectorMember", value="1200000000"))
+        ledger = QuantitativeClaimPromotionLedger(self.connection)
+        renamed = [item for item in statement_line_proposals(self.connection)
+                   if item["origin_ref"] == "l:vertical"]
+        self.assertEqual([item["metric_or_aspect"] for item in renamed],
+                         ["revenue by industry: Financial Services - Americas"])
+        old = {**renamed[0],
+               "metric_or_aspect": "segment revenue: Financial Services - Americas"}
+        ledger.record(old, disposition="admitted",
+                      claim_version_ref="claim-version:" + "e" * 64)
+
+        def pending():
+            return [item["metric_or_aspect"] for item in statement_line_proposals(self.connection)
+                    if item["origin_ref"] == "l:vertical"]
+
+        self.assertEqual(pending(), [])
+        self.connection.executescript(
+            "CREATE TABLE claim_retirement_decisions(claim_version_ref TEXT, decision TEXT);")
+        self.connection.execute("INSERT INTO claim_retirement_decisions VALUES(?, 'retired')",
+                                ("claim-version:" + "e" * 64,))
+        self.connection.commit()
+        self.assertEqual(pending(), ["revenue by industry: Financial Services - Americas"])
+        # Once promoted under the new name it is absorbed like any other.
+        ledger.record(renamed[0], disposition="admitted",
+                      claim_version_ref="claim-version:" + "f" * 64)
+        self.assertEqual(pending(), [])
 
     def test_a_new_filing_adds_only_its_own_numbers(self) -> None:
         ledger = QuantitativeClaimPromotionLedger(self.connection)

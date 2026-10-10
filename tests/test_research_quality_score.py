@@ -159,15 +159,31 @@ class DeterministicCheckTests(unittest.TestCase):
                      if item["check"] == "required_sections_present")
         self.assertEqual(check["status"], "fail")
         self.assertEqual(sorted(finding["code"] for finding in check["findings"]),
-                         ["empty_shell", "missing_section"])
+                         ["empty", "missing_section"])
 
-    def test_a_section_that_says_why_it_is_blank_is_not_a_shell(self):
-        # The live valuation section: no body, one gap explaining the discipline.
+    def test_a_section_that_only_says_why_it_is_blank_now_fails(self):
+        # Batch ap 1: the live valuation section -- no body, one gap explaining
+        # the discipline -- used to pass, which is how IBM's empty S6 counted
+        # as written. A gap note is not substance.
         art = screen([{"title": "S6", "body": "", "claim_refs": [], "numbers": [],
                        "gaps": ["估值一节按 Playbook 的数字纪律留空。"]}])
         check = next(item for item in run_deterministic(art, SCREEN)["checks"]
                      if item["check"] == "required_sections_present")
-        self.assertEqual(check["status"], "pass")
+        self.assertEqual(check["status"], "fail")
+        self.assertEqual([finding["code"] for finding in check["findings"]], ["gap_only"])
+
+    def test_heading_only_and_gap_sentence_only_bodies_fail(self):
+        art = screen([
+            {"title": "S1", "body": "S1 公司概览", "claim_refs": [], "numbers": [], "gaps": []},
+            {"title": "S2", "body": "现有材料缺少行业规模数据。暂无可用的竞争格局材料。",
+             "claim_refs": [], "numbers": [], "gaps": []},
+            {"title": "S3", "body": "公司收入来自两类服务：项目制咨询与多年期托管合同，后者占比上升，"
+                                     "利润率主要取决于人员利用率与定价。", "claim_refs": [], "numbers": [], "gaps": []},
+        ])
+        check = next(item for item in run_deterministic(art, SCREEN)["checks"]
+                     if item["check"] == "required_sections_present")
+        self.assertEqual(sorted((f["title"], f["code"]) for f in check["findings"]),
+                         [("S1", "heading_only"), ("S2", "gap_only")])
 
 
 class ClaimRefResolutionTests(unittest.TestCase):

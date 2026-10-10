@@ -769,6 +769,38 @@ class LegacyAgendaPlaneRetirementTests(unittest.TestCase):
             self.assertIsNone(heartbeat["agenda"]["last_started_at"])
             self.assertEqual("running", heartbeat["state"])
 
+    def test_the_retired_line_is_written_once_per_environment_not_per_restart(self) -> None:
+        # P2-8: legacy's controller.stderr held 143 copies of this line, one per
+        # restart.  The heartbeat an earlier start left behind already says
+        # "retired"; a restart that finds it stays quiet.
+        with tempfile.TemporaryDirectory() as directory:
+            root = Path(directory)
+            with DaltonStore(root / "core.sqlite") as store:
+                ObservabilityStore(store)
+            outputs = []
+            for _ in range(3):
+                service = DaltonService(ServiceConfig.from_mapping(self.raw(root)))
+                try:
+                    with contextlib.redirect_stderr(io.StringIO()) as captured:
+                        service.start()
+                finally:
+                    service.close()
+                outputs.append(captured.getvalue().splitlines())
+            self.assertEqual(["legacy agenda plane retired (ADR-0009)"], outputs[0])
+            self.assertEqual([[], []], outputs[1:])
+            # A heartbeat that does not say "retired" (first start after an
+            # opt-in was undone, or a corrupt file) gets the line again.
+            heartbeat_path = Path(self.raw(root)["heartbeat_path"])
+            heartbeat_path.write_text("not json", encoding="utf-8")
+            service = DaltonService(ServiceConfig.from_mapping(self.raw(root)))
+            try:
+                with contextlib.redirect_stderr(io.StringIO()) as captured:
+                    service.start()
+            finally:
+                service.close()
+            self.assertEqual(["legacy agenda plane retired (ADR-0009)"],
+                             captured.getvalue().splitlines())
+
     def test_a_configured_spool_ceiling_is_published_beside_the_spool(self) -> None:
         """The configured ceiling must not depend on how a process was started.
 
@@ -1311,6 +1343,9 @@ class ServiceTests(unittest.TestCase):
                 service._run_backup()
                 service._backup_future.result(timeout=2)
                 service._poll_backup(allow_launch=False)
+                service._poll_backup()
+                service._backup_future.result(timeout=2)
+                service._poll_backup(allow_launch=False)
             snapshot.assert_called_once_with()
             prune.assert_called_once_with(keep_latest=3)
             self.assertEqual(service._backup_state["last_retention"], retention)
@@ -1354,6 +1389,8 @@ class ServiceTests(unittest.TestCase):
             with mock.patch.object(service._backup, "snapshot") as snapshot:
                 service.start()
                 service._poll_backup()
+                service._backup_future.result(timeout=2)
+                service._poll_backup(allow_launch=False)
                 self.assertIsNone(service._backup_future)
                 snapshot.assert_not_called()
             self.assertNotEqual(service._last_backup_monotonic, 0.0)
@@ -1366,6 +1403,9 @@ class ServiceTests(unittest.TestCase):
                 service._backup, "snapshot", return_value={"snapshot_id": "new"},
             ) as snapshot:
                 service.start()
+                service._poll_backup()
+                service._backup_future.result(timeout=2)
+                service._poll_backup(allow_launch=False)
                 service._poll_backup()
                 service._backup_future.result(timeout=2)
                 snapshot.assert_called_once_with()
@@ -1401,6 +1441,10 @@ class ServiceTests(unittest.TestCase):
             with mock.patch.object(service._backup, "snapshot",
                                    side_effect=blocked_snapshot):
                 try:
+                    service.start()
+                    service._poll_backup()
+                    service._backup_future.result(timeout=2)
+                    service._poll_backup(allow_launch=False)
                     before = time.monotonic()
                     first = service.run_once()
                     self.assertLess(time.monotonic() - before, 1)

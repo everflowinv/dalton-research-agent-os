@@ -1,9 +1,11 @@
 # P9d-7：PDF 抽取来源 + web search/fetch 自主化上线
 
+历史技术评审：保留当时结论与局限；当前运行状态见 [项目状态](../PROJECT_STATUS.md)。原始操作证据私有保存。
+
 日期：2026-09-07
 状态：**已部署 live**；mission v4 已发布（`source:web-search` = `connected`）；
 自动化已在 live 上自主完成 搜索 → 抓取 → 结算 → 人工审阅入队 的完整闭环。
-提交：`d9c0e01`。上游：[P9d-5/6](p9d5-web-chain-deployment-and-live-rehearsal-2026-09-07.md)。
+提交：`d9c0e01`。上游：P9d-5/6（历史证据原件已私有归档）。
 
 ## 一、PDF 抽取来源
 

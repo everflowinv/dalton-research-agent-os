@@ -466,9 +466,14 @@ class DraftRunTests(unittest.TestCase):
         model = FakeModel([json.dumps(reply), reject])
         result = self.run_draft(model)
         self.assertEqual(result["rejected"], [])
-        self.assertEqual(result["status"], "verifier_rejected")
-        self.assertIn("question_not_on_the_named_causal_link", result["reason"])
-        self.assertEqual(result["debates"], [])
+        # 2026-10-08: the verifier faulted two of the three by name; those two
+        # are dropped and named, and the one it passed is publishable.
+        self.assertEqual(result["status"], "verified")
+        self.assertEqual([d["debate_ref"] for d in result["debates"]], refs[:1])
+        self.assertEqual(sorted(row["debate_ref"] for row in result["verifier_dropped"]),
+                         sorted(refs[1:]))
+        self.assertEqual(result["verifier_dropped"][0]["codes"],
+                         ["question_not_on_the_named_causal_link"])
         # The verifier was shown the placement it is being asked to judge.
         self.assertEqual(model.prompts[1].count("admission [0] / link [0]"), 3)
 

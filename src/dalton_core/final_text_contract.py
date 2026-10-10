@@ -43,6 +43,14 @@ def final_text_instructions() -> tuple[str, ...]:
         "prose unless the negation itself carries the research meaning (a genuine contradiction, "
         "a hard refusal, or a boundary the reader must know). Rewrite around the positive "
         "statement: '增速不代表改善' → '增速放缓，成分仍以价格贡献为主'.",
+        # Batch am (2026-10-09 text evaluation, 「本行为收入（Revenues）科目。」):
+        # a label is a name, never a sentence about the name.
+        "A label -- a statement line, row or column name, metric name, heading or button -- is "
+        "rendered as the bare standard Chinese financial name, optionally followed by the English "
+        "name in parentheses (Revenues→营业收入, Diluted EPS→稀释每股收益, Cost of services→服务成本). "
+        "Never turn a label into an explanatory sentence such as '本行为…科目。' or "
+        "'…为单独标注的小值指标', and never print a code expression (a comparison operator, "
+        "'rule:', a variable name) in place of words.",
         "Preserve the meaning of genuine gaps, source boundaries, numerical limits, approval "
         "boundaries and refusals. Never invent a fact, source, number, approval or completed action "
         "to make the Chinese more decisive. Keep authoritative numeric values unchanged; for "

@@ -26,10 +26,10 @@ import json
 import os
 import sys
 import tempfile
-from datetime import datetime, timezone
+from datetime import datetime, timedelta, timezone
 from decimal import Decimal
 from pathlib import Path
-from typing import Any
+from typing import Any, Callable
 from zoneinfo import ZoneInfo
 
 from .budget_pools import POOL_EXHAUSTED_STATUS
@@ -50,11 +50,25 @@ from .event_judgement import (
     build_context,
     judge,
     pool_state,
+    record_judgement_followups,
     reflect,
     reflection_is_owed,
     route_family_resolver,
+    sweep_judgement_followups,
     verify,
     verify_reflection,
+)
+from .event_judgement import open_research_material
+from . import event_judgement_result as result_lane
+from .event_triage import (
+    BYPASS_KINDS as TRIAGE_BYPASS_KINDS,
+    TRIAGE_PURPOSE,
+    gate as triage_gate,
+    record_triage,
+    screen as triage_screen,
+    screened_out_sql,
+    triage_for,
+    triage_table_exists,
 )
 from .mission_deliverable import MissionDeliverableAuthority
 from .model_configurations import register_model_config_name
@@ -78,7 +92,10 @@ VERIFIER_MODEL_CONFIG = register_model_config_name("event-verifier-model-config.
 # advertising the old 60k reservation made every current brain route exceed
 # this lane's unchanged $0.10 per-call cap before a call could start.
 MAX_INPUT_TOKENS = MAX_PROMPT_BYTES
-MAX_OUTPUT_TOKENS = 1_500
+# Batch F: a result-type event answers with its 实际 vs 预期 table, the market
+# reaction and the thesis impact as well as the decision -- about 2-3 K tokens
+# of Chinese; 1,500 truncated it into a refusal.
+MAX_OUTPUT_TOKENS = 4_000
 MAX_COST_USD = 1.0
 TIMEOUT_SECONDS = 180
 MAX_EVENTS_PER_COMPANY = 3
@@ -225,10 +242,25 @@ _CITATION_BINDING_PREFIX = "transcript-claim-citation-binding:"
 class ClaimDocuments:
     """A Claim event -> the document its Claim was drawn from, read once per run."""
 
-    def __init__(self, connection: Any) -> None:
+    def __init__(self, connection: Any, state_dir: Path | None = None) -> None:
         self.connection = connection
+        self.state_dir = state_dir
         self._claims: dict[str, str | None] = {}
         self._sets: dict[str, str | None] = {}
+        self._results: dict[str, tuple[str, ...] | None] = {}
+
+    def result_key(self, event: dict[str, Any]) -> tuple[str, ...] | None:
+        """Batch F: a release and its call (±3 days) are one result event."""
+
+        if not result_lane.is_result_event(event):
+            return None
+        ref = str(event.get("id"))
+        if ref not in self._results:
+            try:
+                self._results[ref] = result_lane.result_key(self.connection, event, state_dir=self.state_dir)
+            except Exception:  # noqa: BLE001 - an unanchorable event keeps its own slot
+                self._results[ref] = None
+        return self._results[ref]
 
     def __call__(self, event: dict[str, Any]) -> str | None:
         if event.get("kind") != "claim":
@@ -318,6 +350,20 @@ def event_group_key(
     key = buyback_group_key(event)
     if key is not None:
         return key
+    # 2026-10-07: one filing's Item 5 / Item 9B trading arrangements are one
+    # table -- an Amazon 10-K lists seven -- and are read together, as one
+    # 10-Q's monthly buyback rows are. Each row stays its own event.
+    if event.get("kind") == "insider_trading_plan":
+        accession = (event.get("payload") or {}).get("accession")
+        if isinstance(accession, str) and accession:
+            return ("plan_filing", str(event.get("company_ref")), accession)
+    # Batch F: an earnings release and its results call are one occurrence,
+    # judged together on the same-event pack.
+    result_key = getattr(document_of, "result_key", None)
+    if result_key is not None:
+        key = result_key(event)
+        if key is not None:
+            return key
     # A low-tier Claim keeps its day batch: a sales note yields a Claim or two,
     # and six of a day's in one call is fewer calls than one call a note.
     document = (None if document_of is None or is_low_tier(event)
@@ -334,6 +380,8 @@ def _slot_cap(key: tuple[str, ...]) -> int | None:
         return MAX_LOW_TIER_BATCH
     if key[0] == "claim_document":
         return MAX_DOCUMENT_CLAIMS
+    if key[0] in ("plan_filing", "result_event"):
+        return MAX_GROUP_INPUTS
     return None
 
 
@@ -354,31 +402,84 @@ def _coherent_group(group: list[dict[str, Any]], document_of: Any = None) -> boo
     return True
 
 
+# 2026-09-30: a price move is re-recorded every time its price series is
+# refreshed -- the payload carries the series version and the connector
+# invocation, so the same close-to-close move is a new event by the ledger's
+# idempotency rule (ACN's 2026-09-08 move is 24 events).  Between 09-24 and
+# 09-30, 163 of the 170 price moves the judge paid for (39.9 of 41.9 USD) were
+# a company/day/direction whose move had already been judged NO_CHANGE.  The
+# event stays (which refresh saw it is a fact); the judgement is the earlier
+# one, recorded again at no cost, under exactly the document rule below.
+EQUIVALENT_PAYLOAD_FIELDS: dict[str, tuple[str, ...]] = {
+    "price_move": ("as_of", "direction"),
+}
+
+
+def equivalence_key(event: dict[str, Any]) -> tuple[str, ...] | None:
+    """One company, one kind, one market day and direction -- whichever refresh saw it."""
+
+    fields = EQUIVALENT_PAYLOAD_FIELDS.get(str(event.get("kind")))
+    if fields is None:
+        return None
+    payload = event.get("payload") or {}
+    values = [payload.get(field) for field in fields]
+    if any(not isinstance(value, str) or not value for value in values):
+        return None
+    return ("equivalent", str(event.get("company_ref")), str(event.get("kind")), *values)
+
+
 def prior_no_change_judgements(
-    connection: Any, event_group: list[dict[str, Any]],
+    connection: Any, event_group: list[dict[str, Any]], *, state_dir: Path | None = None,
 ) -> dict[str, dict[str, Any]]:
-    """Members whose document was already judged, and only ever judged NO_CHANGE.
+    """Members whose document or equivalent event was already judged, only NO_CHANGE.
 
     Keyed by event id, valued by the earlier judgement record.  A document
-    that was ever judged anything else is judged again in full: the saving is
-    only taken where the answer is already known to be "nothing changes".
+    (or a price move of the same company, day and direction) that was ever
+    judged anything else is judged again in full: the saving is only taken
+    where the answer is already known to be "nothing changes".
     """
 
     found: dict[str, dict[str, Any]] = {}
     for item in event_group:
-        key = document_key(item)
-        if key is None:
+        if result_lane.is_result_event(item):
+            # Batch F: a result event with new material is judged (or
+            # re-judged) on its pack; its dedupe is the result-event path's.
             continue
-        rows = connection.execute(
-            "SELECT j.decision AS decision, j.record_json AS record_json "
-            "FROM event_judgements j JOIN research_events e ON e.event_id = j.event_ref "
-            "WHERE e.company_ref=? AND e.kind=? "
-            "AND json_extract(e.record_json, '$.payload.document_ref')=? "
-            "AND e.event_id<>? ORDER BY j.created_at, j.judgement_id",
-            (key[1], key[2], key[3], item["id"]),
-        ).fetchall()
+        key = document_key(item)
+        if key is not None:
+            rows = connection.execute(
+                "SELECT j.decision AS decision, j.record_json AS record_json "
+                "FROM event_judgements j JOIN research_events e ON e.event_id = j.event_ref "
+                "WHERE e.company_ref=? AND e.kind=? "
+                "AND json_extract(e.record_json, '$.payload.document_ref')=? "
+                "AND e.event_id<>? ORDER BY j.created_at, j.judgement_id",
+                (key[1], key[2], key[3], item["id"]),
+            ).fetchall()
+        else:
+            key = equivalence_key(item)
+            if key is None:
+                continue
+            fields = EQUIVALENT_PAYLOAD_FIELDS[key[2]]
+            rows = connection.execute(
+                "SELECT j.decision AS decision, j.record_json AS record_json "
+                "FROM event_judgements j JOIN research_events e ON e.event_id = j.event_ref "
+                "WHERE e.company_ref=? AND e.kind=? "
+                + "".join(f"AND json_extract(e.record_json, '$.payload.{field}')=? "
+                          for field in fields)
+                + "AND e.event_id<>? ORDER BY j.created_at, j.judgement_id",
+                (key[1], key[2], *key[3:], item["id"]),
+            ).fetchall()
         if rows and all(row["decision"] == "NO_CHANGE" for row in rows):
-            found[item["id"]] = json.loads(rows[0]["record_json"])
+            record = json.loads(rows[0]["record_json"])
+            if (state_dir is not None and result_lane.lacked_body(record)[0]
+                    and (record.get("result") or {}).get("evidence_status") == "insufficient"
+                    and result_lane.body_document(state_dir, item, None, None) is not None):
+                # The same gap does not get its NO_CHANGE again once the
+                # material it lacked has arrived: judge it on the body.
+                continue
+            record["_repeat_kind"] = (
+                "repeated_document" if key[0] == "document" else "repeated_event")
+            found[item["id"]] = record
     return found
 
 
@@ -424,6 +525,7 @@ def _record_repeat(
 
     marker = {"cost_micros": 0, "repeat_of_event_ref": prior["event_ref"],
               "repeat_of_judgement_ref": prior["id"]}
+    kind = prior.get("_repeat_kind") or "repeated_document"
     judgement = {
         key: prior.get(key) for key in (
             "decision", "action", "driver_refs", "thesis_refs", "because",
@@ -435,7 +537,7 @@ def _record_repeat(
                     "model": {**(prior.get("verifier_model") or {}), **marker}}
     return judgements.record(
         event=event, judgement=judgement, verification=verification,
-        effect={"kind": "repeated_document", "status": "recorded",
+        effect={"kind": kind, "status": "recorded",
                 "primary_event_ref": prior["event_ref"],
                 "judgement_ref": prior["id"]},
         mission=mission, actor_ref=actor_ref,
@@ -491,10 +593,11 @@ def unjudged_events(
     the backlog drains from the end that is not moving.
     """
 
+    screened = (screened_out_sql("e") if triage_table_exists(events.connection) else "")
     rows = events.connection.execute(
         "SELECT e.event_id AS event_id FROM research_events e "
         "LEFT JOIN event_judgements j ON j.event_ref = e.event_id "
-        "WHERE e.company_ref = ? AND j.event_ref IS NULL "
+        "WHERE e.company_ref = ? AND j.event_ref IS NULL" + screened + " "
         "ORDER BY e.occurred_at ASC, e.event_id ASC LIMIT ?",
         (company_ref, max(1, int(limit))),
     ).fetchall()
@@ -534,6 +637,10 @@ def unjudged_event_groups(
         mission_sql = " AND e.mission_version_ref IN (" + ",".join(
             "?" for _ in mission_version_refs) + ")"
         parameters.extend(mission_version_refs)
+    # An event the triage screen took out of the backlog is settled without a
+    # judgement: it is not offered again (event_triage).
+    if triage_table_exists(events.connection):
+        mission_sql += screened_out_sql("e")
     rows = events.connection.execute(
         "SELECT e.event_id AS event_id FROM research_events e "
         "LEFT JOIN event_judgements j ON j.event_ref = e.event_id "
@@ -590,7 +697,234 @@ def unjudged_event_groups(
         if document is not None:
             documents[document] = len(groups)
         groups.append([event])
+    # A result event is led by its release (then its call): the judgement is
+    # the release's, the call and the repeats are its group.
+    for key, index in positions.items():
+        if key[0] == "result_event":
+            groups[index] = result_lane.primary_first(groups[index])
     return groups
+
+
+# -- batch F: result-type events beyond the anti-join ---------------------------
+
+
+def _is_judged(connection: Any, event_ref: str) -> bool:
+    try:
+        return connection.execute("SELECT 1 FROM event_judgements WHERE event_ref=?",
+                                  (event_ref,)).fetchone() is not None
+    except Exception:  # noqa: BLE001 - no ledger yet: nothing is judged
+        return False
+
+
+def job_group_hash(job: dict[str, Any]) -> str:
+    """The identity a launcher ticket names: the group, and for a re-judgement its number."""
+
+    group = job["group"]
+    if job.get("kind") != "rejudge":
+        return incremental_group_hash(group)
+    return content_hash({
+        "rejudgement": int(job["rejudge"]["sequence"]), "reason": job["rejudge"]["reason"],
+        "events": [{"id": event["id"], "content_hash": event.get("content_hash")}
+                   for event in sorted(group, key=lambda item: item["id"])],
+    })
+
+
+def result_jobs(
+    events: ResearchEventAuthority,
+    *,
+    company_ref: str,
+    state_dir: Path | None,
+    now: datetime | None = None,
+    mission_version_refs: tuple[str, ...] | None = None,
+) -> list[dict[str, Any]]:
+    """Result events owing work although their release is judged.
+
+    ``rejudge``: the occurrence owes a bounded re-judgement
+    (:func:`event_judgement_result.rejudgement_reason` -- the body its last
+    judgement lacked has arrived, or a same-event document arrived within 72
+    hours; at most two).  ``repeat``: an unjudged re-recording of an occurrence
+    already judged, with nothing new -- it is recorded against the latest
+    judgement at no cost (an old event processed again dedupes, it is not
+    judged twice).
+    """
+
+    connection = events.connection
+    moment = now or datetime.now(timezone.utc)
+    since = (moment.date() - timedelta(days=result_lane.REJUDGE_LOOKBACK_DAYS + 10)).isoformat()
+    keyed: dict[tuple[str, ...], list[dict[str, Any]]] = {}
+    for event in result_lane.result_events(connection, company_ref, since=since):
+        if mission_version_refs is not None and event.get("mission_version_ref") not in mission_version_refs:
+            continue
+        key = result_lane.result_key(connection, event, state_dir=state_dir)
+        if key is not None:
+            keyed.setdefault(key, []).append(event)
+    identity = None
+    jobs: list[dict[str, Any]] = []
+    for key, members in sorted(keyed.items()):
+        members = result_lane.primary_first(members)
+        primary = members[0]
+        if not _is_judged(connection, primary["id"]):
+            continue  # the unjudged path judges the release itself
+        if identity is None and state_dir is not None:
+            try:
+                identity = result_lane._identity(state_dir, company_ref)
+            except Exception:  # noqa: BLE001
+                identity = {}
+        unjudged = [item["id"] for item in members if not _is_judged(connection, item["id"])]
+        reason = result_lane.rejudgement_reason(connection, state_dir, primary, members, now=moment,
+                                                identity=identity)
+        if reason is not None:
+            jobs.append({"kind": "rejudge", "key": key, "group": members, "rejudge": reason,
+                         "new_refs": unjudged})
+        elif unjudged:
+            jobs.append({"kind": "repeat", "key": key, "group": members, "primary": primary,
+                         "new_refs": unjudged})
+    return jobs
+
+
+def _record_result_repeat(
+    judgements: EventJudgementAuthority, event: dict[str, Any], primary: dict[str, Any],
+    *, mission: Any, actor_ref: str, reason: str,
+) -> dict[str, Any] | None:
+    """An unjudged re-recording of a judged result event, bound to its latest judgement at no cost."""
+
+    latest = judgements.latest_judgement_for(primary["id"])
+    if latest is None:
+        return None
+    marker = {"cost_micros": 0, "repeat_of_event_ref": latest["event_ref"],
+              "repeat_of_judgement_ref": latest["id"]}
+    judgement = {key: latest.get(key) for key in (
+        "decision", "action", "driver_refs", "thesis_refs", "because", "citations", "note",
+        "research_question", "forecast_change", "result")}
+    judgement["model"] = {**(latest.get("model") or {}), **marker}
+    verification = {**(latest.get("verifier") or {}),
+                    "model": {**(latest.get("verifier_model") or {}), **marker}}
+    effect = {"kind": "repeated_result_event", "status": "recorded",
+              "primary_event_ref": primary["id"], "judgement_ref": latest["id"], "reason": reason,
+              **({"daily_digest": DAILY_DIGEST_MARKER} if latest.get("decision") == "NO_CHANGE" else {})}
+    return judgements.record(
+        event=event, judgement=judgement, verification=verification, effect=effect,
+        mission=mission, actor_ref=actor_ref,
+        annotations={"main_event_ref": primary["id"],
+                     "event_dates": result_lane.event_dates(event)})
+
+
+def _material_record(material: dict[str, Any] | None, decided: dict[str, Any]) -> dict[str, Any] | None:
+    """What a judgement stores about what it read (the full pack text stays in the run directory)."""
+
+    if not material:
+        return None
+    cited: set[str] = set()
+    result = decided.get("result") or {}
+    for row in result.get("actual_vs_expected") or ():
+        cited.update(row.get("sources") or ())
+        for cell in (row.get("actual"), row.get("expected"), row.get("prior_guidance")):
+            cited.update(result_lane._tags_in(cell))
+    reaction = result.get("market_reaction") or {}
+    cited.update(result_lane._tags_in(reaction.get("move"), reaction.get("benchmark")))
+    cited.update(ref.strip("[] ") for ref in decided.get("citations") or ())
+    texts = material.get("tag_texts") or {}
+    return {
+        "contract": material.get("contract"), "kind": material.get("kind"), "anchor": material.get("anchor"),
+        "dates": material.get("dates"), "body_read": bool(material.get("body_read")),
+        "body_document_ref": material.get("body_document_ref"),
+        "documents_read": list(material.get("documents_read") or ()),
+        "pack": material.get("pack"), "tags": dict(material.get("tags") or {}),
+        "tag_texts": {tag: str(texts[tag])[:1500] for tag in sorted(cited) if tag in texts},
+        "tag_sources": {tag: label for tag, label in (material.get("tag_sources") or {}).items() if tag in cited},
+        "main_event_ref": material.get("main_event_ref"),
+        "group_event_refs": list(material.get("group_event_refs") or ()),
+        "catalyst_entry_ref": material.get("catalyst_entry_ref"),
+        "catalyst_entry": material.get("catalyst_entry"),
+        "release_source": material.get("release_source"),
+        "prior_guidance_source": material.get("prior_guidance_source"),
+        "baseline_as_of": material.get("baseline_as_of"),
+        "consensus_version_ref": material.get("consensus_version_ref"),
+        "applicable_rows": list(material.get("applicable_rows") or ()),
+    }
+
+
+def _prompt_sink(summary_dir: Path, event_ref: str, files: list[str]) -> Callable[[str, str], None]:
+    """Write each prompt sent into the run directory (owner-only), for audit."""
+
+    safe = "".join(char if char.isalnum() or char in "-_" else "_" for char in event_ref)[-80:]
+
+    def sink(role: str, prompt: str) -> None:
+        folder = summary_dir / "prompts"
+        folder.mkdir(mode=0o700, parents=True, exist_ok=True)
+        path = folder / f"{safe}.{role}.txt"
+        fd, name = tempfile.mkstemp(prefix=f".{path.name}.", suffix=".tmp", dir=folder)
+        temporary = Path(name)
+        try:
+            with os.fdopen(fd, "w", encoding="utf-8") as handle:
+                handle.write(prompt)
+            os.chmod(temporary, 0o600)
+            os.replace(temporary, path)
+        finally:
+            temporary.unlink(missing_ok=True)
+        files.append(str(path.relative_to(summary_dir)))
+
+    return sink
+
+
+def _record_aliases(
+    judgements: EventJudgementAuthority, aliases: list[dict[str, Any]], event: dict[str, Any],
+    decided: dict[str, Any], checked: dict[str, Any], *, mission: Any, actor_ref: str,
+    rejudgement_ref: str | None,
+) -> None:
+    """The group's other inputs, each recorded as judged with its main event (linked by id)."""
+
+    for grouped_event in aliases:
+        alias_judgement = dict(decided)
+        alias_judgement["model"] = {
+            **(decided.get("model") or {}), "cost_micros": 0,
+            "grouped_under_event_ref": event["id"],
+        }
+        alias_verification = dict(checked)
+        alias_verification["model"] = {
+            **(checked.get("model") or {}), "cost_micros": 0,
+            "grouped_under_event_ref": event["id"],
+        }
+        judgements.record(
+            event=grouped_event, judgement=alias_judgement,
+            verification=alias_verification,
+            effect={"kind": "grouped_judgement", "status": "recorded",
+                    "primary_event_ref": event["id"],
+                    **({"rejudgement_ref": rejudgement_ref} if rejudgement_ref else {}),
+                    # A grouped input is an input examined that day;
+                    # the digest lists it beside its primary.
+                    **({"daily_digest": DAILY_DIGEST_MARKER}
+                       if decided["decision"] == "NO_CHANGE" else {})},
+            mission=mission, actor_ref=actor_ref,
+            annotations={"main_event_ref": event["id"],
+                         "event_dates": result_lane.event_dates(grouped_event)},
+        )
+
+
+def _build_material(state_dir: Path, connection: Any, event: dict[str, Any], group: list[dict[str, Any]], *,
+                    mission: Any, day: str, pack_builder: Any, budget_chars: int) -> dict[str, Any]:
+    material = result_lane.build_result_material(
+        state_dir, connection, event, group=group, mission=mission, today=day,
+        pack_builder=pack_builder, budget_chars=budget_chars)
+    anchor = material.get("anchor") or {}
+    if anchor.get("day"):
+        try:
+            from .catalyst_calendar import entry_for_event
+
+            entry = entry_for_event(connection, str(event["company_ref"]), anchor["day"])
+        except Exception:  # noqa: BLE001 - no calendar is no link
+            entry = None
+        if entry is not None:
+            material["catalyst_entry_ref"] = entry["entry_ref"]
+            material["catalyst_entry"] = entry
+    return material
+
+
+def _material_opener(state_dir: Path) -> Callable[[Any], dict[str, Any]]:
+    def opener(spec: Any) -> dict[str, Any]:
+        return result_lane.open_material(state_dir, spec)
+
+    return opener
 
 
 def config_fingerprint(*paths: Path | None) -> str:
@@ -738,6 +1072,69 @@ def _backlog(store: DaltonStore) -> Any:
     return ResearchQuestionBacklog(store)
 
 
+def _triage(
+    store: DaltonStore, *, event_group: list[dict[str, Any]], context: dict[str, Any],
+    model: Any, mission: Any, actor_ref: str, request_id: str, day: str,
+    judgements: EventJudgementAuthority, summary: dict[str, Any],
+) -> tuple[str, int]:
+    """Screen one group; ``(what happens next, micros booked)``.
+
+    ``judge``, ``skip`` (screened out) or ``stop`` (the pool refused the
+    screen itself).  It writes its own triage rows and the call's spend and
+    has no path to a judgement.  A group already escalated (a judgement
+    refused and retried, a replayed run) goes straight back to the judge
+    without a second screen.  A screen that failed is not a decision and
+    writes no row: the group goes to the judge this time (fail open) and is
+    screened again if it comes back.
+    """
+
+    tally = summary["triage"]
+    prior = [row for row in (triage_for(store.connection, item["id"])
+                             for item in event_group) if row is not None]
+    escalated = [row for row in prior if row["outcome"] == "escalated"]
+    if escalated:
+        record_triage(
+            store, event_group=event_group,
+            decision={key: escalated[0][key] for key in ("outcome", "route", "verdict")},
+            verdict=None, mission=mission, actor_ref=actor_ref,
+            inherited_from=escalated[0]["id"])
+        tally["routes"]["prior"] = tally["routes"].get("prior", 0) + 1
+        tally["escalated"] += 1
+        return "judge", 0
+    verdict = (None if event_group[0].get("kind") in TRIAGE_BYPASS_KINDS
+               else triage_screen(context, model=model, mission=mission,
+                                  request_id=request_id))
+    if verdict is not None and verdict.get("failure_trace") is not None:
+        summary["failed_model_traces"].append(verdict["failure_trace"])
+    cost = judgements.record_spend(
+        call=(verdict or {}).get("model"), purpose=TRIAGE_PURPOSE,
+        outcome=f"triage:{(verdict or {}).get('status') or 'bypass'}",
+        event_ref=event_group[0]["id"], mission=mission, day=day,
+    )
+    tally["cost_micros"] += cost
+    if verdict is not None and verdict.get("lane_status") == POOL_EXHAUSTED_STATUS:
+        return "stop", cost
+    decision = triage_gate(event_group=event_group, verdict=verdict)
+    if decision["route"] == "triage_failed":
+        tally.setdefault("failures", []).append(
+            {"event_ref": event_group[0]["id"], "reason": str(verdict.get("reason"))[:300]})
+    else:
+        record_triage(store, event_group=event_group, decision=decision, verdict=verdict,
+                      mission=mission, actor_ref=actor_ref)
+    route = f"{decision['outcome']}:{decision['route']}"
+    tally["routes"][route] = tally["routes"].get(route, 0) + 1
+    if decision["outcome"] == "screened_out":
+        tally["screened_out"] += 1
+        summary["effects"].append({
+            "event_ref": event_group[0]["id"], "kind": "triage", "status": "screened_out",
+            "event_refs": [item["id"] for item in event_group],
+            "reason": (verdict or {}).get("reason"),
+        })
+        return "skip", cost
+    tally["escalated"] += 1
+    return "judge", cost
+
+
 def run_judgement(
     *,
     state_dir: Path,
@@ -757,7 +1154,17 @@ def run_judgement(
     family_resolver: Any = None,
     now: datetime | None = None,
     budget_db: str | Path | None = None,
+    triage_model: Any = None,
+    pack_builder: Any = None,
 ) -> dict[str, Any]:
+    """Judge one bounded batch.
+
+    ``triage_model`` is the cheap screen (``event_triage``).  Built from the
+    judge's own configuration -- same routing policy, the cheap tier -- when
+    the judge is; a caller that hands in its own judge and no screen runs
+    without one, exactly as before this stage existed.
+    """
+
     state_dir = Path(state_dir).expanduser().resolve()
     summary_dir.mkdir(mode=0o700, parents=True, exist_ok=True)
     moment = (now or datetime.now(timezone.utc)).astimezone(timezone.utc)
@@ -778,6 +1185,8 @@ def run_judgement(
         "reflections": 0,
         "reflections_refused": 0,
         "repeats": 0,
+        "triage": {"mode": "off", "screened_out": 0, "escalated": 0,
+                   "routes": {}, "cost_micros": 0},
         "followups": [],
         "effects": [],
         "failed_model_traces": [],
@@ -809,6 +1218,13 @@ def run_judgement(
         tracked = screen_passed_companies(missions, mission)
         if company_ref is not None:
             tracked = [ref for ref in tracked if ref == company_ref]
+        # ADR-0010 backfill, on every child run before anything is paid for:
+        # a judgement other than NO_CHANGE that has no governed follow-up yet
+        # (written before this code, or its follow-up failed after the
+        # judgement row) goes through the same call the forward path uses.
+        # No model call, keyed writes, and never the reason a tick fails.
+        summary["followup_sweep"] = _followup_sweep(
+            store, judgements, mission, apply=not dry_run)
         day = moment.date().isoformat()
         budget_db = budget_db or _budget_db(judge_model_config, judge_model)
         state = pool_state(
@@ -831,7 +1247,7 @@ def run_judgement(
                 "SELECT mission_version_id FROM coverage_mission_versions "
                 "WHERE mission_ref=?", (mission["mission_ref"],)
             ).fetchall())
-        batch: list[list[dict[str, Any]]] = []
+        batch: list[dict[str, Any]] = []
         if event_refs is not None:
             expected_refs = set(event_refs)
             current = unjudged_event_groups(
@@ -859,14 +1275,29 @@ def run_judgement(
                     and all(item["id"] not in judged_refs for item in target)
                 )
                 if valid:
-                    batch = [target]
+                    batch = [{"kind": "judge", "group": target}]
+            if not batch and company_ref in tracked:
+                # Batch F: a ticket may name a result event's bounded re-judgement.
+                for job in result_jobs(events, company_ref=company_ref or "", state_dir=state_dir,
+                                       now=moment, mission_version_refs=allowed_versions):
+                    if ({item["id"] for item in job["group"]} == expected_refs
+                            and job_group_hash(job) == event_group_hash):
+                        batch = [job]
+                        break
         else:
             for ref in tracked:
-                batch.extend(unjudged_event_groups(
-                    events, judgements, company_ref=ref,
-                    limit=effective_per_company,
-                    mission_version_refs=allowed_versions, now=moment,
-                ))
+                owed = result_jobs(events, company_ref=ref, state_dir=state_dir, now=moment,
+                                   mission_version_refs=allowed_versions)
+                covered = {item for job in owed for item in job.get("new_refs") or ()}
+                for group in unjudged_event_groups(
+                        events, judgements, company_ref=ref,
+                        limit=effective_per_company,
+                        mission_version_refs=allowed_versions, now=moment,
+                ):
+                    if covered.intersection(item["id"] for item in group):
+                        continue
+                    batch.append({"kind": "judge", "group": group})
+                batch.extend(owed)
         batch = batch[:effective_max_events]
         summary["candidates"] = len(batch)
         if not batch:
@@ -874,9 +1305,19 @@ def run_judgement(
             return summary
         if dry_run:
             summary.update({"status": "succeeded", "judgement_status": "dry_run"})
+            summary["rejudgements_owed"] = [
+                {"event_ref": job["group"][0]["id"], **job["rejudge"]} for job in batch
+                if job["kind"] == "rejudge"]
             return summary
 
-        judge_model = judge_model or _model(judge_model_config, state_dir, scheduler_db)
+        if judge_model is None:
+            judge_model = _model(judge_model_config, state_dir, scheduler_db)
+            # The screen routes through the judge's configuration under its
+            # own purpose, which the pinned policy maps to the cheap tier.
+            if triage_model is None:
+                triage_model = judge_model
+        if triage_model is not None:
+            summary["triage"]["mode"] = "screen"
         verifier_model = verifier_model or _model(
             verifier_model_config, state_dir, scheduler_db
         )
@@ -946,7 +1387,29 @@ def run_judgement(
                 (verifier_model, REFLECTION_VERIFIER_PURPOSE),
             )
         ) * 1_000_000)
-        for event_group in batch:
+        # The screen is paid for before any of those four, so an event that
+        # cannot afford its screen and the judge behind it does not start.
+        if triage_model is not None:
+            reservation += int(Decimal(str(
+                _call_budget(triage_model, TRIAGE_PURPOSE)["max_cost_usd"])) * 1_000_000)
+        opener = _material_opener(state_dir)
+        summary.setdefault("rejudged", 0)
+        summary.setdefault("evidence_insufficient", 0)
+        summary.setdefault("prompt_files", [])
+        for job in batch:
+            event_group = list(job["group"])
+            rejudge = job.get("rejudge") if job["kind"] == "rejudge" else None
+            if job["kind"] == "repeat":
+                # An old result event processed again, nothing new: recorded
+                # against the latest judgement of its occurrence, at no cost.
+                for item in event_group:
+                    if item["id"] in set(job.get("new_refs") or ()):
+                        if _record_result_repeat(judgements, item, job["primary"], mission=mission,
+                                                 actor_ref=actor,
+                                                 reason="same result event already judged; no new material "
+                                                        "or the re-judgement bound is reached") is not None:
+                            summary["repeats"] += 1
+                continue
             if budget_db is not None:
                 # The ledger already holds every admission this run made, paid
                 # or still open, and every one it never heard back from; re-read
@@ -958,21 +1421,19 @@ def run_judgement(
                 remaining = state["remaining_micros"]
             else:
                 remaining = state["remaining_micros"] - spent
-            # A document already judged, and only ever judged NO_CHANGE, is not
-            # paid for again: the member is recorded against the earlier
-            # judgement at no cost and the rest of the group goes on.
-            repeated = prior_no_change_judgements(store.connection, event_group)
-            for item in event_group:
-                if item["id"] in repeated:
-                    _record_repeat(judgements, item, repeated[item["id"]],
-                                   mission=mission, actor_ref=actor)
-                    summary["repeats"] += 1
-            event_group = [item for item in event_group if item["id"] not in repeated]
+            if rejudge is None:
+                # A document already judged, and only ever judged NO_CHANGE, is not
+                # paid for again: the member is recorded against the earlier
+                # judgement at no cost and the rest of the group goes on.
+                repeated = prior_no_change_judgements(store.connection, event_group, state_dir=state_dir)
+                for item in event_group:
+                    if item["id"] in repeated:
+                        _record_repeat(judgements, item, repeated[item["id"]],
+                                       mission=mission, actor_ref=actor)
+                        summary["repeats"] += 1
+                event_group = [item for item in event_group if item["id"] not in repeated]
             if not event_group:
                 continue
-            if remaining < reservation:
-                summary["judgement_status"] = "skipped:pool_exhausted"
-                break
             event = event_group[0]
             context = build_context(
                 event=event, mission=mission, connection=store.connection,
@@ -988,13 +1449,86 @@ def run_judgement(
             context["grouped_events"] = evidence_group
             context["grouped_by_document"] = len(evidence_group) > 1 and (
                 event_group_key(event, claim_documents)[0] == "claim_document")
-            request_id = f"{fingerprint}{incremental_group_hash(evidence_group)[:24]}"
+            # Batch F: the event's body, and for a result event the same-event
+            # pack, the expectations baseline and the reaction.
+            material = None
+            if result_lane.is_result_event(event) or result_lane.is_document_event(event):
+                material = _build_material(state_dir, store.connection, event, evidence_group,
+                                           mission=mission, day=day, pack_builder=pack_builder,
+                                           budget_chars=result_lane.PACK_BUDGET_CHARS)
+                material["group_readable"] = result_lane.group_readable(state_dir, evidence_group[1:])
+                context["result"] = material
+            aliases = [item for item in event_group[1:] if not _is_judged(store.connection, item["id"])]
+            if (material is not None and not material.get("body_read")
+                    and result_lane.body_required(event) and rejudge is None
+                    and not material.get("group_readable")):
+                # 证据不足，安排读取: no model is paid to restate that the body
+                # was not read; the request goes to the acquisition service and
+                # the re-judgement waits for the material.
+                decided = result_lane.gap_judgement(event, material)
+                checked = {"status": "not_required", "verdict": "not_required",
+                           "reason": "确定性判定：事件正文未读，只能「证据不足，安排读取」"}
+                effect = {"kind": "research", "status": "material_requested",
+                          **open_research_material(event, decided, context, opener),
+                          **({"daily_digest": DAILY_DIGEST_MARKER})}
+                written = judgements.record(
+                    event=event, judgement=decided, verification=checked, effect=effect,
+                    mission=mission, actor_ref=actor,
+                    annotations={"result_material": _material_record(material, decided),
+                                 "event_dates": material.get("dates"),
+                                 "main_event_ref": event["id"]})
+                _record_aliases(judgements, aliases, event, decided, checked, mission=mission,
+                                actor_ref=actor, rejudgement_ref=None)
+                summary["evidence_insufficient"] += 1
+                summary["judged"] += 1
+                summary["decisions"]["NO_CHANGE"] = summary["decisions"].get("NO_CHANGE", 0) + 1
+                summary["actions"]["research"] = summary["actions"].get("research", 0) + 1
+                summary["effects"].append({"event_ref": event["id"], "judgement_ref": written["id"], **effect})
+                continue
+            if remaining < reservation:
+                summary["judgement_status"] = "skipped:pool_exhausted"
+                break
+            group_hash = (job_group_hash({**job, "group": evidence_group}) if rejudge
+                          else incremental_group_hash(evidence_group))
+            request_id = f"{fingerprint}{group_hash[:24]}"
+            skip_triage = rejudge is not None or (material or {}).get("kind") == "result"
+            if triage_model is not None and not skip_triage:
+                passed, cost = _triage(
+                    store, event_group=event_group, context=context,
+                    model=triage_model, mission=mission, actor_ref=actor,
+                    request_id=f"t{request_id}"[:31], day=day,
+                    judgements=judgements, summary=summary,
+                )
+                spent += cost
+                if passed == "stop":
+                    summary["judgement_status"] = POOL_EXHAUSTED_STATUS
+                    break
+                if passed == "skip":
+                    continue
+            sink = _prompt_sink(summary_dir, event["id"] + (f"-r{rejudge['sequence']}" if rejudge else ""),
+                                summary["prompt_files"])
             decided = judge(
-                context, model=judge_model, mission=mission, request_id=request_id
+                context, model=judge_model, mission=mission, request_id=request_id,
+                prompt_sink=sink,
             )
+            for smaller in (15_000, 8_000):
+                # The pack is cut, not the contract: a prompt over the input
+                # bound is rebuilt on a smaller pack before anything is paid.
+                if (material is None or decided.get("status") != "refused" or decided.get("model")
+                        or "exceeds the model input bound" not in str(decided.get("reason"))):
+                    break
+                readable = material.get("group_readable")
+                material = _build_material(state_dir, store.connection, event, evidence_group,
+                                           mission=mission, day=day, pack_builder=pack_builder,
+                                           budget_chars=smaller)
+                material["group_readable"] = readable
+                context["result"] = material
+                decided = judge(context, model=judge_model, mission=mission, request_id=request_id,
+                                prompt_sink=sink)
             checked = verify(
                 context, decided, model=verifier_model, mission=mission,
                 request_id=f"v{request_id}"[:31], family_resolver=family_resolver,
+                prompt_sink=sink,
             )
             for outcome in (decided, checked):
                 if outcome.get("failure_trace") is not None:
@@ -1041,33 +1575,20 @@ def run_judgement(
                 forecast_models=forecast_models,
                 model_version=model_versions.get(event["company_ref"]),
                 research_admitter=admitter, actor_ref=actor,
+                material_opener=opener,
             )
             written = judgements.record(
                 event=event, judgement=decided, verification=checked,
                 effect=effect, mission=mission, actor_ref=actor,
+                annotations={"event_dates": result_lane.event_dates(event)} if material is None else {
+                    "result_material": _material_record(material, decided),
+                    "event_dates": material.get("dates"), "main_event_ref": event["id"]},
+                rejudgement=rejudge,
             )
-            for grouped_event in event_group[1:]:
-                alias_judgement = dict(decided)
-                alias_judgement["model"] = {
-                    **(decided.get("model") or {}), "cost_micros": 0,
-                    "grouped_under_event_ref": event["id"],
-                }
-                alias_verification = dict(checked)
-                alias_verification["model"] = {
-                    **(checked.get("model") or {}), "cost_micros": 0,
-                    "grouped_under_event_ref": event["id"],
-                }
-                judgements.record(
-                    event=grouped_event, judgement=alias_judgement,
-                    verification=alias_verification,
-                    effect={"kind": "grouped_judgement", "status": "recorded",
-                            "primary_event_ref": event["id"],
-                            # A grouped input is an input examined that day;
-                            # the digest lists it beside its primary.
-                            **({"daily_digest": DAILY_DIGEST_MARKER}
-                               if decided["decision"] == "NO_CHANGE" else {})},
-                    mission=mission, actor_ref=actor,
-                )
+            if rejudge is not None:
+                summary["rejudged"] += 1
+            _record_aliases(judgements, aliases, event, decided, checked, mission=mission,
+                            actor_ref=actor, rejudgement_ref=written["id"] if rejudge else None)
             # The owner's third instruction: when we changed our mind, or when
             # the price kept running against us, write down what we expected
             # and what we may have missed -- including when the decision was to
@@ -1114,30 +1635,33 @@ def run_judgement(
                         "reason": thought.get("reason") or reviewed.get("reason")
                         or "the verifier rejected the reflection",
                     })
-            if effect.get("status") == "candidate":
-                effect = dict(effect)
-                effect["candidates"] = [
-                    judgements.record_thesis_candidate(
-                        judgement_ref=written["id"], thesis=thesis,
-                        company_ref=event["company_ref"], decision=decided["decision"],
-                        because=decided["because"], evidence_refs=decided["citations"],
-                        falsifier_ref=next(iter(thesis.get("falsifier_refs") or ()), None),
-                        proposed_statement=None, proposed_confidence=None,
-                        mission=mission, actor_ref=actor,
-                        reflection_ref=reflection_ref,
-                    )["id"]
-                    for thesis in effect["theses"]
-                ]
-                effect.pop("theses", None)
-            elif effect.get("status") == "proposed":
-                effect = dict(effect)
-                effect["proposal_ref"] = judgements.record_forecast_proposal(
-                    judgement_ref=written["id"], company_ref=event["company_ref"],
+            # ADR-0010: every decision other than NO_CHANGE leaves a governed
+            # follow-up -- a candidate against each named current thesis, a
+            # forecast proposal when the model did not move, or a labelled
+            # notice for the owner. Before this, only ``revise_thesis`` could
+            # reach a candidate and a THESIS_WEAKENED ``note`` or ``research``
+            # left nothing a person would ever be asked about.
+            effect = dict(effect)
+            effect.pop("theses", None)
+            try:
+                followup = record_judgement_followups(
+                    judgements, judgement_ref=written["id"], event_ref=event["id"],
+                    company_ref=event["company_ref"], judgement=decided, effect=effect,
+                    mission=mission, actor_ref=actor,
                     model_version_ref=context.get("model_version_ref"),
-                    change=decided["forecast_change"], decision=decided["decision"],
-                    because=decided["because"], evidence_refs=decided["citations"],
-                    mission=mission, actor_ref=actor, reason=effect["reason"],
-                )["id"]
+                    reflection_ref=reflection_ref,
+                )
+            except EventJudgementError as exc:
+                # The judgement is already recorded; the sweep at the top of
+                # the next tick retries the follow-up through this same call.
+                followup = {"status": "failed", "candidates": [], "proposal_ref": None,
+                            "notice_ref": None, "reason": f"{type(exc).__name__}: {exc}"}
+            if followup["candidates"]:
+                effect["candidates"] = followup["candidates"]
+            if followup["proposal_ref"] is not None:
+                effect["proposal_ref"] = followup["proposal_ref"]
+            if followup["status"] != "not_owed":
+                effect["followup"] = followup
             summary["judged"] += 1
             summary["decisions"][decided["decision"]] = (
                 summary["decisions"].get(decided["decision"], 0) + 1
@@ -1162,7 +1686,10 @@ def run_judgement(
         else:
             summary["status"] = "succeeded"
             summary["judgement_status"] = summary["judgement_status"] or (
-                "partial" if summary["refused"] else "judged"
+                "partial" if summary["refused"] else
+                "screened_out" if (summary["judged"] == 0 and not summary["repeats"]
+                                   and summary["triage"]["screened_out"]) else
+                "judged"
             )
         return summary
     except EventJudgementError as exc:
@@ -1173,6 +1700,75 @@ def run_judgement(
         raise
     finally:
         _write_owner_only(summary_dir / "summary.json", summary)
+        store.close()
+
+
+def _latest_model_ref(store: DaltonStore) -> Callable[[str], str | None]:
+    from .model_forecast_driver import ForecastModelAuthority
+
+    authority = ForecastModelAuthority(store)
+
+    def latest(company_ref: str) -> str | None:
+        version = authority.latest(company_ref)
+        return None if not version else version.get("id")
+
+    return latest
+
+
+def _followup_sweep(
+    store: DaltonStore, judgements: EventJudgementAuthority, mission: Any, *, apply: bool,
+) -> dict[str, Any]:
+    try:
+        report = sweep_judgement_followups(
+            judgements, mission, actor_ref=mission["autonomy"]["automation_principal"],
+            model_version_for=_latest_model_ref(store), apply=apply,
+        )
+    except Exception as exc:  # noqa: BLE001 - the sweep never takes the tick down
+        return {"status": "failed", "reason": f"{type(exc).__name__}: {exc}"}
+    return {"status": "ok", **report}
+
+
+def run_followup_backfill(
+    *, state_dir: str | Path, apply: bool = False,
+) -> dict[str, Any]:
+    """Owner entry point: the same sweep, alone, dry-run unless ``apply``.
+
+    The dry run opens ``core.sqlite`` read-only (``mode=ro``) and writes
+    nothing, not even a schema; ``apply`` goes through ``DaltonStore`` and
+    the same keyed writes the judgement child makes.
+    """
+
+    core = Path(state_dir).expanduser().resolve() / "core.sqlite"
+    if not apply:
+        import sqlite3
+
+        connection = sqlite3.connect(f"file:{core}?mode=ro", uri=True)
+        connection.row_factory = sqlite3.Row
+        try:
+            reader = EventJudgementAuthority.reader(connection)
+
+            def latest(company_ref: str) -> str | None:
+                row = connection.execute(
+                    "SELECT version_id FROM forecast_model_versions WHERE company_ref=? "
+                    "ORDER BY version_number DESC LIMIT 1", (company_ref,)).fetchone()
+                return None if row is None else row["version_id"]
+
+            report = sweep_judgement_followups(
+                reader, {}, actor_ref="dry-run", model_version_for=latest, apply=False)
+        finally:
+            connection.close()
+        return {"status": "ok", **report}
+    store = DaltonStore(str(core))
+    try:
+        pointer = store.connection.execute(
+            "SELECT mission_version_id FROM coverage_mission_pointer "
+            "ORDER BY mission_ref LIMIT 1"
+        ).fetchone()
+        if pointer is None:
+            return {"status": "idle", "reason": "no mission"}
+        mission = CoverageMissionAuthority(store).mission(pointer["mission_version_id"])
+        return _followup_sweep(store, EventJudgementAuthority(store), mission, apply=True)
+    finally:
         store.close()
 
 
@@ -1250,12 +1846,23 @@ def build_parser() -> argparse.ArgumentParser:
     parser.add_argument("--max-events", type=int)
     parser.add_argument("--per-company", type=int)
     parser.add_argument("--dry-run", action="store_true", help="count and stop; no calls")
+    parser.add_argument(
+        "--followups-only", action="store_true",
+        help="ADR-0010 backfill: report judgements that owe a governed follow-up "
+             "(read-only); add --apply to write them. No model call either way.")
+    parser.add_argument("--apply", action="store_true",
+                        help="with --followups-only: write the follow-ups")
     parser.add_argument("--quiet", action="store_true")
     return parser
 
 
 def main(argv: list[str] | None = None) -> int:
     args = build_parser().parse_args(argv)
+    if args.followups_only:
+        report = run_followup_backfill(state_dir=args.state_dir, apply=args.apply)
+        if not args.quiet:
+            print(json.dumps(report, ensure_ascii=False, sort_keys=True, indent=1))
+        return 0 if report.get("status") in ("ok", "idle") and not report.get("errors") else 1
     summary = run_judgement(
         state_dir=args.state_dir,
         summary_dir=args.summary_dir if args.summary_dir is not None else args.state_dir,
@@ -1293,6 +1900,9 @@ __all__ = [
     "main",
     "missing_write_scopes",
     "research_admitter_for",
+    "run_followup_backfill",
     "run_judgement",
     "unjudged_events",
+    "result_jobs",
+    "job_group_hash",
 ]

@@ -2,12 +2,14 @@
 
 from __future__ import annotations
 
+import re
 import unittest
 from pathlib import Path
 
 
 PACKAGE_ROOT = Path(__file__).resolve().parents[1] / "src" / "dalton_core"
 REPOSITORY_ROOT = PACKAGE_ROOT.parents[1]
+ABSOLUTE_OPENCLAW = re.compile(r"/(?:Users|home)/[^/\s\"']+/\.openclaw(?:/|[\s\"']|$)")
 
 
 class IsolationTests(unittest.TestCase):
@@ -21,13 +23,19 @@ class IsolationTests(unittest.TestCase):
             with self.subTest(path=path.name):
                 self.assertIn("DALTON_TEST_OPENCLAW_INSTALL_ROOT", source)
                 self.assertNotIn("Path.home().glob", source)
-                self.assertNotIn("/Users/everflow/.openclaw", source)
+                self.assertNotRegex(source, ABSOLUTE_OPENCLAW)
+
+    def test_absolute_home_matcher_catches_other_users_and_linux_home(self) -> None:
+        for value in ('/Users/analyst/.openclaw', '/Users/researcher/.openclaw/config',
+                      '/home/analyst/.openclaw/config'):
+            with self.subTest(value=value):
+                self.assertRegex(value, ABSOLUTE_OPENCLAW)
+        self.assertNotRegex('<openclaw-root>/config', ABSOLUTE_OPENCLAW)
 
     def test_source_has_no_live_system_references(self) -> None:
         forbidden = (
             "workspace-chem",
             "coverage.db",
-            "/Users/everflow/.openclaw",
             "~/.openclaw",
             "openclaw.json",
             "openclaw-agent.sqlite",
@@ -44,6 +52,8 @@ class IsolationTests(unittest.TestCase):
         for path in sorted(PACKAGE_ROOT.rglob("*.py")):
             source = path.read_text(encoding="utf-8")
             relative = path.relative_to(PACKAGE_ROOT).as_posix()
+            if ABSOLUTE_OPENCLAW.search(source):
+                offenders.append(f"{relative}: absolute home OpenClaw path")
             for token in forbidden:
                 if token in source and token not in bridge_allowances.get(relative, set()):
                     offenders.append(f"{relative}: {token}")

@@ -54,7 +54,8 @@ def _config(path: Path) -> dict[str, Any]:
                 "tailscale_executable", "launch_agents_dir", "ports"}
     optional = {"shared_readonly_paths", "shared_model_capacity_bindings", "shared_connector_capacity",
                 "legacy_workspace", "connections_path", "runtime_templates",
-                "shared_call_budget_policy_path", "shared_daily_budget_policy_path"}
+                "shared_call_budget_policy_path", "shared_daily_budget_policy_path",
+                "allowed_tailscale_logins", "admin_logins", "daily_create_quota"}
     if not isinstance(raw, dict) or not required <= raw.keys() or raw.keys() - required - optional:
         raise WorkspaceError("研究环境管理配置格式无效")
     for key in ("host_root", "release_path", "tailscale_executable", "launch_agents_dir"):
@@ -62,6 +63,12 @@ def _config(path: Path) -> dict[str, Any]:
             raise WorkspaceError("研究环境管理路径无效")
     if not isinstance(raw["owner_login"], str) or not raw["owner_login"].strip():
         raise WorkspaceError("研究环境管理者未配置")
+    for key in ("allowed_tailscale_logins", "admin_logins"):
+        if key in raw and (not isinstance(raw[key], list) or not raw[key]
+                or any(not isinstance(v, str) or not v.strip() for v in raw[key])):
+            raise WorkspaceError("研究环境登录权限配置无效")
+    if type(raw.get("daily_create_quota", 3)) is not int or not 1 <= raw.get("daily_create_quota", 3) <= 100:
+        raise WorkspaceError("每日项目创建配额无效")
     host = raw["tailscale_host"]
     if not isinstance(host, str) or not re.fullmatch(r"[a-zA-Z0-9.-]+", host):
         raise WorkspaceError("研究环境访问地址无效")
@@ -81,6 +88,9 @@ def _config(path: Path) -> dict[str, Any]:
         value = raw["shared_daily_budget_policy_path"]
         if not isinstance(value, str) or not Path(value).is_absolute():
             raise WorkspaceError("共享每日预算策略路径无效")
+    legacy = raw.get("legacy_workspace")
+    if legacy is not None:
+        _validate_legacy_workspace(legacy)
     templates = raw.get("runtime_templates")
     if templates is not None:
         if not isinstance(templates, dict) or set(templates) != {"model", "service"}:
@@ -93,6 +103,45 @@ def _config(path: Path) -> dict[str, Any]:
                     or not re.fullmatch(r"[0-9a-f]{64}", binding["sha256"])):
                 raise WorkspaceError("研究运行模板绑定无效")
     return raw
+
+
+def _admins(config: Mapping[str, Any]) -> set[str]:
+    return {config["owner_login"], *config.get("admin_logins", [])}
+
+
+def _authorize(config: Mapping[str, Any], login: str) -> None:
+    if login not in set(config.get("allowed_tailscale_logins", [config["owner_login"]])) | _admins(config):
+        raise PermissionError("workspace login is not allowed")
+
+
+def _quota(config: Mapping[str, Any], login: str, records: list[dict[str, Any]]) -> tuple[int, int]:
+    today = datetime.now(timezone.utc).date().isoformat()
+    used = sum(1 for row in records if row.get("owner_login") == login
+               and str(row.get("created_at", "")).startswith(today))
+    return used, config.get("daily_create_quota", 3)
+
+
+#: What the manager configuration may say about the legacy environment.
+#: ``state_dir`` and ``config_path`` (2026-09-30) name its real state directory
+#: and its real service.json, so nothing has to fall back to a conventional
+#: path -- and nothing reads the retired legacy-control copy. The explicit
+#: state/config fields identify the live legacy environment.
+LEGACY_WORKSPACE_FIELDS = frozenset({"name", "status", "url", "workspace_id"})
+LEGACY_WORKSPACE_PATH_FIELDS = frozenset({"state_dir", "config_path"})
+
+
+def _validate_legacy_workspace(value: Any) -> None:
+    if not isinstance(value, dict) or set(value) - LEGACY_WORKSPACE_FIELDS \
+            - LEGACY_WORKSPACE_PATH_FIELDS:
+        raise WorkspaceError("研究环境管理配置格式无效")
+    for key in LEGACY_WORKSPACE_PATH_FIELDS & set(value):
+        path = value[key]
+        if not isinstance(path, str) or not Path(path).is_absolute():
+            raise WorkspaceError("现有研究环境路径无效")
+        if "legacy-control" in Path(path).parts:
+            # The 09-15 copy of legacy's service.json: it has drifted from the
+            # real file (planner budget, routing pins) and must not be named.
+            raise WorkspaceError("现有研究环境配置不能指向 legacy-control 旧副本")
 
 
 def _runtime_templates(config: Mapping[str, Any]) -> dict[str, Path]:
@@ -134,10 +183,12 @@ def provision_runtime(config: Mapping[str, Any], manifest: Path, *, login: str,
         tailscale_host=config["tailscale_host"], tailscale_executable=config["tailscale_executable"])
     actor_ref = "human:tailscale-" + hashlib.sha256(login.encode()).hexdigest()[:32]
     model = install_runtime_template(manifest, templates["model"])
+    legacy_service_path = (config.get("legacy_workspace") or {}).get("config_path")
     runtime = install(manifest, actor_ref=actor_ref,
                       manager_config_path=manager_config_path,
                       shared_daily_budget_policy_path=config.get(
-                          "shared_daily_budget_policy_path"))
+                          "shared_daily_budget_policy_path"),
+                      legacy_service_path=legacy_service_path)
     service = install_service_template(manifest, templates["service"])
     workspace = load_workspace_manifest(manifest)
     # After the service template and before any writer: the routing alignment
@@ -146,17 +197,28 @@ def provision_runtime(config: Mapping[str, Any], manifest: Path, *, login: str,
     # them -- and while nothing is holding them open.
     host_scheme = adopt_host_scheme(
         workspace.state_dir, manager_config_path=manager_config_path,
-        actor_ref=actor_ref,
-        legacy_service_path=(config.get("legacy_workspace") or {}).get("config_path"))
+        actor_ref=actor_ref, legacy_service_path=legacy_service_path)
     receipt = {"schema_version": "dalton-workspace-runtime-ready-0.1",
                "workspace_id": workspace.workspace_id,
                "model": model, "runtime": runtime, "service": service,
                "host_scheme": {
                    "shared_daily_budget": runtime.get("shared_daily_budget"),
                    **host_scheme},
-               "template_sha256": {key: value["sha256"] for key, value in config["runtime_templates"].items()}}
+               "template_sha256": {key: value["sha256"] for key, value in config["runtime_templates"].items()},
+               "template_freshness": _freshness_record(config)}
     _write(workspace.state_dir / "runtime-ready.json", receipt)
     return receipt
+
+
+def _freshness_record(config: Mapping[str, Any]) -> dict[str, Any]:
+    """What the creation receipt records about the templates it was built from."""
+
+    from .workspace_template_freshness import template_freshness
+    try:
+        value = template_freshness(config)
+    except Exception as exc:  # noqa: BLE001 - a receipt field, never a failure
+        return {"status": "unknown", "reason": str(exc)}
+    return {key: value.get(key) for key in ("status", "warnings", "model", "service")}
 
 
 def _runtime_shared_paths(templates: Mapping[str, Path]) -> list[str]:
@@ -279,7 +341,7 @@ def _catalog(config: Mapping[str, Any]) -> tuple[dict[str, Any] | None, list[str
 def _public(record: Mapping[str, Any], current_id: str | None) -> dict[str, Any]:
     slug = record.get("slug")
     return {key: record.get(key) for key in (
-        "workspace_id", "name", "url", "status", "retryable", "failure_reason"
+        "workspace_id", "name", "url", "status", "retryable", "failure_reason", "lifecycle", "created_at", "owner_login", "progress", "initial_goal_status"
     )} | {
         "current": record.get("workspace_id") == current_id,
         "slug": slug if slug else "legacy",
@@ -291,8 +353,7 @@ def list_workspaces(config_path: Path | None, login: str, current_id: str | None
         return {"enabled": False, "can_create": False, "items": [],
                 "create_disabled_reason": "研究环境管理尚未配置"}
     config = _config(config_path)
-    if login != config["owner_login"]:
-        raise PermissionError("workspace owner mismatch")
+    _authorize(config, login)
     items = []
     legacy = config.get("legacy_workspace")
     if legacy:
@@ -309,17 +370,45 @@ def list_workspaces(config_path: Path | None, login: str, current_id: str | None
         items.append(row)
     for path in sorted((Path(config["host_root"]) / "creation-requests").glob("*.json")):
         record = json.loads(path.read_text())
-        if record.get("owner_login") == login:
-            items.append(_public(record, current_id))
+        if record.get("owner_login") == login or ("admin_logins" in config and login in _admins(config)):
+            if record.get("lifecycle") in {"archived", "deleted"} and login not in _admins(config):
+                continue
+            row = _public(record, current_id)
+            from .workspace_lifecycle import latest_operation
+            row["lifecycle_operation"] = latest_operation(Path(config["host_root"]), record.get("slug", ""))
+            if record.get("lifecycle") == "paused":
+                row["readonly_url"] = "/v1/cockpit/workspace_research?slug=" + record["slug"]
+            if login in _admins(config) and record.get("lifecycle") == "paused":
+                from .workspace_lifecycle import review_items
+                row["pending_review"] = review_items(Path(config["host_root"]) / "workspaces" / record["slug"])
+            elif login in _admins(config) and record.get("lifecycle") == "archived":
+                from .workspace_lifecycle import archive_integrity
+                row["archive_integrity"] = archive_integrity(Path(config["host_root"]), record["slug"])
+            items.append(row)
     catalog, _ = _catalog(config)
     catalog_counts = {"models": 0, "sources": 0}
     if catalog is not None:
         catalog_raw = json.loads(Path(catalog["path"]).read_text(encoding="utf-8"))
         catalog_counts = {"models": len(catalog_raw["models"]),
                           "sources": len(catalog_raw["sources"])}
-    return {"enabled": True, "can_create": True, "current_workspace_id": current_id or "legacy",
+    # 2026-09-30: warn on the create page when the pinned runtime templates no
+    # longer match the mature environment -- a new environment inherits
+    # whatever the template froze, and the owner should re-export first.
+    from .workspace_template_freshness import template_freshness
+    try:
+        freshness = template_freshness(config)
+    except Exception:  # noqa: BLE001 - a listing never fails on this check
+        freshness = {"status": "unknown", "warnings": []}
+    records = [json.loads(p.read_text()) for p in (Path(config["host_root"]) / "creation-requests").glob("*.json")]
+    used, quota = _quota(config, login, records)
+    return {"enabled": True, "can_create": used < quota, "quota": {"used": used, "limit": quota, "window": "UTC day"},
+            "is_admin": login in _admins(config),
+            "create_disabled_reason": "今天已达到项目创建配额" if used >= quota else None,
+            "current_workspace_id": current_id or "legacy",
             "items": items, "isolation": "blank",
-            "shared_connections": {**catalog_counts, "available": catalog is not None}}
+            "shared_connections": {**catalog_counts, "available": catalog is not None},
+            "template_freshness": {key: freshness.get(key) for key in
+                                   ("status", "warnings", "fix")}}
 
 
 def rename_workspace(config_path: Path, login: str, value: Mapping[str, Any]) -> dict[str, Any]:
@@ -341,8 +430,7 @@ def rename_workspace(config_path: Path, login: str, value: Mapping[str, Any]) ->
         raise WorkspaceError("名称需为 1 到 80 个字符")
     name = name.strip()
     config = _config(config_path)
-    if config["owner_login"] != login:
-        raise PermissionError("workspace owner mismatch")
+    _authorize(config, login)
     root = Path(config["host_root"])
 
     def _rename_display(workspace_root: Path) -> None:
@@ -353,13 +441,15 @@ def rename_workspace(config_path: Path, login: str, value: Mapping[str, Any]) ->
         _write(display, {**body, "content_hash": _metadata_hash(body)})
 
     if slug == "legacy":
+        if login not in _admins(config):
+            raise PermissionError("primary workspace requires administrator")
         _rename_display(root / "legacy-display")
         return {"status": "renamed", "slug": slug, "name": name}
     record_path = root / "creation-requests" / (slug.removeprefix("ws-") + ".json")
     if not record_path.is_file():
         raise WorkspaceError("没有这个研究环境")
     record = json.loads(record_path.read_text(encoding="utf-8"))
-    if record.get("owner_login") != login:
+    if record.get("owner_login") != login and login not in _admins(config):
         raise PermissionError("workspace owner mismatch")
     record["name"] = name
     _write(record_path, record)
@@ -373,7 +463,7 @@ def _metadata_hash(body: Mapping[str, Any]) -> str:
 
 
 def request_create(config_path: Path, login: str, value: Mapping[str, Any]) -> dict[str, Any]:
-    if set(value) != {"name", "request_id"}:
+    if not {"name", "request_id"} <= set(value) or set(value) - {"name", "request_id", "initial_goal"}:
         raise WorkspaceError("请填写研究环境名称")
     name, request_id = value["name"], value["request_id"]
     if not isinstance(name, str) or not name.strip() or len(name.strip()) > 80 \
@@ -382,13 +472,22 @@ def request_create(config_path: Path, login: str, value: Mapping[str, Any]) -> d
     if not isinstance(request_id, str) or not re.fullmatch(r"[A-Za-z0-9_-]{8,128}", request_id):
         raise WorkspaceError("创建请求标识无效，请刷新后重试")
     config = _config(config_path)
-    if config["owner_login"] != login:
-        raise PermissionError("workspace owner mismatch")
+    _authorize(config, login)
+    initial_goal = value.get("initial_goal", "")
+    if not isinstance(initial_goal, str) or len(initial_goal) > 2000:
+        raise WorkspaceError("初始研究目标最多 2000 个字符")
+    root = Path(config["host_root"])
+    key = hashlib.sha256((login + "\0" + request_id).encode()).hexdigest()[:24]
+    if not (root / "creation-requests" / (key + ".json")).exists():
+        records = [json.loads(p.read_text()) for p in (root / "creation-requests").glob("*.json")]
+        used, quota = _quota(config, login, records)
+        if used >= quota:
+            raise WorkspaceError("今天已达到项目创建配额")
     environment = dict(os.environ)
     environment.pop("DALTON_WORKSPACE_MANIFEST", None)
     result = subprocess.run(
         [sys.executable, "-m", "dalton_core.workspace_manager", "--config", str(config_path),
-         "--login", login, "--name", name.strip(), "--request-id", request_id],
+         "--login", login, "--name", name.strip(), "--request-id", request_id, "--initial-goal", initial_goal],
         env=environment, capture_output=True, text=True, timeout=180, check=False,
     )
     if result.returncode:
@@ -398,7 +497,11 @@ def request_create(config_path: Path, login: str, value: Mapping[str, Any]) -> d
 
 
 def _port(config: Mapping[str, Any], records: list[dict[str, Any]]) -> int:
-    used = {r.get("port") for r in records}
+    used = {r.get("port") for r in records if r.get("lifecycle", "active") not in {"archived", "deleted"}}
+    for path in (Path(config["host_root"]) / "workspaces").glob("*/workspace.json"):
+        workspace = load_workspace_manifest(path)
+        if workspace.lifecycle in {"active", "paused"}:
+            used.add(workspace.cockpit_port)
     for port in config["ports"]:
         if port in used:
             continue
@@ -500,14 +603,69 @@ def _controller_tick_probe(workspace: Any) -> None:
         raise WorkspaceError("新研究环境 controller 尚未完成调度 tick")
 
 
-def create_managed_workspace(config_path: Path, login: str, name: str, request_id: str) -> dict[str, Any]:
+def _save_creation_goal(workspace, goal: str, login: str, draft: Mapping[str, Any]) -> None:
+    from .cockpit_plane import CockpitJournal
+    from .cockpit_setup import JOURNAL_DIR, JOURNAL_FILE
+    from .store import content_hash
+    # The same journal/history surface as ordinary onboarding, so the saved
+    # goal is editable and reviewable immediately after the automatic switch.
+    journal = CockpitJournal(workspace.state_dir / JOURNAL_DIR / JOURNAL_FILE)
+    now = datetime.now(timezone.utc).isoformat()
+    draft_id = "cockpit-draft:creation-goal:" + hashlib.sha256(
+        (workspace.workspace_id + "\0" + login + "\0" + goal).encode()).hexdigest()[:32]
+    try:
+        journal.write("INSERT OR IGNORE INTO cockpit_drafts(draft_id,kind,login,input_text,draft_json,content_hash,status,created_at,updated_at) VALUES(?,?,?,?,?,?,?,?,?)",
+            (draft_id, "goal", login, goal, json.dumps(draft, ensure_ascii=False, sort_keys=True), content_hash(draft), "open", now, now))
+    finally:
+        journal.close()
+    _write(workspace.state_dir / "creation-goal-draft.json", draft)
+
+
+def _initial_goal(workspace, goal: str, login: str) -> str:
+    """Creation itself confirms a fully explicit goal; incomplete scope remains a draft.
+
+    No model or network resolver runs in this operation. Existing defaults are
+    bounded authority; an omitted industry/company never receives an invented value.
+    """
+    from .workspace_mission_setup import draft_first_mission, publish_first_mission_to_store
+    from .workspace_onboarding import initial_goal_draft
+    from .store import DaltonStore
+    foundation_path = workspace.state_dir / "research-foundation.json"
+    if not foundation_path.is_file():
+        draft = initial_goal_draft(workspace, title=goal.splitlines()[0][:200], objective=goal)
+        _save_creation_goal(workspace, goal, login, draft)
+        return "review_required"
+    foundation = json.loads(foundation_path.read_text())
+    draft = draft_first_mission(workspace, goal=goal, method_foundation=foundation)
+    if draft["setup_state"] != "ready_for_confirmation":
+        _save_creation_goal(workspace, goal, login, draft)
+        return "review_required"
+    actor = "human:tailscale-" + hashlib.sha256(login.encode()).hexdigest()[:32]
+    store = DaltonStore(str(workspace.state_dir / "core.sqlite"))
+    try:
+        publish_first_mission_to_store(store, workspace, proposal=draft,
+            proposal_hash=draft["content_hash"], actor_ref=actor,
+            method_foundation=foundation,
+            sec_ticker_resolver=lambda ticker: (_ for _ in ()).throw(
+                ValueError("company identifiers resolve after workspace startup")))
+    finally:
+        store.close()
+    return "published_v1"
+
+
+def create_managed_workspace(config_path: Path, login: str, name: str, request_id: str, initial_goal: str = "") -> dict[str, Any]:
     from .workspace_creation import create_blank_workspace
     from .workspace_control_setup import configure_workspace_control
     from .workspace_process import install_workspace, label_namespace
 
     config = _config(config_path)
-    if config["owner_login"] != login:
-        raise PermissionError("workspace owner mismatch")
+    _authorize(config, login)
+    if not isinstance(name, str) or not name.strip() or len(name) > 80 or any(ord(c) < 32 for c in name):
+        raise WorkspaceError("名称需为 1 到 80 个字符")
+    if not isinstance(request_id, str) or not re.fullmatch(r"[A-Za-z0-9_-]{8,128}", request_id):
+        raise WorkspaceError("创建请求标识无效")
+    if not isinstance(initial_goal, str) or len(initial_goal) > 2000:
+        raise WorkspaceError("初始研究目标最多 2000 个字符")
     root = Path(config["host_root"])
     root.mkdir(mode=0o700, parents=True, exist_ok=True)
     key = hashlib.sha256((login + "\0" + request_id).encode()).hexdigest()[:24]
@@ -517,8 +675,10 @@ def create_managed_workspace(config_path: Path, login: str, name: str, request_i
         fcntl.flock(lock, fcntl.LOCK_EX)
         if target.exists():
             record = json.loads(target.read_text())
-            if record["name"] != name or record["owner_login"] != login:
+            if record["name"] != name or record["owner_login"] != login or record.get("initial_goal", "") != initial_goal:
                 raise WorkspaceError("这次创建请求已用于其他名称")
+            if record.get("lifecycle", "active") != "active":
+                raise WorkspaceError("项目已暂停、归档或删除，请使用生命周期操作")
             if record["status"] == "running":
                 try:
                     held = load_workspace_manifest(
@@ -530,7 +690,11 @@ def create_managed_workspace(config_path: Path, login: str, name: str, request_i
                     _write(target, record)
         else:
             records = [json.loads(p.read_text()) for p in target.parent.glob("*.json")]
-            record = {"name": name, "owner_login": login, "request_id": request_id,
+            used, quota = _quota(config, login, records)
+            if used >= quota:
+                raise WorkspaceError("今天已达到项目创建配额")
+            record = {"created_at": datetime.now(timezone.utc).isoformat(), "lifecycle": "active",
+                      "initial_goal": initial_goal, "progress": "allocating_port", "name": name, "owner_login": login, "request_id": request_id,
                       "slug": "ws-" + key, "port": _port(config, records),
                       "status": "creating", "url": None, "workspace_id": None}
             _write(target, record)
@@ -559,6 +723,7 @@ def create_managed_workspace(config_path: Path, login: str, name: str, request_i
                 _write(target, record)
                 return {"status": "running", "workspace": _public(record, None)}
         try:
+            record["progress"] = "initializing"; _write(target, record)
             templates = _runtime_templates(config)
             catalog, catalog_paths = _catalog(config)
             shared_paths = list(config.get("shared_readonly_paths", ()))
@@ -590,6 +755,15 @@ def create_managed_workspace(config_path: Path, login: str, name: str, request_i
                 connection_catalog=catalog,
             )
             workspace = load_workspace_manifest(manifest)
+            from .workspace_lifecycle import _database
+            audit = _database(root)
+            try:
+                audit.execute("INSERT OR IGNORE INTO workspace_lifecycle_events(workspace_id,slug,request_id,actor,at,action,prior_state,state,reason,payload_json) VALUES(?,?,?,?,?,?,?,?,?,?)",
+                    (workspace.workspace_id, workspace.slug, "create:" + request_id, login, record.get("created_at") or datetime.now(timezone.utc).isoformat(),
+                     "create", "unregistered", "active", "创建研究项目", json.dumps({"name": name, "initial_goal": initial_goal}, ensure_ascii=False)))
+                audit.commit()
+            finally:
+                audit.close()
             record["workspace_id"] = workspace.workspace_id
             record["status"] = "creating"
             record.pop("retryable", None)
@@ -600,6 +774,10 @@ def create_managed_workspace(config_path: Path, login: str, name: str, request_i
                     manifest, owner_login=login, tailscale_host=config["tailscale_host"],
                     tailscale_executable=config["tailscale_executable"])
             service = json.loads(workspace.config_path.read_text())
+            control = service["control"]["config"]
+            control["allowed_tailscale_logins"] = sorted({login, *_admins(config)})
+            if "admin_logins" in config:
+                control["admin_logins"] = sorted(_admins(config))
             service["control"]["config"]["cockpit"]["workspace_manager_config_path"] = str(
                 config_path.resolve())
             from .service import ServiceConfig
@@ -608,6 +786,10 @@ def create_managed_workspace(config_path: Path, login: str, name: str, request_i
             validate_service_mapping_paths(service, workspace)
             _write(workspace.config_path, service)
             ServiceConfig.from_file(workspace.config_path)
+            if initial_goal and not record.get("initial_goal_status"):
+                record["initial_goal_status"] = _initial_goal(workspace, initial_goal, login)
+                _write(target, record)
+            record["progress"] = "starting_services"; _write(target, record)
             if not record.get("installed"):
                 install_workspace(manifest, config["launch_agents_dir"])
                 record["installed"] = True
@@ -617,6 +799,14 @@ def create_managed_workspace(config_path: Path, login: str, name: str, request_i
                 configured_roles.append("control")
             if parsed_service.thesis_impact is not None:
                 configured_roles.append("thesis-impact")
+            # h2: this workspace's own publication worker, rendered by
+            # install_workspace; idle (no_current_mission) until a mission
+            # exists.  A request installed by an older release has no plist
+            # for it, which is not a failed creation.
+            worker_plist = Path(config["launch_agents_dir"]) / (
+                f"{label_namespace(workspace.slug)}.publication-worker.plist")
+            if worker_plist.is_file():
+                configured_roles.append("publication-worker")
             namespace = label_namespace(workspace.slug)
             for role in configured_roles:
                 label = f"{namespace}.{role}"
@@ -630,9 +820,10 @@ def create_managed_workspace(config_path: Path, login: str, name: str, request_i
                     subprocess.run(
                         ["launchctl", "bootstrap", f"gui/{os.getuid()}", str(plist)],
                         check=True, capture_output=True, text=True)
-            _readiness(config, workspace)
+            record["progress"] = "checking_readiness"; _write(target, record)
+            _readiness(config, workspace, require_blank=record.get("initial_goal_status") != "published_v1")
             _serve(config, record["port"])
-            record.update(status="running", retryable=False,
+            record.update(progress="ready", status="running", retryable=False,
                           url=f"https://{config['tailscale_host']}:{record['port']}/")
             record.pop("failure_reason", None)
             _write(target, record)
@@ -650,6 +841,7 @@ def main() -> int:
     parser.add_argument("--login", required=True)
     parser.add_argument("--name")
     parser.add_argument("--request-id")
+    parser.add_argument("--initial-goal", default="")
     parser.add_argument("--set-shared-purpose")
     parser.add_argument("--max-cost-usd", type=float)
     parser.add_argument("--expected-hash")
@@ -660,7 +852,7 @@ def main() -> int:
     else:
         if args.name is None or args.request_id is None:
             parser.error("--name and --request-id are required")
-        result = create_managed_workspace(args.config, args.login, args.name, args.request_id)
+        result = create_managed_workspace(args.config, args.login, args.name, args.request_id, args.initial_goal)
     print(json.dumps(result, ensure_ascii=False))
     return 0
 

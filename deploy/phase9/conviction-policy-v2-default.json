@@ -1,0 +1,32 @@
+{
+  "allowed_directions": [
+    "long",
+    "short"
+  ],
+  "allowed_horizons": [
+    "6_12_months"
+  ],
+  "daily_drafting_cost_cap_usd": "1",
+  "gate": "v2",
+  "max_drafts_per_day": 3,
+  "max_valuation_age_days": 7,
+  "min_evidence_confidence": "medium",
+  "min_expected_return_percent": {
+    "1_3_years": "25",
+    "3_5_years": "50",
+    "3_6_months": "8",
+    "6_12_months": "12"
+  },
+  "min_invalidators": 1,
+  "min_upside_downside_ratio": "2",
+  "policy_ref": "conviction-policy:v2",
+  "required_scenarios": 3,
+  "same_direction_min_expected_return_percent": {
+    "1_3_years": "40",
+    "3_5_years": "80",
+    "3_6_months": "15",
+    "6_12_months": "20"
+  },
+  "schema_version": "conviction-policy-0.2",
+  "thesis_scope": "company_only"
+}

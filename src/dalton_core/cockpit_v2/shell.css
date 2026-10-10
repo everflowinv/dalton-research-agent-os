@@ -1,0 +1,491 @@
+/* Cockpit v2 shell (ADR-0016), in the design language of the first cockpit
+   (cockpit_control.html): deep navy, glass panels, the teal -> violet brand
+   gradient, 18px cards and 12-14px controls.
+
+   Two themes from one set of semantic tokens.  Dark navy is the default; the
+   light variant (prefers-color-scheme: light) uses the old page's light
+   tokens.  Every text/background pair listed in AA_PAIRS
+   (tests/test_cockpit_v2_shell.py) is checked for at least 4.5:1 in BOTH
+   themes.  Glass panels are translucent, so the solid tokens below are the
+   composites the text actually sits on (surface = .045 white over the page,
+   raised = .11 white for hover/selected rows, glow = the brightest corner of
+   the page background).  Colour never carries meaning alone: every state also
+   has words (and a sign for gains/losses). */
+:root{
+  color-scheme:dark;
+  --v2-bg:#0d1326;
+  --v2-bg-0:#070b16;
+  --v2-bg-2:#121a33;
+  --v2-surface:#1d243c;
+  --v2-raised:#2c3349;
+  --v2-glow:#333b63;
+  --v2-sheet:#121a33;
+  --v2-cell:#171c2f;
+  --v2-ink:#e8ecf7;
+  --v2-ink-2:#c9d0e4;
+  --v2-muted:#a3adca;
+  --v2-link:#5cc8ff;
+  --v2-accent:#3ee0c8;
+  --v2-accent-ink:#08101f;
+  --v2-accent-bg:#213b4d;
+  --v2-grad-a:#3ee0c8;
+  --v2-grad-b:#8b7cf6;
+  --v2-ok:#4ade80;
+  --v2-ok-bg:#233e46;
+  --v2-warn:#f5b64a;
+  --v2-warn-bg:#3b383e;
+  --v2-danger:#ff8da5;
+  --v2-danger-bg:#3d2e47;
+  --v2-danger-ink:#1b0a12;
+  --v2-danger-btn:#3d2e47;
+  --v2-danger-btn-ink:#ffb3c3;
+  --v2-badge:#f5b64a;
+  --v2-badge-ink:#1b1200;
+  --v2-focus:#5cc8ff;
+  --v2-panel:rgba(255,255,255,.045);
+  --v2-panel-2:rgba(255,255,255,.07);
+  --v2-hover:rgba(255,255,255,.11);
+  --v2-well:rgba(0,0,0,.22);
+  --v2-field:rgba(0,0,0,.25);
+  --v2-line:rgba(255,255,255,.09);
+  --v2-line-2:rgba(255,255,255,.16);
+  --v2-rail:rgba(5,8,18,.55);
+  --v2-topbar:rgba(9,13,28,.78);
+  --v2-grad:linear-gradient(120deg,var(--v2-grad-a),var(--v2-grad-b));
+  --v2-active:linear-gradient(90deg,rgba(62,224,200,.16),rgba(139,124,246,.16));
+  --v2-active-ring:inset 0 0 0 1px rgba(62,224,200,.25);
+  --v2-hero:linear-gradient(135deg,rgba(62,224,200,.12),rgba(139,124,246,.12));
+  --v2-hero-glow:radial-gradient(circle,rgba(62,224,200,.18),transparent 60%);
+  --v2-shadow:0 20px 60px rgba(0,0,0,.35);
+  --v2-shadow-soft:0 10px 30px rgba(0,0,0,.25);
+  --v2-page:radial-gradient(1200px 800px at 10% -10%,#1a2350 0%,transparent 60%),radial-gradient(900px 700px at 110% 10%,#123a44 0%,transparent 55%),linear-gradient(180deg,#070b16 0%,#0d1326 45%,#121a33 100%);
+  --v2-radius:18px;
+  --v2-radius-sm:12px;
+  --v2-radius-md:14px;
+  /* 2026-10-09 density (G03/G04/G05, financial 2.2): one content layer,
+     compact spacing; shadows only on floating layers (side panel, dialog). */
+  --v2-pad-section:16px 20px;
+  --v2-pad-card:10px 14px;
+  --v2-gap:12px;
+  --v2-gap-sm:8px;
+  --v2-rail-w:216px;
+  --v2-rail-w-collapsed:68px;
+  --v2-font:-apple-system,BlinkMacSystemFont,"PingFang SC","Hiragino Sans GB","Helvetica Neue",Arial,"Noto Sans SC","Microsoft YaHei",sans-serif;
+  --v2-mono:ui-monospace,SFMono-Regular,Menlo,monospace;
+}
+@media (prefers-color-scheme: light){
+  :root{
+    color-scheme:light;
+    --v2-bg:#f5f7fa;
+    --v2-bg-0:#f7f8fb;
+    --v2-bg-2:#edf2f8;
+    --v2-surface:#ffffff;
+    --v2-raised:#eef2f7;
+    --v2-glow:#edf0f9;
+    --v2-sheet:#ffffff;
+    --v2-cell:#f8fafc;
+    --v2-ink:#172033;
+    --v2-ink-2:#344055;
+    --v2-muted:#5f6b7c;
+    --v2-link:#1769aa;
+    --v2-accent:#08756b;
+    --v2-accent-ink:#ffffff;
+    --v2-accent-bg:#e9f8f5;
+    --v2-grad-a:#0b7f73;
+    --v2-grad-b:#4f4fc4;
+    --v2-ok:#176d43;
+    --v2-ok-bg:#eff9f3;
+    --v2-warn:#8d4d00;
+    --v2-warn-bg:#fff8e9;
+    --v2-danger:#a92e48;
+    --v2-danger-bg:#fff0f3;
+    --v2-danger-ink:#ffffff;
+    --v2-danger-btn:#b4233f;
+    --v2-danger-btn-ink:#ffffff;
+    --v2-badge:#9a5a00;
+    --v2-badge-ink:#ffffff;
+    --v2-focus:#1769aa;
+    --v2-panel:rgba(255,255,255,.82);
+    --v2-panel-2:#eef2f7;
+    --v2-hover:#e3e9f1;
+    --v2-well:#f8fafc;
+    --v2-field:#ffffff;
+    --v2-line:#e2e7ef;
+    --v2-line-2:#cbd4e1;
+    --v2-rail:rgba(249,250,252,.86);
+    --v2-topbar:rgba(247,249,252,.86);
+    --v2-active:#ffffff;
+    --v2-active-ring:0 5px 18px rgba(40,56,82,.08),inset 0 0 0 1px #dfe5ee;
+    --v2-hero:linear-gradient(135deg,rgba(255,255,255,.94),rgba(239,246,252,.82));
+    --v2-hero-glow:radial-gradient(circle,rgba(26,169,153,.10),transparent 60%);
+    --v2-shadow:0 12px 38px rgba(37,50,74,.08);
+    --v2-shadow-soft:0 6px 20px rgba(37,50,74,.06);
+    --v2-page:radial-gradient(800px 520px at 75% -10%,rgba(109,108,232,.10),transparent 65%),radial-gradient(650px 500px at 8% 5%,rgba(26,169,153,.08),transparent 66%);
+  }
+}
+*{box-sizing:border-box}
+html{font-size:16px}
+body{margin:0;min-height:100vh;color:var(--v2-ink);font:15px/1.6 var(--v2-font);-webkit-text-size-adjust:100%;-webkit-font-smoothing:antialiased;
+  background-color:var(--v2-bg);background-image:var(--v2-page);background-repeat:no-repeat;background-attachment:fixed;background-position:center}
+a{color:var(--v2-link);text-underline-offset:2px}
+a:hover{text-decoration-thickness:2px}
+:focus-visible{outline:3px solid var(--v2-focus);outline-offset:2px}
+::placeholder{color:var(--v2-muted)}
+h1,h2,h3,h4{line-height:1.3;margin:0 0 .5em;color:var(--v2-ink)}
+h1{font-size:1.75rem;font-weight:800;letter-spacing:.2px}
+h2{font-size:1.125rem;font-weight:700}
+h3{font-size:1rem;font-weight:650}
+p{margin:.4em 0}
+ul,ol{padding-left:1.4em}
+code,kbd,samp{font-family:var(--v2-mono);font-size:.88em}
+.v2-visually-hidden{position:absolute!important;width:1px;height:1px;overflow:hidden;clip:rect(0 0 0 0);white-space:nowrap}
+.v2-skip{position:absolute;left:8px;top:-60px;background:var(--v2-accent);color:var(--v2-accent-ink);padding:10px 14px;border-radius:var(--v2-radius-sm);z-index:60;font-weight:700}
+.v2-skip:focus{top:8px}
+
+/* app frame: the old cockpit's side rail with the content column beside it */
+.v2-app{display:grid;grid-template-columns:232px minmax(0,1fr);min-height:100vh}
+.v2-rail{position:sticky;top:0;height:100vh;padding:26px 16px 20px;border-right:1px solid var(--v2-line);background:var(--v2-rail);
+  -webkit-backdrop-filter:blur(14px);backdrop-filter:blur(14px);display:flex;flex-direction:column;gap:6px;z-index:25;min-width:0}
+.v2-brand{display:flex;align-items:center;min-width:0;padding:4px 10px 22px;color:var(--v2-ink);text-decoration:none;font-weight:750;font-size:15px;line-height:1.3;border-radius:var(--v2-radius-sm)}
+.v2-brand-text{min-width:0;white-space:nowrap}
+.v2-nav ul{display:flex;flex-direction:column;gap:4px;margin:0;padding:0;list-style:none}
+.v2-nav a{display:flex;align-items:center;gap:12px;min-height:46px;padding:10px 12px;border-radius:var(--v2-radius-md);color:var(--v2-ink-2);text-decoration:none;white-space:nowrap;transition:background .15s,color .15s}
+.v2-nav a:hover{background:var(--v2-panel);color:var(--v2-ink)}
+.v2-nav a[aria-current="page"]{background:var(--v2-active);box-shadow:var(--v2-active-ring);color:var(--v2-ink);font-weight:650}
+.v2-nav-ic{width:26px;height:26px;flex:0 0 26px;border-radius:9px;display:grid;place-items:center;font-size:14px;line-height:1;background:var(--v2-panel-2);color:var(--v2-ink-2)}
+.v2-nav a[aria-current="page"] .v2-nav-ic{background:var(--v2-grad);color:var(--v2-accent-ink)}
+.v2-badge{display:inline-block;margin-left:auto;min-width:1.6em;padding:1px 8px;border-radius:999px;background:var(--v2-badge);color:var(--v2-badge-ink);font-size:13px;font-weight:800;line-height:1.5;text-align:center}
+.v2-rail-foot{margin-top:auto;padding:12px 10px 0;border-top:1px solid var(--v2-line);font-size:14px}
+.v2-old{color:var(--v2-muted);display:inline-flex;align-items:center;min-height:32px}
+.v2-old:hover{color:var(--v2-ink)}
+
+/* top bar: project switcher (left) and the three status pills (right) */
+.v2-col{min-width:0;display:flex;flex-direction:column}
+.v2-top{position:sticky;top:0;z-index:20;display:flex;flex-wrap:wrap;align-items:center;justify-content:space-between;gap:10px 18px;padding:12px 40px;
+  background:var(--v2-topbar);-webkit-backdrop-filter:blur(14px);backdrop-filter:blur(14px);border-bottom:1px solid var(--v2-line)}
+.v2-project{display:flex;align-items:center;gap:10px;min-width:0}
+.v2-project label{color:var(--v2-muted);font-size:14px;white-space:nowrap}
+.v2-project select{font:inherit;font-size:14px;min-height:38px;padding:6px 34px 6px 14px;border:1px solid var(--v2-line-2);border-radius:999px;background-color:var(--v2-field);color:var(--v2-ink);max-width:22rem;min-width:0;cursor:pointer;transition:border-color .15s}
+.v2-project select:hover{border-color:var(--v2-accent)}
+.v2-project-name{font-weight:650;color:var(--v2-ink);font-size:14px}
+.v2-status{display:flex;flex-wrap:wrap;gap:8px;min-width:0}
+.v2-pill{display:inline-flex;align-items:center;gap:8px;min-height:34px;padding:6px 14px;border-radius:999px;background:var(--v2-panel);border:1px solid var(--v2-line);font-size:13px;color:var(--v2-ink-2);line-height:1.3}
+.v2-pill::before{content:"";width:9px;height:9px;min-width:9px;flex:0 0 9px;border-radius:50%;background:var(--v2-muted)}
+a.v2-pill{text-decoration:none;transition:border-color .15s,background .15s}
+a.v2-pill:hover{border-color:var(--v2-line-2);background:var(--v2-panel-2)}
+.v2-pill-link{color:inherit;text-decoration:underline;text-underline-offset:3px}
+.v2-pill[data-tone="ok"]{color:var(--v2-ink)}
+.v2-pill[data-tone="ok"]::before{background:var(--v2-ok);box-shadow:0 0 0 0 rgba(74,222,128,.55);animation:v2-pulse 2s infinite}
+.v2-pill[data-tone="warn"]{background:var(--v2-warn-bg);color:var(--v2-warn);border-color:transparent}
+.v2-pill[data-tone="warn"]::before{background:var(--v2-warn)}
+.v2-pill[data-tone="danger"]{background:var(--v2-danger-bg);color:var(--v2-danger);border-color:transparent}
+.v2-pill[data-tone="danger"]::before{background:var(--v2-danger)}
+@keyframes v2-pulse{0%{box-shadow:0 0 0 0 rgba(74,222,128,.55)}70%{box-shadow:0 0 0 9px rgba(74,222,128,0)}100%{box-shadow:0 0 0 0 rgba(74,222,128,0)}}
+@media (prefers-reduced-motion: reduce){.v2-pill[data-tone="ok"]::before{animation:none}*{transition:none!important}}
+
+/* layout */
+.v2-body{display:flex;align-items:flex-start;min-width:0;flex:1 1 auto}
+main{flex:1 1 auto;min-width:0;max-width:1280px;margin:0 auto;padding:30px 40px 80px}
+main:focus{outline:none}
+.v2-page{min-width:0}
+.v2-page-head{display:flex;flex-wrap:wrap;align-items:baseline;gap:6px 16px;margin-bottom:22px}
+.v2-page-head h1{margin:0}
+.v2-sub{color:var(--v2-muted);font-size:15px}
+.v2-loading,.v2-empty{color:var(--v2-ink-2)}
+.v2-empty{padding:10px 0}
+.v2-crumb{font-size:14px;margin-bottom:8px;color:var(--v2-muted)}
+
+/* three visual tiers: conclusion / supporting data / alert.  A section is the
+   old cockpit's card: glass, 18px corners, a soft deep shadow. */
+.v2-section{margin:0 0 var(--v2-gap);min-width:0;background:var(--v2-panel);border:1px solid var(--v2-line);border-radius:var(--v2-radius-md);padding:var(--v2-pad-section);position:relative}
+.v2-section>h2{margin:0 0 10px;padding-bottom:8px;border-bottom:1px solid var(--v2-line);font-size:17px}
+.v2-section h3{font-size:14.5px;font-weight:650;color:var(--v2-ink-2);letter-spacing:.4px;margin:18px 0 10px}
+.v2-section>h2+h3{margin-top:4px}
+.v2-lead{font-size:16px;line-height:1.7;color:var(--v2-ink)}
+.v2-panel{background:var(--v2-well);border:1px solid var(--v2-line);border-radius:var(--v2-radius-sm);padding:12px 16px;min-width:0;margin:8px 0}
+.v2-grid{display:grid;grid-template-columns:repeat(auto-fit,minmax(min(100%,280px),1fr));gap:16px;min-width:0}
+.v2-alert{border:1px solid transparent;border-left:4px solid var(--v2-warn);background:var(--v2-warn-bg);color:var(--v2-ink);padding:12px 16px;border-radius:var(--v2-radius-sm);margin:10px 0}
+.v2-alert[data-tone="danger"]{border-left-color:var(--v2-danger);background:var(--v2-danger-bg)}
+.v2-alert[data-tone="info"]{border-left-color:var(--v2-accent);background:var(--v2-accent-bg)}
+.v2-note{color:var(--v2-muted);font-size:14px}
+.v2-kv{display:grid;grid-template-columns:max-content minmax(0,1fr);gap:6px 16px;margin:8px 0}
+.v2-kv dt{color:var(--v2-muted)}
+.v2-kv dd{margin:0;min-width:0;overflow-wrap:anywhere}
+.v2-tag{display:inline-flex;align-items:center;gap:4px;font-size:13px;line-height:1.5;padding:1px 10px;border-radius:999px;background:var(--v2-panel-2);border:1px solid var(--v2-line);color:var(--v2-ink-2);white-space:nowrap;vertical-align:baseline}
+.v2-tag[data-tone="ok"]{background:var(--v2-ok-bg);color:var(--v2-ok);border-color:transparent}
+.v2-tag[data-tone="warn"]{background:var(--v2-warn-bg);color:var(--v2-warn);border-color:transparent}
+.v2-tag[data-tone="danger"]{background:var(--v2-danger-bg);color:var(--v2-danger);border-color:transparent}
+.v2-up{color:var(--v2-ok)}
+.v2-down{color:var(--v2-danger)}
+.v2-num{font-variant-numeric:tabular-nums;text-align:right;white-space:nowrap}
+abbr[title]{text-decoration:underline dotted;cursor:help}
+
+/* stat tiles (the old cockpit's .stat): figures in the brand gradient */
+.v2-stats{display:grid;grid-template-columns:repeat(4,minmax(0,1fr));gap:14px;min-width:0}
+.v2-stat{padding:16px 18px;border-radius:16px;background:var(--v2-well);border:1px solid var(--v2-line);min-width:0}
+.v2-stat-n{display:block;font-size:28px;font-weight:800;letter-spacing:-.5px;line-height:1.2;color:var(--v2-ink);font-variant-numeric:tabular-nums}
+.v2-stat-l{display:block;color:var(--v2-muted);font-size:14px;margin-top:2px}
+
+/* overview: a dashboard -- hero conclusions, then changes beside decisions,
+   then the comparison. */
+.v2-page[data-page="overview"]{display:grid;grid-template-columns:repeat(2,minmax(0,1fr));column-gap:18px;align-items:start}
+.v2-page[data-page="overview"]>*{grid-column:1/-1}
+.v2-page[data-page="overview"]>#changes,.v2-page[data-page="overview"]>#changes+#decide{grid-column:auto}
+.v2-page[data-page="overview"]>details.v2-more{margin:-10px 0 16px}
+.v2-hero{background:var(--v2-hero),var(--v2-panel);overflow:hidden}
+.v2-hero::before{content:"";position:absolute;inset:-40% -20% auto auto;width:420px;height:420px;border-radius:50%;background:var(--v2-hero-glow);pointer-events:none}
+.v2-hero>*{position:relative}
+.v2-theses{list-style:none;margin:0;padding:0;display:flex;flex-direction:column;gap:8px;counter-reset:q}
+.v2-theses>li{position:relative;padding:12px 16px 12px 48px;border-radius:var(--v2-radius-sm);background:var(--v2-well);border:1px solid var(--v2-line);line-height:1.65}
+.v2-theses>li::before{counter-increment:q;content:counter(q);position:absolute;left:14px;top:13px;width:22px;height:22px;border-radius:7px;background:var(--v2-grad);color:var(--v2-accent-ink);font-weight:800;font-size:13px;display:grid;place-items:center}
+.v2-judgements{display:grid!important;grid-template-columns:repeat(auto-fill,minmax(min(100%,300px),1fr))}
+.v2-judgements>.v2-card{display:flex;flex-direction:column;gap:2px}
+.v2-judgements>.v2-card h3{font-size:17px;margin:0 0 4px;color:var(--v2-ink);letter-spacing:0}
+.v2-judgements>.v2-card h3 a{color:var(--v2-ink);text-decoration:none}
+.v2-judgements>.v2-card h3 a:hover{color:var(--v2-link);text-decoration:underline}
+
+/* tables */
+.v2-table-wrap{overflow-x:auto;max-width:100%;border:1px solid var(--v2-line);border-radius:var(--v2-radius-md);background:var(--v2-well)}
+table.v2-table{border-collapse:collapse;width:100%;font-size:14px;font-variant-numeric:tabular-nums}
+.v2-table caption{text-align:left;padding:10px 14px;color:var(--v2-muted);font-size:13.5px;caption-side:top}
+.v2-table th,.v2-table td{padding:10px 14px;border-bottom:1px solid var(--v2-line);text-align:left;vertical-align:top}
+.v2-table tbody tr:last-child>*{border-bottom:0}
+.v2-table thead th{background:var(--v2-panel-2);color:var(--v2-muted);font-weight:650;font-size:13.5px;white-space:nowrap}
+.v2-table tbody tr{transition:background .15s}
+.v2-table tbody tr:hover{background:var(--v2-panel)}
+.v2-table th[scope="row"]{font-weight:650;background:var(--v2-cell);position:sticky;left:0}
+.v2-table tbody tr:hover th[scope="row"]{background:var(--v2-cell)}
+.v2-table td.v2-num,.v2-table th.v2-num{text-align:right}
+/* A figure column may carry a short basis note under the figure: the note wraps, the figure does not. */
+.v2-table td.v2-num{white-space:normal}
+.v2-table td.v2-num .v2-note{text-align:right}
+.v2-table td:first-child{min-width:8.5em}
+.v2-table td:first-child>a{font-weight:650}
+.v2-table .v2-note{font-size:13px}
+.v2-sort{font:inherit;color:inherit;background:none;border:0;padding:2px 4px;margin:-2px -4px;border-radius:6px;cursor:pointer;display:inline-flex;gap:4px;align-items:center;min-height:24px;transition:color .15s}
+.v2-sort:hover{color:var(--v2-ink)}
+.v2-sort[aria-pressed="true"]{color:var(--v2-accent);text-decoration:underline;text-underline-offset:3px}
+pre.v2-pre{margin:0;padding:14px;font:13px/1.5 var(--v2-mono);white-space:pre;overflow:auto;max-height:70vh;color:var(--v2-ink-2)}
+
+/* buttons and fields: native buttons, the old cockpit's shapes */
+.v2-btn{font:inherit;font-weight:700;display:inline-flex;align-items:center;justify-content:center;gap:6px;min-height:42px;padding:9px 18px;border-radius:var(--v2-radius-sm);border:1px solid transparent;
+  background:var(--v2-grad);color:var(--v2-accent-ink);cursor:pointer;text-decoration:none;transition:transform .15s,background .15s,filter .15s,border-color .15s}
+.v2-btn:hover{filter:brightness(1.08)}
+.v2-btn:active{transform:translateY(1px)}
+.v2-btn:disabled{opacity:.5;cursor:not-allowed;transform:none;filter:none}
+.v2-btn-secondary{background:var(--v2-panel-2);color:var(--v2-ink);border-color:var(--v2-line-2);font-weight:650}
+.v2-btn-secondary:hover{background:var(--v2-hover);filter:none}
+.v2-btn-quiet{background:transparent;border-color:var(--v2-line-2);color:var(--v2-ink);font-weight:600}
+.v2-btn-quiet:hover{background:var(--v2-panel-2);filter:none}
+.v2-btn-danger{background:var(--v2-danger-btn);border-color:transparent;color:var(--v2-danger-btn-ink)}
+.v2-actions{display:flex;flex-wrap:wrap;gap:10px;align-items:center;margin-top:14px}
+.v2-field{display:flex;flex-direction:column;gap:6px;margin:12px 0;min-width:0}
+.v2-field label{font-weight:650;color:var(--v2-ink)}
+.v2-field .v2-help{color:var(--v2-muted);font-size:14px}
+.v2-field textarea,.v2-field input,.v2-field select{font:inherit;padding:12px 14px;border:1px solid var(--v2-line-2);border-radius:var(--v2-radius-md);background-color:var(--v2-field);color:var(--v2-ink);width:100%;transition:border-color .15s}
+.v2-field select{padding:10px 14px}
+.v2-field textarea:hover,.v2-field input:hover,.v2-field select:hover{border-color:var(--v2-muted)}
+.v2-field textarea:focus,.v2-field input:focus,.v2-field select:focus{border-color:var(--v2-accent)}
+.v2-field textarea{min-height:110px;resize:vertical}
+.v2-field[data-invalid="true"] textarea,.v2-field[data-invalid="true"] input{border-color:var(--v2-danger)}
+.v2-field-error{color:var(--v2-danger);font-size:14px;min-height:1.2em}
+.v2-receipt{margin-top:10px;padding:10px 14px;border-radius:var(--v2-radius-sm);background:var(--v2-ok-bg);color:var(--v2-ok);border:1px solid transparent}
+.v2-receipt[data-tone="danger"]{background:var(--v2-danger-bg);color:var(--v2-danger)}
+details.v2-more{margin:6px 0}
+details.v2-more>summary{cursor:pointer;color:var(--v2-link);min-height:32px;display:flex;align-items:center;gap:6px;border-radius:6px;font-size:14.5px}
+details.v2-more>summary:hover{color:var(--v2-ink)}
+details.v2-more[open]>summary{margin-bottom:6px}
+
+/* cards (tasks, changes) */
+.v2-list{list-style:none;margin:0;padding:0;display:flex;flex-direction:column;gap:var(--v2-gap-sm)}
+.v2-card{background:var(--v2-well);border:1px solid var(--v2-line);border-radius:var(--v2-radius-sm);padding:var(--v2-pad-card);min-width:0;transition:border-color .15s,background .15s}
+.v2-card:hover{border-color:var(--v2-line-2)}
+.v2-card h3{margin:0 0 6px;font-size:16px;color:var(--v2-ink);letter-spacing:0}
+.v2-card p{overflow-wrap:anywhere}
+.v2-card-meta{display:flex;flex-wrap:wrap;align-items:center;gap:6px 12px;color:var(--v2-muted);font-size:13.5px;margin-bottom:4px;font-variant-numeric:tabular-nums}
+
+/* company page: standalone page with a table of contents */
+.v2-company{display:grid;grid-template-columns:196px minmax(0,1fr);gap:24px;align-items:start}
+.v2-toc{position:sticky;top:84px;padding:10px;border-radius:var(--v2-radius);background:var(--v2-panel);border:1px solid var(--v2-line)}
+.v2-toc ol{list-style:none;margin:0;padding:0;display:flex;flex-direction:column;gap:2px}
+.v2-toc a{display:flex;align-items:center;min-height:38px;padding:6px 12px;border-radius:var(--v2-radius-sm);color:var(--v2-ink-2);text-decoration:none;font-size:14.5px;transition:background .15s,color .15s}
+.v2-toc a:hover{background:var(--v2-panel-2);color:var(--v2-ink)}
+.v2-toc a[aria-current="true"]{background:var(--v2-active);box-shadow:var(--v2-active-ring);color:var(--v2-ink);font-weight:650}
+.v2-company-body{min-width:0}
+.v2-company-body>section{scroll-margin-top:96px}
+.v2-company-body>section>h2{font-size:20px}
+
+/* side panel for sources / originals (G11): the old cockpit's reader sheet */
+.v2-side{position:sticky;top:76px;flex:0 0 400px;max-width:400px;height:calc(100vh - 92px);overflow:auto;margin:16px 16px 16px 0;
+  background:linear-gradient(180deg,var(--v2-bg-2),var(--v2-bg));background-color:var(--v2-sheet);border:1px solid var(--v2-line-2);border-radius:20px;box-shadow:var(--v2-shadow);padding:22px 24px}
+.v2-side-head{display:flex;align-items:center;justify-content:space-between;gap:10px;margin:-22px -24px 14px;padding:16px 24px 12px;position:sticky;top:-22px;z-index:1;background:var(--v2-sheet);border-bottom:1px solid var(--v2-line)}
+.v2-side-head h2{margin:0;font-size:20px}
+.v2-side p{line-height:1.75}
+
+/* Q&A */
+.v2-answer h3{margin-top:.8em}
+.v2-cite{font-size:14px;color:var(--v2-ink-2)}
+.v2-cite li{padding:4px 0;border-top:1px dashed var(--v2-line)}
+
+/* Migrated controls (2026-10-08): toggles, checkbox groups, inline numeric
+   inputs, the scenario sum line, the drawer lists.  Tokens only. */
+.v2-toggle-row{display:flex;flex-wrap:wrap;gap:8px;margin:8px 0}
+.v2-toggle{min-height:36px;padding:6px 14px;font-size:14px}
+.v2-toggle[aria-pressed="true"]{background:var(--v2-accent-bg);border-color:var(--v2-accent);color:var(--v2-ink)}
+.v2-toggle[aria-pressed="true"]::before{content:"✓";color:var(--v2-accent);font-weight:700}
+.v2-fieldset{border:1px solid var(--v2-line);border-radius:var(--v2-radius-md);padding:10px 16px 6px;margin:12px 0;min-width:0}
+.v2-fieldset legend{font-weight:650;color:var(--v2-ink);padding:0 6px}
+.v2-check-row{display:flex;flex-wrap:wrap;gap:6px 18px;margin:4px 0}
+.v2-check{display:inline-flex;align-items:center;gap:6px;min-height:32px;color:var(--v2-ink);cursor:pointer}
+.v2-check input{width:18px;height:18px;accent-color:var(--v2-accent)}
+.v2-input{font:inherit;padding:8px 10px;border:1px solid var(--v2-line-2);border-radius:var(--v2-radius-sm);background-color:var(--v2-field);color:var(--v2-ink);max-width:100%}
+.v2-input:focus{border-color:var(--v2-accent)}
+.v2-input[aria-invalid="true"]{border-color:var(--v2-danger)}
+.v2-input:disabled{opacity:.5}
+.v2-input.v2-num{width:5.5em;text-align:right;font-variant-numeric:tabular-nums}
+.v2-input-pct{display:inline-flex;align-items:center;gap:4px;white-space:nowrap}
+.v2-field-inline{margin:4px 0}
+.v2-grid-tight{grid-template-columns:repeat(auto-fit,minmax(min(100%,150px),1fr));gap:8px 14px}
+.v2-sum{font-weight:650;margin:10px 0;padding:8px 12px;border-radius:var(--v2-radius-sm);background:var(--v2-warn-bg);color:var(--v2-ink)}
+.v2-sum[data-tone="ok"]{background:var(--v2-ok-bg)}
+.v2-diff{list-style:none;padding:0;margin:6px 0;display:flex;flex-direction:column;gap:6px}
+.v2-field textarea.v2-input-short{min-height:64px}
+.v2-feedback{margin-top:6px}
+.v2-traj-list{gap:6px}
+details.v2-traj>summary{display:block;color:var(--v2-ink);font-size:14px;line-height:1.6}
+.v2-records{display:grid;grid-template-columns:repeat(auto-fit,minmax(min(100%,240px),1fr));gap:12px}
+.v2-drawer h3{margin-top:18px}
+.v2-block{margin-top:18px}
+/* ---- 2026-10-09: one layer, not card-in-card (G03).  Anything nested in a
+   card or panel drops its own border and background; a nested section is a
+   plain block with a heading. */
+.v2-card .v2-card,.v2-card .v2-panel,.v2-panel .v2-panel,.v2-panel .v2-card,.v2-section .v2-section,
+.v2-card .v2-table-wrap,.v2-panel .v2-stat{border-color:transparent;background:transparent;box-shadow:none;padding-left:0;padding-right:0}
+.v2-section .v2-section{padding:0;margin-top:var(--v2-gap)}
+.v2-theses>li{border-color:transparent}
+.v2-stat{border-color:transparent}
+.v2-judgements>.v2-card{border-color:transparent}
+/* A page or block a widget marks compact (v2-compact): tighter rows and no
+   per-item frames, for dense financial tables and lists. */
+.v2-compact{--v2-pad-card:6px 10px;--v2-pad-section:12px 14px;--v2-gap:8px;--v2-gap-sm:6px}
+.v2-compact .v2-card,.v2-compact .v2-panel{border-color:transparent}
+.v2-compact .v2-table th,.v2-compact .v2-table td{padding:6px 10px}
+.v2-compact p{margin:.2em 0}
+
+/* collapsible navigation (G04): icons only, the label stays the accessible name */
+.v2-rail-toggle{font:inherit;font-size:14px;display:flex;align-items:center;gap:10px;width:100%;min-height:40px;padding:6px 10px;border:0;border-radius:var(--v2-radius-sm);background:transparent;color:var(--v2-muted);cursor:pointer}
+.v2-rail-toggle:hover{background:var(--v2-panel);color:var(--v2-ink)}
+.v2-app{grid-template-columns:var(--v2-rail-w) minmax(0,1fr)}
+.v2-app.v2-nav-collapsed{grid-template-columns:var(--v2-rail-w-collapsed) minmax(0,1fr)}
+.v2-nav-collapsed .v2-rail{padding-left:10px;padding-right:10px}
+.v2-nav-collapsed .v2-nav-label,.v2-nav-collapsed .v2-rail-toggle-text{position:absolute!important;width:1px;height:1px;overflow:hidden;clip:rect(0 0 0 0);white-space:nowrap}
+.v2-nav-collapsed .v2-nav a{justify-content:center;padding:10px 6px;position:relative}
+.v2-nav-collapsed .v2-badge{position:absolute;top:2px;right:2px;margin:0;padding:0 5px;font-size:11px}
+.v2-nav-collapsed .v2-brand{display:none}
+.v2-nav-collapsed .v2-rail-toggle{justify-content:center}
+
+/* collapsible table of contents (G04): pages tag their TOC v2-toc--collapsible;
+   the toggle sets data-collapsed and the page grid gives the body the room. */
+.v2-toc-toggle{font:inherit;font-size:13.5px;display:flex;align-items:center;gap:6px;width:100%;min-height:34px;padding:4px 10px;margin-bottom:4px;border:0;border-radius:var(--v2-radius-sm);background:transparent;color:var(--v2-muted);cursor:pointer}
+.v2-toc-toggle:hover{background:var(--v2-panel-2);color:var(--v2-ink)}
+.v2-toc--collapsible[data-collapsed="true"] ol{display:none}
+.v2-toc--collapsible[data-collapsed="true"]{padding:4px}
+.v2-company:has(.v2-toc--collapsible[data-collapsed="true"]){grid-template-columns:48px minmax(0,1fr)}
+.v2-toc--collapsible[data-collapsed="true"] .v2-toc-toggle-text{position:absolute!important;width:1px;height:1px;overflow:hidden;clip:rect(0 0 0 0);white-space:nowrap}
+
+/* top bar: refresh and the "new content" prompt (G07) */
+.v2-refresh{min-height:34px;padding:4px 12px;font-size:13px}
+.v2-fresh{display:inline-flex;align-items:center;gap:8px;font-size:13px;color:var(--v2-ink);background:var(--v2-accent-bg);border-radius:999px;padding:2px 4px 2px 12px}
+.v2-fresh .v2-btn{min-height:30px;padding:2px 10px;font-size:13px}
+.v2-fresh[hidden]{display:none}
+.v2-actions .v2-actions{margin-top:0}
+
+/* the shared state block (G12): 当前状态 → 影响 → 谁处理 → 我能做什么 */
+.v2-state{border-left:4px solid var(--v2-accent);background:var(--v2-accent-bg);color:var(--v2-ink);padding:10px 14px;border-radius:var(--v2-radius-sm);margin:8px 0}
+.v2-state[data-tone="danger"]{border-left-color:var(--v2-danger);background:var(--v2-danger-bg)}
+.v2-state[data-tone="warn"]{border-left-color:var(--v2-warn);background:var(--v2-warn-bg)}
+.v2-state-head{font-weight:700;margin:0 0 4px}
+.v2-state-grid{display:grid;grid-template-columns:max-content minmax(0,1fr);gap:2px 14px;margin:0}
+.v2-state-grid dt{color:var(--v2-ink-2);font-weight:600}
+.v2-state-grid dd{margin:0;min-width:0;overflow-wrap:anywhere}
+.v2-state .v2-actions{margin-top:8px}
+details.v2-tech>summary{color:var(--v2-ink-2);font-size:13.5px}
+.v2-enum-unknown{display:inline-flex;flex-wrap:wrap;align-items:baseline;gap:4px}
+
+/* the shared confirmation dialog (MUSE P0 #2): a floating layer, so it has a shadow */
+dialog.v2-dialog{max-width:min(560px,calc(100vw - 32px));width:100%;border:1px solid var(--v2-line-2);border-radius:var(--v2-radius-md);background:var(--v2-sheet);color:var(--v2-ink);padding:18px 20px;box-shadow:var(--v2-shadow)}
+dialog.v2-dialog::backdrop{background:rgba(5,8,18,.55)}
+dialog.v2-dialog h2{font-size:18px;margin:0 0 8px}
+.v2-dialog-body p{margin:.3em 0}
+
+/* a card after its action (T06): done / queued / rejected stay readable */
+.v2-card[data-state="done"]{opacity:.85;border-left:4px solid var(--v2-ok)}
+.v2-card[data-state="queued"]{border-left:4px solid var(--v2-accent)}
+.v2-card[data-state="rejected"]{border-left:4px solid var(--v2-danger)}
+.v2-chip{display:inline-flex;align-items:center;gap:6px;font-size:13px;padding:2px 10px;border-radius:999px;background:var(--v2-accent-bg);color:var(--v2-ink)}
+.v2-progress{display:flex;flex-wrap:wrap;align-items:center;gap:10px;margin:8px 0}
+.v2-progress-bar{flex:1 1 160px;height:6px;border-radius:999px;background:var(--v2-panel-2);overflow:hidden}
+.v2-progress-bar>span{display:block;height:100%;width:30%;background:var(--v2-grad);border-radius:999px;animation:v2-indet 1.6s ease-in-out infinite}
+@keyframes v2-indet{0%{transform:translateX(-100%)}100%{transform:translateX(340%)}}
+@media (prefers-reduced-motion: reduce){.v2-progress-bar>span{animation:none;width:100%;opacity:.5}}
+.v2-subnav{display:flex;flex-wrap:wrap;gap:6px;margin:0 0 var(--v2-gap)}
+.v2-subnav a{display:inline-flex;align-items:center;min-height:34px;padding:4px 12px;border-radius:999px;border:1px solid var(--v2-line);color:var(--v2-ink-2);text-decoration:none;font-size:14px}
+.v2-subnav a:hover{background:var(--v2-panel-2);color:var(--v2-ink)}
+.v2-presets{display:flex;flex-wrap:wrap;gap:8px;margin:6px 0}
+.v2-inline{display:inline-flex;align-items:center;gap:6px}
+.v2-inline select.v2-input{padding:6px 8px;min-height:36px}
+.v2-pre-line{white-space:pre-line}
+.v2-weekly-document{min-width:0;max-width:100%;overflow-wrap:anywhere;scroll-margin-top:148px}
+.v2-weekly-document .v2-table-wrap{min-width:0;max-width:100%;overflow-x:auto}
+.v2-weekly-document table{min-width:32rem;overflow-wrap:normal}
+.v2-weekly-document th[scope="row"],.v2-weekly-document td:first-child{white-space:nowrap}
+.v2-headline-kv{grid-template-columns:max-content minmax(0,1fr);gap:6px 18px;margin:0 0 6px;font-size:15.5px}
+.v2-headline-kv dt{font-weight:650;color:var(--v2-ink-2)}
+.v2-handoff{display:flex;flex-direction:column;gap:4px;min-width:0}
+
+@media (max-width:1280px){
+  main{padding:24px 28px 64px}
+  .v2-top{padding:12px 28px}
+  .v2-side{position:fixed;right:0;top:0;bottom:0;height:auto;margin:0;z-index:40;border-radius:20px 0 0 20px;flex-basis:auto;width:min(440px,100vw);max-width:100vw;box-shadow:-20px 0 60px rgba(0,0,0,.45)}
+  .v2-stats{grid-template-columns:repeat(2,minmax(0,1fr))}
+}
+/* <= 1024: the rail collapses to a top bar of tabs, as the old page's nav did */
+@media (max-width:1024px){
+  .v2-app{grid-template-columns:minmax(0,1fr);grid-template-rows:auto 1fr}
+  .v2-rail{position:sticky;top:0;height:auto;flex-direction:row;align-items:center;gap:8px;padding:8px 16px;border-right:0;border-bottom:1px solid var(--v2-line);z-index:30}
+  .v2-brand,.v2-nav-collapsed .v2-brand{display:flex;padding:4px 6px;flex:none}
+  .v2-nav{min-width:0;flex:1 1 auto}
+  .v2-nav ul{flex-direction:row;overflow-x:auto;scrollbar-width:none;padding:2px}
+  .v2-nav a{min-height:44px;padding:8px 12px;gap:8px}
+  .v2-badge{margin-left:2px}
+  .v2-rail-foot{margin:0;padding:0 0 0 8px;border-top:0;border-left:1px solid var(--v2-line);flex:none}
+  .v2-top{position:static;padding:10px 20px}
+  .v2-company{grid-template-columns:minmax(0,1fr)}
+  .v2-toc{position:static;padding:8px}
+  .v2-toc ol{flex-direction:row;flex-wrap:wrap;gap:6px}
+  .v2-toc a{min-height:34px;border:1px solid var(--v2-line);border-radius:999px;padding:4px 12px;font-size:14px}
+  .v2-company-body>section{scroll-margin-top:76px}
+  .v2-page[data-page="overview"]{grid-template-columns:minmax(0,1fr)}
+  .v2-page[data-page="overview"]>#changes,.v2-page[data-page="overview"]>#decide{grid-column:1/-1}
+}
+@media (max-width:1024px){.v2-rail-foot{display:none}.v2-app.v2-nav-collapsed{grid-template-columns:minmax(0,1fr)}
+  .v2-nav-collapsed .v2-nav-label{position:static!important;width:auto;height:auto;overflow:visible;clip:auto}}
+@media (max-width:768px){
+  .v2-rail{flex-wrap:wrap;padding:8px 12px}
+  .v2-nav{flex-basis:100%;order:3}
+  .v2-rail-foot{margin-left:auto}
+  .v2-top{padding:10px 14px}
+  .v2-project{flex-wrap:wrap}
+  main{padding:18px 14px 56px}
+  .v2-section{padding:18px 16px}
+  .v2-kv{grid-template-columns:minmax(0,1fr)}
+  .v2-kv dt{margin-top:4px}
+  .v2-stats{grid-template-columns:minmax(0,1fr) minmax(0,1fr)}
+  h1{font-size:1.5rem}
+  .v2-side{border-radius:0;inset:0;width:100vw;max-width:100vw}
+  .v2-refresh{order:5}
+}
+@media print{.v2-rail,.v2-top,.v2-toc,.v2-side,.v2-actions,dialog{display:none}.v2-app{display:block}main{max-width:none}.v2-section{box-shadow:none}}
+/* Headings receive focus on navigation for screen readers; the page itself
+   is the visible cue, so no ring on a heading nobody tabbed to. */
+h1[tabindex="-1"]:focus,h2[tabindex="-1"]:focus,h3[tabindex="-1"]:focus{outline:none}

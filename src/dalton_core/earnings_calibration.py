@@ -409,6 +409,8 @@ def build_calibration_prompt(context: Mapping[str, Any]) -> str:
         + "、".join(DECISION_VOCABULARY)
         + "；决定与动作必须相容（NO_CHANGE 不能配 revise_thesis）。",
         "5. 你提的是候选，不是修改：thesis 由人裁决，未来期的预测这一步一律不动。",
+        "每项 revise_thesis 必须独立评估并明确给出 proposed_statement 与 proposed_confidence（low/medium/high）；"
+        "不得复制当前置信度或默认设低。没有完整建议就用 note 并说清缺口。",
         "6. 和市场一致等于没有看法：说清我们和街上差在哪，什么可观测量会把市场拉过来；"
         "这一季打了我们的脸就说漏了什么，不要复述 thesis。",
         "",
@@ -418,7 +420,7 @@ def build_calibration_prompt(context: Mapping[str, Any]) -> str:
         ' "because": "<为什么>", "refs": []}],',
         ' "theses": [{"thesis_ref": "<thesis 版本 ref>", "decision": "<五词之一>",'
         ' "action": "no_change|note|revise_thesis", "because": "<理由>",'
-        ' "proposed_statement": "<改成什么，或 null>", "refs": []}],',
+        ' "proposed_statement": "<改成什么，或 null>", "proposed_confidence": "<独立评估的 low|medium|high，非修订可 null>", "refs": []}],',
         ' "reflection": {"what_we_expected": "", "what_happened": "", "why": "",'
         ' "citations": [], "missed_debates": [{"question": "", "refs": []}],'
         ' "followup_tracking": [{"source_key": "", "interval_seconds": 0, "because": ""}],'
@@ -530,11 +532,11 @@ def _theses(value: Any, context: Mapping[str, Any], permitted: set[str]) -> list
     seen: set[str] = set()
     for item in value:
         if not isinstance(item, Mapping) or set(item) != {
-            "thesis_ref", "decision", "action", "because", "proposed_statement", "refs"
+            "thesis_ref", "decision", "action", "because", "proposed_statement", "proposed_confidence", "refs"
         }:
             raise EarningsSeasonValidationError(
                 "each thesis entry is exactly thesis_ref, decision, action, because, "
-                "proposed_statement and refs"
+                "proposed_statement, proposed_confidence and refs"
             )
         ref = _text(item["thesis_ref"], "theses[].thesis_ref", maximum=512)
         if ref not in known:
@@ -565,11 +567,17 @@ def _theses(value: Any, context: Mapping[str, Any], permitted: set[str]) -> list
         proposed = item["proposed_statement"]
         if proposed is not None:
             proposed = _text(proposed, "theses[].proposed_statement", maximum=1200)
-        if action == "revise_thesis" and proposed is None and decision != "THESIS_BROKEN":
-            raise EarningsSeasonValidationError(
-                "a revision candidate that proposes no new statement has to be a "
-                "THESIS_BROKEN, otherwise it proposes nothing"
-            )
+        confidence = item["proposed_confidence"]
+        if confidence is not None and confidence not in {"low", "medium", "high"}:
+            raise EarningsSeasonValidationError("proposed_confidence must be ordinal low, medium or high")
+        if action == "revise_thesis":
+            if proposed is None:
+                raise EarningsSeasonValidationError("a revision candidate without a statement proposes nothing")
+            from .thesis_question_model import validate_revision_proposal
+            try:
+                validate_revision_proposal(proposed, confidence, decision=decision)
+            except ValueError as exc:
+                raise EarningsSeasonValidationError(str(exc)) from exc
         refs = _ref_list(item["refs"], "theses[].refs")
         stray = sorted(set(refs) - permitted)
         if stray:
@@ -586,6 +594,7 @@ def _theses(value: Any, context: Mapping[str, Any], permitted: set[str]) -> list
             "action": action,
             "because": _text(item["because"], "theses[].because", maximum=1200),
             "proposed_statement": proposed,
+            "proposed_confidence": confidence,
             "refs": refs,
         })
     return rows
@@ -783,6 +792,7 @@ def calibration_body(output: Mapping[str, Any], context: Mapping[str, Any]) -> s
         parts.append(
             f"- {row['decision']} / {row['action']}：{row['because']}"
             + (f"　改成：{proposed}" if proposed else "")
+            + (f"　提议信心：{row['proposed_confidence']}" if row.get("proposed_confidence") else "")
         )
     reflection = output.get("reflection") or {}
     if reflection:
@@ -888,6 +898,8 @@ def build_calibration_verifier_prompt(
         "",
         "拒绝的理由：说了材料里没有的事（unsupported_claim）、该带的说明没带（missing_caveat）、"
         "写错了期间（wrong_period）、编了一个数字（invented_number）。都没有就 pass。",
+        "核验每项修订的 proposed_statement 与 proposed_confidence 是否由理由及引用独立支持；"
+        "空建议、置信度与正文相反、或没有依据地照抄当前置信度应拒绝。",
         "",
         f"公司：{context['company_ref']}　期间：{context.get('period_end')}",
         "",
@@ -1112,6 +1124,13 @@ def apply_calibration_effects(
     checkpoint exists for.
     """
 
+    incomplete = [row["thesis_ref"] for row in output["theses"] if row.get("action") == "revise_thesis"
+                  and (not str(row.get("proposed_statement") or "").strip()
+                       or row.get("proposed_confidence") not in {"low", "medium", "high"})]
+    if incomplete:
+        return {"status": "blocked", "reason": "incomplete_proposal", "incomplete_thesis_refs": incomplete,
+                "candidates": [], "forecast_proposals": [], "reflection_ref": None,
+                "forward_estimates_revised": False}
     decision, action = strongest_decision(output["theses"])
     judgement_body = {
         "decision": decision,
@@ -1170,7 +1189,7 @@ def apply_calibration_effects(
             evidence_refs=row["refs"] or [event["id"]],
             falsifier_ref=None,
             proposed_statement=row.get("proposed_statement"),
-            proposed_confidence=None,
+            proposed_confidence=row["proposed_confidence"],
             mission=mission,
             actor_ref=actor_ref,
             reflection_ref=reflection_ref,

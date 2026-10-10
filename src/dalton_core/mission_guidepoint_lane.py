@@ -550,6 +550,54 @@ class GuidepointLaneCoordinator:
                 })
         return due
 
+    # -- batch E: targeted queries on behalf of a MaterialRequest ----------
+    def _state_dir(self) -> Any:
+        return getattr(self.launcher, "state_dir", None)
+
+    def targeted_queries(self, *, as_of: date | None = None) -> list[dict[str, Any]]:
+        """The material acquisition service's queued Guidepoint queries, as due plan queries.
+
+        A targeted query names a company; it runs that company's plan query
+        (the plan's own wording, its own grant and quota) now, ahead of the
+        cadence.  A company the plan does not cover is refused back to the
+        service, which moves on to the next source.
+        """
+
+        state_dir = self._state_dir()
+        if state_dir is None:
+            return []
+        try:
+            from .material_acquisition import pending_targeted_queries
+            pending = pending_targeted_queries(state_dir, GUIDEPOINT_SOURCE_REF, limit=3)
+        except Exception:  # noqa: BLE001 - nothing queued
+            return []
+        if not pending:
+            return []
+        today = as_of or self.clock().date()
+        compiled = guidepoint_plan_queries(self.plan, as_of=today)
+        out: list[dict[str, Any]] = []
+        for item in pending:
+            match = next((query for query in compiled if query["kind"] == "company"
+                          and query["company_ref"] == item.get("company_ref")), None)
+            if match is None:
+                self._answer_targeted({"targeted_query_ref": item["query_id"]}, "refused", "not_in_plan",
+                                      "company is not in the Guidepoint plan")
+                continue
+            out.append({**match, "reason": "material_request", "targeted_query_ref": item["query_id"]})
+        return out
+
+    def _answer_targeted(self, query: Mapping[str, Any], status: str, kind: str | None,
+                         reason: str | None, **extra: Any) -> None:
+        query_id = query.get("targeted_query_ref")
+        state_dir = self._state_dir()
+        if not query_id or state_dir is None:
+            return
+        try:
+            from .material_acquisition import record_targeted_event
+            record_targeted_event(state_dir, query_id, status=status, kind=kind, reason=reason, **extra)
+        except Exception:  # noqa: BLE001 - the service times the query out instead
+            pass
+
     # -- settling last tick's children -------------------------------------
     def settle_dispatches(self) -> list[dict[str, Any]]:
         """Reconcile every search child this lane has open.
@@ -845,7 +893,12 @@ class GuidepointLaneCoordinator:
                 "quota_exhausted" if budget["remaining_24h"] < 1 else "tick_cap_reached"
             )
             return result
-        due = self.due_queries(as_of=as_of)
+        # Batch E: a MaterialRequest's targeted query goes first; the same
+        # (company, spec) is not launched twice in one tick.
+        targeted = self.targeted_queries(as_of=as_of)
+        seen = {(query["company_ref"], query["spec_ref"]) for query in targeted}
+        due = targeted + [query for query in self.due_queries(as_of=as_of)
+                          if (query["company_ref"], query["spec_ref"]) not in seen]
         if not due:
             result["reason"] = "nothing_due"
             return result
@@ -874,6 +927,7 @@ class GuidepointLaneCoordinator:
             except LaneChildConflict:
                 # One child at a time is the lane's contract, not a failure:
                 # the remaining queries are still due on the next tick.
+                self._answer_targeted(query, "deferred", "busy", "child_slot_busy")
                 result["skipped"].append({
                     "spec_ref": query["spec_ref"],
                     "company_ref": query["company_ref"],
@@ -886,6 +940,7 @@ class GuidepointLaneCoordinator:
                 # to keep retrying at speed, so it is reported and the tick
                 # stops rather than walking the rest of the queue into the
                 # same refusal.
+                self._answer_targeted(query, "refused", "credentials", f"{type(exc).__name__}: {exc}")
                 result["skipped"].append({
                     "spec_ref": query["spec_ref"],
                     "company_ref": query["company_ref"],
@@ -901,6 +956,8 @@ class GuidepointLaneCoordinator:
                 query_hash=query["query_hash"],
                 ticket_ref=ticket["id"],
             )
+            self._answer_targeted(query, "launched", None, None, dispatch_ref=dispatch["dispatch_id"],
+                                  ticket_ref=ticket["id"])
             result["launched"].append({
                 "spec_ref": query["spec_ref"],
                 "company_ref": query["company_ref"],
@@ -970,7 +1027,23 @@ def dispatch(server: Any, params: Mapping[str, Any]) -> dict[str, Any]:
     del params
     launcher = server.lane_launcher(LAUNCHER_KWARG)
     if launcher is None:
+        # An absent connector cannot answer later. Tell the material ladder
+        # now so it can try its next source instead of waiting three hours.
+        from .material_acquisition import pending_targeted_queries, record_targeted_event
+
+        state = getattr(server, "state_dir", None)
+        refused = 0
+        if state is not None:
+            try:
+                for query in pending_targeted_queries(state, GUIDEPOINT_SOURCE_REF, limit=3):
+                    record_targeted_event(state, query["query_id"], status="refused",
+                                          kind="unconfigured", reason="本环境尚未接入专家访谈检索，继续检查其他来源")
+                    refused += 1
+            except Exception as exc:  # report an unreadable ledger; do not claim it was drained
+                return {"status": "unconfigured", "targeted_refused": refused,
+                        "reason": f"Guidepoint is not configured; material handoff failed: {type(exc).__name__}"}
         return {"status": "unconfigured",
+                "targeted_refused": refused,
                 "reason": "no Guidepoint lane on this writer"}
     try:
         coordinator = GuidepointLaneCoordinator(

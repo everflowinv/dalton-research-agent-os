@@ -79,6 +79,12 @@ class BoundedPlannerPending(BoundedPlannerError):
     pass
 
 
+def terminal_event_table(connection):
+    """Read old Core copies without provisioning the additive source park view."""
+    exists=connection.execute("SELECT 1 FROM sqlite_master WHERE type='view' AND name='bounded_planner_terminal_event_union'").fetchone()
+    return "bounded_planner_terminal_event_union" if exists else "bounded_planner_terminal_events"
+
+
 def _now() -> str:
     return datetime.now(timezone.utc).isoformat(timespec="microseconds")
 
@@ -303,10 +309,11 @@ def _validate_parameters(contract: Mapping[str, Any], value: Any) -> dict[str, A
 class BoundedPlannerAuthority:
     """Append-only authority for templates, loops, directives and outcomes."""
 
-    def __init__(self, store: Any):
+    def __init__(self, store: Any, *, state_dir: str | Path | None = None):
         if not hasattr(store, "connection") or not hasattr(store, "_transaction"):
             raise TypeError("BoundedPlannerAuthority requires a DaltonStore")
         self.store = store
+        self.state_dir = Path(state_dir) if state_dir is not None else Path(store.path).parent
         self.connection: sqlite3.Connection = store.connection
         self.connection.executescript(_SCHEMA_PATH.read_text(encoding="utf-8"))
 
@@ -355,10 +362,28 @@ class BoundedPlannerAuthority:
 
     def terminal(self, loop_version_ref: str) -> dict[str, Any] | None:
         row = self.connection.execute(
-            "SELECT * FROM bounded_planner_terminal_events WHERE loop_version_ref=?",
+            f"SELECT * FROM {terminal_event_table(self.connection)} WHERE loop_version_ref=?",
             (loop_version_ref,),
         ).fetchone()
-        return None if row is None else _decode_record(row, "BoundedPlannerTerminalEvent")
+        if row is None: return None
+        wire=_decode_record(row,"BoundedPlannerTerminalEvent")
+        if wire["terminal_state"].startswith("source_"):
+            metadata=wire.get("metadata") or {}
+            proposal=self.proposal(wire["proposal_ref"])
+            decision=self.decision_for(proposal["id"])
+            if (proposal["content_hash"] != wire["proposal_hash"] or proposal["loop_version_ref"] != loop_version_ref
+                    or not decision or decision["decision"] != "rejected"
+                    or decision["id"] != metadata.get("decision_ref") or decision["content_hash"] != metadata.get("decision_hash")
+                    or decision["reason"] != metadata.get("waiting_reason")
+                    or decision.get("source_material_binding") != metadata.get("source_material_binding")):
+                raise BoundedPlannerConflict("source park decision authority drifted")
+            for binding in metadata.get("reused_outcomes",[]):
+                outcome=self._one("bounded_research_outcomes","outcome_id",binding["ref"],"ResearchOutcome")
+                if outcome["content_hash"] != binding["hash"]:
+                    raise BoundedPlannerConflict("source park outcome authority drifted")
+            if not metadata.get("reused_outcomes"):
+                raise BoundedPlannerConflict("source park has no prior outcome proof")
+        return wire
 
     def loop_for_admission(self, admission_content_hash: str) -> dict[str, Any] | None:
         """The *head* loop version already admitted for this admission hash.
@@ -1052,6 +1077,7 @@ class BoundedPlannerAuthority:
         *,
         proposal: Mapping[str, Any] | None,
         actor_ref: str,
+        metadata: Mapping[str, Any] | None = None,
     ) -> dict[str, Any]:
         existing = self.terminal(loop["id"])
         if existing is not None:
@@ -1069,10 +1095,11 @@ class BoundedPlannerAuthority:
             "proposal_hash": proposal["content_hash"] if proposal else None,
             "formal_negative_claim_created": False,
             "actor_ref": actor_ref,
+            **({"metadata": dict(metadata)} if metadata is not None else {}),
         })
         with self.store._transaction() as cur:
             cur.execute(
-                "INSERT INTO bounded_planner_terminal_events "
+                ("INSERT INTO bounded_planner_source_terminal_events " if terminal_state.startswith("source_") else "INSERT INTO bounded_planner_terminal_events ") +
                 "(event_id,loop_version_ref,terminal_state,record_json,content_hash,created_at) "
                 "VALUES(?,?,?,?,?,?)",
                 (event_id, loop["id"], terminal_state, canonical_json(wire),
@@ -1106,6 +1133,80 @@ class BoundedPlannerControlPlane:
     def _inject(self, seam: str) -> None:
         if self.fault_injector is not None:
             self.fault_injector(seam)
+
+    def _source_material_binding(self, loop, action):
+        """Freeze exact local source bytes; lack of bytes never authorizes a rescan."""
+        db = self.authority.connection
+        question = read_exact_backlog_question_version(db, loop["question_version_ref"])
+        source = action["parameters"].get("source_ref")
+        locator = str(action["parameters"].get("locator", ""))
+        hashes = set()
+        if db.execute("SELECT 1 FROM sqlite_master WHERE name='mission_document_research_admissions'").fetchone():
+            for row in db.execute("SELECT * FROM mission_document_research_admissions WHERE question_version_ref=? AND source_ref=?", (question["id"], source)):
+                wire = json.loads(row["record_json"])
+                if (canonical_json(wire) != row["record_json"] or wire.get("content_hash") != row["content_hash"]
+                        or content_hash({k:v for k,v in wire.items() if k != "content_hash"}) != row["content_hash"]
+                        or wire.get("document_authority_hash") != row["document_authority_hash"]):
+                    raise BoundedPlannerConflict("source document admission hash drifted")
+                hashes.add(wire["document_authority_hash"])
+        for row in db.execute("SELECT evidence_json,content_hash FROM evidence_versions e WHERE version_number=(SELECT max(version_number) FROM evidence_versions newer WHERE newer.evidence_ref=e.evidence_ref)"):
+            evidence = json.loads(row[0])
+            if evidence.get("source_ref") != source:
+                continue
+            locations = evidence.get("source_locator", {})
+            exact_locations = {str(locations), str(evidence.get("document_ref", "")), str(evidence.get("source_key", "")), *(str(r.get("ref", "")) if isinstance(r, Mapping) else str(r) for r in evidence.get("artifact_refs", []))}
+            if isinstance(locations, Mapping): exact_locations.update(str(v) for v in locations.values())
+            if locator not in exact_locations:
+                continue
+            if (canonical_json(evidence) != row[0] or evidence.get("content_hash") != row[1]
+                    or content_hash({k:v for k,v in evidence.items() if k != "content_hash"}) != row[1]):
+                raise BoundedPlannerConflict("source evidence hash drifted")
+            hashes.add(row[1])
+        body = {"schema_version": "probe-source-binding-v1", "company_ref": question["company_ref"],
+                "source_ref": source, "locator": locator, "material_hashes": sorted(hashes)}
+        return {**body, "content_hash": content_hash(body)}
+
+    def _same_source_history(self, loop, action):
+        """Across-loop source/query history; exact authority, never prose similarity."""
+        fingerprint = content_hash({"template": action["template_version_ref"], "parameters": action["parameters"]})
+        question = read_exact_backlog_question_version(self.authority.connection, loop["question_version_ref"])
+        current_source = self._source_material_binding(loop, action)
+        history = []
+        rows = self.authority.connection.execute("SELECT r.proposal_ref,o.outcome_id,r.loop_version_ref "
+            "FROM bounded_research_plan_rounds r JOIN bounded_research_outcomes o ON o.round_ref=r.round_id "
+            "ORDER BY r.created_at,r.round_id").fetchall()
+        for row in rows:
+            prior = self.authority.proposal(row["proposal_ref"])["action"]
+            if prior["kind"] != "probe" or content_hash({"template": prior["template_version_ref"], "parameters": prior["parameters"]}) != fingerprint:
+                continue
+            prior_loop = self.authority.loop(row["loop_version_ref"])
+            prior_question = read_exact_backlog_question_version(self.authority.connection, prior_loop["question_version_ref"])
+            if prior_question["company_ref"] != question["company_ref"]:
+                continue
+            decision = self.authority.decision_for(row["proposal_ref"])
+            frozen = decision.get("source_material_binding") if decision else None
+            if frozen:
+                if content_hash({k:v for k,v in frozen.items() if k != "content_hash"}) != frozen.get("content_hash"):
+                    raise BoundedPlannerConflict("frozen source material binding drifted")
+                if frozen["material_hashes"] != current_source["material_hashes"] and current_source["material_hashes"]:
+                    continue
+            # Old decisions without a source snapshot remain conservative;
+            # query changes or a new admitted document are needed to rescan.
+            elif current_source["material_hashes"]:
+                continue
+            history.append(self.authority._one("bounded_research_outcomes", "outcome_id", row["outcome_id"], "ResearchOutcome"))
+        return history
+
+    def _request_unavailable_source(self, loop, action, history):
+        from .material_requests import open_request
+        question = read_exact_backlog_question_version(self.authority.connection, loop["question_version_ref"])
+        request = open_request(self.authority.state_dir,
+            requester={"lane": "bounded_planner", "product_ref": question["question_ref"], "run_ref": loop["id"], "section": action["coverage_item_ref"]},
+            subject=question["company_ref"], need={"kind": "answer", "question": question["question"]},
+            source_priority=[str(action["parameters"].get("source_ref") or "public_sec")],
+            acceptance={"answer_criteria": question["answer_criteria"], "source_unavailable_outcomes": [h["id"] for h in history]},
+            budget={"max_attempts": 0, "max_cost_usd": 0}, actor_ref="automation:bounded-planner-source-gap")
+        return request["id"]
 
     def _admission_reason(
         self, loop: Mapping[str, Any], proposal: Mapping[str, Any]
@@ -1159,6 +1260,12 @@ class BoundedPlannerControlPlane:
                 })
                 if fingerprint == prior_fingerprint:
                     return "duplicate_probe"
+            history = self._same_source_history(loop, action)
+            if any(h["outcome_kind"] in {"observed", "not_found_in_scope"} for h in history):
+                return "source_material_unchanged_no_rescan"
+            if len([h for h in history if h["outcome_kind"] == "source_unavailable"]) >= 2:
+                request_ref = self._request_unavailable_source(loop, action, history)
+                return "source_unavailable_material_request:" + request_ref
             template = self.authority.probe_template(action["template_version_ref"])
             remaining = self.authority._budget_snapshot(loop)
             if (
@@ -1199,6 +1306,12 @@ class BoundedPlannerControlPlane:
             raise BoundedPlannerConflict("proposal loop binding drifted")
         decision = self.authority.decision_for(proposal["id"])
         if decision is None:
+            # 2026-10-06: no new planner round during the owner's emergency
+            # stop (owner_levers); the driver skips the loops, this is the
+            # authority's own refusal.
+            from .owner_levers import assert_admission_open
+
+            assert_admission_open(self.authority.store.connection)
             rejection = self._admission_reason(loop, proposal)
             decision_value = "rejected" if rejection else "accepted"
             decision_id = _deterministic_ref(
@@ -1214,6 +1327,8 @@ class BoundedPlannerControlPlane:
                 "decision": decision_value,
                 "reason": rejection or "closed_contract_and_budget_checks_passed",
                 "actor_ref": "core:bounded-planner-admission",
+                **({"source_material_binding": self._source_material_binding(loop, proposal["action"])}
+                   if proposal["action"]["kind"] == "probe" else {}),
             })
             with self.authority.store._transaction() as cur:
                 cur.execute(
@@ -1227,6 +1342,16 @@ class BoundedPlannerControlPlane:
         if decision["proposal_hash"] != proposal["content_hash"]:
             raise BoundedPlannerConflict("proposal decision binding drifted")
         if decision["decision"] == "rejected":
+            if (decision["reason"] == "source_material_unchanged_no_rescan"
+                    or decision["reason"].startswith("source_unavailable_material_request:")):
+                history = self._same_source_history(loop, proposal["action"])
+                terminal = self.authority._append_terminal(loop,
+                    "source_material_unchanged_waiting_new_material" if decision["reason"] == "source_material_unchanged_no_rescan" else "source_unavailable_waiting_material_request",
+                    proposal=proposal, actor_ref="core:bounded-planner-source-reuse",
+                    metadata={"decision_ref":decision["id"],"decision_hash":decision["content_hash"],
+                        "reused_outcomes":[{"ref":h["id"],"hash":h["content_hash"]} for h in history],
+                        "waiting_reason":decision["reason"],"source_material_binding":decision.get("source_material_binding")})
+                return {"status":"terminal","decision":decision,"terminal_event":terminal}
             return {"status": "rejected", "decision": decision}
         if proposal["action"]["kind"] == "terminate":
             terminal = self.authority._append_terminal(
@@ -1425,7 +1550,13 @@ class BoundedPlannerControlPlane:
         cik = locator.removeprefix("company-facts/CIK")
         if not cik.isdigit():
             raise BoundedPlannerConflict("coverage item locator has no numeric CIK")
-        company_ref = f"company:sec-cik:{cik}"
+        from .mission_company_cik import resolve_company_ref, sec_cik_company_ref
+        from .sec_company_facts_lane import US_IT_SERVICES_ISSUERS
+
+        # Canonical (ten digits), unless a packaged issuer already names this
+        # company another way in append-only history (legacy DXC).
+        company_ref = resolve_company_ref(
+            sec_cik_company_ref(cik), (item.company_ref for item in US_IT_SERVICES_ISSUERS))
         location = current[0]
         formal = self.scheduler.formal_result(round_wire["work_order_ref"])
         result = (formal or {}).get("result_envelope") or {}

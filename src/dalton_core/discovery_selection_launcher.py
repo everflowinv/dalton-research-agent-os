@@ -67,9 +67,26 @@ def _formal_selection_valid(scheduler_db: Path, selection: Mapping[str, Any],
         return False
 
 PREFIX="discovery-selection"; _RE=re.compile(r"discovery-selection:[0-9a-f]{24}\Z")
+#: Fresh attempts a failed selection gets under one identity before it is
+#: ``exhausted``.  Until 2026-10-02 this was 0: one ``database is locked``
+#: (legacy, 2026-09-30) or one model reply in the wrong shape (ws-7d,
+#: 2026-10-01) exhausted the discovery at the head of the queue and every
+#: AlphaEngine acquisition behind it waited for a config change.  The
+#: installed ``capacity_retry.max_recovery_epochs`` still overrides it.
+DEFAULT_MAX_RECOVERY_EPOCHS = 2
 def _write(path:Path,value:Any):
     tmp=path.with_name('.'+path.name+'.tmp'); tmp.write_text(canonical_json(value)+'\n'); os.chmod(tmp,0o600); os.replace(tmp,path)
 def _now(): return datetime.now(timezone.utc).isoformat(timespec="microseconds")
+
+def _failure_reason(ticket: Mapping[str, Any]) -> str:
+    """Why the last attempt of a ticket failed, as plainly as it is recorded."""
+    summary = ticket.get('summary')
+    reason = summary.get('failure_reason') if isinstance(summary, Mapping) else None
+    reason = reason or ticket.get('failure_reason')
+    if not reason:
+        reason = f"selection child {ticket.get('status')}" + (
+            f" (exit {ticket['exit_code']})" if ticket.get('exit_code') is not None else '')
+    return str(reason)[:500]
 
 class DiscoverySelectionLauncher:
     def __init__(self,*,state_dir:str|Path,model_config_path:str|Path,scheduler_db:str|Path,
@@ -77,11 +94,15 @@ class DiscoverySelectionLauncher:
         self.state=Path(state_dir).resolve(); self.config=Path(model_config_path).resolve()
         self.scheduler=Path(scheduler_db).resolve(); self.python=python_executable or sys.executable
         self.root=self.state/'discovery-selections'; self.root.mkdir(parents=True,exist_ok=True); os.chmod(self.root,0o700)
+        # Deterministic selection refusals set one discovery aside here
+        # instead of holding the whole queue (2026-09-29).
+        from .discovery_selection_quarantine import DIRECTORY, DiscoverySelectionQuarantine
+        self.quarantine=DiscoverySelectionQuarantine(self.root/DIRECTORY)
         self._lock=threading.Lock(); self._current=None
         # Reuse the installed, closed capacity recovery policy.  It already
         # versions the model WorkOrder and is preserved by tier setup.
         retry = json.loads(self.config.read_text()).get("capacity_retry", {})
-        self.max_recovery_epochs = retry.get("max_recovery_epochs", 0)
+        self.max_recovery_epochs = retry.get("max_recovery_epochs", DEFAULT_MAX_RECOVERY_EPOCHS)
         self.cooldown_seconds = retry.get("cooldown_seconds", 300)
         if (not isinstance(self.max_recovery_epochs, int) or isinstance(self.max_recovery_epochs, bool)
                 or not 0 <= self.max_recovery_epochs <= 10):
@@ -180,10 +201,19 @@ class DiscoverySelectionLauncher:
             if existing.get('status') in {'running', 'succeeded'}:
                 return existing
             epoch = int(existing.get('recovery_epoch', 0)) + 1
-            if epoch > self.max_recovery_epochs:
-                return {**existing, "status": "exhausted"}
             completed = datetime.fromisoformat(existing['completed_at'])
-            if self._now_datetime() < completed + timedelta(seconds=self.cooldown_seconds):
+            fresh = self._fresh_after(discovery_ref)
+            if fresh is not None and completed < fresh:
+                # The owner released the quarantine this exhaustion led to
+                # (or the selection rules it was taken under changed) after
+                # the last attempt: one more attempt, at once.  If it fails
+                # too it is exhausted -- and quarantined -- again.
+                pass
+            elif epoch > self.max_recovery_epochs:
+                return {**existing, "status": "exhausted",
+                        "failure_reason": _failure_reason(existing),
+                        "attempts": epoch}
+            elif self._now_datetime() < completed + timedelta(seconds=self.cooldown_seconds):
                 return {**existing, "status": "cooldown"}
         attempt_identity = {**identity, "recovery_epoch": epoch}
         digest=content_hash(attempt_identity)[:24]; tid=f'{PREFIX}:{digest}'; directory=self.root/digest
@@ -266,5 +296,28 @@ class DiscoverySelectionLauncher:
             except (OSError, ValueError, KeyError, TypeError):
                 effective_selected = None
         return {**row,"summary":parsed,"effective_selected":effective_selected}
+    def _fresh_after(self, discovery_ref: str):
+        """When this discovery's quarantine stopped holding it, if it did.
+
+        A quarantine record that is no longer active -- released by the owner,
+        or taken under selection rules that have since changed -- entitles the
+        discovery to a fresh attempt for any ticket that completed before the
+        record's last event.  ``None`` while quarantined or never quarantined.
+        """
+
+        from .discovery_candidate_selection import SELECTION_RULES_VERSION
+        from .discovery_selection_quarantine import QUARANTINED
+        try:
+            record = self.quarantine.record(discovery_ref)
+        except Exception:  # an unreadable record grants nothing
+            return None
+        if record is None or (record.get('status') == QUARANTINED
+                              and record.get('rules_version') == SELECTION_RULES_VERSION):
+            return None
+        events = record.get('events') or []
+        try:
+            return datetime.fromisoformat(events[-1]['at'])
+        except (IndexError, KeyError, TypeError, ValueError):
+            return None
     def _now_datetime(self):
         return datetime.now(timezone.utc)

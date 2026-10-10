@@ -104,6 +104,35 @@ class StateHashTests(unittest.TestCase):
         self.assertEqual(planning_hash(base), planning_hash(projected))
         self.assertEqual(state_content_hash(base), state_content_hash(projected))
 
+    def test_first_readable_original_is_material_but_another_unrelated_row_is_not(self):
+        company = _planner_fixtures.ACN
+        doc = {"document_ref": "doc:first", "document_version_hash": "a" * 64}
+        empty = self.state()
+        first = self.state(readable_documents_by_company={company: [doc]})
+        more = self.state(readable_documents_by_company={company: [doc, {
+            "document_ref": "doc:second", "document_version_hash": "b" * 64}]})
+        self.assertNotEqual(planning_core_hash(empty), planning_core_hash(first))
+        self.assertEqual(planning_core_hash(first), planning_core_hash(more))
+
+    def test_recovered_original_for_reopened_question_bypasses_pacing_once(self):
+        company = _planner_fixtures.ACN
+        old = {"document_ref": "doc:old-filing", "document_version_hash": "a" * 64}
+        recent = {"document_ref": "doc:recent-note", "document_version_hash": "b" * 64}
+        settlement = {"by_company": {company: {"reopened": [
+            {"document_ref": old["document_ref"], "question": "Read the lease note"}]}}}
+        before = self.state(readable_documents_by_company={company: [recent]},
+                            document_research_settlement=settlement)
+        after = self.state(readable_documents_by_company={company: [recent, old]},
+                           document_research_settlement=settlement)
+        now = datetime(2026, 10, 10, 12, tzinfo=timezone.utc)
+        last = {"at": (now-timedelta(minutes=5)).isoformat(),
+                "planning_hash": planning_hash(before), "planning_core_hash": planning_core_hash(before)}
+        self.assertIsNone(replan_pacing_hold(last, planning_hash(after), now=now,
+                                             planning_core_hash=planning_core_hash(after)))
+        last.update(planning_hash=planning_hash(after), planning_core_hash=planning_core_hash(after))
+        self.assertIsNotNone(replan_pacing_hold(last, planning_hash(after), now=now,
+                                               planning_core_hash=planning_core_hash(after)))
+
 
 class DossierFeedbackMaterialityTests(unittest.TestCase):
     """2026-09-25 06:24-06:49 legacy: five paid plans, $2.34, whose prompts

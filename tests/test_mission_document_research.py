@@ -1,10 +1,12 @@
 from __future__ import annotations
 
+import base64
 import copy
 import hashlib
 import json
 import sqlite3
 import unittest
+from decimal import Decimal
 from datetime import datetime, timedelta, timezone
 from pathlib import Path
 from unittest.mock import patch
@@ -27,7 +29,8 @@ from dalton_core.feed_acquisition import (
 )
 from dalton_core.host_tool_runner import ACCESS_POLICY_REF, RETENTION_POLICY_REF, TERMS_POLICY_REF
 from dalton_core.mission_document_research import (
-    MissionDocumentResearchAuthority, MissionDocumentResearchError, PURPOSE,
+    MODEL_BUDGET_LIMIT_FIELDS, MissionDocumentResearchAuthority,
+    MissionDocumentResearchError, PURPOSE,
 )
 from dalton_core.model_accounting import record_model_accounting
 from dalton_core.document_research_qualitative import (
@@ -178,6 +181,61 @@ class ProviderBudgetExceededAdapter(CountingFakeAdapter):
                    "source": "openclaw-model-adapter"})
 
 
+class InputOverrunAdapter(CountingFakeAdapter):
+    """Charged and refused for reading more input than the WorkOrder admitted.
+
+    Live ws-7d 2026-10-06: two MSFT 10-K drafts on glm-5.3 read 64,341 and
+    64,534 provider tokens against an admitted ``max_input_tokens`` of 64,000;
+    the router had estimated 8,663.  ``always`` keeps overrunning whatever
+    the ceiling; otherwise only the first Work of the stage overruns.
+    """
+
+    OVERRUN = 341
+
+    def __init__(self, wire, *, always=False):
+        super().__init__(wire)
+        self.always = always
+        self.overrun_work_id = None
+        self.budgets = []
+
+    def execute(self, work, route, selected):
+        from dataclasses import replace
+        from tests.test_transcript_polish_model_worker import FakeAdapter
+        self.calls += 1
+        self.budgets.append(dict(work.budget))
+        if self.overrun_work_id is None:
+            self.overrun_work_id = work.id
+        invocation, result = FakeAdapter.execute(self, work, route, selected)
+        if not self.always and work.id != self.overrun_work_id:
+            return invocation, result
+        wire = invocation.to_dict()
+        used = int(work.budget["max_input_tokens"]) + self.OVERRUN
+        wire["usage"]["input_tokens"] = used
+        wire["usage"]["total_tokens"] = used + 40
+        return ModelInvocation.from_dict(wire), replace(
+            result, status="failed", outputs={},
+            error={"code": "PROVIDER_BUDGET_EXCEEDED",
+                   "message": "provider max_input_tokens telemetry exceeds WorkOrder budget",
+                   "source": "openclaw-model-adapter"})
+
+
+DRAFT_STATEMENT = "Managed services revenue is recognized over time."
+DRAFT_REPLY = {
+    "schema_version": "0.1", "status": "answered", "answer": DRAFT_STATEMENT,
+    "candidate": {"normalized_statement": DRAFT_STATEMENT,
+                  "metric_or_aspect": "managed services revenue recognition",
+                  "period": "current policy", "basis": "reported",
+                  "cited_match_indexes": [0]}, "missing": [],
+}
+
+
+def passing_verifier_reply(work):
+    """A 0.2 directed-document verifier pass for exactly the candidate it was asked."""
+
+    return {"schema_version": "0.2", "verdict": "pass",
+            "candidate_ref": work.metadata["verifier_candidate_ref"], "findings": []}
+
+
 class RouteBoundCountingFakeAdapter(CountingFakeAdapter):
     """Keep the shared fixture adapter's invocation faithful to the selected route."""
 
@@ -250,10 +308,8 @@ class MissionDocumentResearchTests(unittest.TestCase):
                           "period": "current policy", "basis": "reported",
                           "cited_match_indexes": [0]}, "missing": [],
         })
-        verifier_adapter = verifier_adapter or RouteBoundCountingFakeAdapter({
-            "schema_version": "0.1", "verdict": "pass",
-            "verified_statement": statement, "findings": [],
-        })
+        verifier_adapter = verifier_adapter or RouteBoundCountingFakeAdapter(
+            passing_verifier_reply)
         scheduler = fixture.harness.scheduler()
         common = dict(
             scheduler=scheduler, router=fixture.router, store=fixture.store,
@@ -395,7 +451,8 @@ class MissionDocumentResearchTests(unittest.TestCase):
             work_order_ref=work.id,
         )
 
-    def _fixture(self, *, auto_commit=False, company_in_mandate=True):
+    def _fixture(self, *, auto_commit=False, company_in_mandate=True,
+                 question="How does the company recognize managed services revenue?"):
         fixture = MissionAnnualFixture(
             self, additional_connected_source=COMPANY_WIKI_SOURCE_REF,
             company_in_mandate=company_in_mandate, auto_commit=auto_commit,
@@ -470,7 +527,7 @@ class MissionDocumentResearchTests(unittest.TestCase):
         )
         inquiry = {
             "rank": 0, "company_ref": COMPANY,
-            "question": "How does the company recognize managed services revenue?",
+            "question": question,
             "wants": "Identify whether revenue is recognized at a point or over time.",
             "because": "The accounting policy affects revenue comparability.",
             "directed_document": {
@@ -926,17 +983,126 @@ class MissionDocumentResearchTests(unittest.TestCase):
         self.assertEqual((draft.calls, verifier.calls), calls)
 
     def test_model_policy_roll_cannot_expand_admitted_call_budget(self):
+        # The admitted ceiling is the most an admission may ever spend.  A
+        # later raise of the installed ceiling is policy for new work: the
+        # admission keeps its admitted values (2026-09-30: capped, where it
+        # used to be refused and held).
         fixture, authority, args, _registration, _launcher = self._fixture()
         admission = authority.admit_from_plan(**args)
         current_execution = copy.deepcopy(admission["model_execution"])
         current_execution["draft"]["max_cost_usd"] += 0.01
+        current_execution["draft"]["max_output_tokens"] += 11_904
         authority.model_execution_resolver = lambda: (
             current_execution, copy.deepcopy(admission["model_authority"])
         )
-        with self.assertRaisesRegex(
-            MissionDocumentResearchError, "exceeds admitted budget"
-        ):
-            authority.resolve_for_execution(admission["id"])
+        resolved = authority.resolve_for_execution(admission["id"])
+        for stage in ("draft", "verifier"):
+            for field in MODEL_BUDGET_LIMIT_FIELDS:
+                self.assertLessEqual(
+                    Decimal(str(resolved["model_execution"][stage][field])),
+                    Decimal(str(admission["model_execution"][stage][field])))
+        works = executor_module._blueprints(resolved)
+        self.assertEqual(works[1]["budget"]["max_output_tokens"],
+                         admission["model_execution"]["draft"]["max_output_tokens"])
+        self.assertEqual(works[1]["budget"]["max_cost_usd"],
+                         admission["model_execution"]["draft"]["max_cost_usd"])
+
+    def test_a_ceiling_raise_leaves_in_flight_work_byte_identical(self):
+        # The owner raises mission_directed_document_draft's output ceiling:
+        # the draft config's hash moves, and at the new ceiling a pricier
+        # candidate reads work_order_cost_budget_exceeded.  Neither is a change
+        # to the work this admission was admitted for, so nothing is refreshed
+        # and every WorkOrder derives exactly as before.
+        fixture, authority, args, _registration, _launcher = self._fixture()
+        admission = authority.admit_from_plan(**args)
+        before = executor_module._blueprints(admission)
+        current_execution = copy.deepcopy(admission["model_execution"])
+        current_execution["draft"]["max_output_tokens"] = 16_000
+        current_authority = copy.deepcopy(admission["model_authority"])
+        current_authority["draft"]["config_hash"] = "7" * 64
+        for item in current_authority["draft"].get("configured_candidate_profiles") or []:
+            item["preflight_reasons"] = sorted(
+                {*item["preflight_reasons"], "work_order_cost_budget_exceeded"})
+        authority.model_execution_resolver = lambda: (
+            current_execution, current_authority
+        )
+        resolved = authority.resolve_for_execution(admission["id"])
+        self.assertNotIn("model_authority_refresh", resolved)
+        self.assertEqual(resolved["model_execution"], admission["model_execution"])
+        self.assertEqual(executor_module._blueprints(resolved), before)
+
+    def test_an_admission_in_flight_runs_to_staging_after_a_ceiling_raise(self):
+        fixture, authority, args, _registration, _launcher = self._fixture()
+        admission = authority.admit_from_plan(**args)
+        executor, draft, _verifier = self._executor(fixture, authority)
+        current_execution = copy.deepcopy(admission["model_execution"])
+        current_execution["draft"]["max_output_tokens"] = 16_000
+        current_authority = copy.deepcopy(admission["model_authority"])
+        current_authority["draft"]["config_hash"] = "7" * 64
+        authority.model_execution_resolver = lambda: (
+            current_execution, current_authority
+        )
+        self._run_until(
+            executor, admission,
+            lambda item: item.get("research_status") == "candidate_staged",
+        )
+        works = effective_mission_document_work_orders(
+            authority, executor.scheduler, admission["id"],
+            draft_worker=executor.draft_worker,
+            verifier_worker=executor.verifier_worker,
+        )
+        self.assertEqual(works[1]["budget"]["max_output_tokens"],
+                         admission["model_execution"]["draft"]["max_output_tokens"])
+        self.assertEqual(draft.calls, 1)
+
+    def test_a_raise_with_a_real_roll_refreshes_at_the_admitted_ceiling(self):
+        fixture, authority, args, _registration, _launcher = self._fixture()
+        admission = authority.admit_from_plan(**args)
+        current_execution = copy.deepcopy(admission["model_execution"])
+        current_execution["draft"]["max_output_tokens"] = 16_000
+        current_authority = copy.deepcopy(admission["model_authority"])
+        current_authority["draft"]["routing_policy_hash"] = "8" * 64
+        authority.model_execution_resolver = lambda: (
+            current_execution, current_authority
+        )
+        resolved = authority.resolve_for_execution(admission["id"])
+        self.assertTrue(resolved["model_authority_refresh"]["stages"]["draft"]["changed"])
+        self.assertEqual(resolved["model_execution"]["draft"]["max_output_tokens"],
+                         admission["model_execution"]["draft"]["max_output_tokens"])
+        works = executor_module._blueprints(resolved)
+        self.assertEqual(works[1]["budget"]["max_output_tokens"],
+                         admission["model_execution"]["draft"]["max_output_tokens"])
+
+    def test_a_narrowed_ceiling_still_narrows_in_flight_work(self):
+        fixture, authority, args, _registration, _launcher = self._fixture()
+        admission = authority.admit_from_plan(**args)
+        current_execution = copy.deepcopy(admission["model_execution"])
+        narrowed = admission["model_execution"]["draft"]["max_output_tokens"] - 96
+        current_execution["draft"]["max_output_tokens"] = narrowed
+        authority.model_execution_resolver = lambda: (
+            current_execution, copy.deepcopy(admission["model_authority"])
+        )
+        resolved = authority.resolve_for_execution(admission["id"])
+        self.assertEqual(resolved["model_execution"]["draft"]["max_output_tokens"], narrowed)
+        self.assertEqual(executor_module._blueprints(resolved)[1]["budget"]["max_output_tokens"],
+                         narrowed)
+
+    def test_a_non_budget_preflight_change_is_not_hidden_by_a_raise(self):
+        from dalton_core.mission_document_research import _authority_apart_from_budget
+        proof = {"config_hash": "1" * 64, "routing_policy_hash": "2" * 64,
+                 "configured_candidate_profiles": [
+                     {"profile_ref": "profile:a", "preflight_reasons": []}]}
+        raised = copy.deepcopy(proof)
+        raised["config_hash"] = "3" * 64
+        raised["configured_candidate_profiles"][0]["preflight_reasons"] = [
+            "work_order_cost_budget_exceeded"]
+        self.assertEqual(_authority_apart_from_budget(raised),
+                         _authority_apart_from_budget(proof))
+        expired = copy.deepcopy(raised)
+        expired["configured_candidate_profiles"][0]["preflight_reasons"].append(
+            "availability_expired")
+        self.assertNotEqual(_authority_apart_from_budget(expired),
+                            _authority_apart_from_budget(proof))
 
     def test_verifier_only_roll_keeps_draft_work_byte_identical(self):
         fixture, authority, args, _registration, _launcher = self._fixture()
@@ -1660,7 +1826,7 @@ class MissionDocumentResearchTests(unittest.TestCase):
             if results[-1].get("research_status") == "candidate_staged":
                 break
         self.assertEqual(results[-1]["research_status"], "candidate_staged")
-        self.assertEqual((draft.calls, verifier.calls), (4, 1))
+        self.assertEqual((draft.calls, verifier.calls), (2, 1))
         links = fixture.store.connection.execute(
             "SELECT * FROM mission_document_research_recovery_links").fetchall()
         self.assertEqual(len(links), 1)
@@ -1677,7 +1843,7 @@ class MissionDocumentResearchTests(unittest.TestCase):
         settlements = fixture.budget.connection.execute(
             "SELECT actual_micros FROM thesis_impact_day_settlements ORDER BY created_at"
         ).fetchall()
-        self.assertEqual(sorted(row[0] for row in settlements), [0, 0, 0, 2000, 2000])
+        self.assertEqual(sorted(row[0] for row in settlements), [0, 2000, 2000])
         observation = next(item for item in read_mission_document_research_observations(
             fixture.store.connection) if item["outcome"] == "recovery_required")
         self.assertEqual(observation["recovery"]["proof"]["classification"],
@@ -1699,15 +1865,15 @@ class MissionDocumentResearchTests(unittest.TestCase):
             fixture, authority, draft_adapter=adapter,
             fault_injector=lambda seam: (fired.append(seam),
                                          (_ for _ in ()).throw(RuntimeError("crash")))[1])
-        for _ in range(6):
-            executor.run_once(admission["id"])
+        self._run_until(executor, admission, lambda item: item['status'] == 'failed')
+        self.assertEqual(adapter.calls, 1)
         with self.assertRaisesRegex(RuntimeError, "crash"):
             executor.run_once(admission["id"])
         self.assertEqual(fired, ["after_recovery_enqueue"])
         self.assertEqual(fixture.store.connection.execute(
             "SELECT count(*) FROM mission_document_research_recovery_links").fetchone()[0], 0)
         self.assertEqual(fixture.budget.connection.execute(
-            "SELECT count(*) FROM thesis_impact_day_admissions").fetchone()[0], 3)
+            "SELECT count(*) FROM thesis_impact_day_admissions").fetchone()[0], 1)
         restarted, _draft, _verifier = self._executor(
             fixture, authority, draft_adapter=adapter)
         result = restarted.run_once(admission["id"])
@@ -1715,7 +1881,7 @@ class MissionDocumentResearchTests(unittest.TestCase):
         self.assertEqual(fixture.store.connection.execute(
             "SELECT count(*) FROM mission_document_research_recovery_links").fetchone()[0], 1)
         self.assertEqual(fixture.budget.connection.execute(
-            "SELECT count(*) FROM thesis_impact_day_admissions").fetchone()[0], 3)
+            "SELECT count(*) FROM thesis_impact_day_admissions").fetchone()[0], 1)
 
     def test_model_authority_roll_preserves_prior_recovery_spend(self):
         fixture, authority, args, _registration, _launcher = self._fixture()
@@ -1938,7 +2104,15 @@ class MissionDocumentResearchTests(unittest.TestCase):
         restarted, _draft, _verifier = self._executor(
             fixture, authority, draft_adapter=adapter)
 
-        restarted.run_once(admission["id"])
+        # Keep this a genuinely unfinished epoch: with the declared one
+        # attempt, executing the capacity adapter would already be terminal.
+        rebound_ref = fixture.store.connection.execute(
+            "SELECT rebound_work_order_ref FROM "
+            "mission_document_research_model_authority_epoch_rebinds"
+        ).fetchone()[0]
+        unresolved_lease = restarted.scheduler.claim(
+            restarted.draft_worker.worker_ref, work_order_id=rebound_ref)
+        self.assertIsNotNone(unresolved_lease)
 
         core_path = next(
             row["file"] for row in fixture.store.connection.execute(
@@ -2260,8 +2434,8 @@ class MissionDocumentResearchTests(unittest.TestCase):
                 return current
         self.fail(f"fixture never reached the expected state: {current}")
 
-    def test_paid_contract_failure_buys_exactly_one_automatic_retry(self):
-        """One contract rejection is retried by the lane; the second asks a person."""
+    def test_paid_contract_failure_buys_at_most_two_automatic_retries(self):
+        """Two proved contract repairs retain their daily and individual fee caps."""
 
         fixture, authority, args, _registration, _launcher = self._fixture()
         self._enable_recovery(fixture, maximum=2)
@@ -2308,8 +2482,7 @@ class MissionDocumentResearchTests(unittest.TestCase):
                 fixture.store.connection)
             if item["recovery"]["reason"] == "automatic_bounded_contract_retry")
         self.assertIn("one bounded automatic retry", observation["meaning"])
-        # The retry's reply fails the contract as well: escalate, and never buy
-        # a second automatic reply.
+        # Two automatic repairs can fail: the third failure must escalate.
         escalated = self._run_until(
             executor, admission,
             lambda item: item.get("reason") == "contract_failed_after_automatic_retry")
@@ -2320,11 +2493,11 @@ class MissionDocumentResearchTests(unittest.TestCase):
                              "contract_failed_after_automatic_retry")
         self.assertEqual(fixture.store.connection.execute(
             "SELECT count(*) FROM mission_document_research_recovery_links"
-        ).fetchone()[0], 1)
+        ).fetchone()[0], 2)
         self.assertEqual(fixture.store.connection.execute(
             "SELECT count(*) FROM "
             "mission_document_research_controlled_recovery_authorizations"
-        ).fetchone()[0], 1)
+        ).fetchone()[0], 2)
         escalation = next(
             item for item in read_mission_document_research_observations(
                 fixture.store.connection)
@@ -2440,7 +2613,13 @@ class MissionDocumentResearchTests(unittest.TestCase):
         self.assertIn("only an owner authorization", escalation["meaning"])
 
     def test_provider_budget_refusal_is_held_not_retried_on_the_same_route(self):
-        """Live: paid 0.54 USD, refused, retried automatically, paid again."""
+        """Live: paid 0.54 USD, refused, retried automatically, paid again.
+
+        2026-10-06: a refusal no token ceiling explains (here the provider's
+        count is inside every ceiling) has no correction to make, so it still
+        stops at once -- now with the numbers, and with no door that would buy
+        the same call at the same ceiling.
+        """
 
         fixture, authority, args, _registration, _launcher = self._fixture()
         self._enable_recovery(fixture, maximum=2)
@@ -2452,11 +2631,13 @@ class MissionDocumentResearchTests(unittest.TestCase):
             executor, admission,
             lambda item: item.get("status") == "stopped")
         self.assertEqual(stopped["reason"],
-                         executor_module.PROVIDER_BUDGET_EXCEEDED_NOT_RETRIED)
+                         executor_module.PROVIDER_BUDGET_CORRECTION_REFUSED)
+        self.assertEqual(stopped["budget_overrun"]["refusal"], "no_token_ceiling_exceeded")
+        self.assertEqual(stopped["budget_overrun"]["provider_input_tokens"], 100)
         calls = adapter.calls
         for _ in range(3):
             self.assertEqual(executor.run_once(admission["id"])["reason"],
-                             executor_module.PROVIDER_BUDGET_EXCEEDED_NOT_RETRIED)
+                             executor_module.PROVIDER_BUDGET_CORRECTION_REFUSED)
         self.assertEqual(adapter.calls, calls)
         self.assertEqual(fixture.store.connection.execute(
             "SELECT count(*) FROM mission_document_research_recovery_links"
@@ -2471,16 +2652,153 @@ class MissionDocumentResearchTests(unittest.TestCase):
             item["work_order_ref"] for item in read_mission_document_research_observations(
                 fixture.store.connection)
             if item["recovery"] and item["recovery"]["reason"]
-            == executor_module.PROVIDER_BUDGET_EXCEEDED_NOT_RETRIED)
-        self.assertEqual(lane._typed_recovery_state(admission, work_ref)["action"],
-                         "recovery_required")
-        # The owner's one-call door is the unproved-send door.
+            == executor_module.PROVIDER_BUDGET_CORRECTION_REFUSED)
+        state = lane._typed_recovery_state(admission, work_ref)
+        self.assertEqual(state["action"], "recovery_required")
+        self.assertTrue(state["reason"].startswith(
+            "provider_budget_exceeded_correction_refused:input=100>"))
+        self.assertTrue(state["reason"].endswith(":no_token_ceiling_exceeded"))
+        # No door buys the same call at the same ceiling any more.
         from dalton_core.mission_document_research_lane import (
             _escalated_stage_ordinal, _recovery_doors,
         )
-        self.assertEqual(_escalated_stage_ordinal(
+        self.assertIsNone(_escalated_stage_ordinal(
             fixture.store.connection, admission,
-            _recovery_doors()["unproved"]["reasons"]), 2)
+            _recovery_doors()["unproved"]["reasons"]))
+
+    def test_an_input_overrun_is_retried_once_under_the_corrected_ceiling(self):
+        """Live ws-7d 2026-10-06: 64,341 provider tokens against 64,000 admitted."""
+
+        fixture, authority, args, _registration, _launcher = self._fixture()
+        self._enable_recovery(fixture, maximum=2)
+        admission = authority.admit_from_plan(**args)
+        adapter = InputOverrunAdapter(DRAFT_REPLY)
+        executor, _draft, _verifier = self._executor(
+            fixture, authority, draft_adapter=adapter)
+        admitted = self._run_until(
+            executor, admission,
+            lambda item: item.get("reason")
+            == executor_module.AUTOMATIC_BUDGET_CORRECTION_REASON)
+        self.assertEqual(admitted["status"], "admitted")
+        failed_budget = adapter.budgets[0]
+        used = int(failed_budget["max_input_tokens"]) + InputOverrunAdapter.OVERRUN
+        expected = -(-(-(-used * 5 // 4)) // 1000) * 1000
+        overrun = admitted["budget_overrun"]
+        self.assertEqual(overrun["provider_input_tokens"], used)
+        self.assertEqual(overrun["exceeded"], ["max_input_tokens"])
+        self.assertEqual(overrun["corrected_budget"]["max_input_tokens"], expected)
+        rows = fixture.store.connection.execute(
+            "SELECT record_json FROM "
+            "mission_document_research_controlled_recovery_authorizations").fetchall()
+        self.assertEqual(len(rows), 1)
+        authorization = json.loads(rows[0]["record_json"])
+        self.assertEqual(authorization["kind"], "automation_corrected_input_budget_retry")
+        self.assertEqual(authorization["max_cost_usd"], failed_budget["max_cost_usd"])
+        self.assertEqual(authorization["corrected_budget"]["max_cost_usd"],
+                         failed_budget["max_cost_usd"])
+        final = self._run_until(
+            executor, admission,
+            lambda item: item.get("research_status") == "candidate_staged")
+        self.assertEqual(final["research_status"], "candidate_staged")
+        # Exactly two draft calls: the refused one and the corrected one, and
+        # the corrected one ran under the corrected ceiling and nothing else.
+        self.assertEqual(len(adapter.budgets), 2)
+        self.assertEqual(adapter.budgets[1]["max_input_tokens"], expected)
+        self.assertEqual(adapter.budgets[1]["max_total_tokens"],
+                         expected + int(failed_budget["max_output_tokens"]))
+        self.assertEqual(
+            {key: value for key, value in adapter.budgets[1].items()
+             if key not in {"max_input_tokens", "max_total_tokens"}},
+            {key: value for key, value in failed_budget.items()
+             if key not in {"max_input_tokens", "max_total_tokens"}})
+        self.assertEqual(fixture.store.connection.execute(
+            "SELECT count(*) FROM mission_document_research_recovery_links"
+        ).fetchone()[0], 1)
+
+    def test_a_corrected_retry_that_overruns_again_stops_with_the_numbers(self):
+        fixture, authority, args, _registration, _launcher = self._fixture()
+        self._enable_recovery(fixture, maximum=2)
+        admission = authority.admit_from_plan(**args)
+        adapter = InputOverrunAdapter(DRAFT_REPLY, always=True)
+        executor, _draft, _verifier = self._executor(
+            fixture, authority, draft_adapter=adapter)
+        stopped = self._run_until(
+            executor, admission, lambda item: item.get("status") == "stopped")
+        # 2026-10-09: the same model served the corrected call, so its count
+        # is no new fact: this release's verdict is final, never re-entered.
+        self.assertEqual(stopped["reason"],
+                         executor_module.PROVIDER_BUDGET_EXCEEDED_AFTER_FINAL_CORRECTION)
+        self.assertEqual(adapter.calls, 2)
+        for _ in range(3):
+            self.assertEqual(executor.run_once(admission["id"])["reason"],
+                             executor_module.PROVIDER_BUDGET_EXCEEDED_AFTER_FINAL_CORRECTION)
+        self.assertEqual(adapter.calls, 2)
+        lane = MissionDocumentResearchCoordinator(
+            store=fixture.store, launcher=None, clock=fixture.harness.clock)
+        state = lane._typed_recovery_state(admission, stopped["work_order_ref"])
+        corrected = adapter.budgets[1]["max_input_tokens"]
+        self.assertEqual(state["action"], "recovery_required")
+        self.assertEqual(
+            state["reason"],
+            "provider_budget_exceeded_after_corrected_retry_final:"
+            f"input={corrected + InputOverrunAdapter.OVERRUN}>{corrected}"
+            f":need={-(-(-(-(corrected + InputOverrunAdapter.OVERRUN) * 5 // 4)) // 1000) * 1000}")
+
+    def test_the_correction_waits_for_its_own_daily_cap(self):
+        fixture, authority, args, _registration, _launcher = self._fixture()
+        self._enable_recovery(fixture, maximum=2)
+        admission = authority.admit_from_plan(**args)
+        adapter = InputOverrunAdapter(DRAFT_REPLY)
+        executor, _draft, _verifier = self._executor(
+            fixture, authority, draft_adapter=adapter)
+        executor.max_automatic_budget_corrections_per_day = 0
+        waiting = self._run_until(
+            executor, admission, lambda item: item.get("status") == "waiting")
+        self.assertEqual(waiting["reason"], executor_module.BUDGET_CORRECTION_DAY_CAP_REASON)
+        self.assertEqual(adapter.calls, 1)
+
+    def test_a_hold_from_before_the_correction_reenters_and_is_corrected(self):
+        """The two live ws-7d holds: stopped as provider_budget_exceeded_not_retried."""
+
+        fixture, authority, args, _registration, _launcher = self._fixture()
+        self._enable_recovery(fixture, maximum=2)
+        admission = authority.admit_from_plan(**args)
+        adapter = InputOverrunAdapter(DRAFT_REPLY)
+        executor, _draft, _verifier = self._executor(
+            fixture, authority, draft_adapter=adapter)
+
+        def old_release(self, admission, work, formal, index, links, record, *,
+                        now, deadline):
+            recovery = {
+                "status": "stopped",
+                "reason": executor_module.PROVIDER_BUDGET_EXCEEDED_NOT_RETRIED,
+                "eligible": False, "used_fresh_work_orders": len(links),
+                "max_fresh_work_orders": 1, "retry_at": None,
+                "deadline": executor_module._time(deadline), "proof": record,
+            }
+            self._recovery_observation(admission, work, formal, index, recovery)
+            return {"status": "stopped", "reason": recovery["reason"],
+                    "work_order_ref": work["id"], "stage": work["metadata"]["stage"]}
+
+        with patch.object(executor_module.MissionDocumentResearchExecutor,
+                          "_recover_provider_budget_overrun", old_release):
+            held = self._run_until(
+                executor, admission, lambda item: item.get("status") == "stopped")
+        self.assertEqual(held["reason"], executor_module.PROVIDER_BUDGET_EXCEEDED_NOT_RETRIED)
+        lane = MissionDocumentResearchCoordinator(
+            store=fixture.store, launcher=None, clock=fixture.harness.clock)
+        self.assertEqual(lane._typed_recovery_state(admission, held["work_order_ref"]),
+                         {"action": "resume",
+                          "reason": "automatic_budget_correction_available",
+                          "work_order_ref": held["work_order_ref"]})
+        admitted = executor.run_once(admission["id"])
+        self.assertEqual(admitted["reason"], executor_module.AUTOMATIC_BUDGET_CORRECTION_REASON)
+        self.assertEqual(lane._typed_recovery_state(admission, held["work_order_ref"])["reason"],
+                         "controlled_budget_correction_admitted")
+        final = self._run_until(
+            executor, admission,
+            lambda item: item.get("research_status") == "candidate_staged")
+        self.assertEqual(final["research_status"], "candidate_staged")
 
     def test_unproved_send_retry_stops_at_its_own_daily_cap_and_waits(self):
         """The cap is a spending bound, so its answer is tomorrow, not a person."""
@@ -2496,10 +2814,7 @@ class MissionDocumentResearchTests(unittest.TestCase):
                           "period": "current policy", "basis": "reported",
                           "cited_match_indexes": [0]}, "missing": [],
         })
-        verifier = UnprovedSendOnceAdapter({
-            "schema_version": "0.1", "verdict": "pass",
-            "verified_statement": statement, "findings": [],
-        })
+        verifier = UnprovedSendOnceAdapter(passing_verifier_reply)
         executor, _draft, _verifier = self._executor(
             fixture, authority, draft_adapter=draft, verifier_adapter=verifier,
             max_automatic_unproved_send_retries_per_day=1)
@@ -2679,7 +2994,7 @@ class MissionDocumentResearchTests(unittest.TestCase):
         self.assertEqual(fixture.store.connection.execute(
             "SELECT count(*) FROM "
             "mission_document_research_controlled_recovery_authorizations"
-        ).fetchone()[0], 1)
+        ).fetchone()[0], 2 if door == "paid" else 1)
         granted = authorize_owner_recovery(
             executor, admission["id"], door=door, actor_ref="human:lumos",
             max_cost_usd=ceiling)
@@ -2697,7 +3012,7 @@ class MissionDocumentResearchTests(unittest.TestCase):
         self.assertEqual(fixture.store.connection.execute(
             "SELECT count(*) FROM "
             "mission_document_research_controlled_recovery_authorizations"
-        ).fetchone()[0], 2)
+        ).fetchone()[0], 3 if door == "paid" else 2)
         self.assertEqual(adapter.calls, calls)
         # And the other door refuses to touch a state that is not its own.
         other = "unproved" if door == "paid" else "paid"
@@ -2722,6 +3037,7 @@ class MissionDocumentResearchTests(unittest.TestCase):
             worker=executor.draft_worker)
         self.assertEqual([item["failure_proof"]["classification"] for item in links],
                          ["automation_bounded_contract_retry",
+                          "automation_bounded_contract_retry",
                           "owner_authorized_paid_contract_retry"])
 
     def test_owner_unproved_door_builds_the_exact_authorization_and_replays(self):
@@ -2898,6 +3214,80 @@ class MissionDocumentResearchTests(unittest.TestCase):
                     prior_ticket_ref=prior_ref,
                     authorization="test:other-authorization")
         self.assertEqual(len(spawned), 3)
+
+    def test_orphan_without_summary_rebinds_and_claims_once(self):
+        """Live ws-7d 256f7569: killed ten seconds in, no summary, held since 09-18.
+
+        The writer restarted under the child, the ticket was marked orphaned
+        with an empty run.log and no summary.json, and a later release moved
+        the configuration.  Every tick since then refused the re-entry with
+        ``controlled reentry summary is unavailable`` -- before taking the
+        claim, so the lane never escalated and no door existed.
+        """
+
+        from dalton_core.lane_child_launcher import write_owner_only
+        from dalton_core.mission_document_research_launcher import (
+            MissionDocumentResearchLauncher,
+        )
+
+        fixture, authority, args, _registration, _launcher = self._fixture()
+        admission = authority.admit_from_plan(**args)
+        paths = {}
+        for name, body in (("staging", b"staging"), ("core", b"core"),
+                           ("planner", b"{}\n"), ("document", b'{"release": "one"}\n'),
+                           ("draft", b"{}\n"), ("verifier", b"{}\n")):
+            paths[name] = fixture.state / f"orphan-{name}"
+            paths[name].write_bytes(body)
+        launcher = MissionDocumentResearchLauncher(
+            state_dir=fixture.state, staging_path=paths["staging"],
+            planner_scheduler_db=paths["core"],
+            planner_model_config_path=paths["planner"],
+            draft_model_config_path=paths["draft"],
+            verifier_model_config_path=paths["verifier"],
+            document_config_path=paths["document"],
+        )
+        self.addCleanup(launcher.close)
+        configuration = launcher.configuration()
+        signature = {
+            "admission_ref": admission["id"],
+            "admission_hash": admission["content_hash"],
+            "configuration": configuration,
+        }
+        prior_ref = "mission-document-research:" + content_hash(signature)[:24]
+        ticket_path = launcher._ticket_path(prior_ref)
+        ticket_path.parent.mkdir(parents=True, exist_ok=True)
+        write_owner_only(ticket_path, {
+            "schema_version": "0.1", "id": prior_ref, **signature,
+            "configuration_hash": content_hash(configuration),
+            "started_at": NOW.isoformat(), "pid": 1, "command": ["true"],
+            "status": "orphaned", "exit_code": None,
+            "completed_at": NOW.isoformat(),
+            "orphaned_reason": "writer restarted after the child",
+        })
+        ticket_path.with_name("run.log").write_bytes(b"")
+        self.assertFalse(ticket_path.with_name("summary.json").exists())
+        paths["document"].write_text('{"release": "two"}\n', encoding="utf-8")
+        spawned = []
+
+        def fake_spawn(*, digest, record, _controlled_reentry=None, **kwargs):
+            spawned.append({"digest": digest, "record": dict(record)})
+            return {"id": f"mission-document-research:{digest}",
+                    "status": "running", **dict(record)}
+
+        with patch.object(launcher, "spawn", side_effect=fake_spawn):
+            rebound = launcher.resume(
+                admission_ref=admission["id"],
+                admission_hash=admission["content_hash"],
+                prior_ticket_ref=prior_ref,
+                authorization="test:exact-scheduler-replay")
+        self.assertEqual(rebound["rebound_from_ticket_ref"], prior_ref)
+        self.assertEqual(len(spawned), 1)
+        markers = sorted(ticket_path.parent.glob("controlled-reentry-*.json"))
+        self.assertEqual(len(markers), 1)
+        record = json.loads(markers[0].read_text(encoding="utf-8"))
+        self.assertIsNone(record["prior_summary_sha256"])
+        self.assertIsNone(record["prior_summary_base64"])
+        self.assertEqual(base64.b64decode(record["prior_log_base64"]), b"")
 
     def test_systemic_child_failure_is_completed_once_then_reaches_a_person(self):
         """The live 2026-09-18 escalations, at the real instants they happened.
@@ -3443,7 +3833,7 @@ class MissionDocumentResearchTests(unittest.TestCase):
         work, automatic = executor_module._effective_stage(
             authority, executor.scheduler, admission, 1,
             worker=executor.draft_worker)
-        self.assertEqual(len(automatic), 1)
+        self.assertEqual(len(automatic), 2)
         self.assertEqual(automatic[0]["failure_proof"]["classification"],
                          "automation_bounded_contract_retry")
         formal = executor.scheduler.formal_result(work["id"])
@@ -3476,15 +3866,16 @@ class MissionDocumentResearchTests(unittest.TestCase):
         # The automation's row and link stay; the owner's are appended to them.
         self.assertEqual(fixture.store.connection.execute(
             "SELECT count(*) FROM mission_document_research_controlled_recovery_authorizations"
-        ).fetchone()[0], 2)
+        ).fetchone()[0], 3)
         self.assertEqual(fixture.store.connection.execute(
             "SELECT count(*) FROM mission_document_research_recovery_links"
-        ).fetchone()[0], 2)
+        ).fetchone()[0], 3)
         _owned, owner_links = executor_module._effective_stage(
             authority, executor.scheduler, admission, 1,
             worker=executor.draft_worker)
         self.assertEqual([item["failure_proof"]["classification"] for item in owner_links],
                          ["automation_bounded_contract_retry",
+                          "automation_bounded_contract_retry",
                           "owner_authorized_paid_contract_retry"])
         changed = dict(authorization)
         changed["max_cost_usd"] = authorization["max_cost_usd"] + 1
@@ -3754,7 +4145,16 @@ class MissionDocumentResearchTests(unittest.TestCase):
         self.assertIsNotNone(stopped)
         self.assertEqual(fixture.store.connection.execute(
             "SELECT count(*) FROM mission_document_research_recovery_links").fetchone()[0], 1)
-        self.assertEqual(adapter.calls, 6)
+        self.assertEqual(adapter.calls, 2)
+        model_works = fixture.store.connection.execute(
+            "SELECT work_order_id,max_attempts FROM scheduler_work_orders "
+            "WHERE json_extract(work_order_json,'$.metadata.stage')='qualitative_model_draft'"
+        ).fetchall()
+        self.assertEqual(len(model_works), 2)
+        for row in model_works:
+            self.assertEqual(row['max_attempts'], 1)
+            self.assertEqual({event['attempt_number'] for event in
+                              executor.scheduler.attempt_history(row['work_order_id'])}, {1})
 
     def test_atomic_day_budget_refusal_waits_for_refill_then_uses_fresh_work(self):
         fixture, authority, args, _registration, _launcher = self._fixture()
@@ -4245,7 +4645,7 @@ class MissionDocumentResearchTests(unittest.TestCase):
             if final.get("research_status") == "candidate_staged":
                 break
         self.assertEqual(final["research_status"], "candidate_staged")
-        self.assertEqual((adapter.calls, verifier.calls), (4, 1))
+        self.assertEqual((adapter.calls, verifier.calls), (2, 1))
         self.assertEqual(fixture.budget.connection.execute(
             "SELECT count(*) FROM thesis_impact_day_admissions WHERE work_order_ref=?",
             (original["id"],)).fetchone()[0], 0)

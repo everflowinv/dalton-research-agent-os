@@ -34,6 +34,7 @@ from .sec_company_facts_lane import (
     SecCompanyFactsLane,
     US_IT_SERVICES_ISSUERS,
 )
+from .mission_company_cik import sec_cik_company_ref
 from .sec_public_adapter import SEC_COMPANY_FACTS_FORMS
 from .store import canonical_json
 
@@ -209,7 +210,7 @@ def select_issuers(tickers: list[str] | None, overrides: dict[str, str],
                 company_refs.get(ticker) in (None, packaged.company_ref)):
             continue
         catalog[ticker] = Issuer(
-            ticker, cik, company_refs.get(ticker) or f"company:sec-cik:{int(cik):010d}",
+            ticker, cik, company_refs.get(ticker) or sec_cik_company_ref(cik),
             packaged.name if packaged is not None else ticker)
     if not tickers:
         return US_IT_SERVICES_ISSUERS

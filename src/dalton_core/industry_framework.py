@@ -427,6 +427,14 @@ def validate_policy(policy: Mapping[str, Any]) -> dict[str, Any]:
         if not isinstance(drivers, list):
             raise IndustryFrameworkValidationError(
                 f"gap_checklist[{index}].driver_refs must be an array")
+        kind = _text(item["content_kind"], "content_kind", maximum=60)
+        if not _known_content_kind(kind):
+            # 2026-10-07: refused here, when the policy is read and before
+            # any model call -- not at gap assessment, after the draft and the
+            # verifier have been paid for (ws-7d, twice).
+            raise IndustryFrameworkValidationError(
+                f"gap_checklist[{index}].content_kind {kind!r} is not a content "
+                "kind of the source capability map")
         checklist.append({
             "gap_ref": _text(item["gap_ref"], "gap_ref", maximum=120),
             "label": _text(item["label"], "label", maximum=200),
@@ -965,6 +973,16 @@ def comparability_notes(companies: Sequence[Mapping[str, Any]]) -> list[str]:
         notes.append(
             f"operating_margin cannot be computed for {', '.join(missing_operating)}: "
             "no operating-income concept is bound by the specification")
+    statement_only = sorted(
+        str(company["ticker"]) for company in companies
+        if company.get("spec_ref") is None
+    )
+    if statement_only:
+        notes.append(
+            f"rows for {', '.join(statement_only)} are read straight from the filed "
+            "statements (no company model specification yet): the first filed "
+            "revenue, cost-of-revenue and operating-income concept in the frozen "
+            "preference order plays each role")
     notes.append(
         "columns are calendar quarters; each cell carries its own fiscal "
         "period_end, which can be up to one month from the column")
@@ -1096,6 +1114,39 @@ def stated_driver_refs(*blocks: Mapping[str, Any] | None) -> set[str]:
     return found
 
 
+#: Content kinds a gap may name that stand for several of the capability
+#: map's kinds.  ``primary_source`` is what the first-mission setup writes for
+#: its one generic "mission-specific evidence" gap (``workspace_mission_setup``)
+#: -- every workspace published before 2026-10-07 carries it -- and it means
+#: the primary evidence a company itself files or says.  An alias of the code,
+#: not of a policy file, so every environment reads it the same way.
+CONTENT_KIND_ALIASES: dict[str, tuple[str, ...]] = {
+    "primary_source": ("filing", "financial_statement", "transcript",
+                       "management_minutes"),
+}
+
+
+#: Gap kinds no connector fills.  ``mission_authority`` is the awaiting-
+#: mission placeholder ``workspace_runtime_setup`` writes before a workspace
+#: has published its first mission: what is missing is an owner decision, so
+#: it has no candidate sources at all.
+NON_SOURCE_CONTENT_KINDS = frozenset({"mission_authority"})
+
+
+def _content_kinds(content_kind: str) -> tuple[str, ...]:
+    if content_kind in NON_SOURCE_CONTENT_KINDS:
+        return ()
+    return CONTENT_KIND_ALIASES.get(content_kind, (content_kind,))
+
+
+def _known_content_kind(content_kind: str) -> bool:
+    from .source_capability_map import CONTENT_KINDS
+
+    if content_kind in NON_SOURCE_CONTENT_KINDS:
+        return True
+    return all(kind in CONTENT_KINDS for kind in _content_kinds(content_kind))
+
+
 def candidate_sources(
     content_kind: str, *, mission: Mapping[str, Any] | None = None,
 ) -> list[dict[str, Any]]:
@@ -1113,7 +1164,10 @@ def candidate_sources(
 
     status = connection_status(mission)
     out = []
-    for slug in sources_for(content_kind):
+    slugs: list[str] = []
+    for kind in _content_kinds(content_kind):
+        slugs.extend(slug for slug in sources_for(kind) if slug not in slugs)
+    for slug in slugs:
         entry = capability(slug)
         out.append({
             "slug": slug,
@@ -1126,6 +1180,38 @@ def candidate_sources(
             "note": entry["note"],
         })
     return out
+
+
+# 2026-10-08 (ws-7d): the industry_model gate (ADR-0011, Q3) asks whether the
+# high-frequency inputs are identified with a named substitute source, and it
+# reads this gap_ref to answer.  A workspace whose policy was generated with a
+# single generic gap could therefore never pass, whatever was drafted.  The
+# checklist always carries it: a policy's own entry wins, and otherwise this
+# one is added, its sources read off the capability map like every other gap.
+HIGH_FREQUENCY_GAP_REF = "gap:high-frequency-demand"
+HIGH_FREQUENCY_GAP: Mapping[str, Any] = {
+    "gap_ref": HIGH_FREQUENCY_GAP_REF,
+    "label": "高频需求读数",
+    "what_is_missing": ("季报之间没有接入任何高频需求指标（招聘、渠道或行业调查、"
+                        "第三方追踪数据）；因果链只能按季度观察。"),
+    "content_kind": "web_page",
+    "driver_refs": [],
+    "cost_note": ("替代来源：在接入第三方高频数据前，用网页搜索与网页抓取"
+                  "（generic，只能定位不能枚举）找公开的高频读数；"
+                  "真正的高频数据源尚未评估。"),
+    "blocks_links": [],
+}
+
+
+def gap_checklist(policy: Mapping[str, Any]) -> list[dict[str, Any]]:
+    """The policy's checklist plus the standard high-frequency gap it may lack."""
+
+    checklist = [dict(item) for item in validate_policy(policy)["gap_checklist"]]
+    if not any(item["gap_ref"] == HIGH_FREQUENCY_GAP_REF for item in checklist):
+        checklist.append({**HIGH_FREQUENCY_GAP,
+                          "driver_refs": list(HIGH_FREQUENCY_GAP["driver_refs"]),
+                          "blocks_links": list(HIGH_FREQUENCY_GAP["blocks_links"])})
+    return checklist
 
 
 def assess_gaps(
@@ -1145,7 +1231,7 @@ def assess_gaps(
 
     stated = stated_driver_refs(long_term, short_term)
     rows = []
-    for item in validate_policy(policy)["gap_checklist"]:
+    for item in gap_checklist(policy):
         named = list(item["driver_refs"])
         covered = sorted(set(named) & stated)
         if not named or not covered:
@@ -2522,6 +2608,8 @@ __all__ = [
     "IndustryFrameworkNotFound",
     "IndustryFrameworkValidationError",
     "assess_gaps",
+    "gap_checklist",
+    "HIGH_FREQUENCY_GAP_REF",
     "body_hash",
     "build_comparison",
     "calendar_quarter",

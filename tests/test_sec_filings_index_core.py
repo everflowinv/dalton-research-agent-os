@@ -242,6 +242,54 @@ class SecFilingsIndexCoreTests(unittest.TestCase):
             self.harness.governance.wire["expected_schema_hash"],
         )
 
+    def _publish_sealed_with(self, fixture_hash: str) -> None:
+        """Publish the descriptor the way an older release did: its receipt
+        seals ``fixture_hash`` rather than today's operation projection."""
+
+        from dalton_core.connector_governance import canonical_hash
+
+        governance = self.harness.governance
+
+        def sealing(query):
+            receipt = dict(governance.approval(query))
+            receipt.pop("receipt_hash")
+            receipt["fixture_manifest_hash"] = fixture_hash
+            receipt["receipt_hash"] = canonical_hash(receipt)
+            return receipt
+
+        self.harness.catalog.approval_resolver = sealing
+        try:
+            descriptor = self.harness.index.ensure_descriptor()
+        finally:
+            self.harness.catalog.approval_resolver = governance.approval
+        self.assertEqual(descriptor.approval.fixture_manifest_hash, fixture_hash)
+
+    def test_a_descriptor_sealed_over_the_whole_sec_manifest_still_leases(self) -> None:
+        """ws-7d, 2026-09-27..29: its filings-index descriptor was published on
+        09-16, after S5, and sealed the whole ``sec`` manifest hash; 485c9ad6
+        re-bound approvals to the operation projection (legacy's descriptors,
+        published before S5), and every ws-7d search was refused at lease use
+        with "capability approval changed after lease issuance"."""
+
+        from dalton_core.connector_inventory import load_packaged_connector_inventory
+
+        whole = load_packaged_connector_inventory()["templates"]["sec"]["fixture_manifest_hash"]
+        self._publish_sealed_with(whole)
+        index = self.harness.index
+        receipt = index.list_filings(index.build_request(SPEC))
+        self.assertEqual(receipt["outcome"], "succeeded", receipt)
+
+    def test_a_descriptor_sealed_over_other_fixtures_is_still_refused(self) -> None:
+        self._publish_sealed_with("0" * 64)
+        index = self.harness.index
+        try:
+            receipt = index.list_filings(index.build_request(SPEC))
+        except Exception as exc:  # noqa: BLE001 - either shape of refusal is fine
+            self.assertIn("approval changed after lease issuance", str(exc))
+        else:
+            self.assertNotEqual(receipt["outcome"], "succeeded", receipt)
+            self.assertIn("approval changed after lease issuance", json.dumps(receipt))
+
     def test_the_spec_is_closed(self) -> None:
         for bad in (
             {**SPEC, "extra": 1},

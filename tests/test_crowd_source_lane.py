@@ -610,7 +610,13 @@ class LaneRegistrationTests(unittest.TestCase):
                         # originals and stages a derived candidate. Source
                         # acquisition happened in an earlier lane.
                         "dispatch_mission_annual_research",
-                        "dispatch_mission_document_research"}
+                        "dispatch_mission_document_research",
+                        # ADR-0012: proposing scenarios from the dossier and
+                        # observing them against filed figures, prices and
+                        # Claims acquire nothing.
+                        "dispatch_scenario_proposal", "dispatch_scenario_observation",
+                        # Vision-gap #13: telling the owner acquires nothing.
+                        "dispatch_owner_delivery"}
         evidence_lanes = [
             spec.operation for spec in self.registry.tick_lanes()
             if spec.operation not in not_evidence

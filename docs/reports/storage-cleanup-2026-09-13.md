@@ -13,7 +13,7 @@ Owner 要求清理磁盘，同时明确开发继续进行。清理工作与 Cock
 
 精确路径、删除前核验及空间读数分别见：
 
-- `/Users/everflow/Projects/dalton-owner-activation-20260910/storage-cleanup-2026-09-13.json`
+- `$HOME/Projects/dalton-owner-activation-20260910/storage-cleanup-2026-09-13.json`
 - `/private/tmp/dalton-dev-scratch-cleanup-0913.json` 及 `-v2.json`、`-v3.json`
 - `/private/tmp/dalton-live-backup-cleanup-20260913.json`
 - `/private/tmp/dalton-worktree-cleanup-result-0913.json`

@@ -11,16 +11,108 @@ from typing import Any, Callable, Mapping, Sequence
 from .call_budget import resolve_call_budget, resolve_run_budget
 from .cockpit_model import CockpitModel
 from .coverage_mission import CoverageMissionAuthority
-from .investment_memo_contract import CHECK_REFS, SCHEMA_VERSION, model_work_order_refs, validate_memo_gate
+from .investment_memo_contract import (
+    CHECK_REFS_V2, SCHEMA_VERSION_V2, adv_findings, model_work_order_refs, recommendation_findings,
+    validate_memo_gate,
+)
 from .investment_memo_draft import (
-    GROUPS, MAX_COST_USD, MAX_INPUT_TOKENS, MAX_OUTPUT_TOKENS, MAX_RUN_COST_USD,
-    TIMEOUT_SECONDS, draft_group, verified_material_hash, verify_memo,
+    GROUPS, MAX_COST_USD, MAX_INPUT_TOKENS, MAX_OUTPUT_TOKENS, MAX_REPAIRS, MAX_RUN_COST_USD,
+    TIMEOUT_SECONDS, citation_index, draft_group, verified_material_hash, verify_memo,
 )
 from .mission_deliverable import MissionDeliverableAuthority, MissionDeliverableError, validate_section
 from .research_playbook import ResearchPlaybookAuthority
 from .store import DaltonStore, content_hash
 
 SUMMARY_SCHEMA_VERSION = "0.1"
+MEMO_CONTRACT_VERSION = "investment-memo-contract:batch-d:1"
+
+
+def market_block_row(connection: Any, company_ref: str) -> dict[str, Any] | None:
+    """Price, market cap and 30-day ADV as one citable number row.
+
+    The live Key Information title asks for 「30 日 ADV」 and the memo material
+    used to carry no ADV at all, so every draft either invented one or was
+    refused (ACN, seven times).  The row's text is the figure source a
+    ``numbers[].number_ref`` cites; an unavailable ADV is stated with its
+    reason so the drafter writes 「30 日 ADV：暂不可得（原因）」.
+    """
+
+    from .market_data_block import market_block_from
+
+    try:
+        block = market_block_from(connection, company_ref)
+    except Exception:  # noqa: BLE001 - one optional block
+        return None
+    if block.get("status") != "ok":
+        return None
+    currency = str(block.get("currency") or "")
+    price = block.get("price") or {}
+    parts = [f"收盘价 {price.get('close')} {currency}（{price.get('date')}）"]
+    cap = block.get("market_cap") or {}
+    if cap.get("value") is not None:
+        parts.append(f"市值 {cap['value']} {currency}（{cap.get('formula')}）")
+    else:
+        parts.append(f"市值不可得（{cap.get('reason') or '无股本观测'}）")
+    adv = block.get("adv_30d") or {}
+    if adv.get("status") == "available":
+        parts.append(f"30 日 ADV {adv['value']} {currency}，{adv['shares']} 股/日（自 {adv.get('since')}）")
+    else:
+        parts.append(f"30 日 ADV 不可得（{adv.get('reason') or '没有成交量'}）")
+    text = "；".join(parts)
+    return {"ref": f"market-block:{block.get('series_version_ref')}:{price.get('date')}",
+            "hash": content_hash(text), "kind": "market_block", "text": text,
+            "source_kind": "market", "period": str(price.get("date") or "")}
+
+
+PACK_ROW_KINDS = {"number": "pack_number", "passage": "pack_passage", "ours": "pack_ours"}
+
+
+def material_pack_rows(store: Any, company_ref: str) -> tuple[list[dict[str, Any]], str | None]:
+    """The batch-C material pack's N/P/O tags as citable memo rows.
+
+    ``(rows, reason)``: no rows and the reason when the pack is unavailable
+    (sibling module absent, in-memory Core, or a build error).
+    """
+
+    rows, reason, _record = material_pack_bound(store, company_ref)
+    return rows, reason
+
+
+def material_pack_bound(store: Any, company_ref: str) -> tuple[list[dict[str, Any]], str | None,
+                                                               dict[str, Any] | None]:
+    """``material_pack_rows`` plus the pack's ``record()`` the memo version stores."""
+
+    from .product_contract import MaterialPackUnavailable, build_pack, tag_entry
+
+    path = str(getattr(store, "path", ":memory:") or ":memory:")
+    if path == ":memory:":
+        return [], "in-memory Core: no material pack", None
+    try:
+        pack = build_pack(Path(path).parent, company_ref, "investment_memo")
+    except MaterialPackUnavailable as exc:
+        return [], str(exc), None
+    except Exception as exc:  # noqa: BLE001 - the pack is an input, not the lane
+        return [], f"material pack failed: {type(exc).__name__}: {exc}", None
+    record = pack.get("record")
+    record = dict(record) if isinstance(record, Mapping) else None
+    rows = []
+    for tag in sorted(pack.get("tags") or {}):
+        entry = tag_entry(pack, str(tag))
+        if entry is None or entry["kind"] not in PACK_ROW_KINDS or not entry.get("text"):
+            continue
+        # Batch C: our model's figures are [N…] tags into /our_model -- those
+        # are the 「我们的估计」 rows; an [O…] tag is our earlier *view*, which
+        # is background and only an estimate row when it binds our model.
+        kind = ("pack_ours" if entry.get("source_kind") == "ours" and entry["kind"] == "number"
+                else PACK_ROW_KINDS[entry["kind"]])
+        if entry["kind"] == "ours" and not str(entry["ref"]).startswith(("assumption:", "pack-json:/our_model")):
+            continue
+        text = str(entry["text"])
+        rows.append({"ref": entry["ref"], "hash": content_hash(text),
+                     "kind": kind, "text": text,
+                     "source_kind": str(entry.get("source_kind") or entry["kind"]),
+                     "period": str(entry.get("period") or entry.get("as_of") or "")})
+    return rows, None, record
 
 
 def _latest_rows(connection: Any, table: str, company_ref: str, *, subject_column: str = "company_ref",
@@ -78,16 +170,28 @@ def collect_frozen_input(store: DaltonStore, *, company_ref: str | None = None,
             or "deliverable" not in mission["autonomy"]["may_write"] \
             or "investment_memo" not in mission["autonomy"]["human_checkpoints"]:
         return {"status": "held", "reason": "the mission does not authorize memo candidates"}
+    from .mission_model_stage_lane import mission_version_refs
+
+    mission_refs = mission_version_refs(store.connection, mission)
     candidates = [member for member in mission["universe"]
                   if company_ref in (None, member["company_ref"])
                   and member["company_ref"] not in _excluded]
+    states = {member["company_ref"]: missions.current_stage_state(
+        mission["mission_ref"], member["company_ref"]) for member in candidates}
     chosen = next((member for member in candidates
-                   if missions.current_stage_state(mission["mission_ref"], member["company_ref"])["next_stage"] == "investment_memo"), None)
+                   if states[member["company_ref"]]["next_stage"] == "investment_memo"), None)
     if chosen is None:
-        return {"status": "idle", "reason": "no company has passed the folded industry and company model gates"}
+        waiting = [{"company_ref": member["company_ref"],
+                    "reason": stage_wait_reason(member, states[member["company_ref"]])}
+                   for member in candidates]
+        reason = ("；".join(str(item["reason"]) for item in (*_skipped, *waiting))
+                  or "研究任务里没有可起草备忘录的公司")
+        return {"status": "idle", "reason": reason,
+                "skipped": [*_skipped, *waiting]}
     company_ref = chosen["company_ref"]
 
     def hold_or_continue(reason: str) -> dict[str, Any]:
+        reason = f"{chosen.get('ticker') or company_ref.rsplit(':', 1)[-1]}：{reason}"
         skipped = (*_skipped, {"company_ref": company_ref, "reason": reason})
         if len(candidates) > 1 and company_ref not in _excluded:
             return collect_frozen_input(store, _excluded=(*_excluded, company_ref),
@@ -144,8 +248,22 @@ def collect_frozen_input(store: DaltonStore, *, company_ref: str | None = None,
                 if not cell.get("ref"):
                     continue
                 rows.append({"ref": cell["ref"], "hash": content_hash(cell),
-                             "kind": "forecast_cell",
+                             "kind": "forecast_cell", "version_ref": str(model_record["id"]),
                              "text": json.dumps(cell, ensure_ascii=False, sort_keys=True)})
+    if valuation is not None:
+        # The snapshot's computed multiples are the cells a Key Information or
+        # valuation figure cites (``valuation-metric:<version>:<metric>``, the
+        # shape MissionDeliverable resolves).  Without them the only place a
+        # price or multiple lived was the snapshot row itself, which is not
+        # citable in a section, and every draft that quoted one was refused.
+        for metric in valuation.get("metrics") or ():
+            if not isinstance(metric, Mapping) or metric.get("status") != "available" \
+                    or metric.get("value") is None or not metric.get("metric"):
+                continue
+            rows.append({"ref": f"valuation-metric:{valuation['id']}:{metric['metric']}",
+                         "hash": content_hash(metric), "kind": "valuation_metric",
+                         "version_ref": str(valuation["id"]),
+                         "text": json.dumps(metric, ensure_ascii=False, sort_keys=True)})
     try:
         approved_rows = store.connection.execute(
             "SELECT v.record_json,v.content_hash FROM deep_insight_gate_versions v "
@@ -153,12 +271,18 @@ def collect_frozen_input(store: DaltonStore, *, company_ref: str | None = None,
             "WHERE v.company_ref=? AND d.decision='approve' ORDER BY v.version_number DESC",
             (company_ref,),
         ).fetchall()
+        # The draft binds its mission version under ``bindings`` (the Deep
+        # Insight Gate record shape); any version of this mission counts,
+        # because a version is provenance, not scope (ADR-0008 addendum).
+        # Reading only the top-level field matched no real gate record, so
+        # every memo held here for ever.
         approved = next((row for row in approved_rows
-                         if json.loads(row["record_json"]).get("mission_version_ref") == mission["id"]), None)
+                         if gate_mission_version(json.loads(row["record_json"])) in mission_refs),
+                        None)
     except Exception:
         approved = None
     if approved is None:
-        return hold_or_continue("an owner-approved Deep Insight Gate is required")
+        return hold_or_continue("缺少你已批准的深度认知门（当前研究任务下）")
     gate_record = json.loads(approved["record_json"])
     rows.append({"ref": gate_record["id"], "hash": approved["content_hash"],
                  "kind": "deep_insight_gate_versions",
@@ -172,18 +296,43 @@ def collect_frozen_input(store: DaltonStore, *, company_ref: str | None = None,
             continue
         rows.append({"ref": record["id"], "hash": record["content_hash"],
                      "kind": record["kind"], "text": json.dumps(record, ensure_ascii=False, sort_keys=True)})
+    if "industry_framework" not in {row["kind"] for row in rows}:
+        # The industry framework is its own authority, not a MissionDeliverable:
+        # the live Core has 30 framework versions and no ``industry_framework``
+        # deliverable at all, so the memo held on "missing industry_framework"
+        # even after every gate passed.
+        framework = latest_industry_framework(store.connection, mission, mission_refs)
+        if framework is not None:
+            rows.append({"ref": framework["id"], "hash": framework["content_hash"],
+                         "kind": "industry_framework",
+                         "text": json.dumps(framework, ensure_ascii=False, sort_keys=True)})
     kinds = {row["kind"] for row in rows}
     required = {"company_dossier_versions", "deep_insight_gate_versions", "forecast_model_versions",
                 "sensitivity_projections", "valuation_snapshot_versions", "industry_framework"}
     missing = sorted(required - kinds)
     if missing:
-        return hold_or_continue("required memo inputs are missing: " + ", ".join(missing))
+        return hold_or_continue("备忘录缺少依据：" + ", ".join(missing))
+    market = market_block_row(store.connection, company_ref)
+    if market is not None:
+        rows.append(market)
+    pack_rows, pack_reason, pack_record = material_pack_bound(store, company_ref)
+    rows.extend(pack_rows)
+    from .investment_memo_material import bound_material
+
+    rows = bound_material(rows, company_ref=company_ref)
     bindings = [{"ref": row["ref"], "hash": row["hash"], "kind": row["kind"]} for row in rows]
     current = MissionDeliverableAuthority(store).latest(
         "mission-deliverable:investment_memo:" + company_ref.rsplit(":", 1)[-1])
-    if current is not None and current.get("mission_version_ref") == mission["id"] \
-            and (current.get("gate") or {}).get("input_bindings") == bindings:
-        reason = "the frozen memo input is unchanged"
+    if current is not None and current.get("mission_version_ref") in mission_refs \
+            and anchor_bindings((current.get("gate") or {}).get("input_bindings") or []) \
+            == anchor_bindings(bindings):
+        # A memo already stands on this company's approved gate and driver
+        # model.  New claims, prices and events arrive every day; redrafting
+        # for each of them would put a new four-call memo in front of the
+        # owner daily.  The memo is redrafted when what it argues *from*
+        # moves: a newly approved gate or a new model version (ADR-0011).
+        reason = (f"{chosen.get('ticker') or company_ref.rsplit(':', 1)[-1]}："
+                  "已有一份基于当前深度认知门与公司模型的备忘录，依据未变")
         skipped = (*_skipped, {"company_ref": company_ref, "reason": reason})
         if len(candidates) > 1:
             return collect_frozen_input(store, _excluded=(*_excluded, company_ref),
@@ -195,10 +344,136 @@ def collect_frozen_input(store: DaltonStore, *, company_ref: str | None = None,
                 "event_judgements", "thesis_reflections", "research_events"}
     return {"status": "ready", "mission": mission, "playbook": playbook, "company": chosen,
             "material": rows, "input_bindings": bindings, "skipped": list(_skipped),
+            "material_pack": {"status": "unavailable" if pack_reason else "bound",
+                              "reason": pack_reason, "rows": len(pack_rows)},
+            "material_pack_record": pack_record,
             "optional_missing": sorted(optional - kinds)}
 
 
-def _checks(sections: Sequence[Mapping[str, Any]], questions: Sequence[Mapping[str, Any]]) -> list[dict[str, Any]]:
+def cited_refs(sections: Sequence[Mapping[str, Any]],
+               questions: Sequence[Mapping[str, Any]]) -> set[str]:
+    refs: set[str] = set()
+    for section in sections:
+        refs.update(str(ref) for ref in section.get("claim_refs") or ())
+        for number in section.get("numbers") or ():
+            if not isinstance(number, Mapping):
+                continue
+            if number.get("claim_version_ref"):
+                refs.add(str(number["claim_version_ref"]))
+            cell = number.get("cell")
+            if isinstance(cell, Mapping) and cell.get("ref"):
+                refs.add(str(cell["ref"]))
+            for key in ("number_ref", "passage_ref"):
+                if number.get(key):
+                    refs.add(str(number[key]))
+            estimate = number.get("estimate")
+            if isinstance(estimate, Mapping) and estimate.get("assumption_ref"):
+                refs.add(str(estimate["assumption_ref"]))
+    for question in questions:
+        refs.update(str(ref) for ref in question.get("refs") or ())
+    return refs
+
+
+# The authorities a memo argues from; a memo is redrafted only when one moves.
+ANCHOR_KINDS = ("deep_insight_gate_versions", "forecast_model_versions")
+
+
+def anchor_bindings(bindings: Sequence[Mapping[str, Any]]) -> list[tuple[str, str, str]]:
+    return sorted((str(row.get("kind")), str(row.get("ref")), str(row.get("hash")))
+                  for row in bindings if row.get("kind") in ANCHOR_KINDS)
+
+
+def gate_mission_version(record: Mapping[str, Any]) -> str | None:
+    bound = (record.get("bindings") or {}).get("mission_version_ref") \
+        or record.get("mission_version_ref")
+    return None if bound is None else str(bound)
+
+
+def latest_industry_framework(connection: Any, mission: Mapping[str, Any],
+                              mission_refs: Any) -> dict[str, Any] | None:
+    """The industry's newest framework version, if it belongs to this mission."""
+
+    try:
+        from .industry_framework import IndustryFrameworkAuthority
+
+        reader = IndustryFrameworkAuthority.__new__(IndustryFrameworkAuthority)
+        reader.connection = connection
+        framework = reader.latest(str(mission["industry_ref"]))
+    except Exception:  # noqa: BLE001 - no framework authority yet
+        return None
+    if framework is None:
+        return None
+    if (framework.get("bindings") or {}).get("mission_version_ref") not in mission_refs:
+        return None
+    return framework
+
+
+def stage_wait_reason(member: Mapping[str, Any], state: Mapping[str, Any]) -> str:
+    """One company's answer to "why is there no memo yet", in the owner's words."""
+
+    from .mission_stage import STAGE_LABELS, STAGE_STATUS_LABELS
+
+    label = str(member.get("ticker") or str(member["company_ref"]).rsplit(":", 1)[-1])
+    stage = state.get("current_stage")
+    nxt = state.get("next_stage")
+    if nxt in (None, "active_coverage") and stage in ("investment_memo", "active_coverage"):
+        return f"{label} 备忘录已裁决"
+    if stage is None:
+        return f"{label} 尚未开始研究阶段"
+    status = STAGE_STATUS_LABELS.get(str(state.get("current_status")),
+                                     str(state.get("current_status")))
+    return (f"{label} 停在{STAGE_LABELS.get(stage, stage)}（{status}），"
+            f"等{STAGE_LABELS['company_model']}通过审核")
+
+
+def source_kinds_for(section: Mapping[str, Any], material: Sequence[Mapping[str, Any]]) -> set[str]:
+    """What kinds of source a memo section cites, for the source-aware lint rules."""
+
+    rows = {str(row.get("ref")): row for row in material}
+    kinds: set[str] = set()
+    cited = [str(ref) for ref in section.get("claim_refs") or ()]
+    for number in section.get("numbers") or ():
+        for key in ("number_ref", "passage_ref", "claim_version_ref"):
+            if number.get(key):
+                cited.append(str(number[key]))
+    for ref in cited:
+        row = rows.get(ref) or {}
+        if row.get("source_kind"):
+            kinds.add(str(row["source_kind"]))
+        if row.get("kind") == "consensus_estimate_versions" or "consensus" in str(row.get("text") or "").lower()[:400]:
+            kinds.add("consensus")
+    return kinds
+
+
+def recommendation_check(sections: Sequence[Mapping[str, Any]]) -> tuple[bool, str]:
+    key = next((section for section in sections
+                if str(section.get("title") or "").startswith("Key Information")), None)
+    if key is None:
+        return False, "no Key Information section carries the recommendation"
+    found = recommendation_findings(str(key.get("body") or "")) + adv_findings(
+        str(key.get("title") or ""), str(key.get("body") or ""), key.get("gap_items") or ())
+    if found:
+        return False, "Key Information: " + "；".join(item["code"] for item in found)
+    return True, "Key Information states 建议（研究建议）: direction, position range and horizon"
+
+
+def lint_check(sections: Sequence[Mapping[str, Any]],
+               material: Sequence[Mapping[str, Any]]) -> tuple[bool, str]:
+    from .research_reasoning_lint import lint_text
+
+    findings = []
+    for section in sections:
+        findings += lint_text(str(section.get("body") or ""),
+                              source_kinds=source_kinds_for(section, material),
+                              section=str(section.get("title") or ""))
+    if findings:
+        return False, "reasoning lint: " + "；".join(
+            f"{item['rule']}@{item.get('section', '')}" for item in findings[:5])
+    return True, "no reasoning-lint finding"
+
+
+def _checks(sections: Sequence[Mapping[str, Any]], questions: Sequence[Mapping[str, Any]],
+            material: Sequence[Mapping[str, Any]] = ()) -> list[dict[str, Any]]:
     refs = sorted({str(ref) for q in questions for ref in q["refs"]})
     by_title = {str(section["title"]): section for section in sections}
     values = (
@@ -206,13 +481,15 @@ def _checks(sections: Sequence[Mapping[str, Any]], questions: Sequence[Mapping[s
         (bool(questions[7]["answer"] and questions[6]["answer"]), "variant view is stated against consensus"),
         (any("Anti-thesis" in title and section["body"] for title, section in by_title.items()), "Anti-thesis is a written counter-case"),
         (any(title.startswith("S5 ") and section["body"] for title, section in by_title.items()) and bool(questions[11]["answer"]), "risk/reward and loss case are written"),
+        recommendation_check(sections),
+        lint_check(sections, material),
     )
     return [{"check_ref": ref, "status": "pass" if passed else "fail", "reason": reason,
-             "evidence_refs": refs} for ref, (passed, reason) in zip(CHECK_REFS, values)]
+             "evidence_refs": refs} for ref, (passed, reason) in zip(CHECK_REFS_V2, values)]
 
 
 def run_memo(*, store: DaltonStore, frozen: Mapping[str, Any], model: Any, verifier_model: Any,
-             max_units: int = 4) -> dict[str, Any]:
+             max_units: int = 4, max_repairs: int = 0) -> dict[str, Any]:
     if frozen.get("status") != "ready":
         return dict(frozen)
     mission, playbook, company = frozen["mission"], frozen["playbook"], frozen["company"]
@@ -225,31 +502,50 @@ def run_memo(*, store: DaltonStore, frozen: Mapping[str, Any], model: Any, verif
         return {"status": "held", "reason": "run max_units cannot cover the atomic four-group memo"}
     sections, answers, calls = [], [], []
     cost_micros = 0
+    repairs_left = max(0, int(max_repairs))
+    repaired: list[dict[str, Any]] = []
     for group, section_indexes, question_indexes in GROUPS:
-        outcome = draft_group(model, group=group,
-            section_titles=[titles[i] for i in section_indexes],
-            questions=[questions[i] for i in question_indexes], material=frozen["material"],
-            company=company, mission=mission)
+        kwargs = dict(group=group, section_titles=[titles[i] for i in section_indexes],
+                      questions=[questions[i] for i in question_indexes],
+                      material=frozen["material"], company=company, mission=mission)
+        outcome = draft_group(model, **kwargs)
         cost_micros += int(outcome.get("model", {}).get("cost_micros") or outcome.get("cost_micros") or 0)
+        if outcome["status"] != "drafted" and outcome.get("repairable") and repairs_left:
+            # One paid redo, told exactly which refs were refused and why.
+            repairs_left -= 1
+            first = {"group": group, "reason": outcome["reason"], "refs": outcome.get("refs") or []}
+            outcome = draft_group(model, **kwargs, repair=first)
+            cost_micros += int(outcome.get("model", {}).get("cost_micros") or outcome.get("cost_micros") or 0)
+            repaired.append(first)
         if outcome["status"] != "drafted":
-            return {"status": "refused", "memo_status": "draft_refused", "reason": outcome["reason"],
-                    "cost_micros": cost_micros}
+            refused = {"status": "refused", "memo_status": "draft_refused", "reason": outcome["reason"],
+                       "cost_micros": cost_micros}
+            if outcome.get("refs"):
+                refused["offending_refs"] = list(outcome["refs"])
+            if repaired:
+                refused["repairs"] = repaired
+            return refused
         sections.extend(outcome["sections"]); answers.extend(outcome["key_questions"])
         calls.append({"group": group, "work_order_ref": outcome["model"]["work_order_ref"],
                       "route_decision_ref": outcome["model"]["route_decision_ref"],
                       "result_envelope_ref": outcome["model"]["result_envelope_ref"],
                       "invocation_ref": outcome["model"]["invocation_ref"]})
     live_claims = {row["ref"] for row in frozen["material"] if row["kind"] == "claim"}
-    cell_refs = {row["ref"] for row in frozen["material"] if row["kind"] in (
-        "forecast_cell", "statement_accession")}
+    index = citation_index(frozen["material"])
+    cells = index["cells"]
+    from .mission_deliverable import pack_passage_resolver
+
+    resolve_passage = pack_passage_resolver(None, index["passages"])
     try:
         sections = [validate_section(section, live_claim_refs=live_claims,
-                                     resolve_cell=lambda cell: cell.get("ref") in cell_refs)
+                                     resolve_cell=lambda cell: cells.get(str(cell.get("ref"))) == dict(cell),
+                                     resolve_passage=resolve_passage,
+                                     resolve_number=index["numbers"].get, strict=True)
                     for section in sections]
     except MissionDeliverableError as exc:
         return {"status": "refused", "memo_status": "authority_validation_failed",
                 "reason": str(exc), "cost_micros": cost_micros}
-    checks = _checks(sections, answers)
+    checks = _checks(sections, answers, frozen["material"])
     if any(check["status"] != "pass" for check in checks):
         return {"status": "refused", "memo_status": "deterministic_gate_failed", "checks": checks,
                 "cost_micros": cost_micros}
@@ -261,14 +557,20 @@ def run_memo(*, store: DaltonStore, frozen: Mapping[str, Any], model: Any, verif
     digest = verified_material_hash(sections=sections, questions=answers,
         input_bindings=frozen["input_bindings"], record_fields=fields)
     routes = [call["route_decision_ref"] for call in calls]
+    # The verifier reads every row the draft cites -- the rows it has to check
+    # -- rather than the whole bounded material: the draft itself is added to
+    # its prompt, and both together must stay inside one call (ADR-0011).
+    cited = cited_refs(sections, answers)
+    verifier_material = [row for row in frozen["material"] if row["ref"] in cited] \
+        or list(frozen["material"])
     verdict = verify_memo(verifier_model, sections=sections, questions=answers,
-        material=frozen["material"], material_hash=digest, mission=mission,
+        material=verifier_material, material_hash=digest, mission=mission,
         producer_route_decision_refs=routes)
     cost_micros += int(verdict.get("model", {}).get("cost_micros") or verdict.get("cost_micros") or 0)
     if verdict.get("status") != "verified" or verdict.get("verdict") != "pass":
         return {"status": "refused", "memo_status": "verification_failed", "verification": verdict,
                 "cost_micros": cost_micros}
-    gate = {"schema_version": SCHEMA_VERSION, "passed": True, "checks": checks,
+    gate = {"schema_version": SCHEMA_VERSION_V2, "passed": True, "checks": checks,
             "verified_body_hash": digest, "key_questions": answers,
             "input_bindings": list(frozen["input_bindings"]), "producer_calls": calls,
             "verifier": {"verdict": "pass", "work_order_ref": verdict["model"]["work_order_ref"],
@@ -282,11 +584,19 @@ def run_memo(*, store: DaltonStore, frozen: Mapping[str, Any], model: Any, verif
             subject_ref=company["company_ref"], mission=mission, playbook=playbook,
             template_ref=fields["template_ref"], sections=sections, summary=summary, gaps=[],
             model_invocation_refs=model_work_order_refs(gate), actor_ref=mission["autonomy"]["automation_principal"],
-            idempotency_key="investment-memo:" + content_hash({"company": company["company_ref"], "digest": digest}), gate=gate)
+            idempotency_key="investment-memo:" + content_hash({"company": company["company_ref"], "digest": digest}), gate=gate,
+            pack_numbers=index["numbers"], pack_passages=index["passages"],
+            contract={"version": MEMO_CONTRACT_VERSION,
+                      "material_pack": dict(frozen.get("material_pack") or {"status": "unknown"})},
+            # Like the initial screen: the pack's provenance block (watermark,
+            # inputs, sufficiency) is what redraft_policy reads later.
+            material_pack=frozen.get("material_pack_record"))
     except MissionDeliverableError as exc:
         return {"status": "refused", "memo_status": "authority_validation_failed",
                 "reason": str(exc), "cost_micros": cost_micros}
-    return {"status": "succeeded", "memo_status": published["status"],
+    from .research_product_quality import product_quality
+    quality = product_quality("investment_memo", published, core=store.connection, playbook=playbook)
+    return {"status": "succeeded", "memo_status": published["status"], "quality": quality,
             "company_ref": company["company_ref"], "version_ref": published["id"],
             "version_hash": published["content_hash"], "cost_micros": cost_micros, "gate": gate}
 
@@ -304,12 +614,13 @@ def run(*, state_dir: Path, model_config_path: Path | None, verifier_model_confi
                 "reason": "memo producer and independent verifier configurations are both required"}
     config = json.loads(model_config_path.read_text(encoding="utf-8"))
     verifier_config = json.loads(verifier_model_config_path.read_text(encoding="utf-8"))
-    run_budget = resolve_run_budget(config, "investment_memo",
-        defaults={"max_cost_usd": MAX_RUN_COST_USD, "max_units": 4})
     producer_budget = resolve_call_budget(config, "investment_memo", defaults={
         "max_input_tokens": MAX_INPUT_TOKENS, "max_output_tokens": MAX_OUTPUT_TOKENS,
         "max_cost_usd": MAX_COST_USD, "timeout_seconds": TIMEOUT_SECONDS})
     verifier_budget = resolve_call_budget(verifier_config, "investment_memo_verifier", defaults=producer_budget)
+    run_budget = resolve_run_budget(config, "investment_memo",
+        defaults={"max_cost_usd": MAX_RUN_COST_USD, "max_units": 4},
+        call_budgets={"investment_memo": producer_budget, "investment_memo_verifier": verifier_budget})
     if float(run_budget["max_cost_usd"]) < 4 * float(producer_budget["max_cost_usd"]) + float(verifier_budget["max_cost_usd"]):
         return {"schema_version": SUMMARY_SCHEMA_VERSION, "status": "held", "memo_status": "run_budget_too_small",
                 "reason": "run budget cannot reserve four producer calls and one verifier call"}
@@ -317,10 +628,17 @@ def run(*, state_dir: Path, model_config_path: Path | None, verifier_model_confi
         return CockpitModel(settings, scheduler_db=str(scheduler_db or state_dir / "scheduler.sqlite"),
                             max_input_tokens=MAX_INPUT_TOKENS, max_output_tokens=MAX_OUTPUT_TOKENS,
                             max_cost_usd=MAX_COST_USD, timeout_seconds=TIMEOUT_SECONDS)
+    # A repair is one more producer call; it is offered only when the run
+    # budget can still reserve it on top of the four drafts and the verifier.
+    headroom = float(run_budget["max_cost_usd"]) - (
+        4 * float(producer_budget["max_cost_usd"]) + float(verifier_budget["max_cost_usd"]))
+    repairs = min(MAX_REPAIRS, max(0, int(headroom // float(producer_budget["max_cost_usd"]))))
     result = run_memo(store=store, frozen=frozen, model=(model_factory or (lambda: build(config)))(),
                       verifier_model=(verifier_model_factory or (lambda: build(verifier_config)))(),
-                      max_units=int(run_budget["max_units"]))
-    return {"schema_version": SUMMARY_SCHEMA_VERSION, **result}
+                      max_units=int(run_budget["max_units"]), max_repairs=repairs)
+    return {"schema_version": SUMMARY_SCHEMA_VERSION, **result,
+            "budget": {"run": run_budget, "producer": producer_budget,
+                       "verifier": verifier_budget, "max_repairs": repairs}}
 
 
 def main(argv: Sequence[str] | None = None) -> int:

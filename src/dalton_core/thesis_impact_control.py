@@ -223,7 +223,9 @@ class ResearchPlanThesisImpactCoordinator:
         # INVALID_HOST_RESULT is the broker's own contract validation of the
         # host frame (proof shape, attribution, telemetry) — again no model
         # semantics, so the same bounded re-drive applies.
-        if code in {"HOST_COMPLETION_FAILED", "INVALID_HOST_RESULT"}:
+        from .model_profile_health import HOST_FRAME_FAILURE_CODES
+
+        if code in HOST_FRAME_FAILURE_CODES:
             return True
         if not metadata.get("control_plane_failure"):
             return False
@@ -296,10 +298,11 @@ class ResearchPlanThesisImpactCoordinator:
             or in_progress["metadata"] != expected_started
             or answered["state"] != "answered"
             or answered["reason"] != "formal_claim_bound"
-            or answered["metadata"] != {
+            or {key: answered["metadata"].get(key) for key in ("claim_version_refs", "claim_version_hashes")} != {
                 "claim_version_refs": [binding["claim_version_ref"]],
                 "claim_version_hashes": [binding["claim_version_hash"]],
             }
+            or set(answered["metadata"]) - {"claim_version_refs", "claim_version_hashes", "answer_acceptance"}
             or binding["question_ref"] != question["question_ref"]
             or binding["event_ref"] != answered["id"]
         ):

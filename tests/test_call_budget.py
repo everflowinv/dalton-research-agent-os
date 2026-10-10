@@ -74,18 +74,41 @@ class CallBudgetTests(unittest.TestCase):
         wire = json.loads(path.read_text())
         self.assertEqual(wire["defaults"]["max_cost_usd"], 1.0)
         self.assertTrue(wire["purposes"])
+        # Batch C2: the whole-pack purposes carry the long-context floor
+        # (call_budget.LONG_CONTEXT_CALL_FLOOR), which every stored config and
+        # the shared cost policy are held to; every other purpose is 1 USD.
+        from dalton_core.call_budget import LONG_CONTEXT_CALL_FLOOR, LONG_CONTEXT_PURPOSES
+
         self.assertEqual(
             {name: value["max_cost_usd"] for name, value in wire["purposes"].items()},
-            {name: 1.0 for name in wire["purposes"]},
+            {name: (LONG_CONTEXT_CALL_FLOOR["max_cost_usd"] if name in LONG_CONTEXT_PURPOSES else 1.0)
+             for name in wire["purposes"]},
         )
+        for name in LONG_CONTEXT_PURPOSES:
+            self.assertEqual(wire["purposes"][name], LONG_CONTEXT_CALL_FLOOR)
+
+    def test_long_form_brain_drafts_leave_room_for_reasoning(self):
+        # 2026-09-29: glm-5.3 (a brain-tier link) spent all 4096 output tokens
+        # of 从已登记原文起草定向回答 reasoning and returned no text -- a paid
+        # call. The two long-form drafting stages on the brain chain get 16k;
+        # at the priciest brain link (claude-opus-5, $4/$20 per million) a
+        # 64k-in/16k-out call is still ~$0.58, inside the $1 per-call ceiling.
+        for purpose in ("mission_directed_document_draft",
+                        "registered_annual_report_draft"):
+            with self.subTest(purpose=purpose):
+                budget = default_call_budget(purpose)
+                self.assertGreaterEqual(budget["max_output_tokens"], 16000)
+                worst = (budget["max_input_tokens"] * 4.0
+                         + budget["max_output_tokens"] * 20.0) / 1_000_000
+                self.assertLessEqual(worst, budget["max_cost_usd"])
 
     def test_run_budget_resolves_general_then_purpose(self):
         config = {
             "run_budget": {"max_cost_usd": 4.0, "max_units": 3},
-            "purpose_run_budgets": {"dossier": {"max_units": 2, "max_calls": 5}},
+            "purpose_run_budgets": {"unlisted_runtime": {"max_units": 2, "max_calls": 5}},
         }
         self.assertEqual(resolve_run_budget(
-            config, "dossier", defaults={"max_cost_usd": 5.0, "max_units": 4}),
+            config, "unlisted_runtime", defaults={"max_cost_usd": 5.0, "max_units": 4}),
             {"max_cost_usd": 4.0, "max_units": 2, "max_calls": 5})
 
     def test_run_budget_rejects_unknown_nonpositive_and_nonfinite(self):
@@ -97,7 +120,7 @@ class CallBudgetTests(unittest.TestCase):
     def test_packaged_run_budget_overrides_legacy_defaults(self):
         self.assertEqual(resolve_run_budget(
             {}, "dossier", defaults={"max_cost_usd": 9.0, "max_units": 9}),
-            {"max_cost_usd": 2.5, "max_units": 3})
+            {"max_cost_usd": 56.0, "max_units": 3})
 
 
 if __name__ == "__main__":

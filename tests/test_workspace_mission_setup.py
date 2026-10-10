@@ -80,6 +80,8 @@ class WorkspaceFirstMissionTests(unittest.TestCase):
         self.assertNotIn("us-it-services", str(draft).lower())
         self.assertNotIn("ACN", str(draft))
         self.assertIsNone(body["bindings"])
+        self.assertTrue(body["research_questions"][0].startswith("哪些证据能够支持或推翻这一研究目标："))
+        self.assertEqual(body["research_questions"][1], "哪些业务驱动因素能够解释所选公司的差异？")
 
     def test_ambiguous_goal_stays_review_only_and_cannot_publish(self):
         draft = draft_first_mission(

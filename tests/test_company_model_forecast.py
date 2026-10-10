@@ -151,7 +151,7 @@ class PublishedLineTests(unittest.TestCase):
         self.assertEqual({item["metric_or_aspect"] for item in published},
                          {"metric:revenue-usd"})
         self.assertEqual(list(PUBLISHED_METRICS), ["revenue"])
-        self.assertEqual(len(published), 4)
+        self.assertEqual(len(published), 8)
         self.assertEqual(Decimal(published[0]["value"]), Decimal("1464100000"))
 
     def test_a_line_binds_the_exact_model_version_it_fell_out_of(self):
@@ -174,20 +174,18 @@ class PublishedLineTests(unittest.TestCase):
         # line version saying the same number would claim it had.
         self.assertEqual({item["status"] for item in again}, {"unchanged"})
         self.assertEqual(self.store.connection.execute(
-            "SELECT COUNT(*) AS n FROM model_forecast_line_versions").fetchone()["n"], 4)
+            "SELECT COUNT(*) AS n FROM model_forecast_line_versions").fetchone()["n"], 8)
 
     def test_an_actual_is_never_published_as_a_forecast(self):
         publish_forecast_lines(self.lines, self.record)
         table = build_model_inputs(filed_quarter(ledger()), spec())
         second = self.models.publish(actualize_model(self.record, table))
         published = publish_forecast_lines(self.lines, second)
-        # The realised quarter is gone from the forecast; the three still ahead
-        # did not move, so nothing was written for them either.
-        self.assertEqual([item["period_end"] for item in published],
-                         ["2026-11-30", "2027-02-28", "2027-05-31"])
-        self.assertEqual({item["status"] for item in published}, {"unchanged"})
-        self.assertEqual(self.store.connection.execute(
-            "SELECT COUNT(*) AS n FROM model_forecast_line_versions").fetchone()["n"], 4)
+        self.assertEqual(len(published), 8)
+        self.assertEqual(published[0]["period_end"], "2026-11-30")
+        self.assertNotIn("2026-08-31", [item["period_end"] for item in published])
+        self.assertEqual({item["status"] for item in published}, {"fresh", "unchanged"})
+
 
     def test_a_unit_the_reconciler_cannot_scale_is_refused_not_assumed(self):
         record = dict(self.record)
@@ -332,7 +330,7 @@ class LaneStateTests(unittest.TestCase):
                  "because": ("Free cash flow is part of this model."
                              if cash_concepts else "Nothing turns on it here.")}],
             "operating_metrics": [],
-            "horizon": {"historical_quarters": 12, "forecast_quarters": 4,
+            "horizon": {"historical_quarters": 12, "forecast_quarters": 8,
                         "because": "Three years spans the cycle."},
             "financial_statement_structure": statement_structure(full=True),
             "cash_flow_companion": {
@@ -377,8 +375,8 @@ class LaneStateTests(unittest.TestCase):
         self.assertEqual(summary["company_ref"], ACN)
         self.assertEqual(summary["model_version"], 1)
         self.assertEqual(summary["drivers"], 4)
-        self.assertEqual(summary["forecast_quarters"], 4)
-        self.assertEqual(summary["forecast_lines_written"], 4)
+        self.assertEqual(summary["forecast_quarters"], 8)
+        self.assertEqual(summary["forecast_lines_written"], 8)
         self.assertEqual(summary["formal_authority_writes"], 0)
         self.assertEqual(summary["cost_micros"], 0)
         self.assertIn("result:revenue", summary["results_computed"])
@@ -857,10 +855,20 @@ class LaneStateTests(unittest.TestCase):
             build_projection(model_record, bridge=built["bridge"],
                              bridge_detail=built["detail"],
                              mission_version_ref=self.mission["id"]))
+        # ADR-0011: the gate also wants the valuation snapshot assembled from
+        # the latest price series, and a model that covers the latest filing.
+        price_ref = "market-price-series-version:acn-latest"
+        valuation = {"id": "valuation-snapshot-version:acn", "company_ref": ACN,
+                     "price": {"version_ref": price_ref},
+                     "metrics": [{"metric": "trailing_pe", "status": "available"}]}
+        from dalton_core.mission_model_stage_lane import latest_filed_period
+        latest_filed = latest_filed_period(self.store.connection, ACN)
         verdict = company_model_readiness(
             model_record, projection, mission=self.mission,
-            company_ref=ACN, filing_proof=proof)
+            company_ref=ACN, filing_proof=proof, valuation=valuation,
+            current_price_ref=price_ref, latest_filed_period=latest_filed)
         self.assertTrue(verdict["passed"], verdict)
+        self.assertIn(valuation["id"], verdict["evidence_refs"])
         for stage_ref, status, actor in (
             ("initial_screen", "entered", "automation:coverage-mission"),
             ("initial_screen", "gate_passed", "automation:coverage-mission"),
@@ -876,12 +884,23 @@ class LaneStateTests(unittest.TestCase):
                 evidence_refs=[model_record["id"]], rationale="real authority fixture",
                 actor_ref=actor,
                 idempotency_key=f"real-stage:{stage_ref}:{status}")
-        advanced = advance_once(self.missions, self.store.connection, self.mission)
-        self.assertEqual((advanced["status"], advanced["stage_ref"]),
-                         ("advanced", "company_model"), advanced)
-        count = len(self.missions.stage_records(self.mission["id"], company_ref=ACN))
-        self.assertEqual(advance_once(
-            self.missions, self.store.connection, self.mission)["status"], "idle")
+        from dalton_core.market_price import MarketPriceSeriesAuthority
+        from dalton_core.valuation_snapshot import ValuationSnapshotAuthority
+
+        def current(connection, authority_type, company_ref):
+            if authority_type is ValuationSnapshotAuthority:
+                return valuation
+            if authority_type is MarketPriceSeriesAuthority:
+                return {"id": price_ref}
+            return None
+
+        with mock.patch("dalton_core.mission_model_stage_lane._latest_version", current):
+            advanced = advance_once(self.missions, self.store.connection, self.mission)
+            self.assertEqual((advanced["status"], advanced["stage_ref"]),
+                             ("advanced", "company_model"), advanced)
+            count = len(self.missions.stage_records(self.mission["id"], company_ref=ACN))
+            self.assertEqual(advance_once(
+                self.missions, self.store.connection, self.mission)["status"], "idle")
         self.assertEqual(len(self.missions.stage_records(
             self.mission["id"], company_ref=ACN)), count)
 
@@ -929,7 +948,7 @@ class LaneStateTests(unittest.TestCase):
         self.assertEqual(summary["change_reason"], "filing_actual")
         self.assertEqual(summary["realised_quarters"], 1)
         self.assertEqual(summary["model_version"], 2)
-        self.assertEqual(summary["forecast_quarters"], 3)
+        self.assertEqual(summary["forecast_quarters"], 8)
         # Nothing was written to the separate forecast-line authority. The
         # structured model keeps its 10% assumptions but replays later formula
         # cells from the filed actual, so value and formula stay identical.

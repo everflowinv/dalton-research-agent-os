@@ -347,8 +347,39 @@ def refund_systemic_grant(launcher: Any, admission_ref: str,
     return record
 
 
+#: The hold reason a lane writes when a controlled re-entry is refused before
+#: any claim was taken, i.e. before anything could have been sent.
+REENTRY_UNAVAILABLE_PREFIX = "controlled_reentry_unavailable:"
+
+
+def escalate_repeated_refusal(reason: str, prior_reason: str | None,
+                              escalated_reason: str) -> str:
+    """A refusal that repeats verbatim is not the lane's business any more.
+
+    ``controlled_reentry_unavailable`` is written for a re-entry the launcher
+    refused *before* it took the one-shot claim, so nothing was attempted and
+    the lane rightly tries again next tick.  But when the very same refusal
+    comes back on the next tick, it is a standing condition -- a ticket file,
+    a summary, a workspace binding -- and the lane will say the same thing for
+    ever without anyone being asked.  Live on ws-7d, admission 256f7569 held
+    ``controlled reentry summary is unavailable`` from 2026-09-18 onwards:
+    never escalated, no door, and counted as waiting on the owner.
+
+    So the second identical refusal is escalated under the lane's re-entry
+    door.  Nothing is bought by escalating: the lane still re-evaluates the
+    hold every tick and continues by itself once the condition is repaired.
+    """
+
+    escalated = f"{escalated_reason}:{reason}"
+    if (reason.startswith(REENTRY_UNAVAILABLE_PREFIX)
+            and prior_reason in (reason, escalated)):
+        return escalated
+    return reason
+
+
 __all__ = [
     "CLAIM_PREFIX",
+    "REENTRY_UNAVAILABLE_PREFIX",
     "GRANT_PREFIX",
     "SCHEMA_VERSION",
     "SYSTEMIC_CHILD_FAILURES",
@@ -356,6 +387,7 @@ __all__ = [
     "claim_consumed",
     "claim_path",
     "consume_grant",
+    "escalate_repeated_refusal",
     "grant_path",
     "marker",
     "read_claim",

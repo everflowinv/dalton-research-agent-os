@@ -63,11 +63,100 @@ IMMEDIATE_COOLDOWN_NEEDLES: tuple[str, ...] = (
     "QUOTA_EXCEEDED", "RESOURCE_EXHAUSTED",
 )
 
+#: Broker codes that are the host's own framing failures -- the provider or its
+#: gateway returned no usable frame, and no model content came back.  Every
+#: consumer that treats one of them as "the provider did not answer" (fall
+#: back, bounded re-drive, keep the chain alive) treats all of them that way.
+#: The last two refine what used to arrive as the generic INVALID_HOST_RESULT
+#: "host returned invalid text" (broker 2026-09-30, ``emptyCompletion``).
+HOST_FRAME_FAILURE_CODES: frozenset[str] = frozenset({
+    "HOST_COMPLETION_FAILED", "INVALID_HOST_RESULT",
+    "HOST_EMPTY_COMPLETION", "HOST_OUTPUT_LIMIT_REACHED",
+})
+
+#: Exact broker codes that mean the provider produced nothing at all -- no
+#: text and no output tokens.  Live 2026-09-29 this was the Claude CLI
+#: gateway's weekly usage limit ("You've hit your weekly limit"), answered
+#: in-band on an open stream: 62 such calls in a day, each one a wasted
+#: route and a lane stall, and none of them tripped a cooldown because the
+#: generic code only counts towards the five-in-fifteen-minutes streak.  One of
+#: these is enough, for the same reason one HTTP 429 is.
+UNAVAILABLE_COOLDOWN_CODES: frozenset[str] = frozenset({"HOST_EMPTY_COMPLETION"})
+
+#: Broker codes that mean the provider account has no credit left: HTTP 402
+#: "Payment Required" (DeepSeek's "Insufficient Balance"), which the broker
+#: names ``PROVIDER_INSUFFICIENT_BALANCE`` once the host forwards the status
+#: (``patch_provider_failure_bridge``).  Live 2026-10-04 onwards every
+#: deepseek-v4-flash call was a 402 and Dalton saw only ``INVALID_HOST_RESULT``
+#: -- fourteen cooldowns, each one labelled "the probe failed again", none of
+#: them saying "top the account up".  One is enough, and the cooldown carries
+#: its own reason so the owner reads the actual fix.
+BILLING_COOLDOWN_NEEDLES: tuple[str, ...] = (
+    "INSUFFICIENT_BALANCE", "PAYMENT_REQUIRED", "INSUFFICIENT_FUNDS",
+    "INSUFFICIENT_CREDIT", "BILLING",
+)
+
 COOLDOWN_REASONS: frozenset[str] = frozenset({
+    "provider_billing",
     "provider_rate_limited",
+    "provider_unavailable",
     "provider_failure_streak",
     "probe_failed",
 })
+
+#: Each cooldown reason in the owner's words.  One table for the to-do list,
+#: the model page and the parity report, so the three never disagree.
+COOLDOWN_REASON_LABELS: Mapping[str, str] = {
+    "provider_billing": "供应商账户余额不足（HTTP 402）",
+    "provider_rate_limited": "供应商限流（HTTP 429）",
+    "provider_unavailable": "供应商或网关不出结果（空回复，常见于 CLI 订阅用量上限）",
+    "provider_failure_streak": "连续多次供应商失败",
+    "probe_failed": "冷却到期后的探测调用又失败",
+}
+
+#: The broker failure codes a cooldown can carry, in the owner's words.  The
+#: generic ``INVALID_HOST_RESULT`` says so: on a broker or host older than the
+#: 402 bridge, an exhausted balance, a refused key and an empty reply all
+#: arrive as that one code.
+FAILURE_CODE_LABELS: Mapping[str, str] = {
+    "PROVIDER_INSUFFICIENT_BALANCE": "供应商账户余额不足（HTTP 402）",
+    "RATE_LIMITED": "供应商限流（HTTP 429）",
+    "PROVIDER_RATE_LIMITED": "供应商限流（HTTP 429）",
+    "PROVIDER_INTERNAL_ERROR": "供应商服务端错误（HTTP 5xx）",
+    "PROVIDER_OVERLOADED": "供应商过载",
+    "HOST_EMPTY_COMPLETION": "供应商什么都没返回（常见于用量上限）",
+    "HOST_OUTPUT_LIMIT_REACHED": "推理把输出上限用完，没有正文",
+    "HOST_COMPLETION_FAILED": "宿主调用失败",
+    "INVALID_HOST_RESULT": ("宿主返回了空或无效的文本（旧版 broker/宿主的笼统代码："
+                            "余额不足、密钥被拒、空回复都会显示成它）"),
+    "TIMEOUT": "调用超时",
+}
+
+
+def failure_code_label(code: Any) -> str:
+    """One Chinese phrase for a broker failure code; unknown codes say so."""
+
+    if not isinstance(code, str) or not code:
+        return "未记录失败代码"
+    if code in FAILURE_CODE_LABELS:
+        return FAILURE_CODE_LABELS[code]
+    if is_billing_code(code):
+        return "供应商账户余额不足（HTTP 402）"
+    if is_immediate_cooldown_code(code):
+        return "供应商限流（HTTP 429）"
+    return f"供应商返回失败（代码 {code}）"
+
+
+def is_billing_code(code: Any) -> bool:
+    """Whether this broker error code says the provider account has no credit."""
+
+    if not isinstance(code, str) or not code:
+        return False
+    upper = code.upper()
+    if any(needle in upper for needle in BILLING_COOLDOWN_NEEDLES):
+        return True
+    digits = "".join(character for character in upper if character.isdigit())
+    return len(digits) == 3 and digits == "402"
 
 
 class ModelProfileHealthError(RuntimeError):
@@ -80,6 +169,8 @@ def is_immediate_cooldown_code(code: Any) -> bool:
     if not isinstance(code, str) or not code:
         return False
     upper = code.upper()
+    if upper in UNAVAILABLE_COOLDOWN_CODES or is_billing_code(upper):
+        return True
     if any(needle in upper for needle in IMMEDIATE_COOLDOWN_NEEDLES):
         return True
     # A code that carries its own HTTP status, which the broker's provider
@@ -122,7 +213,14 @@ def cooldown_decision(
         raise ModelProfileHealthError("a cooldown decision needs an aware moment")
     if recent_failures < 1:
         raise ModelProfileHealthError("a cooldown decision needs the failure that caused it")
-    if is_immediate_cooldown_code(failure_code):
+    if is_billing_code(failure_code):
+        # Before ``probe_failed`` on purpose: a probe that meets the same 402
+        # is still "fund the account", not "the probe failed again".
+        reason = "provider_billing"
+    elif (isinstance(failure_code, str)
+            and failure_code.upper() in UNAVAILABLE_COOLDOWN_CODES):
+        reason = "provider_unavailable"
+    elif is_immediate_cooldown_code(failure_code):
         reason = "provider_rate_limited"
     elif on_probation:
         reason = "probe_failed"
@@ -147,12 +245,8 @@ def cooldown_decision(
 def cooldown_message(cooldown: Mapping[str, Any]) -> str:
     """One sentence, for the owner, about why a model is not being asked."""
 
-    labels = {
-        "provider_rate_limited": "供应商限流（HTTP 429）",
-        "provider_failure_streak": "连续多次供应商失败",
-        "probe_failed": "冷却到期后的探测调用又失败",
-    }
-    reason = labels.get(str(cooldown.get("reason")), str(cooldown.get("reason")))
+    reason = COOLDOWN_REASON_LABELS.get(str(cooldown.get("reason")),
+                                        str(cooldown.get("reason")))
     minutes = max(1, int(cooldown.get("cooldown_seconds") or 0) // 60)
     return (
         f"{cooldown.get('profile_id')} 因{reason}进入冷却，"
@@ -183,7 +277,12 @@ def active(cooldowns: Sequence[Mapping[str, Any]], *, now: datetime) -> list[dic
 
 __all__ = [
     "BASE_COOLDOWN_SECONDS",
+    "BILLING_COOLDOWN_NEEDLES",
     "COOLDOWN_REASONS",
+    "COOLDOWN_REASON_LABELS",
+    "FAILURE_CODE_LABELS",
+    "HOST_FRAME_FAILURE_CODES",
+    "UNAVAILABLE_COOLDOWN_CODES",
     "COOLDOWN_SKIP_REASON",
     "FAILURE_THRESHOLD",
     "FAILURE_WINDOW_SECONDS",
@@ -194,5 +293,7 @@ __all__ = [
     "cooldown_decision",
     "cooldown_message",
     "cooldown_seconds",
+    "failure_code_label",
+    "is_billing_code",
     "is_immediate_cooldown_code",
 ]

@@ -60,7 +60,12 @@ from .public_web_connector import (
 )
 from .raw_spool import RawSpool
 from .runner_journal import RunnerJournal
-from .scheduler import Scheduler
+from .scheduler import LaneChildScheduler
+from .sqlite_contention import (
+    LANE_LOCK_RETRY_SECONDS,
+    is_sqlite_lock_error,
+    sqlite_lock_failure,
+)
 from .store import DaltonStore, canonical_json
 
 
@@ -100,6 +105,8 @@ def run_discovery(
     expected_provider: str = LEGACY_WEB_SEARCH_PROVIDER,
     catalog_db: Path | None = None,
     spool_dir: Path | None = None,
+    lock_retry_seconds: float = LANE_LOCK_RETRY_SECONDS,
+    targeted_binding: dict[str, Any] | None = None,
 ) -> dict[str, Any]:
     """Authorize, search, and append the discovery record; return the summary."""
 
@@ -112,8 +119,9 @@ def run_discovery(
     connectors = ConnectorStore(core)
     observability = ObservabilityStore(core)
     journal = RunnerJournal(core)
-    scheduler = Scheduler(
-        str(state / "scheduler.sqlite"), default_lease_seconds=30, max_lease_seconds=60
+    scheduler = LaneChildScheduler(
+        str(state / "scheduler.sqlite"), default_lease_seconds=30, max_lease_seconds=60,
+        lock_retry_seconds=lock_retry_seconds,
     )
     # One catalog per governed capability (see alphaengine_search_cli): a
     # shared catalog file would let another capability's publish bump the
@@ -177,6 +185,16 @@ def run_discovery(
         parameters = build_discovery_parameters(
             plan, spec_ref=spec_ref, company_ref=company_ref, as_of=as_of
         )
+        if targeted_binding is not None:
+            from .material_targeted_web import targeted_web_parameters, TargetedWebError
+            try:
+                parameters, bound = targeted_web_parameters(state, plan=plan, company_ref=company_ref,
+                    spec_ref=spec_ref, as_of=as_of, mission_version_ref=authorization["mission_version_ref"],
+                    mission_version_hash=authorization["mission_version_hash"], binding=targeted_binding)
+            except TargetedWebError as exc:
+                summary["failure_reason"] = f"TargetedWebError: {exc}"
+                return summary
+            summary["targeted_binding"] = bound
         summary["parameters"] = parameters
         summary["query_hash"] = web_search_spec_hash(parameters)
         search = PublicWebCoreSearch(
@@ -202,7 +220,14 @@ def run_discovery(
         }
         summary["provider_calls"] = receipt["provider_calls"]
         if receipt["outcome"] != "succeeded" or receipt["source_envelope_ref"] is None:
-            summary["failure_reason"] = f"search outcome {receipt['outcome']}"
+            # 2026-10-08: carry the provider's own words (the runner journal
+            # holds them) and their class, instead of "search outcome retryable".
+            from .provider_failure import failure_reason_text, journal_failure
+
+            detail = journal_failure(core.connection, receipt["connector_invocation_ref"])
+            summary["failure_detail"] = detail
+            summary["failure_reason"] = failure_reason_text(
+                f"search outcome {receipt['outcome']}", detail)
             return summary
         present = public_web_urls_in_authority(core.connection, receipt["document_refs"])
         # Human-readable canonical URLs, rebuilt from the exact raw artifact;
@@ -242,6 +267,9 @@ def run_discovery(
         summary["failure_reason"] = f"{type(exc).__name__}: {exc}"
         return summary
     except Exception as exc:  # unexpected: record the reason for the parent, then surface it
+        if is_sqlite_lock_error(exc):
+            summary.update(sqlite_lock_failure(exc))
+            return summary
         summary["failure_reason"] = f"unexpected {type(exc).__name__}: {exc}"
         raise
     finally:
@@ -260,6 +288,8 @@ def build_parser() -> argparse.ArgumentParser:
         help="build an in-memory approved web search governance record for an isolated rehearsal",
     )
     parser.add_argument("--discovery-plan", type=Path, required=True)
+    parser.add_argument("--targeted-binding", type=json.loads,
+                        help="exact append-only MaterialRequest/query identity; no free-text override")
     parser.add_argument("--company-ref", required=True)
     parser.add_argument("--spec-ref", required=True)
     parser.add_argument("--requested-by", required=True, help="human:<who> or the mission automation principal")
@@ -377,6 +407,7 @@ def main(argv: list[str] | None = None) -> int:
         expected_provider=expected_provider,
         catalog_db=args.catalog_db,
         spool_dir=args.spool_dir,
+        targeted_binding=args.targeted_binding,
     )
     if not args.quiet:
         print(json.dumps(summary, ensure_ascii=False, sort_keys=True, indent=1))

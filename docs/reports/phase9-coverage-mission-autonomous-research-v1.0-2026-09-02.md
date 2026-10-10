@@ -1,5 +1,7 @@
 # Dalton Phase 9：任务驱动的自主研究（Coverage Mission）v1.0
 
+历史技术评审：保留当时结论与局限；当前运行状态见 [项目状态](../PROJECT_STATUS.md)。原始操作证据私有保存。
+
 日期：2026-09-02  
 状态：当前执行顺序基线；替代 Phase 8 v1.0 的近期顺序，不反向改写历史报告  
 触发：owner 2026-09-02 指令——①把 chem agent（workspace-chem）`references/manual` 里的研究方法论、原则和任务理解植入 OS；②记录恰当的 next step 并开始开发。owner 同日说明目标形态：「我给 research OS 下达任务（比如建立对 US IT service 行业的首次覆盖），OS 能开始 7×24 自主研究，自己从 SEC、AlphaEngine、Guidepoint、web search 等途径找资料，建立行业认知、公司财务模型和预测」。

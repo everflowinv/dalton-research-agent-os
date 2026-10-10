@@ -38,7 +38,7 @@ _SEED_PATTERNS = (
     re.compile(rf"research-localization/ui-records/{_HEX}\.json"),
 )
 WORKER_CONFIG = "research-publication-worker-config.json"
-_OWNER_ROOT = Path("/Users/everflow/Projects/dalton-owner-activation-20260910")
+_OWNER_ROOT = Path.home() / "Projects/dalton-owner-activation-20260910"
 
 
 def validate_worker_config_bytes(data: bytes, *,

@@ -1,0 +1,123 @@
+{
+  "case_ref": "investment_memo-baseline",
+  "rubric": "investment_memo",
+  "source": "Synthetic acceptance fixture; no production company data.",
+  "note": "Exercises baseline; judgement scores are unmeasured, not a real model rating.",
+  "artefact": {
+    "artefact_kind": "investment_memo",
+    "ref": "synthetic:investment_memo:baseline",
+    "hash": "aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa",
+    "title": "",
+    "subject_ref": null,
+    "sections": [
+      {
+        "title": "投资建议",
+        "body": "合成公司披露营业收入为 100 万美元。我们认为客户续约决定后续收入，需结合合同到期安排检验。",
+        "claim_refs": [
+          "claim-version:synthetic"
+        ],
+        "numbers": [
+          {
+            "text": "营业收入 100 万美元",
+            "claim_version_ref": "claim-version:synthetic",
+            "period": null
+          }
+        ],
+        "gaps": []
+      },
+      {
+        "title": "业务机制",
+        "body": "需求恢复仍待确认。相反证据是客户审批延后，订单增长不能直接等同于当期收入增长。",
+        "claim_refs": [
+          "claim-version:synthetic"
+        ],
+        "numbers": [
+          {
+            "text": "营业收入 100 万美元",
+            "claim_version_ref": "claim-version:synthetic",
+            "period": null
+          }
+        ],
+        "gaps": []
+      },
+      {
+        "title": "盈利与估值",
+        "body": "我们的判断仍有不确定性；估值暂不可得，因为尚未取得可比口径的盈利与股本数据。",
+        "claim_refs": [
+          "claim-version:synthetic"
+        ],
+        "numbers": [
+          {
+            "text": "营业收入 100 万美元",
+            "claim_version_ref": "claim-version:synthetic",
+            "period": null
+          }
+        ],
+        "gaps": []
+      },
+      {
+        "title": "风险与证伪",
+        "body": "下一次申报时核对客户留存与现金回款。如果合同取消明显增加，则重新审查原有判断。",
+        "claim_refs": [
+          "claim-version:synthetic"
+        ],
+        "numbers": [
+          {
+            "text": "营业收入 100 万美元",
+            "claim_version_ref": "claim-version:synthetic",
+            "period": null
+          }
+        ],
+        "gaps": []
+      }
+    ],
+    "gaps": [],
+    "expected_sections": [
+      "投资建议",
+      "业务机制",
+      "盈利与估值",
+      "风险与证伪"
+    ],
+    "shown_claims": [],
+    "cited_tags": [],
+    "confidence": null,
+    "question": null,
+    "prior": null
+  },
+  "expected": {
+    "rationale": "Pinned deterministic result for baseline; judgement requires an independent reading.",
+    "score_ranges_are_calibration_only": true,
+    "score_ranges": {
+      "substance": [
+        0,
+        4
+      ],
+      "number_provenance": [
+        0,
+        4
+      ],
+      "reasoning_lint": [
+        0,
+        4
+      ],
+      "decision_usefulness": [
+        0,
+        4
+      ]
+    },
+    "deterministic": {
+      "required_sections_present": {
+        "status": "pass",
+        "count": 0
+      },
+      "numbers_without_refs": {
+        "status": "pass",
+        "count": 0
+      },
+      "reasoning_lint": {
+        "status": "pass",
+        "count": 0
+      }
+    }
+  }
+}

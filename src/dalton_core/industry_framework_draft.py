@@ -257,6 +257,7 @@ def build_unit_prompt(
         "",
         "Hard rules:",
         "- Use ONLY the tagged material below. Cite by tag in the refs array.",
+        "- Label older quantitative evidence as 历史对照 with its disclosed year/period. Historical segment names cannot stand in for current segment identity; undated numbers must not be described as current.",
         "- NEVER write a C, T or D tag inside a sentence's text: not as a word, not",
         "  in brackets, not in a source list. The tags travel in refs; a sentence",
         "  whose subject is a tag becomes a sentence with no subject once the tag",
@@ -414,6 +415,9 @@ def parse_unit_output(
             f"{unit}: the reply has keys {sorted(value)}; the contract is "
             f"{sorted(expected)}")
     slots, sources = _resolve_tags(value["slots"], material, unit=unit)
+    from .historical_research_context import historical_findings
+    findings=historical_findings(slots,sources,material)
+    if findings:raise FrameworkDraftRefused(f"{unit}: historical_number_without_period: {findings}")
     gaps = value.get("gaps") or []
     ids = [slot["slot_id"] for slot in structure]
     try:

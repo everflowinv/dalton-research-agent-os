@@ -345,5 +345,81 @@ class WindowIsolationRunTests(AutomationAdmissionTests):
         self.assertFalse(summary["partial"]["productive"])
 
 
+class OrphanedWindowRedriveTests(AutomationAdmissionTests):
+    """2026-10-09: a window whose WorkOrder exists without a formal result.
+
+    Live, ACN's FY26 Q4 transcript sat open for a day: the child that
+    enqueued window 36000 died mid-call, the Scheduler expired the lease and
+    queued attempt 2, and no later run ever executed it -- only windows with
+    no WorkOrder at all were sent to ``generate`` -- so every tick reported
+    ``nothing_to_draft`` while the planner's "read" directive named it.
+    """
+
+    def test_a_pending_window_is_re_driven_through_generate(self) -> None:
+        self._grant_automation()
+        self._policy_with_document_rule()
+        fixture = self.root / "unused-fixture.json"
+        fixture.write_text('{"schema_version":"0.1","suggestions":[]}', encoding="utf-8")
+        state = {"generated": 0}
+
+        def suggestions(_service, context):
+            if state["generated"]:
+                return {"status": "succeeded", "suggestions": [],
+                        "work_order_ref": "work:document-extraction:orphan"}
+            return {"status": "pending", "suggestions": [],
+                    "work_order_ref": "work:document-extraction:orphan"}
+
+        def generated(_service, **_kwargs):
+            state["generated"] += 1
+            return {"status": "succeeded", "suggestions": [],
+                    "work_order_ref": "work:document-extraction:orphan"}
+
+        with patch.object(DocumentExtractionService, "_suggestions", suggestions), \
+                patch.object(DocumentExtractionService, "generate", generated):
+            summary = run_extraction(
+                state_dir=self.root, model_config_path=self._model_config(),
+                summary_dir=self.root / "direct-summary", spool_dir=self.root / "spool",
+                scheduler_db=self.root / "scheduler.sqlite", requested_by=None,
+                max_windows=2, max_numeric_windows=0, max_discovery_windows=0,
+                connector_governance=None, web_fetch_governance=None,
+                hermetic_fixture=fixture, candidate_staging=self.root / "staging.sqlite",
+            )
+        self.assertEqual(state["generated"], 1)
+        self.assertEqual(len(summary["redriven_windows"]), 1)
+        self.assertEqual(summary["redriven_windows"][0]["work_order_ref"],
+                         "work:document-extraction:orphan")
+        self.assertEqual(summary["partial"]["windows_redriven"], 1)
+        self.assertNotEqual(summary["stop_reason"], "nothing_to_draft")
+
+    def test_a_pending_window_still_respects_the_window_cap(self) -> None:
+        self._grant_automation()
+        self._policy_with_document_rule()
+        fixture = self.root / "unused-fixture.json"
+        fixture.write_text('{"schema_version":"0.1","suggestions":[]}', encoding="utf-8")
+        calls = []
+
+        def suggestions(_service, context):
+            return {"status": "pending", "suggestions": [],
+                    "work_order_ref": "work:document-extraction:orphan"}
+
+        def generated(_service, **_kwargs):
+            calls.append(1)
+            return {"status": "pending", "suggestions": [],
+                    "work_order_ref": "work:document-extraction:orphan"}
+
+        with patch.object(DocumentExtractionService, "_suggestions", suggestions), \
+                patch.object(DocumentExtractionService, "generate", generated):
+            summary = run_extraction(
+                state_dir=self.root, model_config_path=self._model_config(),
+                summary_dir=self.root / "direct-summary", spool_dir=self.root / "spool",
+                scheduler_db=self.root / "scheduler.sqlite", requested_by=None,
+                max_windows=1, max_numeric_windows=0, max_discovery_windows=0,
+                connector_governance=None, web_fetch_governance=None,
+                hermetic_fixture=fixture, candidate_staging=self.root / "staging.sqlite",
+            )
+        self.assertEqual(len(calls), 1)
+        self.assertEqual(summary["reviews_complete"], 0)
+
+
 if __name__ == "__main__":  # pragma: no cover
     unittest.main()

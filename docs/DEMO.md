@@ -6,7 +6,7 @@
 
 在已获授权、连接同一 Tailscale 网络的设备上打开：
 
-<https://everflowdemac-mini.taild2c767.ts.net:8793/>
+<https://your-node.your-tailnet.ts.net:8793/>
 
 页面展示 Dalton 已积累的真实研究数据和当前研究状态。建议按下面的顺序完成一次演示。
 

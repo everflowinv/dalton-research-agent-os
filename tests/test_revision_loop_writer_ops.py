@@ -298,8 +298,11 @@ class CockpitApprovalTests(unittest.TestCase):
         self.assertEqual(row["detail_labels"]["提议的把握"], "建议置信度")
         self.assertEqual(row["reflection"]["what_happened"], "They fell.")
         self.assertEqual([a["decision"] for a in row["actions"]],
-                         ["accept", "reject", "defer"])
-        self.assertTrue(row["needs_rationale"])
+                         ["reject", "defer"])
+        # This projection fixture has no held formal thesis/verifier.  It
+        # remains reviewable but must not offer an impossible acceptance.
+        self.assertTrue(row["display_reason"])
+        self.assertFalse(row["needs_rationale"])
         self.assertNotIn("thesis-version:1", row["title"])
 
     def test_a_reopen_appears_with_the_diff_that_argues_for_it(self):

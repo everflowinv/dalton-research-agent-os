@@ -149,6 +149,20 @@ def _publish_thesis(
     seed: dict[str, Any], mandate: dict[str, Any]
 ) -> dict[str, Any]:
     candidate_params = copy.deepcopy(seed["base_manifest"]["candidate"])
+    # Exercise today's admission contract with held recorded evidence. These
+    # question/threshold values are canary inputs, never a live investment view;
+    # the original historical bootstrap manifest remains byte-for-byte intact.
+    held_refs = [row[0] for row in seed["coverage"].store.connection.execute(
+        "SELECT claim_version_id FROM claim_versions ORDER BY claim_version_id")]
+    candidate_params["content"].update({
+        "question_ref": "question:isolated-canary:bookings-conversion",
+        "stance": "house", "proposition_direction": "supports", "view_status": "active",
+        "claim_refs": held_refs, "passage_refs": [], "framework_version_ref": None,
+        "disagreement": None,
+        "falsification_conditions": [{"metric_ref": "metric:synthetic-canary:bookings-growth",
+            "operator": "lt", "threshold": "0", "unit": "percent", "deadline": "2026-12-31",
+            "evidence_refs": held_refs}],
+    })
     candidate = seed["coverage"].propose_thesis_admission(
         mandate_version_ref=mandate["id"],
         mandate_version_hash=mandate["content_hash"],

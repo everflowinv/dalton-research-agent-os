@@ -34,6 +34,7 @@ from __future__ import annotations
 import copy
 import json
 import os
+import re
 import sqlite3
 import time
 from dataclasses import dataclass
@@ -108,6 +109,47 @@ AGENDA_BINDING_VERSION = "v3"
 AGENDA_POLICY_VERSION_ID = f"agenda-policy-version:{LANE_SLUG}:{AGENDA_BINDING_VERSION}"
 MANDATE_REF = f"mandate:{LANE_SLUG}"
 MANDATE_VERSION_ID = f"mandate-version:{LANE_SLUG}:{AGENDA_BINDING_VERSION}"
+#: The objective every legacy-named mandate was created with.  It is part of
+#: the idempotent create request, so a replay of an existing binding must send
+#: exactly these bytes.
+LEGACY_MANDATE_OBJECTIVE = (
+    "Track reported quarterly revenue for US IT services issuers from SEC company facts"
+)
+#: A workspace's own bindings name no industry: the lane reads one company's
+#: SEC facts, whatever the workspace researches.
+WORKSPACE_MANDATE_OBJECTIVE = "Track reported quarterly revenue from SEC company facts"
+_WORKSPACE_SLUG_RE = re.compile(r"[a-z0-9][a-z0-9-]{0,62}")
+
+
+def lane_slug_for_state(state_dir: str | Path) -> str:
+    """The binding slug this state directory's SEC lane names its records with.
+
+    2026-09-30 (e2): the lane wrote ``mandate:us-it-services-sec-lane:...`` into
+    every Core it ran in, so ws-7d -- a hyperscaler workspace -- carried
+    mandates an audit reads as IT services.  A state directory laid out as a
+    workspace (``<root>/state/dalton-core`` with ``<root>/workspace.json``
+    naming this exact state directory) now gets ``<workspace slug>-sec-lane``.
+    Anything else -- the legacy Core, a rehearsal directory -- keeps
+    :data:`LANE_SLUG`, so the legacy environment's records and replays are
+    unchanged.  Read-only, and never raises: an unreadable manifest means "not
+    a workspace we can name", which is the legacy answer.
+    """
+
+    try:
+        state = Path(state_dir).expanduser().resolve()
+        manifest = state.parent.parent / "workspace.json"
+        if not manifest.is_file():
+            return LANE_SLUG
+        raw = json.loads(manifest.read_text(encoding="utf-8"))
+        declared = raw.get("state_dir") if isinstance(raw, Mapping) else None
+        slug = raw.get("slug") if isinstance(raw, Mapping) else None
+        if (not isinstance(declared, str) or not isinstance(slug, str)
+                or _WORKSPACE_SLUG_RE.fullmatch(slug) is None
+                or Path(declared).expanduser().resolve() != state):
+            return LANE_SLUG
+        return f"{slug}-sec-lane"
+    except (OSError, UnicodeError, ValueError):
+        return LANE_SLUG
 QUESTION = "How did reported quarterly revenue change year over year?"
 ANSWER_CRITERIA = "Return the exact same-filing SEC quarterly revenue comparison."
 DEFAULT_USER_AGENT = "Dalton Research Agent SEC company-facts lane"
@@ -136,6 +178,11 @@ US_IT_SERVICES_ISSUERS: tuple[Issuer, ...] = (
     Issuer("CTSH", "1058290", "company:sec-cik:0001058290", "Cognizant Technology Solutions Corp"),
     Issuer("EPAM", "1352010", "company:sec-cik:0001352010", "EPAM Systems Inc"),
     Issuer("IBM", "51143", "company:sec-cik:0000051143", "International Business Machines Corp"),
+    # Nine digits: minted by hand in p8a-s7f (2026-08-27) and since then the
+    # legacy mission's DXC identity in every append-only table and in the
+    # immutable legacy agenda binding.  Kept; new refs are minted through
+    # ``mission_company_cik.sec_cik_company_ref`` (ten digits) and lookups
+    # use ``same_company_ref``.  Parity lists it as non-canonical.
     Issuer("DXC", "1688568", "company:sec-cik:001688568", "DXC Technology Co"),
 )
 
@@ -550,6 +597,7 @@ class SecCompanyFactsLane:
         annual_report_draft_model_execution: Mapping[str, Any] | None = None,
         annual_report_verifier_model_execution: Mapping[str, Any] | None = None,
         clock: MutableClock | None = None,
+        lane_slug: str | None = None,
     ) -> None:
         if not getattr(governance, "approved", False):
             raise LanePreconditionError(
@@ -577,6 +625,9 @@ class SecCompanyFactsLane:
         self.governance = governance
         self.issuers = tuple(issuers)
         self.state_dir = Path(state_dir)
+        # e2: the slug this Core's own bindings are named with; see
+        # ``lane_slug_for_state`` and ``binding_for``.
+        self.lane_slug = lane_slug if lane_slug is not None else lane_slug_for_state(state_dir)
         self.staging_path = Path(staging_path)
         self.user_agent = user_agent
         self.clock = clock if clock is not None else MutableClock(datetime.now(timezone.utc))
@@ -906,12 +957,14 @@ class SecCompanyFactsLane:
     # ------------------------------------------------------------------ #
 
     @staticmethod
-    def agenda_binding_for(issuer: Issuer | None) -> dict[str, Any]:
+    def agenda_binding_for(
+        issuer: Issuer | None, *, lane_slug: str = LANE_SLUG,
+    ) -> dict[str, Any]:
         """Which inactive agenda policy + mandate a run for ``issuer`` binds.
 
-        The packaged US IT services issuers share the one ``v3`` binding over
-        the packaged universe, byte-identical to what every legacy run has
-        replayed since 2026-08-26.
+        Under the legacy slug the packaged US IT services issuers share the one
+        ``v3`` binding over the packaged universe, byte-identical to what every
+        legacy run has replayed since 2026-08-26.
 
         2026-09-25: any other issuer -- a mission's own company, e.g. ws-7d's
         AMZN -- gets a binding of its own, scoped to that company alone.  A
@@ -919,25 +972,63 @@ class SecCompanyFactsLane:
         immutable, so the first ws-7d run would have bound "packaged + AMZN"
         and every later GOOGL/META/MSFT run would have been refused as "a
         different issuer universe".  A per-company binding never changes.
+
+        2026-09-30 (e2): under a workspace's own slug every issuer is
+        per-company -- the packaged universe is the legacy environment's
+        coverage, not a workspace's -- and the names carry that slug.
         """
 
         packaged = {item.company_ref for item in US_IT_SERVICES_ISSUERS}
-        if issuer is None or issuer.company_ref in packaged:
+        legacy = lane_slug == LANE_SLUG
+        if legacy and (issuer is None or issuer.company_ref in packaged):
             return {
                 "agenda_policy_version_ref": AGENDA_POLICY_VERSION_ID,
                 "mandate_version_ref": MANDATE_VERSION_ID,
                 "mandate_ref": MANDATE_REF,
                 "key": f"{LANE_SLUG}:{AGENDA_BINDING_VERSION}",
                 "company_refs": sorted(packaged),
+                "lane_slug": LANE_SLUG,
+                "objective": LEGACY_MANDATE_OBJECTIVE,
             }
+        if issuer is None:
+            raise LanePreconditionError(
+                "a workspace SEC lane binds one company at a time; name the issuer")
         tag = content_hash({"company_ref": issuer.company_ref})[:16]
+        agenda_policy = f"agenda-policy-version:{lane_slug}:{AGENDA_BINDING_VERSION}"
+        mandate_version = f"mandate-version:{lane_slug}:{AGENDA_BINDING_VERSION}"
         return {
-            "agenda_policy_version_ref": f"{AGENDA_POLICY_VERSION_ID}:company:{tag}",
-            "mandate_version_ref": f"{MANDATE_VERSION_ID}:company:{tag}",
-            "mandate_ref": f"{MANDATE_REF}:company:{tag}",
-            "key": f"{LANE_SLUG}:{AGENDA_BINDING_VERSION}:company:{tag}",
+            "agenda_policy_version_ref": f"{agenda_policy}:company:{tag}",
+            "mandate_version_ref": f"{mandate_version}:company:{tag}",
+            "mandate_ref": f"mandate:{lane_slug}:company:{tag}",
+            "key": f"{lane_slug}:{AGENDA_BINDING_VERSION}:company:{tag}",
             "company_refs": [issuer.company_ref],
+            "lane_slug": lane_slug,
+            "objective": (LEGACY_MANDATE_OBJECTIVE if legacy
+                          else WORKSPACE_MANDATE_OBJECTIVE),
         }
+
+    def binding_for(self, issuer: Issuer | None) -> dict[str, Any]:
+        """This Core's binding for ``issuer``, keeping any name it already has.
+
+        A workspace created before 2026-09-30 already holds legacy-named
+        per-company bindings (ws-7d: AMZN, GOOGL, META, MSFT).  Those rows are
+        immutable and every earlier run's backlog question and cycle name
+        them, so an issuer whose legacy-named binding already exists here keeps
+        it: its mandate stays readable, and a replay of an earlier run sends
+        byte-identical requests.  Only an issuer this Core has never bound gets
+        the workspace's own name.
+        """
+
+        if self.lane_slug == LANE_SLUG:
+            return self.agenda_binding_for(issuer)
+        legacy = self.agenda_binding_for(issuer, lane_slug=LANE_SLUG)
+        row = self.core.connection.execute(
+            "SELECT 1 FROM mandate_versions WHERE version_id=?",
+            (legacy["mandate_version_ref"],),
+        ).fetchone()
+        if row is not None:
+            return legacy
+        return self.agenda_binding_for(issuer, lane_slug=self.lane_slug)
 
     def ensure_agenda_bindings(self, *, actor_ref: str, issuer: Issuer | None = None) -> dict[str, str]:
         """Create the run's inactive agenda policy + mandate once (idempotent)."""
@@ -952,7 +1043,7 @@ class SecCompanyFactsLane:
         binding_actor = self.governance.approved_by
         # Bind the coverage universe, not this run's subset: a later run for a
         # different ticker must replay the same idempotent binding request.
-        binding = self.agenda_binding_for(issuer)
+        binding = self.binding_for(issuer)
         # Fixed effective window keeps the idempotent request hash stable
         # across runs; the lane only ever binds cycles to these exact versions.
         effective_from = "2026-08-01T00:00:00+00:00"
@@ -970,6 +1061,7 @@ class SecCompanyFactsLane:
         return {
             "agenda_policy_version_ref": binding["agenda_policy_version_ref"],
             "mandate_version_ref": binding["mandate_version_ref"],
+            "lane_slug": binding["lane_slug"],
         }
 
     def _bind_agenda(
@@ -989,7 +1081,7 @@ class SecCompanyFactsLane:
             raise AgendaConflict("agenda policy idempotency conflict")
         mandate_result = self.agenda.create_mandate(
             binding["mandate_ref"],
-            objective="Track reported quarterly revenue for US IT services issuers from SEC company facts",
+            objective=binding.get("objective", LEGACY_MANDATE_OBJECTIVE),
             scope_refs=company_refs,
             constraints={"mode": "core_hosted_public_read_only_lane"},
             success_criteria={"policy_authorized_low_risk_loop": True},
@@ -1065,7 +1157,12 @@ class SecCompanyFactsLane:
         self, issuer: Issuer, *, filed_from: str, filed_to: str, run_key: str,
         form: str = "10-Q", binding: Mapping[str, str] | None = None,
     ) -> tuple[dict[str, Any], dict[str, Any], str]:
-        binding = binding or self.agenda_binding_for(issuer)
+        binding = binding or self.binding_for(issuer)
+        # e2: records keyed by the binding's own slug.  An issuer that keeps a
+        # legacy-named binding keeps the legacy keys too, so its replays are
+        # byte-identical; only a newly bound issuer's records carry the
+        # workspace name.
+        slug = binding.get("lane_slug", LANE_SLUG)
         identity = self.question_identity(
             issuer, filed_from=filed_from, filed_to=filed_to,
             run_key=run_key, form=form,
@@ -1098,23 +1195,23 @@ class SecCompanyFactsLane:
         }
         snapshot["content_hash"] = content_hash(snapshot)
         self.agenda.register_perception_snapshot(
-            snapshot, actor_ref="core", idempotency_key=f"perception:{LANE_SLUG}:{suffix}",
+            snapshot, actor_ref="core", idempotency_key=f"perception:{slug}:{suffix}",
         )
         cycle = self.agenda.start_cycle(
-            f"agenda:{LANE_SLUG}:{suffix}",
+            f"agenda:{slug}:{suffix}",
             perception_snapshot_ref=snapshot["snapshot_id"],
             perception_snapshot_hash=snapshot["content_hash"],
             mandate_version_ref=binding["mandate_version_ref"],
             policy_version_ref=binding["agenda_policy_version_ref"],
             company_ref=issuer.company_ref,
             actor_ref="core",
-            cycle_id=f"agenda-cycle:{LANE_SLUG}:{suffix}",
-            idempotency_key=f"cycle:{LANE_SLUG}:{suffix}",
+            cycle_id=f"agenda-cycle:{slug}:{suffix}",
+            idempotency_key=f"cycle:{slug}:{suffix}",
         )
         self.agenda.add_candidates(
             cycle["cycle_id"],
             candidates=[{
-                "candidate_id": f"candidate:{LANE_SLUG}:{suffix}",
+                "candidate_id": f"candidate:{slug}:{suffix}",
                 "company_ref": issuer.company_ref,
                 "question": question_text,
                 "answer_criteria": ANSWER_CRITERIA,
@@ -1126,13 +1223,13 @@ class SecCompanyFactsLane:
                 "source_refs": ["source:sec-edgar"],
             }],
             actor_ref="core",
-            idempotency_key=f"candidates:{LANE_SLUG}:{suffix}",
+            idempotency_key=f"candidates:{slug}:{suffix}",
         )
         decision = self.agenda.decide_cycle(
             cycle["cycle_id"],
             actor_ref="core",
-            decision_id=f"decision:{LANE_SLUG}:{suffix}",
-            idempotency_key=f"decision:{LANE_SLUG}:{suffix}",
+            decision_id=f"decision:{slug}:{suffix}",
+            idempotency_key=f"decision:{slug}:{suffix}",
         )
         record = self.backlog.record_question(
             mandate_version_ref=binding["mandate_version_ref"],
@@ -1141,13 +1238,13 @@ class SecCompanyFactsLane:
             answer_criteria=ANSWER_CRITERIA,
             source_refs=["source:sec-edgar"],
             actor_ref="core",
-            idempotency_key=f"question:{LANE_SLUG}:{suffix}",
+            idempotency_key=f"question:{slug}:{suffix}",
         )
         self.backlog.select_question(
             question_ref=record["question_ref"],
             decision_ref=decision["id"],
             actor_ref="core",
-            idempotency_key=f"select:{LANE_SLUG}:{suffix}",
+            idempotency_key=f"select:{slug}:{suffix}",
         )
         return decision, record, suffix
 
@@ -1229,17 +1326,17 @@ class SecCompanyFactsLane:
             actor_ref="core:planner",
             concept_candidates=list(concept_candidates),
             form=form,
-            idempotency_key=f"create-plan:{LANE_SLUG}:{suffix}",
+            idempotency_key=f"create-plan:{binding.get('lane_slug', LANE_SLUG)}:{suffix}",
         )
         plan_ref = created["plan_version_ref"]
         authorization = self.plans.authorize_plan_by_policy(
             plan_version_ref=plan_ref,
-            idempotency_key=f"authorize-plan:{LANE_SLUG}:{plan_ref}",
+            idempotency_key=f"authorize-plan:{binding.get('lane_slug', LANE_SLUG)}:{plan_ref}",
         )
         self.control.start_plan(
             plan_version_ref=plan_ref,
             actor_ref="core:planner",
-            idempotency_key=f"start-plan:{LANE_SLUG}:{plan_ref}",
+            idempotency_key=f"start-plan:{binding.get('lane_slug', LANE_SLUG)}:{plan_ref}",
         )
         plan_wire = self.plans.plan_version(plan_ref)
 
@@ -1316,6 +1413,10 @@ class SecCompanyFactsLane:
                 )
             except CoverageMissionError as exc:
                 raise LaneError(f"mission stage Claim binding failed: {exc}") from exc
+        from .statement_context import refresh_company_contexts
+        statement_contexts = refresh_company_contexts(self.core, self.state_dir, issuer.company_ref)
+        from .model_cell_reconciliation import ModelCellReconciliationAuthority
+        model_cell_reconciliation = ModelCellReconciliationAuthority(self.core).refresh(issuer.company_ref)
         forecast_reconciliation = self._reconcile_forecasts(
             claim_version_ref=promotion["claim_version_ref"],
             issuer=issuer,
@@ -1327,6 +1428,8 @@ class SecCompanyFactsLane:
             bundle.get("source_verification"), bundle.get("numeric_verification"),
         ]
         summary.update({
+            "statement_contexts": statement_contexts,
+            "model_cell_reconciliation": {"cells": len(model_cell_reconciliation), "compared": sum(row["status"] == "compared" for row in model_cell_reconciliation), "unavailable": sum(row["status"] == "unavailable" for row in model_cell_reconciliation)},
             "forecast_reconciliation": forecast_reconciliation,
             "status": "duplicate" if promotion.get("status") == "duplicate" else "committed",
             "policy_version_ref": promotion["authorization"].get("policy_version_ref"),

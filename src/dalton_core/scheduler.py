@@ -21,7 +21,11 @@ from pathlib import Path
 from typing import Any, Iterator
 
 from .sqlite_path import sqlite_path
-from .sqlite_contention import SQLITE_BUSY_TIMEOUT_MS
+from .sqlite_contention import (
+    LANE_LOCK_RETRY_SECONDS,
+    SQLITE_BUSY_TIMEOUT_MS,
+    retry_lane_call_on_sqlite_lock,
+)
 from .contracts import ResultEnvelope, WorkOrder
 from .recorded_completion import (
     build_recorded_parent_response,
@@ -36,6 +40,97 @@ _ATTEMPT_STATES = frozenset(
     {"ready", "leased", "succeeded", "retryable", "failed", "expired"}
 )
 _RESULT_STATES = frozenset({"succeeded", "retryable", "failed"})
+_RECOVERY_RESERVED_PREFIX = "operator_model_recovery_reserved:"
+
+#: How many overdue leases one advisory probe hands to the write transaction.
+#: More than this many lapsing at once is not a steady state; the rest are the
+#: next claim's or sweep's, earliest deadline first.
+DUE_LEASE_PROBE_LIMIT = 256
+
+#: The current-lease index: one row per WorkOrder whose *latest* attempt event
+#: is ``leased``, carrying the expiry of that lease's latest revision.
+#:
+#: 2026-09-29: finding overdue leases meant walking every ``leased`` event ever
+#: written (68k live, one per claim) and proving each had no newer event -- on
+#: every controller tick, every claim and every lane child's claim, before and
+#: after c20e683f moved it outside the write lock.  The authority tables stay
+#: append-only; this table is derived from them by triggers inside the same
+#: transaction that appends the event or lease revision, so every writer (of
+#: any release, since the triggers live in the database) keeps it exact, and
+#: ``_due_lease_candidates`` becomes one indexed range probe with a LIMIT.  It
+#: is not an authority: every candidate is re-read from the append-only tables
+#: under ``BEGIN IMMEDIATE`` before anything is expired.
+_CURRENT_LEASE_TABLE = "scheduler_current_leases"
+_CURRENT_LEASE_DDL = (
+    f"CREATE TABLE IF NOT EXISTS {_CURRENT_LEASE_TABLE} ("
+    " work_order_id TEXT PRIMARY KEY,"
+    " event_seq INTEGER NOT NULL,"
+    " lease_id TEXT,"
+    " expires_at TEXT NOT NULL,"
+    " reserved INTEGER NOT NULL"
+    ")",
+    f"CREATE INDEX IF NOT EXISTS {_CURRENT_LEASE_TABLE}_due"
+    f" ON {_CURRENT_LEASE_TABLE}(reserved, expires_at)",
+    f"CREATE INDEX IF NOT EXISTS {_CURRENT_LEASE_TABLE}_lease"
+    f" ON {_CURRENT_LEASE_TABLE}(lease_id)",
+    # Any event replaces the WorkOrder's row; a ``leased`` one re-inserts it
+    # with its lease's newest expiry (revisions may precede the event, as a
+    # recovery reservation re-appends the same lease).  A leased event without
+    # a lease row gets the empty expiry, which sorts before every timestamp and
+    # so is always due: the write transaction raises on it exactly as the full
+    # scan used to.
+    f"CREATE TRIGGER IF NOT EXISTS {_CURRENT_LEASE_TABLE}_on_event"
+    " AFTER INSERT ON scheduler_attempt_events BEGIN"
+    f" DELETE FROM {_CURRENT_LEASE_TABLE} WHERE work_order_id=NEW.work_order_id;"
+    f" INSERT INTO {_CURRENT_LEASE_TABLE}"
+    " (work_order_id, event_seq, lease_id, expires_at, reserved)"
+    " SELECT NEW.work_order_id, NEW.event_seq, first.lease_id,"
+    "  COALESCE((SELECT latest.expires_at FROM scheduler_leases latest"
+    "   WHERE latest.lease_id=first.lease_id"
+    "   ORDER BY latest.lease_version DESC LIMIT 1), ''),"
+    f"  substr(COALESCE(NEW.reason, ''), 1, {len(_RECOVERY_RESERVED_PREFIX)})"
+    f"   = '{_RECOVERY_RESERVED_PREFIX}'"
+    " FROM (SELECT 1) LEFT JOIN scheduler_leases first"
+    "  ON first.lease_revision_id=NEW.lease_revision_id"
+    " WHERE NEW.state='leased';"
+    " END",
+    # A renewal appends a revision and no event: move the expiry forward.
+    f"CREATE TRIGGER IF NOT EXISTS {_CURRENT_LEASE_TABLE}_on_lease"
+    " AFTER INSERT ON scheduler_leases BEGIN"
+    f" UPDATE {_CURRENT_LEASE_TABLE} SET expires_at=NEW.expires_at"
+    " WHERE lease_id=NEW.lease_id AND NEW.lease_version=("
+    "  SELECT MAX(lease_version) FROM scheduler_leases WHERE lease_id=NEW.lease_id);"
+    " END",
+)
+#: The one-time backfill: the full current-lease scan, run once per database
+#: inside the transaction that creates the triggers, so no event can slip
+#: between the two.
+_CURRENT_LEASE_BACKFILL = (
+    f"INSERT INTO {_CURRENT_LEASE_TABLE}"
+    " (work_order_id, event_seq, lease_id, expires_at, reserved)"
+    " SELECT e.work_order_id, e.event_seq, first.lease_id,"
+    "  COALESCE((SELECT latest.expires_at FROM scheduler_leases latest"
+    "   WHERE latest.lease_id=first.lease_id"
+    "   ORDER BY latest.lease_version DESC LIMIT 1), ''),"
+    f"  substr(COALESCE(e.reason, ''), 1, {len(_RECOVERY_RESERVED_PREFIX)})"
+    f"   = '{_RECOVERY_RESERVED_PREFIX}'"
+    " FROM scheduler_attempt_events e"
+    " LEFT JOIN scheduler_leases first ON first.lease_revision_id=e.lease_revision_id"
+    " WHERE e.state='leased' AND NOT EXISTS ("
+    "  SELECT 1 FROM scheduler_attempt_events newer"
+    "  WHERE newer.work_order_id=e.work_order_id AND newer.event_seq>e.event_seq)"
+)
+#: ``_due_lease_candidates``' probe: a range on the ``(reserved, expires_at)``
+#: index.  Scheduler timestamps are all ``_timestamp`` output (fixed-width UTC
+#: ISO-8601), so text order is time order; the write transaction still
+#: compares parsed times before expiring anything.
+_DUE_LEASE_PROBE = (
+    "SELECT work_order_id FROM ("
+    f" SELECT work_order_id, event_seq FROM {_CURRENT_LEASE_TABLE}"
+    " WHERE reserved=0 AND expires_at<=?"
+    " ORDER BY expires_at LIMIT ?"
+    ") ORDER BY event_seq"
+)
 
 
 class SchedulerError(Exception):
@@ -246,6 +341,50 @@ class Scheduler:
             self.connection.execute(
                 "ALTER TABLE scheduler_attempt_events ADD COLUMN wire_version TEXT"
             )
+        self._current_leases_ready = self._ensure_current_lease_index()
+
+    def _current_lease_index_present(self) -> bool:
+        names = {
+            row[0] for row in self.connection.execute(
+                "SELECT name FROM sqlite_master WHERE name IN (?, ?, ?)",
+                (_CURRENT_LEASE_TABLE, f"{_CURRENT_LEASE_TABLE}_on_event",
+                 f"{_CURRENT_LEASE_TABLE}_on_lease"),
+            )
+        }
+        return len(names) == 3
+
+    def _ensure_current_lease_index(self) -> bool:
+        """Create and backfill ``scheduler_current_leases`` once per database.
+
+        Steady state is one ``sqlite_master`` lookup.  The first open after
+        the deploy pays the old full current-lease scan once, inside the same
+        ``BEGIN IMMEDIATE`` that installs the triggers.  A database this
+        connection cannot write (a read-only open, a writer that holds the
+        lock past the busy timeout) keeps the scan-based path for this
+        process and is migrated by the next open that can.
+        """
+
+        if self._current_lease_index_present():
+            return True
+        if self.connection.in_transaction:
+            # A borrowed connection inside its owner's transaction: not ours
+            # to commit.  The next open migrates.
+            return False
+        try:
+            with self._transaction() as cur:
+                if self._current_lease_index_present():
+                    return True
+                # Anything partial (this code never commits one) is rebuilt
+                # whole rather than trusted.
+                cur.execute(f"DROP TRIGGER IF EXISTS {_CURRENT_LEASE_TABLE}_on_event")
+                cur.execute(f"DROP TRIGGER IF EXISTS {_CURRENT_LEASE_TABLE}_on_lease")
+                cur.execute(f"DROP TABLE IF EXISTS {_CURRENT_LEASE_TABLE}")
+                for statement in _CURRENT_LEASE_DDL:
+                    cur.execute(statement)
+                cur.execute(_CURRENT_LEASE_BACKFILL)
+        except sqlite3.OperationalError:
+            return False
+        return True
 
     @contextmanager
     def _transaction(self) -> Iterator[sqlite3.Cursor]:
@@ -371,13 +510,22 @@ class Scheduler:
                 }
             # A plan may choose a tighter per-node bound than the installed
             # Scheduler policy.  The WorkOrder can never raise the trusted
-            # policy cap; it can only spend fewer attempts.
+            # policy cap; it can only spend fewer attempts. The published model
+            # broker runtime shares this contract with annual-report steps.
+            # Pure local steps retain their existing lease/crash recovery policy.
             work_max_attempts = self.max_attempts
             requested_max = wire.get("budget", {}).get("step_max_attempts")
-            if (wire.get("metadata", {}).get("permission_scope")
-                    == "registered_annual_report_read"
-                    and isinstance(requested_max, int) and not isinstance(requested_max, bool)
-                    and requested_max > 0):
+            scoped_attempt_cap = (
+                wire.get("metadata", {}).get("permission_scope")
+                == "registered_annual_report_read"
+                or wire.get("runtime_profile_ref")
+                == "runtime-profile:dalton-model-broker:0.1"
+            )
+            if scoped_attempt_cap and "step_max_attempts" in wire.get("budget", {}):
+                if (isinstance(requested_max, bool)
+                        or not isinstance(requested_max, int) or requested_max <= 0):
+                    raise SchedulerValidationError(
+                        "WorkOrder step_max_attempts must be a positive integer")
                 work_max_attempts = min(work_max_attempts, requested_max)
             cur.execute(
                 "INSERT INTO scheduler_work_orders "
@@ -420,6 +568,36 @@ class Scheduler:
             "ORDER BY event_seq DESC LIMIT 1",
             (work_order_id,),
         ).fetchone()
+
+    def _claimable_event(
+        self, cur: sqlite3.Cursor, work_order_id: str, now: str
+    ) -> sqlite3.Row | None:
+        """The named WorkOrder's current event if it is ready to claim now.
+
+        The same predicate as the whole-queue claim -- the WorkOrder's latest
+        event is ``ready``, its ``not_before`` has passed, and it has no formal
+        result -- answered with two index probes.  2026-09-29: the targeted
+        claim used to join a ``GROUP BY work_order_id`` over every attempt
+        event, so each claim held ``BEGIN IMMEDIATE`` for a full index scan
+        (0.65 s at 206k events, growing with history, far longer cold on the
+        external volume) and a burst of children queued past the 30 s busy
+        timeout: web fetches failed at ``scheduler.enqueue`` and cockpit
+        completions were abandoned.  Every production caller names its
+        WorkOrder, so none of them needs the scan.
+        """
+
+        event = self._latest_event(cur, work_order_id)
+        if (
+            event is None
+            or event["state"] != "ready"
+            or (event["not_before"] is not None and event["not_before"] > now)
+        ):
+            return None
+        formal = cur.execute(
+            "SELECT 1 FROM scheduler_formal_results WHERE work_order_id=?",
+            (work_order_id,),
+        ).fetchone()
+        return None if formal is not None else event
 
     def _append_event(
         self,
@@ -558,11 +736,22 @@ class Scheduler:
         return {"expired": expired, "next": next_event}
 
     def _current_leased_events(self, cur: sqlite3.Cursor) -> list[sqlite3.Row]:
-        # Start with the small set of leased events and use the existing
+        # Start with the leased events and use the existing
         # (work_order_id, event_seq) index to rule out historical leases.  The
         # former GROUP BY materialized the latest event for every WorkOrder
         # while holding BEGIN IMMEDIATE, serializing otherwise independent
-        # child completions as the authority grew.
+        # child completions as the authority grew.  Every claim appends a
+        # leased event, though, so this is still one probe per attempt ever
+        # made (68k live on 2026-09-29): writers run it as an advisory read
+        # before BEGIN IMMEDIATE and re-check only its candidates under the
+        # lock (see ``_expire_due_among``).
+        if getattr(self, "_current_leases_ready", False):
+            # The derived current-lease index: rows == WorkOrders leased now.
+            return cur.execute(
+                "SELECT e.* FROM scheduler_current_leases c "
+                "JOIN scheduler_attempt_events e ON e.event_seq=c.event_seq "
+                "ORDER BY e.event_seq"
+            ).fetchall()
         return cur.execute(
             "SELECT e.* FROM scheduler_attempt_events e "
             "WHERE e.state='leased' AND NOT EXISTS ("
@@ -578,6 +767,61 @@ class Scheduler:
         expired: list[dict[str, Any]] = []
         for event in current_leased:
             if str(event["reason"]).startswith("operator_model_recovery_reserved:"):
+                continue
+            lease = self._latest_lease_for_event(cur, event)
+            if _parse_time(lease["expires_at"]) <= now_dt:
+                expired.append(self._expire_one(cur, event, lease, now))
+        return expired
+
+    def _due_lease_candidates(self, now_dt: datetime) -> list[str]:
+        """WorkOrders whose current lease looks overdue, read without a lock.
+
+        Advisory only: a WAL snapshot taken before ``BEGIN IMMEDIATE``, so the
+        full scan of current leases no longer holds the write lock.  Anything
+        it names is re-read under the lock by ``_expire_due_among``; a lease
+        that falls due between the two is picked up by the next claim or
+        sweep, exactly as one expiring a moment later would be.
+        """
+
+        if self.connection.in_transaction:
+            raise RuntimeError("Scheduler operation cannot be nested")
+        cur = self.connection.cursor()
+        try:
+            if getattr(self, "_current_leases_ready", False):
+                # One range probe on (reserved, expires_at), bounded by LIMIT:
+                # the same cost at 200k events as at 200.  Handed over in
+                # event order, which is the order the full scan expired them.
+                rows = cur.execute(
+                    _DUE_LEASE_PROBE, (_timestamp(now_dt), DUE_LEASE_PROBE_LIMIT)
+                ).fetchall()
+                return [row["work_order_id"] for row in rows]
+            return [
+                event["work_order_id"]
+                for event in self._current_leased_events(cur)
+                if not str(event["reason"]).startswith("operator_model_recovery_reserved:")
+                and _parse_time(
+                    self._latest_lease_for_event(cur, event)["expires_at"]) <= now_dt
+            ]
+        finally:
+            cur.close()
+
+    def _expire_due_among(
+        self, cur: sqlite3.Cursor, work_order_ids: list[str], now_dt: datetime, now: str
+    ) -> list[dict[str, Any]]:
+        """``_expire_due`` restricted to named WorkOrders, by index lookups.
+
+        Each candidate is re-read under the write lock: only a WorkOrder whose
+        latest event is still that leased attempt, not reserved for recovery,
+        with its latest lease revision overdue is expired -- the same test
+        ``_expire_due`` applies to every current lease.
+        """
+
+        expired: list[dict[str, Any]] = []
+        for work_order_id in dict.fromkeys(work_order_ids):
+            event = self._latest_event(cur, work_order_id)
+            if (event is None or event["state"] != "leased"
+                    or str(event["reason"]).startswith(
+                        "operator_model_recovery_reserved:")):
                 continue
             lease = self._latest_lease_for_event(cur, event)
             if _parse_time(lease["expires_at"]) <= now_dt:
@@ -659,19 +903,13 @@ class Scheduler:
         # Most controller ticks have nothing to expire. WAL readers can check
         # this while another worker completes; taking BEGIN IMMEDIATE first
         # needlessly competes with every paid worker for the single write lock.
-        # This is only an advisory read. If anything looks due, re-read all
-        # current leases under the original transaction before changing them.
-        cur = self.connection.cursor()
-        try:
-            if not any(
-                _parse_time(self._latest_lease_for_event(cur, event)["expires_at"]) <= now_dt
-                for event in self._current_leased_events(cur)
-            ):
-                return []
-        finally:
-            cur.close()
+        # This is only an advisory read. If anything looks due, re-read those
+        # WorkOrders under the transaction before changing them.
+        due = self._due_lease_candidates(now_dt)
+        if not due:
+            return []
         with self._transaction() as cur:
-            return self._expire_due(cur, now_dt, now)
+            return self._expire_due_among(cur, due, now_dt, now)
 
     def reconcile_interrupted_model_attempt(
         self, work_order_id: str, attempt_number: int, owner_ref: str,
@@ -874,24 +1112,31 @@ class Scheduler:
         )
         now_dt = self._now()
         now = _timestamp(now_dt)
+        # A targeted claim keeps claim's lazy expiry of every overdue lease,
+        # but finds the candidates before taking the write lock; its own
+        # WorkOrder is always re-checked so a lapsed lease on it is reclaimable.
+        due = (None if work_order_id is None
+               else [*self._due_lease_candidates(now_dt), work_order_id])
         with self._transaction() as cur:
-            self._expire_due(cur, now_dt, now)
-            query = (
-                "SELECT e.* FROM scheduler_attempt_events e "
-                "JOIN (SELECT work_order_id, MAX(event_seq) AS max_seq "
-                "      FROM scheduler_attempt_events GROUP BY work_order_id) current "
-                "ON current.max_seq=e.event_seq "
-                "WHERE e.state='ready' "
-                "AND (e.not_before IS NULL OR e.not_before<=?) "
-                "AND NOT EXISTS (SELECT 1 FROM scheduler_formal_results r "
-                "                WHERE r.work_order_id=e.work_order_id) "
-            )
-            params: tuple[Any, ...] = (now,)
+            if due is None:
+                self._expire_due(cur, now_dt, now)
+            else:
+                self._expire_due_among(cur, due, now_dt, now)
             if work_order_id is not None:
-                query += "AND e.work_order_id=? "
-                params = (now, work_order_id)
-            query += "ORDER BY e.event_seq LIMIT 1"
-            event = cur.execute(query, params).fetchone()
+                event = self._claimable_event(cur, work_order_id, now)
+            else:
+                event = cur.execute(
+                    "SELECT e.* FROM scheduler_attempt_events e "
+                    "JOIN (SELECT work_order_id, MAX(event_seq) AS max_seq "
+                    "      FROM scheduler_attempt_events GROUP BY work_order_id) current "
+                    "ON current.max_seq=e.event_seq "
+                    "WHERE e.state='ready' "
+                    "AND (e.not_before IS NULL OR e.not_before<=?) "
+                    "AND NOT EXISTS (SELECT 1 FROM scheduler_formal_results r "
+                    "                WHERE r.work_order_id=e.work_order_id) "
+                    "ORDER BY e.event_seq LIMIT 1",
+                    (now,),
+                ).fetchone()
             if event is None:
                 return None
             work = cur.execute(
@@ -2269,6 +2514,51 @@ class Scheduler:
         result = dict(row)
         result["result_envelope"] = json.loads(result.pop("result_envelope_json"))
         return result
+
+
+class LaneChildScheduler(Scheduler):
+    """A Scheduler whose lease operations ride out a locked shared file.
+
+    For connector lane children (web fetch/search, AlphaEngine, Guidepoint).
+    2026-09-29: eleven of seventeen web fetches died at ``enqueue``'s
+    ``BEGIN IMMEDIATE`` after one 30 s busy wait and were settled as unknown
+    acquisition failures.  Each operation below is one transaction that rolls
+    back on a lock error, so calling it again is a later first call: the
+    enqueue and completion replay by idempotency key, a claim or lease check
+    that raised handed nothing out, and every retry reads a fresh clock, so a
+    lease is never issued stale by the time spent waiting.  Retrying the
+    whole connector call instead is not safe -- its invocation binds a
+    freshly issued capability lease and would conflict with itself.
+    """
+
+    def __init__(self, *args: Any, lock_retry_seconds: float = LANE_LOCK_RETRY_SECONDS,
+                 **kwargs: Any) -> None:
+        self.lock_retry_seconds = _positive_seconds(lock_retry_seconds, "lock_retry_seconds")
+        super().__init__(*args, **kwargs)
+
+    def _patient(self, operation: str, call: Callable[[], Any]) -> Any:
+        return retry_lane_call_on_sqlite_lock(
+            call, label=f"scheduler.{operation}", deadline_seconds=self.lock_retry_seconds)
+
+    def enqueue(self, work_order: WorkOrder | Mapping[str, Any]) -> dict[str, Any]:
+        return self._patient("enqueue", lambda: super(LaneChildScheduler, self).enqueue(work_order))
+
+    def claim(self, owner_ref: str, **kwargs: Any) -> dict[str, Any] | None:
+        return self._patient(
+            "claim", lambda: super(LaneChildScheduler, self).claim(owner_ref, **kwargs))
+
+    def validate_lease_for_use(self, *args: Any, **kwargs: Any) -> dict[str, Any]:
+        return self._patient(
+            "validate_lease_for_use",
+            lambda: super(LaneChildScheduler, self).validate_lease_for_use(*args, **kwargs))
+
+    def renew(self, *args: Any, **kwargs: Any) -> dict[str, Any]:
+        return self._patient(
+            "renew", lambda: super(LaneChildScheduler, self).renew(*args, **kwargs))
+
+    def complete(self, *args: Any, **kwargs: Any) -> dict[str, Any]:
+        return self._patient(
+            "complete", lambda: super(LaneChildScheduler, self).complete(*args, **kwargs))
 
 
 # Deliberately local aliases; parent integration may export them from

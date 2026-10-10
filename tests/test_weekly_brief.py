@@ -1,5 +1,7 @@
 from __future__ import annotations
 
+from tests.thesis_question_fixtures import formal_content
+
 import hashlib
 import sqlite3
 import unittest
@@ -183,7 +185,7 @@ class WeeklyBriefAuthorityTests(unittest.TestCase):
                 mandate_version_hash=mandate["content_hash"],
                 driver_pack_version_ref=pack["id"],
                 driver_pack_version_hash=pack["content_hash"],
-                content=content, actor_ref=owner,
+                content=formal_content(self.fixture.store, content, question="question:" + thesis_ref, industry=(INDUSTRY_REF if str(subject_ref).startswith("industry:") else None)), actor_ref=owner,
                 idempotency_key=candidate_id,
             )
             return coverage.decide_thesis_admission(

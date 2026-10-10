@@ -531,12 +531,33 @@ class BoundedPlannerDriver:
         except Exception as exc:  # noqa: BLE001 - one loop's failure is not the tick's
             return {"status": f"unavailable:{type(exc).__name__}"}
 
+    def _owner_levers(self) -> dict[str, Any] | None:
+        """The owner's levers as the writer folds them, or ``None`` if unreadable.
+
+        2026-10-06 (vision-gap #11).  Read once per tick: an emergency stop
+        skips the SEC dispatch and every planner round (the writer refuses the
+        lanes itself), and whatever is paused is written into the tick summary
+        -- and so the tick ledger -- as "paused by owner until ...".
+        """
+
+        try:
+            state = self.client.call("owner_lever_state", {})
+        except Exception:  # noqa: BLE001 - an older writer has no levers to read
+            return None
+        return state if isinstance(state, Mapping) else None
+
     def run_once(self) -> dict[str, Any]:
         started_at = self.clock()
-        try:
-            mission_dispatch = self.client.call("dispatch_coverage_mission_sec_lane", {})
-        except Exception as exc:
-            mission_dispatch = {"status": f"unavailable:{type(exc).__name__}"}
+        levers = self._owner_levers()
+        emergency = bool(levers and levers.get("emergency"))
+        lever_tick = None if levers is None else levers.get("tick")
+        if emergency:
+            mission_dispatch = dict(lever_tick or {"status": "paused:owner_emergency_stop"})
+        else:
+            try:
+                mission_dispatch = self.client.call("dispatch_coverage_mission_sec_lane", {})
+            except Exception as exc:
+                mission_dispatch = {"status": f"unavailable:{type(exc).__name__}"}
         # P9c: pending forecast-vs-actual pairs are reconciled every tick under
         # the mission grant; the writer reports skips instead of hiding them.
         try:
@@ -585,6 +606,12 @@ class BoundedPlannerDriver:
         loops = listing["loops"]
         executed: list[dict[str, Any]] = []
         skipped: list[dict[str, Any]] = []
+        if emergency:
+            # No new planner round while the owner's emergency stop is set:
+            # a round is an admission and usually a paid call.
+            skipped.extend({"loop_version_ref": loop["loop_version_ref"],
+                            "reason": "paused_by_owner:emergency_stop"} for loop in loops)
+            loops = []
         # C2b: the two things about this tick's planner spending that a
         # summary overwritten every tick could never answer -- how many loops
         # the pools held, and whether the calls reached the day ledger at all.
@@ -791,6 +818,10 @@ class BoundedPlannerDriver:
                 planner_holds, planner_budget_words),
             **lanes,
         }
+        if isinstance(lever_tick, Mapping):
+            # Not a lane: one ledger row saying what the owner has paused and
+            # until when, present only while something is.
+            summary["owner_levers"] = dict(lever_tick)
         summary["tick_ledger"] = self._record_tick(summary, started_at=started_at)
         return summary
 

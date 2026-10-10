@@ -242,9 +242,9 @@ def library(connection, mission, company):
     return {"products": [
         {"kind": "surface_event_judgement", "subject_ref": company,
          "version_ref": f"judgement:{company[-1]}", "status": "available",
-         "sections": [{"title": "事件研判", "body": company, "gaps": []}]},
+         "sections": [{"title": "事件研判", "body": company + " 的经营情况保持稳定，没有新增信息。", "gaps": []}]},
         {"kind": "dossier", "subject_ref": company, "version_ref": f"dossier:{company[-1]}",
-         "status": "available", "sections": [{"title": "结论", "body": company, "gaps": []}]},
+         "status": "available", "sections": [{"title": "结论", "body": company + " 的经营情况保持稳定，没有新增信息。", "gaps": []}]},
     ]}
 
 
@@ -349,8 +349,11 @@ class UiTextDeferralTests(unittest.TestCase):
             {"error": "purpose_daily_cap_reached: ...", "deferred": True}]}}
         for _ in range(DEFAULT_MAX_ATTEMPTS + 3):
             result = self.poll(deferred)
-            # The first deferral stops the queue: one prepare per poll.
-            self.assertEqual(result["attempted"], 1)
+            # The first deferral stops the queue: one prepare per poll, and it
+            # is reported as a ceiling deferral, not as an attempt.
+            self.assertEqual(result["attempted"], 0)
+            self.assertEqual(result["ceiling_deferred"], 1)
+            self.assertIn("purpose_daily_cap_reached", result["ceiling_reason"])
             self.assertEqual(result["blocked"], 0)
             self.assertEqual(sorted(row["status"] for row in result["batches"]),
                              ["deferred"] * 3)

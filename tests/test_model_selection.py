@@ -23,6 +23,7 @@ refuses instead.
 from __future__ import annotations
 
 import copy
+import hashlib
 import json
 import tempfile
 import unittest
@@ -592,7 +593,7 @@ class StateDirectoryCase(RouterCase):
 class SetTierSelectionTests(StateDirectoryCase):
     """2026-09-15: one chain per tier replaces per-purpose picking."""
 
-    def test_tier_selection_replaces_overrides_and_repoints_configs(self) -> None:
+    def test_tier_selection_preserves_overrides_and_repoints_configs(self) -> None:
         from dalton_core.model_router import policy_chain
 
         set_model_selection(
@@ -606,12 +607,14 @@ class SetTierSelectionTests(StateDirectoryCase):
         self.assertFalse(result["requires_restart"])
         config = self.stored()
         policy = self.router.get_policy(config["routing_policy_ref"])
-        for purpose in ("ask", "dossier", "plan"):
+        for purpose in ("dossier", "plan"):
             resolved = policy_chain(policy, tier="brain", purpose=purpose)
             self.assertEqual(
                 resolved["chain"],
                 ("profile:gpt-6-astra", "profile:claude-fable-5-1"), purpose)
-        self.assertNotIn("ask", policy.get("purpose_overrides") or {})
+        self.assertEqual(policy_chain(policy, tier="brain", purpose="ask")["chain"],
+                         ("profile:claude-fable-5-1",))
+        self.assertEqual(policy["purpose_overrides"]["ask"]["mode"], "explicit")
 
     def test_saving_the_same_tier_chain_again_changes_nothing(self) -> None:
         chain = list(tier_chain("brain"))
@@ -621,24 +624,17 @@ class SetTierSelectionTests(StateDirectoryCase):
                                     chain=chain, now=NOW)
         self.assertEqual(result["status"], "unchanged")
 
-    def test_a_tier_save_widens_the_allow_list_to_every_reachable_model(self) -> None:
-        # 2026-09-15: the allow-list was written once around that day's chains
-        # and tier saves never touched it again. Live, the verifier chain moved
-        # to gemini-3-8-flash-antigravity-high while the list still named the
-        # old trio, and every tier-mode purpose pinned to the policy -- the
-        # cheap-tier language check above all -- was refused with
-        # profile_not_allowed and no eligible candidate at all.
+    def test_a_tier_save_authorizes_only_its_default_without_expanding_filters(self) -> None:
+        before = self.router.get_policy(self.stored()["routing_policy_ref"])
         set_tier_selection(
             self.root, tier="verifier", mode="explicit",
             chain=["profile:gemini-3-8-flash",
                    "profile:claude-fable-5-1"], now=NOW)
         policy = self.router.get_policy(self.stored()["routing_policy_ref"])
-        tiers = (policy.get("fallback_chains") or {}).get("tiers") or {}
-        self.assertEqual(
-            policy["filters"]["allowed_profile_ids"],
-            sorted({profile for chain in tiers.values() for profile in chain}))
-        self.assertIn("profile:gemini-3-8-flash",
-                      policy["filters"]["allowed_profile_ids"])
+        tiers = policy["fallback_chains"]["tiers"]
+        self.assertEqual(policy["filters"], before["filters"])
+        self.assertEqual(tiers["saved_default_verifier"], tiers["verifier"])
+        self.assertNotIn("profile:gemini-3-8-flash", policy["filters"]["allowed_profile_ids"])
 
     def test_verifier_tier_save_refuses_profiles_whose_controls_expired(self) -> None:
         config = self.catalog_config()
@@ -663,12 +659,10 @@ class SetTierSelectionTests(StateDirectoryCase):
             )
         self.assertEqual(self.config_path.read_text(encoding="utf-8"), before)
 
-    def test_the_deliverable_tier_saves_like_any_other_and_drops_its_own_pins(
+    def test_the_deliverable_tier_saves_its_default_and_keeps_explicit_pins(
             self) -> None:
-        # 2026-09-17: the live shape before the split -- the three drafting
-        # stages held by hand-written overrides. One 整类保存 of 交付物起草
-        # writes the tier chain and takes the three pins away, and leaves an
-        # override belonging to another tier exactly where it was.
+        # Shared-default saves preserve all explicit stage choices, including
+        # stages in the selected tier and stages in other tiers.
         from dalton_core.model_router import policy_chain
 
         for purpose in ("dossier", "debate_map", "model_spec"):
@@ -689,10 +683,10 @@ class SetTierSelectionTests(StateDirectoryCase):
         self.assertEqual(tiers["deliverable"], chain)
         overrides = policy.get("purpose_overrides") or {}
         for purpose in ("dossier", "debate_map", "model_spec"):
-            self.assertNotIn(purpose, overrides)
+            self.assertEqual(overrides[purpose]["chain"], ["profile:claude-fable-5-1"])
             self.assertEqual(
                 policy_chain(policy, tier="deliverable", purpose=purpose)["chain"],
-                tuple(chain), purpose)
+                ("profile:claude-fable-5-1",), purpose)
         # A cheap-tier stage's own choice is none of this tier's business.
         self.assertEqual(overrides["quality"]["chain"], ["profile:gpt-6-astra"])
         # And the brain tier is untouched, so the stages that stayed there
@@ -814,6 +808,8 @@ class SetSelectionTests(StateDirectoryCase):
 
     def test_registry_covers_every_installed_role_configuration(self) -> None:
         self.assertEqual(set(model_config_names()), {
+            "street-estimate-model-config.json",
+            "street-estimate-verifier-model-config.json",
             "document-extraction-model-config.json",
             "discovery-selection-model-config.json",
             "research-planner-model-config.json",
@@ -2115,6 +2111,19 @@ class CockpitModelPageTests(unittest.TestCase):
         self.assertNotIn("profile:", row["cooldown_note"])
         other = next(item for item in row["chain"] if item["model"] != head)
         self.assertIsNone(other["cooldown"])
+        # 2026-10-07: and in every other place the model appears -- the tier
+        # editor, the picker and the page-wide map the editor marks from.
+        self.assertIn(head, view["cooldowns"])
+        self.assertTrue(view["cooldowns"][head]["badge"].startswith("冷却中"))
+        self.assertEqual(view["cooldowns"][head]["failure_code"], "RATE_LIMITED")
+        card = next(item for item in view["tier_cards"] if item["tier"] == row["tier"])
+        self.assertIn("正在供应商冷却中", card["cooldown_note"])
+        self.assertIsNotNone(next(link for link in card["chain"]
+                                  if link["model"] == head)["cooldown"])
+        member = next(item for item in card["purposes"] if item["purpose"] == BRAIN_PURPOSE)
+        self.assertEqual(member["cooldown_note"], row["cooldown_note"])
+        choice = next(item for item in view["choices"] if item["model"] == head)
+        self.assertEqual(choice["cooldown"]["profile_id"], head)
 
     def test_a_stage_with_no_cooled_model_carries_no_cooldown_note(self) -> None:
         self.install()
@@ -2131,7 +2140,7 @@ class CockpitModelPageTests(unittest.TestCase):
         row = next(
             item for item in view["purposes"] if item["purpose"] == BRAIN_PURPOSE
         )
-        self.assertEqual(row["mode_label"], "使用系统推荐配置")
+        self.assertEqual(row["mode_label"], "使用本类任务的默认顺序")
         self.assertEqual(
             [link["model"] for link in row["chain"]], list(tier_chain("brain"))
         )
@@ -2305,6 +2314,144 @@ class CockpitModelPageTests(unittest.TestCase):
         self.assertIn(coverage["uncovered_chains"][0]["display_names"][0],
                       coverage["note"])
 
+    def test_a_plain_verify_stage_is_not_held_to_provider_controls(self) -> None:
+        # 2026-09-29. Legacy read 受控核验部分不可用 … 核验论点影响评估：
+        # gemini-3.8-flash · Antigravity、glm-5.3 · 智谱. The thesis-impact
+        # verifier (like the annual-report verifier) asks the router for plain
+        # ``verify``; only stages with a provider output contract ask for
+        # provider-controlled-verify. Its chain declares ``verify`` and routes,
+        # so it is not "rejected before the call".
+        from dalton_core.cockpit_model import verifier_route_capability
+        self.assertEqual(verifier_route_capability("thesis_impact_verifier"), "verify")
+        self.assertEqual(verifier_route_capability("registered_annual_report_verifier"),
+                         "verify")
+        self.assertEqual(verifier_route_capability("quality_verifier"),
+                         "provider-controlled-verify")
+        self.install()
+        policy = self.install_verifier_stage(["profile:gemini-3-8-flash"])
+        (self.root / "registered-annual-report-verifier-model-config.json").write_text(
+            (self.root / "quality-verifier-model-config.json").read_text("utf-8"),
+            encoding="utf-8")
+        # The gateway drops the controls: the contract stage loses its only
+        # controlled link, the plain-verify stage keeps routing.
+        self.openclaw.write_text(
+            json.dumps(_allowing_config(), ensure_ascii=False, indent=2) + "\n",
+            encoding="utf-8")
+        with ModelRouter(self.router_db) as router:
+            sync_openclaw_model_catalog(
+                router, _allowing_config(), checked_at=NOW,
+                availability_ttl=timedelta(days=3650))
+            chain = resolve_chain(
+                router.get_policy(policy), tier="verifier",
+                purpose="registered_annual_report_verifier",
+                profiles={p["id"]: p for p in router.latest_profiles()})["chain"]
+            self.assertTrue(any("verify" in p["capabilities"]
+                                for p in router.latest_profiles() if p["id"] in chain))
+        view = self.plane(with_model_config=True).models()
+        card = next(item for item in view["tier_cards"] if item["tier"] == "verifier")
+        coverage = card["capability_coverage"]
+        self.assertEqual(coverage["required_by_purpose"]["registered_annual_report_verifier"],
+                         "verify")
+        self.assertIn("registered_annual_report_verifier", coverage["covered_purposes"])
+        self.assertEqual(coverage["missing_purposes"], ["quality_verifier"])
+        self.assertEqual(coverage["status"], "partial")
+        annual = next(item["label"] for item in view["purposes"]
+                      if item["purpose"] == "registered_annual_report_verifier")
+        self.assertNotIn(annual, coverage["note"])
+        self.assertIn("供应商验证控件", coverage["note"])
+
+    def test_the_legacy_thesis_impact_chain_reads_covered_not_rejected(self) -> None:
+        # The exact legacy rows of 2026-09-29: 核验论点影响评估 is pinned by
+        # service.json to verifier:4 (Antigravity gemini-3.8-flash high,
+        # glm-5.3), neither of which declares provider-controlled-verify but
+        # both of which declare ``verify`` -- the capability its WorkOrder asks
+        # for. A contract stage on the gemini-3.8-flash · Google chain is
+        # covered by the controls.
+        from dalton_core.cockpit_plane import _verifier_capability_coverage
+        plain = ["research", "verify", "adjudicate"]
+
+        def row(purpose, label, links):
+            return {"purpose": purpose, "label": label, "mode": "explicit",
+                    "configuration_status": "configured", "configuration_source": "x",
+                    "chain": [{"model": model, "display_name": name, "capabilities": caps}
+                              for model, name, caps in links]}
+
+        rows = [
+            row("thesis_impact_verifier", "核验论点影响评估", [
+                ("profile:gemini-3-8-flash-antigravity-high",
+                 "gemini-3.8-flash · Antigravity", plain),
+                ("profile:zai-glm-5-3", "glm-5.3 · 智谱", plain)]),
+            row("quality_verifier", "核验产出评分", [
+                ("profile:gemini-3-8-flash", "gemini-3.8-flash · Google",
+                 [*plain, "provider-controlled-verify"])]),
+        ]
+        coverage = _verifier_capability_coverage(rows)
+        self.assertEqual(coverage["status"], "covered")
+        self.assertEqual(coverage["missing_purposes"], [])
+        self.assertEqual(coverage["covered_by"], ["profile:gemini-3-8-flash"])
+        self.assertNotIn("核验论点影响评估", coverage["note"])
+        self.assertIn("受控核验可用", coverage["note"])
+
+        # The contract stage on that same uncontrolled chain *is* rejected
+        # before the call, and says so, with its models.
+        rows[1] = row("quality_verifier", "核验产出评分", [
+            ("profile:zai-glm-5-3", "glm-5.3 · 智谱", plain)])
+        coverage = _verifier_capability_coverage(rows)
+        self.assertEqual(coverage["status"], "partial")
+        self.assertEqual(coverage["missing_purposes"], ["quality_verifier"])
+        self.assertIn("受控核验部分不可用", coverage["note"])
+        self.assertIn("核验产出评分：glm-5.3 · 智谱", coverage["note"])
+        self.assertNotIn("核验论点影响评估", coverage["note"])
+
+        # And a plain-verify stage whose chain declares no ``verify`` at all
+        # is named in its own sentence, not blamed on gateway controls.
+        rows[0] = row("thesis_impact_verifier", "核验论点影响评估", [
+            ("profile:x", "x · 某家", ["research"])])
+        coverage = _verifier_capability_coverage(rows)
+        self.assertEqual(coverage["status"], "missing")
+        self.assertIn("没有声明核验能力的模型", coverage["note"])
+        self.assertIn("核验论点影响评估：x · 某家", coverage["note"])
+        self.assertIn("供应商验证控件；", coverage["note"])
+
+    def test_the_tier_card_shows_and_saves_each_stages_output_ceiling(self) -> None:
+        # 2026-09-29: glm-5.3 spent 从已登记原文起草定向回答's whole 4096
+        # output tokens reasoning and returned no text. The 09-15 page had no
+        # way to raise it; the card now shows the ceiling per stage and saves
+        # it through the governed set_model_call_budget door.
+        policy = self.install()
+        config = self.root / "mission-document-draft-model-config.json"
+        config.write_text(json.dumps({
+            "routing_policy_ref": policy, "model_router_db": str(self.router_db),
+            "credential_slot_refs": [],
+            "call_budget": {"max_cost_usd": 1.0, "max_input_tokens": 64000,
+                            "max_output_tokens": 4096, "timeout_seconds": 600},
+            "purpose_call_budgets": {
+                "mission_directed_document_draft": {"max_cost_usd": 1.0}},
+        }), encoding="utf-8")
+        plane = self.plane(with_model_config=True)
+        view = plane.models()
+        stage = next(item for card in view["tier_cards"] for item in card["purposes"]
+                     if item["purpose"] == "mission_directed_document_draft")
+        budget = stage["call_budget"]
+        self.assertTrue(budget["editable"])
+        self.assertEqual(budget["effective"]["max_output_tokens"], 4096)
+        self.assertEqual(budget["overrides"], {"max_cost_usd": 1.0})
+        self.assertEqual(budget["config_hash"],
+                         hashlib.sha256(config.read_bytes()).hexdigest())
+        plane.set_call_budget("owner@example.com", {
+            "purpose": "mission_directed_document_draft", "kind": "call",
+            "budget": {**budget["overrides"], "max_output_tokens": 16000},
+            "expected_config_hash": budget["config_hash"]})
+        operation, params = self.calls[-1]
+        self.assertEqual(operation, "set_model_call_budget")
+        self.assertEqual(params["budget"], {"max_cost_usd": 1.0, "max_output_tokens": 16000})
+        self.assertEqual(params["expected_config_hash"], budget["config_hash"])
+        page = (Path(__file__).resolve().parents[1]
+                / "src/dalton_core/cockpit_control.html").read_text("utf-8")
+        self.assertIn("outputBudgetEditor(p)", page)
+        self.assertIn('postJson("/v1/cockpit/model_budget"', page)
+        self.assertIn("max_output_tokens:n", page)
+
     def test_the_model_page_offers_a_fourth_chain_for_the_deliverable_tier(
             self) -> None:
         # 2026-09-17: 交付物起草 is configured exactly like the other three --
@@ -2335,7 +2482,7 @@ class CockpitModelPageTests(unittest.TestCase):
             self.assertEqual(row["tier_label"], "交付物起草", purpose)
             # "follow the tier", which is what the split leaves behind.
             self.assertEqual(row["mode"], "tier", purpose)
-            self.assertEqual(row["mode_label"], "使用系统推荐配置", purpose)
+            self.assertEqual(row["mode_label"], "使用本类任务的默认顺序", purpose)
             self.assertEqual([link["model"] for link in row["chain"]],
                              list(tier_chain("deliverable")), purpose)
         # The brain card keeps its own stages and its own chain.
@@ -2642,6 +2789,53 @@ class CockpitModelPageTests(unittest.TestCase):
             [action["decision"] for action in items[0]["actions"]], ["acknowledge"]
         )
         self.assertFalse(items[0]["needs_rationale"])
+
+    def test_one_disappeared_model_is_one_notice_and_one_acknowledgement(self) -> None:
+        # P2-6: grok-4-6 left the gateway and the page showed it three times,
+        # once per stage that had been pointed at it.
+        self.install()
+        with ModelRouter(self.router_db) as router:
+            for purpose in ("model_spec", "dossier", "debate_map"):
+                router.record_fallback_notice(
+                    profile_id="profile:grok-4-6", purpose=purpose, tier="brain",
+                    replacement_profile_id="profile:claude-opus-5",
+                    reason="not_in_broker_catalog",
+                    message=f"模型 profile:grok-4-6 已在 OpenClaw 消失；环节 {purpose}",
+                    detail={})
+            router.record_fallback_notice(
+                profile_id="profile:gpt-6-astra", purpose=BRAIN_PURPOSE, tier="brain",
+                replacement_profile_id=None, reason="not_in_broker_catalog",
+                message="模型 profile:gpt-6-astra 已在 OpenClaw 消失", detail={})
+            refs = [n["id"] for n in router.fallback_notices()
+                    if n["profile_id"] == "profile:grok-4-6"]
+        plane = self.plane(with_model_config=True)
+        items = plane._model_fallback_items()
+        self.assertEqual(len(items), 2)
+        grok = next(item for item in items if item["details"]["消失的模型"] == "profile:grok-4-6")
+        self.assertEqual(sorted(grok["refs"]), sorted(refs))
+        self.assertIn("3 个环节", grok["title"])
+        self.assertIn("编制公司模型规格", grok["details"]["环节"])
+        self.assertEqual(grok["details"]["现在用"], "profile:claude-opus-5")
+        notices = plane.models()["notices"]
+        self.assertEqual(len(notices), 2)
+        self.assertEqual(
+            sum(1 for n in notices if n["profile_id"] == "profile:grok-4-6"), 1)
+        # One 知道了 acknowledges every open notice about that model.
+        self.calls.clear()
+        plane.acknowledge_model_notice("owner@example.com", {"ref": grok["ref"]})
+        acked = [params["notice_id"] for name, params in self.calls
+                 if name == "acknowledge_model_fallback_notice"]
+        self.assertEqual(sorted(acked), sorted(refs))
+
+    def test_street_estimate_reads_as_deterministic_not_unconfigured(self) -> None:
+        # P2-6 (checked): the consensus lane parses broker notes itself; the
+        # page must not offer it as a missing model.
+        self.install()
+        view = self.plane(with_model_config=True).models()
+        row = next(p for p in view["purposes"] if p["purpose"] == "street_estimate")
+        self.assertEqual(row["mode"], "deterministic")
+        self.assertEqual(row["mode_label"], "确定性处理")
+        self.assertFalse(row["editable"])
 
 
 class PurposeCoverageTests(unittest.TestCase):

@@ -81,6 +81,7 @@ def _forecast_reason_text(value: str, fallback: Callable[[str], str]) -> str:
         (r"forecast base .+ is unavailable for this quarter", "本季度缺少预测基准"),
         (r"formula terms unavailable for this quarter: .+", "本季度缺少公式所需项目"),
         (r"no growth assumption for .+ in this quarter", "本季度缺少增长假设"),
+        (r"statement line .+ has no forecast assumption for this quarter", "本季度缺少该报表项目的预测假设"),
         (r"no share assumption for .+ in this quarter; its trailing history gives no usable rate", "本季度缺少占比假设，历史数据也无法提供可用比例"),
         (r"no cash-flow share assumption for .+ in this quarter", "本季度缺少现金流占比假设"),
         (r"no supported exact (operating_cash_flow|capital_expenditure) forecast basis is available", "缺少可核验的现金流预测基准"),
@@ -257,6 +258,7 @@ def render_forecast_model(
     annual_projection: Mapping[str, Any] | None = None,
     display_text: Callable[[str], str] | None = None,
     include_technical: bool = True,
+    line_label: Callable[[Mapping[str, Any]], str] | None = None,
 ) -> str:
     """Print one ForecastModelVersion so a person can argue with it.
 
@@ -276,6 +278,9 @@ def render_forecast_model(
     from .cockpit_model_display import field_label
     show = lambda value: _forecast_reason_text(
         value, lambda raw: field_label(raw, lambda item: _model_text(item, supplied_show)))
+    # A line's name is metadata, shown through ``line_label`` when the caller
+    # gates prose (``display_text``); prose stays behind ``show``.
+    name_of = line_label or (lambda row: show(str(row.get("label") or row.get("ref"))))
     history = [str(item) for item in (record.get("history_periods") or [])]
     history = history[-max(0, int(history_columns)):] if history_columns else []
     realised = [str(item["end"]) for item in (record.get("realised_periods") or [])]
@@ -300,7 +305,7 @@ def render_forecast_model(
     out.append("驱动因素（已披露历史）")
     for driver in drivers:
         cells = {str(cell["period_end"]): cell for cell in (driver.get("history") or [])}
-        label = f"  {show(str(driver.get('label') or driver.get('ref')))}"
+        label = f"  {name_of(driver)}"
         if driver.get("role"):
             role={"revenue":"收入驱动","cost":"成本驱动","margin":"利润率驱动"}.get(str(driver["role"]),show(str(driver["role"])))
             label = f"{label} [{role}]"
@@ -336,7 +341,7 @@ def render_forecast_model(
         measure = {"share":"占比","growth":"增速","margin":"利润率"}.get(str(rows[0].get("measure")),show(str(rows[0].get("measure"))))
         kinds = sorted({{"estimate":"预测","actual":"实际","scenario":"情景"}.get(str(item.get("kind")),show(str(item.get("kind")))) for item in rows})
         out.append(_row(
-            f"  {show(str(driver.get('label') or driver.get('ref')))}  [{measure}, {'/'.join(kinds)}]",
+            f"  {name_of(driver)}  [{measure}, {'/'.join(kinds)}]",
             ["" for _ in history],
             [_percent(live[end]["value"], decimals=1) if end in live else "--" for end in columns]))
         for because in dict.fromkeys(
@@ -354,7 +359,7 @@ def render_forecast_model(
     for result in record.get("results") or []:
         live = _live(result.get("cells") or [])
         out.append(_row(
-            f"  {show(str(result.get('label') or result.get('ref')))}",
+            f"  {name_of(result)}",
             ["" for _ in history],
             [(_display_value(live[end]["value"], live[end].get("unit") or result.get("unit"))
               if live.get(end, {}).get("status") == "computed"
@@ -379,15 +384,33 @@ def render_forecast_model(
         from .company_model_annual_projection import validate_projection_record
 
         projection = validate_projection_record(annual_projection, model=record)
-        result_labels = {str(item["ref"]): str(item["label"])
-                         for item in record.get("results") or []}
+        result_rows = {str(item["ref"]): item
+                       for item in record.get("results") or []}
         out.append("")
         out.append("年度结构化财务预测")
         out.append("-" * DRIVER_LABEL_WIDTH)
+        for gap in projection.get("historical_gaps") or []:
+            out.append(f"  历史分季输入缺口 {gap['label']}：" + "、".join(gap["quarter_ends"]))
+            if gap.get("held_but_outside_model_window"):
+                out.append("    已持有但被模型窗口裁剪：" + "、".join(gap["held_but_outside_model_window"]))
+            if gap.get("not_held_as_quarter"):
+                out.append("    仍未持有可复算季度：" + "、".join(gap["not_held_as_quarter"]))
+            if gap.get("source_coverage_unknown"):
+                out.append("    旧输入未记录窗口外来源覆盖：" + "、".join(gap["source_coverage_unknown"]))
+        kinds = {"historical": "历史", "mixed": "混合", "forecast": "预测", "incomplete": "不完整", "partial": "不完整"}
         for period in projection["periods"]:
-            out.append(f"  {period['label']}")
+            out.append(f"  {period['label']} · {kinds.get(period['kind'], period['kind'])}")
+            shares = period.get("forecast_shares") or {}
+            if shares.get("method") == "annual_growth_from_filed":
+                out.append(
+                    f"    年度股份独立增长假设：基准 {shares.get('as_of')}；"
+                    f"复利 {shares.get('steps')} 年；年增长率 {shares.get('growth_rate')}。"
+                    "直接年度披露优先，未将季度平均股份假称为年度精确重建。")
+            if period.get("missing_quarters"):
+                out.append("    缺少季度：" + "、".join(period["missing_quarters"]) + "；缺季不计作零")
             for result_ref, outcome in period["line_outcomes"].items():
-                label = show(result_labels.get(result_ref, result_ref))
+                label = (name_of(result_rows[result_ref]) if result_ref in result_rows
+                         else show(result_ref))
                 if outcome.get("status") == "computed":
                     out.append(
                         f"    {label}: {outcome.get('value')} {outcome.get('unit')}"
@@ -428,8 +451,9 @@ def render_forecast_model(
         out.append("")
         out.append("  当前计算链未覆盖的披露科目：")
         for concept in outside:
-            name = next((str(item.get("label") or concept) for item in drivers if str(item.get("concept")) == concept), concept)
-            out.append(f"      {concept if include_technical else show(name)}")
+            row = next((item for item in drivers if str(item.get("concept")) == concept),
+                       {"label": concept, "concept": concept})
+            out.append(f"      {concept if include_technical else name_of(row)}")
     out.append("")
     out.append("阅读说明")
     out.append("-" * DRIVER_LABEL_WIDTH)
@@ -522,6 +546,25 @@ def render_sensitivity(
     if selection.get("status") != "available":
         out.append(f"驱动选择暂不可得（{selection.get('status')}），原因见模型记录")
     out.append("")
+
+    linked = record.get("linked_mechanisms")
+    if linked is not None:
+        out.append("经济驱动联动核验（同一模型重算，不带情景概率）")
+        out.append("各驱动同时取自身历史端点；这些端点不代表曾同时发生。")
+        for interval in linked.get("intervals") or []:
+            name = interval.get("label") or next((d.get("label") for d in record.get("drivers") or [] if d.get("driver_ref") == interval["driver_ref"]), "经济驱动（名称待补）")
+            window = interval.get("history_window") or {}
+            out.append(f"  {show(str(name))}：{_percent(interval['low'])} 至 {_percent(interval['high'])}"
+                       f"（{'相对数量/价格水平变化' if interval['mode']=='relative_level' else '比率变动'}；历史 {window.get('start')} .. {window.get('end')}）")
+        for row in linked.get("rows") or []:
+            name = {"historical_low":"历史低端联动", "current":"当前模型", "historical_high":"历史高端联动"}.get(row["key"], "联动核验")
+            out.append(f"  {name}：{'已重算' if row['status']=='computed' else '资料或经济合理性门禁未通过'}")
+            for line in row.get("lines") or []:
+                out.append(f"    {show(str(line.get('label') or line['ref']))}：" + ", ".join(
+                    f"{cell.get('period_end') or (cell.get('period') or {}).get('end')}={_millions(cell['value']) if cell.get('value') is not None else '缺失'} 百万" for cell in line.get("cells") or []))
+        if linked.get("status") != "available":
+            out.append("  联动核验存在缺口；缺少输入或不合理的端点不会显示为零。")
+        out.append("")
 
     drivers = list(record.get("drivers") or [])
     for driver in drivers:

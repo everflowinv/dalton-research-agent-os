@@ -11,7 +11,7 @@ UTF-8 bytes with beginning/middle/end sentinels intact at both low and high
 effort. A direct 269,100-byte call still silently truncated at 191,985 bytes.
 Use 170,000 for Dalton, leaving room under the gateway's 190,000-byte limit
 for host framing. This is a transport bound, not a quality certification.
-Evidence: docs/reports/environment-repair-2026-09-22.md.
+Measured on 2026-09-22; the byte counts above retain the tested transport evidence.
 
 So the measured ceiling is kept *here*, beside the code that enforces it,
 rather than in a row a sync can overwrite.  The effective bound is the smaller

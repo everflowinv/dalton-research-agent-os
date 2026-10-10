@@ -299,6 +299,36 @@ def stale_importance(
     )
 
 
+#: F10: the one evidence kind a rule assigns. A Claim whose statement reads a
+#: market quantity standing in for the company's own -- a spot or futures
+#: price, a crack or price spread, an industry operating rate, a published
+#: benchmark -- is ``market_proxy``, so a forecast that cites it has to say how
+#: far it sits from what the company realises (``model_forecast_driver``).
+#: Deliberately narrow: "list price" alone is often the company's own price,
+#: and "spread" alone is a word about anything, so neither is a cue by itself.
+#: Everything else stays ``statement``, the index's compatibility default.
+MARKET_PROXY_PATTERNS: tuple[str, ...] = (
+    r"\b(?:spot|futures?|front[- ]month) prices?\b",
+    r"\bcontinuous (?:futures|contract)\b",
+    r"\b(?:crack|price|product|chemical|refining) spreads?\b",
+    r"\bindustry (?:operating|utili[sz]ation|capacity utili[sz]ation) rates?\b",
+    r"\b(?:benchmark|index|posted|listed) prices?\b",
+    r"\b(?:brent|wti|henry hub|lme|comex|dram contract|nand contract)\b",
+    "现货价", "期货价", "期货连续", "挂牌价", "价差", "行业开工率",
+)
+_MARKET_PROXY_RE = re.compile("|".join(MARKET_PROXY_PATTERNS), re.IGNORECASE)
+
+
+def evidence_kind_for(claim: Mapping[str, Any]) -> str:
+    """``market_proxy`` when the claim reads a public market quantity, else ``statement``."""
+
+    if claim.get("basis") == "market_proxy":
+        return "market_proxy"
+    text = " ".join(str(claim.get(field) or "") for field in
+                    ("metric_or_aspect", "normalized_statement"))
+    return "market_proxy" if _MARKET_PROXY_RE.search(text) else "statement"
+
+
 RULE_TAGGER_REF = "rule:claim-index-deterministic:0.1"
 # The hash of the rules themselves, so that changing a rule changes the tagger
 # and every claim it touched gets a new entry version rather than silently
@@ -311,6 +341,7 @@ RULE_TAGGER_HASH = content_hash({
     "importance_tiers": list(IMPORTANCE_TIERS),
     "stale_after_days": STALE_AFTER_DAYS,
     "stale_downgrade": dict(STALE_DOWNGRADE),
+    "market_proxy_patterns": list(MARKET_PROXY_PATTERNS),
 })
 
 TASK_HASH = content_hash({
@@ -1322,6 +1353,7 @@ __all__ = [
     "MAX_STATEMENT_CHARS",
     "MAX_UNPARSED_ROW_RATIO",
     "QUANTITATIVE_ASPECT_RULES",
+    "MARKET_PROXY_PATTERNS",
     "RULE_TAGGER_HASH",
     "RULE_TAGGER_REF",
     "SOURCE_TYPE_IMPORTANCE",
@@ -1329,6 +1361,7 @@ __all__ = [
     "TAGGING_CONTRACT_NAME",
     "TAGGING_OUTPUT_ENVELOPE",
     "TASK_HASH",
+    "evidence_kind_for",
     "TASK_REF",
     "TIMEOUT_SECONDS",
     "ClaimIndexTaggingError",

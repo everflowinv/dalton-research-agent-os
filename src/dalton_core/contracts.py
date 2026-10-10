@@ -840,9 +840,17 @@ class ThesisVersion:
     content_hash: str
     authority_kind: str | None = None
     authority_ref: str | None = None
+    question_ref: str | None = None
+    stance: str | None = None
+    proposition_direction: str | None = None
+    view_status: str | None = None
+    falsification_conditions: tuple[Mapping[str, Any], ...] = ()
+    passage_refs: tuple[str, ...] = ()
+    framework_version_ref: str | None = None
+    disagreement: Mapping[str, Any] | None = None
 
     def __post_init__(self) -> None:
-        if self.schema_version not in {"0.1", "0.2"}:
+        if self.schema_version not in {"0.1", "0.2", "0.3"}:
             raise ValidationError("unsupported ThesisVersion schema_version")
         _require_string(self.id, "id")
         _require_string(self.created_at, "created_at")
@@ -873,6 +881,15 @@ class ThesisVersion:
                 raise ValidationError(f"{name} must be a tuple of non-empty strings")
         if self.prior_version_ref is not None:
             _require_string(self.prior_version_ref, "prior_version_ref")
+        from .thesis_question_model import QUESTION_FIELDS, validate_question_fields
+        if self.schema_version == "0.3":
+            try:
+                validate_question_fields({**{key:getattr(self,key) for key in QUESTION_FIELDS},
+                                          "claim_refs":self.claim_refs})
+            except ValueError as exc:
+                raise ValidationError(str(exc)) from exc
+        elif any(getattr(self,key) for key in QUESTION_FIELDS):
+            raise ValidationError("legacy thesis versions cannot carry question semantics")
 
     @classmethod
     def from_dict(cls, data: Mapping[str, Any]) -> "ThesisVersion":
@@ -886,8 +903,11 @@ class ThesisVersion:
         }
         if schema_version == "0.1":
             expected = common | {"verification_ref"}
-        elif schema_version == "0.2":
+        elif schema_version in {"0.2", "0.3"}:
             expected = common | {"authority_kind", "authority_ref"}
+            if schema_version == "0.3":
+                from .thesis_question_model import QUESTION_FIELDS
+                expected |= QUESTION_FIELDS
         else:
             raise ValidationError("unsupported ThesisVersion schema_version")
         if set(obj) != expected:
@@ -896,8 +916,11 @@ class ThesisVersion:
             raise ValidationError(
                 f"ThesisVersion fields are invalid; unknown={unknown}, missing={missing}"
             )
-        if schema_version == "0.2":
+        if schema_version in {"0.2", "0.3"}:
             obj["verification_ref"] = None
+        if schema_version == "0.3":
+            obj["passage_refs"] = tuple(obj["passage_refs"])
+            obj["falsification_conditions"] = tuple(obj["falsification_conditions"])
         for key in ("claim_refs", "catalyst_refs", "falsifier_refs"):
             obj[key] = tuple(obj[key])
         return cls(**obj)
@@ -917,6 +940,11 @@ class ThesisVersion:
             result["authority_ref"] = self.authority_ref
         for key in ("claim_refs", "catalyst_refs", "falsifier_refs"):
             result[key] = list(result[key])
+        if self.schema_version == "0.3":
+            from .thesis_question_model import QUESTION_FIELDS
+            result.update({key:getattr(self,key) for key in QUESTION_FIELDS})
+            result["passage_refs"] = list(self.passage_refs)
+            result["falsification_conditions"] = [dict(item) for item in self.falsification_conditions]
         return result
 
 

@@ -2,9 +2,9 @@
  "case_ref": "acn-view-states-where-the-market-is-wrong",
  "expected": {
   "cited_tags": [
-   "D1",
    "C2",
-   "B1"
+   "O1",
+   "O2"
   ],
   "confidence": "medium",
   "quality": {
@@ -16,13 +16,19 @@
   "rationale": "五个槽位都写满，pathway 指向一个有日期的可观察量；这是与市场同向但无 pathway 的反面。",
   "refused": false,
   "verification": {
+   "citations_resolve": "skipped",
    "cites_only_shown_rows": "pass",
    "confidence_in_vocabulary": "pass",
    "market_vs_us_present": "pass",
-   "numeric_sentences_cite": "pass",
+   "material_gap_has_request": "skipped",
+   "numbers_sourced": "pass",
+   "our_view_not_used_as_evidence": "pass",
+   "reasoning_lint": "pass",
    "refresh_names_a_capable_source": "pass",
    "refusal_states_why": "pass",
-   "unknowns_typed": "pass"
+   "structure_present": "pass",
+   "unknowns_typed": "pass",
+   "what_happened_cites_evidence": "pass"
   },
   "wants_market_vs_us": true
  },
@@ -30,6 +36,12 @@
  "question": "你怎么看 ACN 现在的位置？",
  "reply": {
   "confidence": "medium",
+  "market_expected": [
+   {
+    "refs": [],
+    "text": "卖方多数把审批延后读成需求下修。"
+   }
+  ],
   "market_vs_us": {
    "convergence_pathway": "十月的 bookings 与 book-to-bill 会先于收入证实或证伪这一点。",
    "market_view": "卖方多数把审批延后读成需求下修，四家里有三家在下调 2027 年收入。",
@@ -38,10 +50,29 @@
    "observable_signals": "月度招聘公告、外包合同披露、以及电话会上对审批周期的措辞变化。",
    "our_view": "预算恢复只是被审批链条推迟了一到两个季度，不是需求塌了。",
    "refs": [
-    "D1",
-    "B1"
+    "O1",
+    "O2"
    ],
    "where_market_is_wrong": "市场把「签得慢」当成「不签」，两者在 bookings 上会分岔。"
+  },
+  "our_view": {
+   "change": "no_change",
+   "house_view": "预算恢复只是被审批链条推迟，需求没有塌。",
+   "sentences": [
+    {
+     "refs": [
+      "O1"
+     ],
+     "text": "我们比市场乐观一档，理由是预算恢复被审批周期拉长，需求还在。"
+    },
+    {
+     "refs": [
+      "C2",
+      "O2"
+     ],
+     "text": "我们认为 GCC 自建是真实的结构性威胁，但它抢的是可标准化的那一层。"
+    }
+   ]
   },
   "refresh_suggested": {
    "content_kind": "sell_side_report",
@@ -51,19 +82,10 @@
   "refusal_detail": null,
   "refusal_reason": null,
   "refused": false,
-  "sentences": [
+  "uncertainties": [
    {
-    "refs": [
-     "D1"
-    ],
-    "text": "我们比市场乐观一档，理由是预算恢复被审批周期拉长，而不是需求消失。"
-   },
-   {
-    "refs": [
-     "C2",
-     "B1"
-    ],
-    "text": "GCC 自建是真实的结构性威胁，但它抢的是可标准化的那一层。"
+    "refs": [],
+    "text": "缺卖方最近两个月对 ACN 的评级与目标价分布。"
    }
   ],
   "unknowns": [
@@ -72,34 +94,50 @@
     "source": "alphaengine",
     "what": "缺卖方最近两个月对 ACN 的评级与目标价分布"
    }
+  ],
+  "what_happened": [
+   {
+    "refs": [
+     "C2"
+    ],
+    "text": "公司把大客户的内部 IT 部门列为竞争对手。"
+   }
   ]
  },
  "shown": [
   {
-   "block": "dossier",
+   "block": "house_view",
+   "evidence": false,
    "period": null,
    "ref": "company-dossier-version:acn:2",
+   "source_text": "客户预算在恢复，但审批链条比 2024 年长；管理层在两次电话会上都提到这一点。",
    "statement": "客户预算在恢复，但审批链条比 2024 年长；管理层在两次电话会上都提到这一点。",
-   "tag": "D1"
+   "tag": "O1"
   },
   {
-   "block": "debates",
+   "block": "house_view",
+   "evidence": false,
    "period": null,
    "ref": "debate-map-version:acn:3",
+   "source_text": "GCC 自建是否结构性压低 ACN 的可服务市场？",
    "statement": "GCC 自建是否结构性压低 ACN 的可服务市场？",
-   "tag": "B1"
+   "tag": "O2"
   },
   {
    "block": "claims",
+   "evidence": true,
    "period": "2026-03-01..2026-05-31",
    "ref": "claim-version:1c4f31d84d431ac4aa2cfd5e10624ed9f0ddff0f17844392bc7a76a339adfa05",
+   "source_text": "Accenture plc reported Revenues of USD 18718144000 for 2026-03-01..2026-05-31, up 5.59% year over year from USD 17727871000 in the comparable quarter.",
    "statement": "Accenture plc reported Revenues of USD 18718144000 for 2026-03-01..2026-05-31, up 5.59% year over year from USD 17727871000 in the comparable quarter.",
    "tag": "C1"
   },
   {
    "block": "claims",
+   "evidence": true,
    "period": "fiscal 2025",
    "ref": "claim-version:ec52d36d94",
+   "source_text": "Accenture identifies in-house IT departments of large corporations using global capability centers as a competitive threat because clients may use their own resources rather than engage an outside firm.",
    "statement": "Accenture identifies in-house IT departments of large corporations using global capability centers as a competitive threat because clients may use their own resources rather than engage an outside firm.",
    "tag": "C2"
   }

@@ -79,6 +79,15 @@ IR_EVIDENCE_TIER = "management_direct"
 WRITE_SCOPE = "observation"
 
 DECLARATION_FILENAME = "p9-us-it-services-ir-pages-v1.json"
+# The file a Core reads its declaration from: ``<state>/ir-pages.json``, a copy
+# a person made of the packaged example on purpose (``install.sh`` never does).
+STATE_DECLARATION_FILENAME = "ir-pages.json"
+IR_PAGES_ABSENT_REASON = (
+    "没有 ir-pages.json：每家公司要盯的投资者关系页面网址无法推导，需要你写进状态目录的 "
+    "ir-pages.json（格式见 deploy/phase9/p9-us-it-services-ir-pages-v1.json），"
+    "并在本机运行 changedetection（127.0.0.1:5055）；写好后下一轮调度自动开始，"
+    "在此之前这条流程不读取任何页面"
+)
 DECLARATION_SCHEMA_VERSION = "0.1"
 MAX_DECLARED_PAGES = 60
 
@@ -464,6 +473,22 @@ def declared_watches(
 # -- one sweep --------------------------------------------------------------
 
 MAX_DIFFS_PER_SWEEP = 10
+# #21 (2026-10-07): what makes a diff worth an event.  changedetection reports
+# a page as changed when its bytes moved, and a rotated cache-buster, a
+# re-ordered menu or a whitespace edit moves bytes without saying anything.
+# ``line_change_counts`` already ignores blank lines and compares lines as a
+# multiset, so a diff with no line gained and none lost is exactly that kind of
+# change: read (the call is made and counted), reported, and not an event.
+MIN_MATERIAL_CHANGED_LINES = 1
+
+
+def is_material(diff: Mapping[str, Any]) -> bool:
+    """Whether one diff says something a reader of the event ledger would want."""
+
+    if diff.get("previous_snapshot_hash") == diff.get("current_snapshot_hash"):
+        return False
+    changed = int(diff.get("added_line_count") or 0) + int(diff.get("removed_line_count") or 0)
+    return changed >= MIN_MATERIAL_CHANGED_LINES
 GOVERNANCE_FILENAME_BY_OPERATION = {
     operation: f"{kind}-v1.json" for operation, kind in KIND_BY_OPERATION.items()
 }
@@ -503,6 +528,7 @@ def sweep_ir_pages(
     state_dir: Any,
     clock: Callable[[], datetime] | None = None,
     max_diffs: int = MAX_DIFFS_PER_SWEEP,
+    base_url: str = DEFAULT_BASE_URL,
 ) -> dict[str, Any]:
     """List the watches, read the declared ones that moved, and report.
 
@@ -531,8 +557,8 @@ def sweep_ir_pages(
             return {
                 "status": "unconfigured",
                 "reason": (
-                    f"no approved {KIND_BY_OPERATION[operation]} record at {path}; "
-                    "the watcher needs both of its approvals"
+                    f"投资者关系页面监测缺少 {path.name} 审批记录；列出监测与读取变动"
+                    "是两项审批，两项都批准后才会读取"
                 ),
                 "watch_count": 0, "undeclared_count": 0, "changes": [],
             }
@@ -540,11 +566,17 @@ def sweep_ir_pages(
         if not record.approved:
             return {
                 "status": "unconfigured",
-                "reason": f"the {KIND_BY_OPERATION[operation]} record is not approved",
+                "reason": f"投资者关系页面监测的 {path.name} 审批记录尚未批准",
                 "watch_count": 0, "undeclared_count": 0, "changes": [],
             }
         records[operation] = record
 
+    if not declaration_path.is_file():
+        return {
+            "status": "unconfigured",
+            "reason": IR_PAGES_ABSENT_REASON,
+            "watch_count": 0, "undeclared_count": 0, "changes": [],
+        }
     declaration = load_ir_page_declaration(declaration_path)
 
     def runner(operation: str) -> Any:
@@ -559,6 +591,10 @@ def sweep_ir_pages(
                 "--declaration", str(declaration_path),
                 "--output-dir", str(output_dir),
             ]
+            if base_url != DEFAULT_BASE_URL:
+                # Only ever another loopback port -- the child refuses
+                # anything else -- and only a test asks for one.
+                argv.extend(["--base-url", str(base_url)])
             for flag, key in (("--watch-id", "watch_id"), ("--since", "since")):
                 if parameters.get(key):
                     argv.extend([flag, str(parameters[key])])
@@ -582,6 +618,7 @@ def sweep_ir_pages(
     )
     watches = listing.observation["watches"]
     changes: list[dict[str, Any]] = []
+    immaterial = 0
     read = 0
     for watch in declared_watches(declaration, watches):
         if watch["paused"] or not watch["last_changed"] or watch["snapshot_count"] < 2:
@@ -595,10 +632,16 @@ def sweep_ir_pages(
             output_dir=_Path(state_dir) / "ir-page-snapshots",
         )
         diff = receipt.observation
+        if not is_material(diff):
+            immaterial += 1
+            continue
         changes.append({
             "company_ref": diff["company_ref"],
             "occurred_at": changed_at_rfc3339(diff["changed_at"], fallback=now),
+            # The page itself first: it is what a reader opens, and the
+            # declaration is what made it a page Dalton may cite.
             "source_refs": [
+                diff["url"],
                 f"ir-watch:{diff['watch_id']}",
                 f"raw-sink:{receipt.raw_response_hash}",
             ],
@@ -613,6 +656,8 @@ def sweep_ir_pages(
         "reason": None,
         "watch_count": len(watches),
         "undeclared_count": listing.observation["undeclared_count"],
+        "diff_read_count": read,
+        "immaterial_count": immaterial,
         "changes": changes,
     }
 
@@ -620,8 +665,12 @@ def sweep_ir_pages(
 __all__ = [
     "ADAPTER_REF",
     "GOVERNANCE_FILENAME_BY_OPERATION",
+    "IR_PAGES_ABSENT_REASON",
     "MAX_DIFFS_PER_SWEEP",
+    "MIN_MATERIAL_CHANGED_LINES",
+    "STATE_DECLARATION_FILENAME",
     "changed_at_rfc3339",
+    "is_material",
     "sweep_ir_pages",
     "CAPABILITY_BY_OPERATION",
     "CONNECTOR_SLUG",

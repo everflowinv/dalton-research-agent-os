@@ -1,6 +1,6 @@
 """The legacy IT-services refusals of 2026-09-27, and what was and was not a rule bug.
 
-Live, ``/Volumes/EveSSD/Dalton/legacy-state/dalton-core/company-model-spec-runs``:
+Live, ``<state-dir>/company-model-spec-runs``:
 
 * ``41245f70d8ee229a0da3961e`` IBM (09:12Z, $0.48 repair under the
   ``:retired-rule:95310fa7…`` recovery epoch): ``diluted EPS cannot be
@@ -668,7 +668,7 @@ class GeographicCountryMemberTests(unittest.TestCase):
 
     def test_the_contract_version_moved(self):
         self.assertEqual(ei.FORECAST_INVARIANT_CONTRACT_REF,
-                         "forecast-economic-invariants:9")
+                         "forecast-economic-invariants:11")
         self.assertEqual(
             ei.FORECAST_INVARIANT_CONTRACT["segment_sum"]["geographic_country_members"],
             "partition-or-nested-in-region:v1")

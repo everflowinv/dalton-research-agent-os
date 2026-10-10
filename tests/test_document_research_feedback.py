@@ -33,7 +33,9 @@ class DocumentFeedbackTests(unittest.TestCase):
         company = next(c for c in next_state["companies"] if c["company_ref"] == ACN)
         self.assertEqual(company["document_research_feedback"][0]["tried_query_terms"], ["收入确认"])
         self.assertEqual(company["figures"], next(c for c in prior_state["companies"] if c["company_ref"] == ACN)["figures"])
-        self.assertIn("not a finding that the source contains nothing", build_prompt(next_state))
+        self.assertIn("query_miss/no_verified_claim means unresolved, not source absence", build_prompt(next_state))
+        self.assertIn("refine tried terms/context", build_prompt(next_state))
+        self.assertIn("Never repeat an unsuccessful same-version/query by changing rationale", build_prompt(next_state))
 
     def test_foreign_or_unverifiable_feedback_is_disclosed_without_invented_observations(self):
         cases = [ValueError("formal proof drift"), [{"mission_version_ref": "foreign", "company_ref": ACN}]]

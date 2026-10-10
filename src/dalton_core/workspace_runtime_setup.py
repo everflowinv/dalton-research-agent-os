@@ -24,6 +24,10 @@ from .connector_governance import (
 )
 from .connector_inventory import load_packaged_connector_inventory
 from .conviction_call import CONVICTION_POLICY
+from .conviction_policy import (
+    DEFAULT_POLICY_HASH as CONVICTION_V2_DEFAULT_HASH,
+    DEFAULT_VERSION_REF as CONVICTION_V2_DEFAULT_REF,
+)
 from .debate_map import DEBATE_POLICY
 from .driver_template import (
     COST_DRIVER_TEMPLATES,
@@ -236,7 +240,7 @@ def _connector_records(workspace: Any, actor_ref: str) -> tuple[list[str], list[
     for kind in sorted(kinds):
         # Current consumers require the corrected contracts for these two
         # capabilities.  Every other registered connector remains v1.
-        version = 3 if kind in {"sec-company-facts", "sec-financial-statements"} else 1
+        version = 4 if kind == "sec-financial-statements" else (3 if kind == "sec-company-facts" else 1)
         identity = (kind, version)
         if identity in seen:
             continue
@@ -328,7 +332,8 @@ def _service_pinned_policy_lineages(workspace: Any) -> dict[str, Any]:
 
 def _host_lane_inputs(workspace: Any, actor_ref: str,
                       host_sources: Mapping[str, Path] | None,
-                      enabled: bool) -> dict[str, Any]:
+                      enabled: bool,
+                      source_state_dir: Path | None = None) -> dict[str, Any]:
     """Stage the lane inputs that are facts about this machine, not this mission.
 
     A workspace used to come up with a third of the legacy environment's lanes,
@@ -345,6 +350,21 @@ def _host_lane_inputs(workspace: Any, actor_ref: str,
     machine does not have is skipped silently here and reported loudly by
     ``dalton_core.workspace_parity_cli``, which is where an owner goes to find
     out what a quiet lane is waiting for.
+
+    ``source_state_dir`` is the mature environment on this machine (the one
+    ``workspace_host_scheme`` copies the model configuration from).  Until
+    2026-09-30 this was never passed, and the control process that runs a
+    creation has neither ``DALTON_PRIOR_RESEARCH_DIR`` nor the crowd host
+    tools in its environment -- they only ever existed inside the legacy
+    state directory -- so every new workspace came up without the crowd and
+    prior-research lanes and needed a hand repair (ws-7d, 2026-09-27).
+    Naming the source here makes ``resolve_host_sources`` find the crowd tools
+    and grants where the owner already installed them.  The prior-research
+    corpus is not among them any more (owner instruction, 2026-09-30): each
+    environment gets its own empty ``feeds/prior-research`` inside its own
+    state, never a link into another environment's.  What was bound *into another environment's
+    state directory* is recorded as ``borrowed``: a link there breaks the day
+    that environment moves, and the receipt should say so rather than hide it.
     """
 
     from .workspace_lane_parity import (
@@ -357,18 +377,47 @@ def _host_lane_inputs(workspace: Any, actor_ref: str,
     if not enabled:
         return {"source_refs": [], "host_sources": [], "staged": [],
                 "skipped": "host lane staging was not requested"}
-    resolved = (resolve_host_sources() if host_sources is None
-                else dict(host_sources))
+    resolved = (resolve_host_sources(source_state_dir=source_state_dir)
+                if host_sources is None else dict(host_sources))
     actions = plan_parity_actions(
         workspace.state_dir, actor_ref=actor_ref, host_sources=resolved,
         mission=None,
     )
     performed = apply_parity_actions(actions, actor_ref=actor_ref)
+    borrowed: list[str] = []
+    if source_state_dir is not None:
+        source = Path(source_state_dir).expanduser().resolve()
+        borrowed = sorted(name for name, path in resolved.items()
+                          if Path(path).resolve().is_relative_to(source))
     return {
         "source_refs": host_provisioned_source_refs(resolved),
         "host_sources": sorted(resolved),
         "staged": sorted(Path(row["target"]).name for row in performed),
+        "source_state_dir": None if source_state_dir is None else str(source_state_dir),
+        "borrowed_from_source_state": borrowed,
     }
+
+
+def _source_state_dir(workspace: Any, manager_config_path: str | Path | None,
+                      legacy_service_path: str | Path | None) -> Path | None:
+    """The mature environment this machine's host inputs were installed into.
+
+    The same resolution ``workspace_host_scheme.adopt_host_scheme`` makes
+    moments later, so the lanes and the model configuration are taken from
+    one environment.  ``None`` -- no host manifest, or no other environment --
+    leaves host-input discovery exactly as it was.
+    """
+
+    if manager_config_path is None:
+        return None
+    from .workspace_host_scheme import resolve_source_state_dir
+
+    try:
+        return resolve_source_state_dir(
+            workspace.state_dir, manager_config_path=manager_config_path,
+            legacy_service_path=legacy_service_path)
+    except (OSError, ValueError):
+        return None
 
 
 def _shared_daily_budget(workspace: Any, manager_config_path: str | Path | None,
@@ -405,11 +454,42 @@ def _shared_daily_budget(workspace: Any, manager_config_path: str | Path | None,
         return {"status": "failed", "note": f"没有绑定共享每日预算：{exc}"}
 
 
+def _claim_support_settings(workspace: Any, source_state_dir: Path | None) -> str:
+    """Start with the host's claim-support settings rather than none at all.
+
+    ``claim-support-verification.json`` holds the owner's operating choices
+    for the support check (backfill pause, second opinion, daily ceilings).
+    Absent means "module defaults", which is behaviourally what an empty file
+    means too -- but the ops scripts that pause the backfill across the fleet
+    edit the file in place, and an environment without one was an
+    environment those scripts silently skipped (ws-e399).  Copied from the
+    mature environment when it has one (validated by the module's own loader,
+    so an invalid file is not propagated), otherwise seeded empty; an owner's
+    existing file is never replaced.
+    """
+
+    from .claim_support_verification import SETTINGS_FILENAME, load_settings
+
+    value: dict[str, Any] = {}
+    if source_state_dir is not None and (source_state_dir / SETTINGS_FILENAME).is_file():
+        try:
+            load_settings(source_state_dir)
+            candidate = json.loads(
+                (source_state_dir / SETTINGS_FILENAME).read_text(encoding="utf-8"))
+            if isinstance(candidate, dict):
+                value = candidate
+        except Exception:  # noqa: BLE001 - an unreadable source file is not copied
+            value = {}
+    return _atomic_seed(workspace.state_dir / SETTINGS_FILENAME, value)
+
+
 def install(workspace_manifest: str | Path, *, actor_ref: str,
             stage_host_lanes: bool = True,
             host_sources: Mapping[str, Path] | None = None,
             manager_config_path: str | Path | None = None,
-            shared_daily_budget_policy_path: str | Path | None = None) -> dict[str, Any]:
+            shared_daily_budget_policy_path: str | Path | None = None,
+            source_state_dir: str | Path | None = None,
+            legacy_service_path: str | Path | None = None) -> dict[str, Any]:
     """Install idempotent, mission-neutral research foundations.
 
     ``host_sources`` names where this machine keeps the host-level lane inputs.
@@ -438,6 +518,23 @@ def install(workspace_manifest: str | Path, *, actor_ref: str,
     if not (workspace.state_dir / "core.sqlite").is_file():
         raise WorkspaceError("bootstrap the workspace before runtime setup")
 
+    # Control and Writer launch independently. Provision the empty staging
+    # schema before either process starts; waiting for Writer's first mutation
+    # otherwise leaves the review control plane unable to open a new project.
+    from .research_verification import CandidateStagingStore
+    from .research_review import HumanReviewAuthority
+    staging_path = (config.control.research_review.candidate_staging_path
+                    if config.control is not None and config.control.research_review is not None
+                    else workspace.state_dir / "research-review/candidate-staging.sqlite")
+    try:
+        Path(staging_path).resolve().relative_to(workspace.state_dir.resolve())
+    except ValueError as exc:
+        raise WorkspaceError("candidate staging must remain inside the workspace state") from exc
+    staging = CandidateStagingStore(staging_path)
+    staging.close()
+    review = HumanReviewAuthority(staging_path)
+    review.close()
+
     defaults = {
         "market-proxy-mappings.json": {"schema_version": "0.1", "mappings": []},
         "tracking-policy.json": TRACKING_POLICY,
@@ -445,9 +542,23 @@ def install(workspace_manifest: str | Path, *, actor_ref: str,
     }
     files = {name: _atomic_seed(workspace.state_dir / name, value)
              for name, value in defaults.items()}
+    # Vision-gap #13: the owner delivery contract, seeded exactly as install.sh
+    # seeds it everywhere else -- proposed, no recipient.  The new workspace's
+    # owner approves it once, with the chat id, like every other connector.
+    from .owner_delivery import CONTRACT_FILE_NAME, GOVERNANCE_DIR_NAME, build_contract_record
+
+    files[f"{GOVERNANCE_DIR_NAME}/{CONTRACT_FILE_NAME}"] = _atomic_seed(
+        workspace.state_dir / GOVERNANCE_DIR_NAME / CONTRACT_FILE_NAME,
+        build_contract_record())
     connectors, unsupported = _connector_records(workspace, actor_ref)
+    source_state = (Path(source_state_dir).expanduser().resolve()
+                    if source_state_dir is not None
+                    else _source_state_dir(workspace, manager_config_path,
+                                           legacy_service_path))
     host_lanes = _host_lane_inputs(workspace, actor_ref, host_sources,
-                                   stage_host_lanes)
+                                   stage_host_lanes, source_state)
+    files["claim-support-verification.json"] = _claim_support_settings(
+        workspace, source_state)
     shared_budget = _shared_daily_budget(workspace, manager_config_path,
                                          shared_daily_budget_policy_path)
     routing_policies = _service_pinned_policy_lineages(workspace)
@@ -497,8 +608,12 @@ def install(workspace_manifest: str | Path, *, actor_ref: str,
             },
             "debate_policy": {"policy_ref": DEBATE_POLICY["policy_ref"],
                               "content_hash": debate_hash},
-            "conviction_policy": {"policy_ref": CONVICTION_POLICY["policy_ref"],
-                                  "content_hash": conviction_hash},
+            # ADR-0013: a new workspace drafts under the v2 code default until
+            # the owner publishes a version; v1 is kept for comparison.
+            "conviction_policy": {"policy_ref": CONVICTION_V2_DEFAULT_REF,
+                                  "content_hash": CONVICTION_V2_DEFAULT_HASH,
+                                  "v1": {"policy_ref": CONVICTION_POLICY["policy_ref"],
+                                         "content_hash": conviction_hash}},
             "tracking_policy": {
                 "path": str(workspace.state_dir / "tracking-policy.json"),
                 "policy_ref": TRACKING_POLICY["policy_ref"],

@@ -1,5 +1,7 @@
 # Dalton Research Agent OS：愿景与架构规划 v0.1
 
+历史技术评审：保留当时结论与局限；当前运行状态见 [项目状态](../PROJECT_STATUS.md)。原始操作证据私有保存。
+
 > 状态：讨论底稿；独立架构审阅已完成，见 `fable-5-independent-review-v0.1.md`
 > 日期：2026-08-13
 > 范围：定义我们想实现什么、为什么现有 Dalton 不够、目标系统应如何运行，以及从现有 Coverage OS 演进的路径。本文件不是实施规格，也不绑定某个模型或 agent harness。
@@ -50,10 +52,10 @@ Dalton v1 已经不是空白聊天 agent。现有 Coverage OS 提供了可继续
 
 参考现有文件：
 
-- `/Users/everflow/.openclaw/workspace-chem/references/coverage-architecture.md`
-- `/Users/everflow/.openclaw/workspace-chem/config/coverage.json`
-- `/Users/everflow/.openclaw/workspace-chem/scripts/coverage_os.py`
-- `/Users/everflow/.openclaw/workspace-chem/data/coverage/coverage.db`
+- `$HOME/.openclaw/workspace-chem/references/coverage-architecture.md`
+- 历史工作区的 `config/coverage.json`
+- `$HOME/.openclaw/workspace-chem/scripts/coverage_os.py`
+- `$HOME/.openclaw/workspace-chem/data/coverage/coverage.db`
 
 ## 3. 当前痛点
 

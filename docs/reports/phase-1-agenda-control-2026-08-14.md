@@ -36,7 +36,7 @@ delivery receipt；操作入口是 Tailscale Serve 内网地址。已送达 deci
 ## Live 验收
 
 - `dalton.writer`、`dalton.controller`、`dalton.control` 三个 LaunchAgent 均为 running。
-- Tailscale Serve 已把 `https://everflowdemac-mini.taild2c767.ts.net:8793/` 代理到 loopback control service。
+- Tailscale Serve 已把 `https://your-node.your-tailnet.ts.net:8793/` 代理到 loopback control service。
 - 经 Tailscale Serve 的 HTML 与 `/v1/agenda` 请求成功，identity allowlist 生效。Mac mini 本机因
   Tailscale CLI `1.98.8` 与 daemon `1.96.4` 版本不一致，系统 resolver 无法解析自己的 MagicDNS
   名称；本机验收使用显式地址映射通过 Serve 路径完成。

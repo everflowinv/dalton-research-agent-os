@@ -59,7 +59,7 @@ _SCHEMA_PATH = Path(__file__).with_name("judgement_outcome_schema.sql")
 #: Bumped when the arithmetic below changes what it means.  Part of every
 #: check's identity, so a re-reading under a new formula is a new version of
 #: the check rather than a quiet correction of the old one.
-FORMULA_REF = "judgement-outcome-formula:w4:v1"
+FORMULA_REF = "judgement-outcome-formula:preregistered:v2"
 
 #: The two shapes of a past decision this module can grade, and the actions
 #: that fall into each.  ``note`` and ``research`` are neither: they change no
@@ -411,6 +411,7 @@ def gradable_judgements(
             "company_ref": row["company_ref"], "decision": row["decision"],
             "action": row["action"], "created_at": row["created_at"],
             "check_kind": kind,
+            "judgement_hash": record.get("content_hash"),
         })
     return graded
 
@@ -458,6 +459,71 @@ def reconciliations_by_company(
 # the pass
 # ---------------------------------------------------------------------------
 
+def registered_check(connection: sqlite3.Connection, judgement: Mapping[str, Any],
+                     series_by_company: Mapping[str, Any]) -> dict[str, Any]:
+    """Score only the exact preregistered target; v1 arithmetic remains readable."""
+    from .outcome_registration import read_registration, formal_thesis, actual_publications
+    from .model_cell_reconciliation import read_existing
+    kind = judgement["check_kind"]
+    registration = read_registration(connection, judgement["id"])
+    if registration is None:
+        from .event_judgement import company_theses
+        formal = [row for row in company_theses(connection, judgement["company_ref"])
+                  if row.get("subject_ref") == judgement["company_ref"] and row.get("view_status", "active") == "active"]
+        reason = "outcome_not_preregistered" if formal else "coverage_gap_no_formal_thesis"
+        return _unavailable(kind, reason, governance_status="coverage_gap" if not formal else "unavailable")
+    if registration["judgement_hash"] != judgement["judgement_hash"]:
+        raise JudgementOutcomeConflict("outcome judgement binding drifted")
+    formal_thesis(connection, judgement["company_ref"], registration["thesis_version_ref"], registration["thesis_hash"])
+    evidence = {"registration_ref": registration["id"], "registration_hash": registration["content_hash"],
+                "registered_at": registration["registered_at"], "registered_direction": registration["direction"],
+                "thesis_version_ref": registration["thesis_version_ref"], "thesis_hash": registration["thesis_hash"],
+                "benchmark_version_ref": registration["benchmark_version_ref"], "benchmark_hash": registration["benchmark_hash"],
+                "metric_ref": registration["metric_ref"], "period_start": registration["period_start"], "period_end": registration["period_end"],
+                "threshold_percent": registration["threshold_percent"], "information_cutoff": registration["information_cutoff"]}
+    threshold = Decimal(str(registration["threshold_percent"]))
+    if registration["metric_ref"] == "price_excess_return":
+        selected = {ref: series_by_company.get(ref) for ref in [judgement["company_ref"], *registration["basket_members"]]}
+        dates = settled_dates(selected)
+        start, end = registration["period_start"], registration["period_end"]
+        if not dates or dates[-1] < end:
+            return {"check_kind": kind, "outcome": "pending", "reason": "registered_price_window_not_settled", **evidence}
+        endpoints = [[day for day in dates if day <= boundary] for boundary in (start, end)]
+        if any(not points for points in endpoints): return _unavailable(kind, "registered_price_endpoint_missing", **evidence)
+        from datetime import date
+        left, right = endpoints[0][-1], endpoints[1][-1]
+        if left < registration["registered_at"][:10] or any((date.fromisoformat(boundary)-date.fromisoformat(point)).days > 7 for boundary, point in zip((start,end),(left,right))):
+            return _unavailable(kind, "registered_price_endpoint_missing", **evidence)
+        values = {ref: cumulative_return(series, from_date=left, as_of=right) for ref, series in selected.items()}
+        if any(value is None for value in values.values()): return _unavailable(kind, "registered_price_basket_missing", **evidence)
+        basket = sum((values[ref] for ref in registration["basket_members"]), Decimal(0))/Decimal(len(registration["basket_members"]))
+        deviation = values[judgement["company_ref"]]-basket
+        actual_proof = {"from_date": left, "as_of": right, "basket_members": registration["basket_members"],
+                        "price_inputs_hash": content_hash(selected), "excess_vs_basket_percent": str(deviation)}
+    else:
+        rows = [row for row in read_existing(connection, judgement["company_ref"])
+                if row["model_version_ref"] == registration["benchmark_version_ref"] and row["model_hash"] == registration["benchmark_hash"]
+                and row["result_ref"] == registration["metric_ref"] and row["period"]["start"] == registration["period_start"]
+                and row["period"]["end"] == registration["period_end"]]
+        events = actual_publications(connection, judgement["company_ref"], registration["period_end"])
+        if not events: return {"check_kind":kind, "outcome":"pending", "reason":"registered_actual_not_published", **evidence}
+        first = min(event["published_on"][:10] for event in events)
+        if registration["registered_at"][:10] >= first:
+            return _unavailable(kind, "outcome_registration_not_before_actual_publication", actual_publications=events, **evidence)
+        rows = [row for row in rows if row["status"] == "compared"]
+        if not rows: return _unavailable(kind, "registered_exact_actual_unavailable", actual_publications=events, **evidence)
+        selected = max(rows, key=lambda row: (row["actual"]["basis"] == "filed", row["actual"]["available_on"]))
+        value = selected.get("deviation_percent")
+        if value is None: return _unavailable(kind, "registered_benchmark_zero_no_percent_direction", **evidence)
+        deviation = Decimal(str(value))
+        actual_proof = {"reconciliation_ref": selected["id"], "reconciliation_hash": selected["content_hash"], "actual_publications": events,
+                        "deviation_percent": str(deviation), "forecast_value": selected["forecast"], "actual_value": selected["actual"]["value"]}
+    direction = registration["direction"]
+    confirmed = abs(deviation) <= threshold if direction == "flat" else (deviation > threshold if direction == "up" else deviation < -threshold)
+    contradicted = abs(deviation) > threshold if direction == "flat" else (deviation < -threshold if direction == "up" else deviation > threshold)
+    outcome = ("should_have_moved" if contradicted else "held") if kind == "no_change" else ("moved_right" if confirmed else "moved_wrong" if contradicted else "not_confirmed")
+    return {"check_kind": kind, "outcome": outcome, "reason": "registered_target_compared", **evidence, **actual_proof}
+
 
 def build_outcome_checks(
     connection: sqlite3.Connection,
@@ -474,21 +540,9 @@ def build_outcome_checks(
     are the same computation by construction rather than by agreement.
     """
 
-    dates = settled_dates(series_by_company)
-    reconciliations = reconciliations_by_company(connection, company_refs=company_refs)
     checks: list[dict[str, Any]] = []
     for judgement in gradable_judgements(connection, company_refs=company_refs):
-        if judgement["check_kind"] == "no_change":
-            body = no_change_check(
-                judgement=judgement, series_by_company=series_by_company,
-                dates=dates, thresholds=thresholds,
-                stance=stances.get(judgement["company_ref"]),
-            )
-        else:
-            body = revise_check(
-                judgement=judgement,
-                reconciliations=reconciliations.get(judgement["company_ref"], []),
-            )
+        body = registered_check(connection, judgement, series_by_company)
         inputs = {key: value for key, value in body.items() if key != "reason"}
         checks.append({
             "schema_version": SCHEMA_VERSION,

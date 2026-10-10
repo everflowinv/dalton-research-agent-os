@@ -64,7 +64,7 @@ from .research_playbook import DECISION_VOCABULARY
 from .store import canonical_json, content_hash
 
 SCHEMA_VERSION = "0.1"
-EVENT_PROMPT_CONTRACT_VERSION = "event-output-constraints:0.4"
+EVENT_PROMPT_CONTRACT_VERSION = "event-output-constraints:0.8"
 _SCHEMA_PATH = Path(__file__).with_name("event_judgement_schema.sql")
 
 # Registered at import: anything that can call ``judge()`` has already run this
@@ -139,7 +139,7 @@ POOL_SHARE = Decimal("0.15")
 #: earnings names are spelled here rather than imported because
 #: ``earnings_season`` imports this module.
 POOL_LEDGER_PURPOSES: tuple[str, ...] = (
-    "event_judgement", "event_judgement_verifier",
+    "event_judgement", "event_judgement_verifier", "event_triage",
     "thesis_reflection", "thesis_reflection_verifier",
     "earnings_preview", "earnings_preview_verifier",
     "earnings_calibration", "earnings_calibration_verifier",
@@ -162,8 +162,10 @@ DAILY_DIGEST_MARKER = "event-note-daily-digest:v1"
 DAILY_DIGEST_TEMPLATE_REF = "template:event-note-daily-digest:v1"
 DAILY_DIGEST_LOOKBACK_DAYS = 7
 DAILY_DIGEST_MAX_ENTRIES = 22
-DAILY_DIGEST_FIGURE_ELIDED = "〔数字见研判记录〕"
-DAILY_DIGEST_FIGURE_FALLBACK = "研判理由含未经 Claim 溯源的数字，正文从略；完整理由见当日研判记录。"
+#: Batch F: a digest sentence whose figure nothing in this Core sources is left
+#: out (never replaced by an indirect placeholder); this line counts them.
+DAILY_DIGEST_DROPPED_NOTE = "另有 {n} 句含无法溯源的数字，未收入本摘要（完整理由见本节标题所指的研判记录）。"
+DAILY_DIGEST_EMPTY_NOTE = "研判理由的每一句都含无法溯源的数字，正文从略（完整理由见本节标题所指的研判记录）。"
 MAX_REFS = 12
 MAX_RECENT_JUDGEMENTS = 5
 MAX_CLAIMS_IN_PROMPT = 12
@@ -497,6 +499,14 @@ def build_judge_prompt(
     lines.append("")
     lines.append("## Where evidence can be got, if you decide research is needed")
     lines.append(context.get("source_table") or "(no source map)")
+    material = context.get("result")
+    if material:
+        # Batch F: the event's own body, the same-event pack, the expectations
+        # baseline and the market reaction, every figure tagged; and, for a
+        # result-type event, the 实际 vs 预期 contract.
+        from .event_judgement_result import prompt_lines as result_prompt_lines
+
+        lines.extend(result_prompt_lines(material))
     lines.append("")
     lines.append("Return raw JSON only, nothing else, exactly these keys:")
     lines.append(
@@ -520,7 +530,19 @@ def build_judge_prompt(
     lines.append(
         'Add "research_question": "<one question>" if and only if action is "research".'
     )
+    if material:
+        from .event_judgement_result import output_spec_lines
+
+        lines.extend(output_spec_lines(material))
     lines.extend([
+        f"Reference-list limits: driver_refs, thesis_refs and citations must each be "
+        f"a JSON list of at most {MAX_REFS} references (count list entries before deduplication). "
+        "For citations, choose the decisive references actually supporting the judgement; "
+        "do not copy every input or numbered tag into this top-level list.",
+        "For a result event, retain every required numeric source tag in the corresponding "
+        "actual_vs_expected row's sources and figure text. These per-row source bindings "
+        "remain required even when that tag is not selected among the top-level citations. "
+        "Do not discard a figure's evidence to fit the top-level list limit.",
         f"Text limits are characters, not words: because, forecast_change.because and "
         f"forecast_change.outside_band_reason each allow at most {MAX_BECAUSE_CHARS}; "
         f"note at most {MAX_NOTE_CHARS} characters and {MAX_NOTE_SENTENCES} sentences; "
@@ -528,6 +550,9 @@ def build_judge_prompt(
         "Use the available space for the decision, decisive evidence and the specific "
         "condition that would change it. Do not repeat the source table or write a full memo.",
     ])
+    lines.append('For revise_thesis, add proposed_statement (a complete nonempty revised thesis) and '
+                 'proposed_confidence (low|medium|high, consistent with its wording). Name the thesis version. '
+                 'A statement opposite to the old position requires THESIS_BROKEN, not THESIS_WEAKENED.')
     lines.append("Every citation must be a ref printed above. Do not invent a ref.")
     prompt = "\n".join(lines)
     return _bounded_prompt(prompt, max_bytes=max_prompt_bytes)
@@ -552,6 +577,13 @@ def allowed_refs(context: Mapping[str, Any]) -> set[str]:
     refs.update(thesis["ref"] for thesis in context.get("theses") or ())
     refs.update(driver["ref"] for driver in context.get("drivers") or ())
     refs.update(claim["ref"] for claim in context.get("claims") or ())
+    material = context.get("result") or {}
+    for tag, ref in (material.get("tags") or {}).items():
+        # A tag ([P3] / N12) and the passage or pack number it binds are both citable.
+        if not str(tag).startswith(("O", "C")):
+            refs.add(str(tag))
+            refs.add(f"[{tag}]")
+            refs.add(str(ref))
     return refs
 
 
@@ -591,6 +623,14 @@ def validate_judge_output(value: Any, context: Mapping[str, Any]) -> dict[str, A
     expected = set(required)
     if action in conditional:
         expected.add(conditional[action])
+    if action == "revise_thesis":
+        expected |= {"proposed_statement", "proposed_confidence"}
+    material = context.get("result") or {}
+    result_contract = material.get("kind") == "result"
+    if result_contract:
+        from .event_judgement_result import RESULT_KEYS
+
+        expected |= set(RESULT_KEYS)
     extra = sorted(set(value) - expected)
     if extra:
         raise EventJudgementValidationError(
@@ -619,6 +659,25 @@ def validate_judge_output(value: Any, context: Mapping[str, Any]) -> dict[str, A
         raise EventJudgementValidationError(
             "an action other than no_change must cite what it rests on"
         )
+    normalised_result = None
+    if result_contract:
+        from .event_judgement_result import result_contract_problems
+
+        normalised_result, problems = result_contract_problems(
+            value, material, decision=decision, action=action)
+        if problems:
+            raise EventJudgementValidationError(
+                "the result-event contract is not met: " + "; ".join(problems[:6]))
+    elif material and not material.get("body_read") and not material.get("group_readable"):
+        # Batch F: a document whose body was not read is never judged on its
+        # title.  Only 证据不足，安排读取 is an answer (the lane records that one
+        # deterministically; this is the refusal for a model that tried more).
+        from .event_judgement_result import body_required
+
+        if body_required(context["event"]) and (decision, action) != ("NO_CHANGE", "research"):
+            raise EventJudgementValidationError(
+                "the event's body was not read: the only answer is NO_CHANGE / research "
+                "(证据不足，安排读取), not " + f"{decision} / {action}")
     result: dict[str, Any] = {
         "decision": decision,
         "action": action,
@@ -627,6 +686,18 @@ def validate_judge_output(value: Any, context: Mapping[str, Any]) -> dict[str, A
         "because": _text(value["because"], "because", maximum=MAX_BECAUSE_CHARS),
         "citations": citations,
     }
+    if action == "revise_thesis":
+        from .thesis_question_model import validate_revision_proposal
+        try:
+            validate_revision_proposal(value["proposed_statement"], value["proposed_confidence"], decision=decision)
+        except ValueError as exc:
+            raise EventJudgementValidationError(str(exc)) from exc
+        result["proposed_statement"] = _text(value["proposed_statement"], "proposed_statement", maximum=4000)
+        result["proposed_confidence"] = value["proposed_confidence"]
+        if not thesis_refs:
+            raise EventJudgementValidationError("revise_thesis must name the current thesis")
+    if normalised_result is not None:
+        result["result"] = normalised_result
     if action == "note":
         note = _text(value["note"], "note", maximum=MAX_NOTE_CHARS)
         if len(_sentences(note)) > MAX_NOTE_SENTENCES:
@@ -1167,6 +1238,8 @@ def build_verifier_prompt(
     context: Mapping[str, Any], judgement: Mapping[str, Any],
     *, max_prompt_bytes: int = MAX_PROMPT_BYTES,
 ) -> str:
+    from .research_reasoning_lint import VERIFIER_LINT_INSTRUCTIONS
+
     event = context["event"]
     lines = [
         "You are an independent verifier. Another model read one event and decided what,",
@@ -1178,6 +1251,8 @@ def build_verifier_prompt(
         "of contrarianism. Confidence changes must follow the cited new evidence.",
         "Check that the stated decision has a preferred interpretation and concrete",
         "conditions or observations that could change it, not uncommitted alternatives.",
+        "Research reasoning rules (report a broken rule with an existing evidence finding code):",
+        *VERIFIER_LINT_INSTRUCTIONS,
         "",
         f"Event ({event['kind']}, evidence tier {event['evidence_tier']}, ref {event['id']}):",
         *_payload_lines(event),
@@ -1186,11 +1261,13 @@ def build_verifier_prompt(
     lines.extend([
         "",
         f"Decision: {judgement['decision']} / {judgement['action']}",
+        *thesis_direction_prompt(context, judgement),
         f"Because: {judgement['because']}",
         f"Cited: {', '.join(judgement['citations']) or '(nothing)'}",
         f"Drivers named: {', '.join(judgement['driver_refs']) or '(none)'}",
         f"Theses named: {', '.join(judgement['thesis_refs']) or '(none)'}",
         "",
+        *_result_verifier_lines(context, judgement),
         _producer_draft_line("Producer judgement", judgement),
         *_event_group_lines(context),
         *_cited_evidence_lines(context, judgement["citations"]),
@@ -1204,6 +1281,54 @@ def build_verifier_prompt(
         "\n".join(lines), preserve_from="Producer judgement (canonical JSON):",
         max_bytes=max_prompt_bytes,
     )
+
+
+def _result_verifier_lines(context: Mapping[str, Any], judgement: Mapping[str, Any]) -> list[str]:
+    """Batch F: what the verifier checks on a result-type event's table."""
+
+    result = judgement.get("result")
+    material = context.get("result") or {}
+    if not result:
+        return []
+    texts = material.get("tag_texts") or {}
+    cited = sorted({tag for row in result.get("actual_vs_expected") or () for tag in row.get("sources") or ()})
+    lines = [
+        "",
+        "This is a result-type event. The producer filled an 实际 vs 预期 table; check that each row's",
+        "figures are what its tagged sources say, that beat / miss / range words follow from the figures,",
+        "that the market reaction is read against the stated benchmark (or says 无基准), and that a",
+        "NO_CHANGE explains why the surprise does not change the thesis.",
+        f"Evidence status: {result.get('evidence_status')}; event body read: {bool(material.get('body_read'))}",
+        "Table (canonical JSON): " + json.dumps(result.get("actual_vs_expected") or [], ensure_ascii=False,
+                                                 sort_keys=True),
+        "Market reaction: " + json.dumps(result.get("market_reaction") or {}, ensure_ascii=False, sort_keys=True),
+        "Thesis impact: " + json.dumps(result.get("thesis_impact") or {}, ensure_ascii=False, sort_keys=True),
+        "## The tagged sources the table cites",
+    ]
+    for tag in cited:
+        lines.append(f"[{tag}] {str(texts.get(tag, ''))[:900]}")
+    return lines
+
+
+def thesis_direction_proposals(context, judgement):
+    from .thesis_question_model import direction_binding
+    if not judgement.get("proposed_statement"):
+        return []
+    named = set(judgement.get("thesis_refs") or ())
+    return [direction_binding(t, judgement["proposed_statement"], judgement["proposed_confidence"])
+            for t in context.get("theses") or () if t["ref"] in named]
+
+
+def thesis_direction_prompt(context, judgement):
+    if not judgement.get("proposed_statement"):
+        return []
+    return ["Compare each named old thesis with the proposed statement, including confidence wording. "
+            "Add direction_checks to the JSON: one {thesis_version_ref, relation: same|opposite|unclear, reason} "
+            "in the order below. Opposite direction requires THESIS_BROKEN; unclear cannot pass. "
+            "Do not trust the producer's direction label.",
+            "Old theses: " + canonical_json(list(context.get("theses") or ())),
+            "Proposal: " + canonical_json({"statement": judgement["proposed_statement"], "confidence": judgement["proposed_confidence"]}),
+            "Required checks: " + canonical_json(thesis_direction_proposals(context, judgement))]
 
 
 def validate_verifier_output(value: Any) -> dict[str, Any]:
@@ -1267,8 +1392,13 @@ def judge(
     model: Any,
     mission: Mapping[str, Any],
     request_id: str,
+    prompt_sink: Callable[[str, str], None] | None = None,
 ) -> dict[str, Any]:
-    """One bounded call, verified against the closed schema before it is believed."""
+    """One bounded call, verified against the closed schema before it is believed.
+
+    ``prompt_sink(role, prompt)`` receives the exact prompt sent, so the run
+    directory keeps it for audit (batch F).
+    """
 
     try:
         prompt = build_judge_prompt(
@@ -1277,6 +1407,8 @@ def judge(
     except EventJudgementValidationError as exc:
         return {"status": "refused", "reason": str(exc), "prompt_chars": 0,
                 "model": None}
+    if prompt_sink is not None:
+        prompt_sink("judge", prompt)
     try:
         call = model.call(
             purpose=PURPOSE, request_id=request_id, prompt=prompt, mission=mission
@@ -1298,6 +1430,37 @@ def judge(
     return {"status": "judged", "prompt_chars": len(prompt), "model": provenance, **validated}
 
 
+def reasoning_findings(context: Mapping[str, Any], judgement: Mapping[str, Any]) -> list[dict[str, Any]]:
+    """Lint the proposed analysis, excluding quoted sources and research questions."""
+    from .research_reasoning_lint import lint_text, source_kinds_for_refs
+
+    material = context.get("result") or {}
+    aliases = dict(material.get("tags") or {})
+    refs = list(judgement.get("citations") or ())
+    for row in (judgement.get("result") or {}).get("actual_vs_expected") or ():
+        refs.extend(row.get("sources") or ())
+    consensus_ref = material.get("consensus_version_ref")
+    if isinstance(consensus_ref, str) and consensus_ref.startswith(("consensus-estimate-version:", "consensus-estimate:")):
+        for tag, ref in list(aliases.items()):
+            if str(ref).startswith("pack-json:/event_result/consensus/"):
+                aliases[tag] = consensus_ref
+    kinds = source_kinds_for_refs(refs, aliases)
+    sections = {key: judgement[key] for key in ("because", "note") if judgement.get(key)}
+    change = judgement.get("forecast_change") or {}
+    if change.get("because"):
+        sections["forecast_change"] = change["because"]
+    result = judgement.get("result") or {}
+    for key in ("thesis_impact", "market_reaction"):
+        value = result.get(key)
+        if isinstance(value, str):
+            sections[key] = value
+        elif isinstance(value, Mapping):
+            sections[key] = "\n".join(str(value[name]) for name in
+                ("because", "reason", "interpretation", "statement", "explanation") if value.get(name))
+    return [finding for name, text in sections.items()
+            for finding in lint_text(str(text), section=name, source_kinds=kinds)]
+
+
 def verify(
     context: Mapping[str, Any],
     judgement: Mapping[str, Any],
@@ -1306,6 +1469,7 @@ def verify(
     mission: Mapping[str, Any],
     request_id: str,
     family_resolver: Callable[[str | None], str | None],
+    prompt_sink: Callable[[str, str], None] | None = None,
 ) -> dict[str, Any]:
     """A second, separate call that returns only a verdict on the first.
 
@@ -1316,6 +1480,10 @@ def verify(
 
     if judgement.get("status") != "judged":
         return {"status": "skipped", "reason": "there is no judgement to verify"}
+    lint = reasoning_findings(context, judgement)
+    if lint:
+        return {"status": "refused", "model": None, "reason": "reasoning_lint",
+                "reasoning_findings": lint, "findings": lint}
     # Resolve what can be resolved before paying: a producer whose family is
     # unknown can never be verified independently, so there is nothing to buy.
     producer_family = family_resolver((judgement.get("model") or {}).get("route_decision_ref"))
@@ -1332,6 +1500,8 @@ def verify(
         )
     except EventJudgementValidationError as exc:
         return {"status": "refused", "reason": str(exc), "model": None}
+    if prompt_sink is not None:
+        prompt_sink("verifier", prompt)
     try:
         call = independent_model_call(
             model,
@@ -1360,12 +1530,24 @@ def verify(
         return {"status": "refused", "model": provenance, "independence": independence,
                 "reason": f"model_family_not_independent: both calls ran on {producer_family}"}
     try:
-        validated = validate_verifier_output(unwrap_json_object(call["text"]))
-    except EventJudgementValidationError as exc:
+        payload = unwrap_json_object(call["text"])
+        checks = payload.pop("direction_checks", None)
+        validated = validate_verifier_output(payload)
+        proposals = thesis_direction_proposals(context, judgement)
+        if proposals:
+            from .thesis_question_model import validate_directions
+            validated["direction_checks"] = validate_directions(checks, proposals)
+            if any(c["relation"] == "unclear" or (c["relation"] == "opposite" and judgement["decision"] != "THESIS_BROKEN") for c in validated["direction_checks"]):
+                raise EventJudgementValidationError("opposite thesis requires THESIS_BROKEN; unclear direction requires review")
+
+    except (EventJudgementValidationError, ValueError) as exc:
         return {"status": "refused", "reason": str(exc), "model": provenance,
                 "independence": independence}
+    from .research_product_quality import product_quality
+    quality = product_quality("event_judgement", judgement,
+                              sources=(context.get("result") or {}).get("tags") or {})
     return {
-        "status": "verified",
+        "status": "verified", "quality": quality,
         "judged_decision_hash": content_hash({
             "decision": judgement["decision"], "action": judgement["action"],
             "because": judgement["because"], "citations": judgement["citations"],
@@ -1435,6 +1617,19 @@ class EventJudgementAuthority:
         self.connection: sqlite3.Connection = store.connection
         self.connection.executescript(_SCHEMA_PATH.read_text(encoding="utf-8"))
 
+    @classmethod
+    def reader(cls, connection: sqlite3.Connection) -> "EventJudgementAuthority":
+        """Reads only, over a connection this does not own: no schema, no writes.
+
+        For an owner's dry run against a Core opened ``mode=ro``; every
+        writing method on the result fails because it has no store.
+        """
+
+        authority = cls.__new__(cls)
+        authority.store = None
+        authority.connection = connection
+        return authority
+
     # -- reading -----------------------------------------------------------
 
     def judgement_for(self, event_ref: str) -> dict[str, Any] | None:
@@ -1443,6 +1638,23 @@ class EventJudgementAuthority:
             (_text(event_ref, "event_ref"),),
         ).fetchone()
         return None if row is None else _decode(row, "EventJudgement")
+
+    def latest_judgement_for(self, event_ref: str) -> dict[str, Any] | None:
+        """The newest judgement of an event: its last re-judgement, else the original."""
+
+        row = self.connection.execute(
+            "SELECT * FROM event_judgements WHERE event_ref=? OR event_ref LIKE ? "
+            "ORDER BY created_at DESC, judgement_id DESC LIMIT 1",
+            (_text(event_ref, "event_ref"), event_ref + "#rejudgement-%"),
+        ).fetchone()
+        return None if row is None else _decode(row, "EventJudgement")
+
+    def rejudgements_for(self, event_ref: str) -> list[dict[str, Any]]:
+        rows = self.connection.execute(
+            "SELECT * FROM event_judgements WHERE event_ref LIKE ? ORDER BY created_at, judgement_id",
+            (_text(event_ref, "event_ref") + "#rejudgement-%",),
+        ).fetchall()
+        return [_decode(row, "EventJudgement") for row in rows]
 
     def judged_event_refs(self, company_ref: str | None = None) -> set[str]:
         query = "SELECT event_ref FROM event_judgements"
@@ -1581,23 +1793,54 @@ class EventJudgementAuthority:
         effect: Mapping[str, Any],
         mission: Mapping[str, Any],
         actor_ref: str,
+        annotations: Mapping[str, Any] | None = None,
+        rejudgement: Mapping[str, Any] | None = None,
     ) -> dict[str, Any]:
-        """Bind one decision to one event and one pair of model work orders."""
+        """Bind one decision to one event and one pair of model work orders.
+
+        ``annotations`` (batch F) carry what the judge read and when the event
+        happened: ``result_material`` (pack record, documents read, tag map,
+        dates, main event) and ``event_dates``.  ``rejudgement`` makes this a
+        bounded re-judgement of an already judged event: it is stored under
+        ``<event>#rejudgement-<n>`` (n at most ``MAX_REJUDGEMENTS``), with the
+        reason and the judgement it follows.
+        """
 
         actor_ref = _text(actor_ref, "actor_ref")
         if actor_ref.startswith("automation:") and (
             actor_ref != mission["autonomy"]["automation_principal"]
         ):
             raise EventJudgementConflict("automation actor is not the mission principal")
+        event_ref = event["id"]
+        if rejudgement is not None:
+            from .event_judgement_result import MAX_REJUDGEMENTS, rejudgement_ref
+
+            sequence = int(rejudgement.get("sequence") or 0)
+            if not 1 <= sequence <= MAX_REJUDGEMENTS:
+                raise EventJudgementValidationError(
+                    f"a re-judgement is numbered 1..{MAX_REJUDGEMENTS}, got {sequence}")
+            prior = self.connection.execute(
+                "SELECT COUNT(*) FROM event_judgements WHERE event_ref=? OR event_ref LIKE ?",
+                (event["id"], event["id"] + "#rejudgement-%")).fetchone()[0]
+            if int(prior) != sequence:
+                existing = self.connection.execute(
+                    "SELECT * FROM event_judgements WHERE event_ref=?",
+                    (rejudgement_ref(event["id"], sequence),)).fetchone()
+                if existing is not None:
+                    return {**_decode(existing, "EventJudgement"), "status": "duplicate"}
+                raise EventJudgementConflict(
+                    f"re-judgement {sequence} of {event['id']} does not follow its {int(prior)} "
+                    "earlier judgement(s)")
+            event_ref = rejudgement_ref(event["id"], sequence)
         record = {
             "schema_version": SCHEMA_VERSION,
             "id": "event-judgement:" + content_hash({
-                "event_ref": event["id"],
+                "event_ref": event_ref,
                 "event_hash": event["content_hash"],
                 "work_order_ref": (judgement.get("model") or {}).get("work_order_ref"),
             })[:32],
             "created_at": _now(),
-            "event_ref": event["id"],
+            "event_ref": event_ref,
             "event_hash": event["content_hash"],
             "event_kind": event["kind"],
             "evidence_tier": event["evidence_tier"],
@@ -1611,12 +1854,15 @@ class EventJudgementAuthority:
             "note": judgement.get("note"),
             "research_question": judgement.get("research_question"),
             "forecast_change": judgement.get("forecast_change"),
+            "proposed_statement": judgement.get("proposed_statement"),
+            "proposed_confidence": judgement.get("proposed_confidence"),
             "verifier": {
                 "status": verification.get("status"),
                 "verdict": verification.get("verdict"),
                 "findings": list(verification.get("findings") or ()),
                 "independence": verification.get("independence"),
                 "reason": verification.get("reason"),
+                "direction_checks": verification.get("direction_checks"),
             },
             "model": judgement.get("model"),
             "verifier_model": verification.get("model"),
@@ -1625,13 +1871,25 @@ class EventJudgementAuthority:
             "mission_version_hash": mission["content_hash"],
             "actor_ref": actor_ref,
         }
+        if judgement.get("result") is not None:
+            record["result"] = dict(judgement["result"])
+        for key, value in (annotations or {}).items():
+            if key in ("result_material", "event_dates", "main_event_ref") and value is not None:
+                record[key] = value
+        if rejudgement is not None:
+            record["rejudgement"] = {
+                "of_event_ref": event["id"], "sequence": int(rejudgement["sequence"]),
+                "reason": str(rejudgement.get("reason")), "label": rejudgement.get("label"),
+                "prior_judgement_ref": rejudgement.get("prior_judgement_ref"),
+                "trigger_refs": list(rejudgement.get("trigger_refs") or ())[:20],
+            }
         record["content_hash"] = content_hash(record)
         cost = int((judgement.get("model") or {}).get("cost_micros") or 0) + int(
             (verification.get("model") or {}).get("cost_micros") or 0
         )
         with self.store._transaction() as cur:
             existing = cur.execute(
-                "SELECT * FROM event_judgements WHERE event_ref=?", (event["id"],)
+                "SELECT * FROM event_judgements WHERE event_ref=?", (event_ref,)
             ).fetchone()
             if existing is not None:
                 return {**_decode(existing, "EventJudgement"), "status": "duplicate"}
@@ -1640,7 +1898,7 @@ class EventJudgementAuthority:
                 "decision,action,verdict,cost_micros,mission_version_ref,record_json,"
                 "content_hash,actor_ref,created_at) VALUES(?,?,?,?,?,?,?,?,?,?,?,?,?)",
                 (
-                    record["id"], event["id"], event["content_hash"], event["company_ref"],
+                    record["id"], event_ref, event["content_hash"], event["company_ref"],
                     record["decision"], record["action"],
                     str(verification.get("verdict") or verification.get("status") or "none"),
                     cost, mission["id"], canonical_json(record), record["content_hash"],
@@ -1779,10 +2037,16 @@ class EventJudgementAuthority:
             raise EventJudgementValidationError(
                 f"a candidate carries one word of {list(DECISION_VOCABULARY)}"
             )
-        if proposed_confidence is not None and proposed_confidence not in ("low", "medium", "high"):
-            raise EventJudgementValidationError(
-                "confidence is ADR-0001's ordinal vocabulary, never a float"
-            )
+        from .thesis_question_model import validate_revision_proposal
+        try:
+            validate_revision_proposal(proposed_statement, proposed_confidence, decision=decision)
+        except ValueError as exc:
+            raise EventJudgementValidationError(str(exc)) from exc
+        held = self.connection.execute("SELECT content_json FROM thesis_versions WHERE version_id=?", (thesis["id"],)).fetchone()
+        if held:
+            old = json.loads(held[0])
+            if (proposed_statement is None or proposed_statement == old.get("statement")) and proposed_confidence == old.get("confidence"):
+                raise EventJudgementValidationError("an unchanged thesis is not a revision candidate")
         refs = [_text(ref, "evidence_refs[]") for ref in (evidence_refs or ())]
         if not refs:
             raise EventJudgementValidationError(
@@ -1894,6 +2158,534 @@ class EventJudgementAuthority:
                 ),
             )
         return {**record, "status": "fresh"}
+
+    def followup_notices(self, company_ref: str | None = None) -> list[dict[str, Any]]:
+        query = "SELECT * FROM judgement_followup_notices"
+        params: list[Any] = []
+        if company_ref is not None:
+            query += " WHERE company_ref=?"
+            params.append(company_ref)
+        query += " ORDER BY created_at, notice_id"
+        return [
+            _decode(row, "JudgementFollowupNotice")
+            for row in self.connection.execute(query, params).fetchall()
+        ]
+
+    def followups_for(self, judgement_ref: str) -> dict[str, list[str]]:
+        """Every governed follow-up already written for one judgement, by kind."""
+
+        ref = _text(judgement_ref, "judgement_ref")
+        return {
+            "candidates": [row[0] for row in self.connection.execute(
+                "SELECT candidate_id FROM thesis_revision_candidates WHERE judgement_ref=? "
+                "ORDER BY candidate_id", (ref,)).fetchall()],
+            "proposals": [row[0] for row in self.connection.execute(
+                "SELECT proposal_id FROM forecast_revision_proposals WHERE judgement_ref=? "
+                "ORDER BY proposal_id", (ref,)).fetchall()],
+            "notices": [row[0] for row in self.connection.execute(
+                "SELECT notice_id FROM judgement_followup_notices WHERE judgement_ref=?",
+                (ref,)).fetchall()] if self._has_table("judgement_followup_notices") else [],
+            "no_revision": [row[0] for row in self.connection.execute(
+                "SELECT followup_id FROM judgement_no_revision_followups "
+                "WHERE judgement_ref=?", (ref,)).fetchall()]
+            if self._has_table("judgement_no_revision_followups") else [],
+        }
+
+    def no_revision_followups(self, company_ref: str | None = None) -> list[dict[str, Any]]:
+        if not self._has_table("judgement_no_revision_followups"):
+            return []
+        query = "SELECT * FROM judgement_no_revision_followups"
+        params: list[Any] = []
+        if company_ref is not None:
+            query += " WHERE company_ref=?"
+            params.append(company_ref)
+        query += " ORDER BY created_at, followup_id"
+        return [
+            _decode(row, "JudgementNoRevisionFollowup")
+            for row in self.connection.execute(query, params).fetchall()
+        ]
+
+    def record_no_revision_followup(
+        self,
+        *,
+        judgement_ref: str,
+        company_ref: str,
+        decision: str,
+        action: str,
+        because: str,
+        evidence_refs: Sequence[str],
+        maintained_theses: Sequence[Mapping[str, Any]],
+        mission: Mapping[str, Any],
+        actor_ref: str,
+        reflection_ref: str | None = None,
+    ) -> dict[str, Any]:
+        """The governed record of "the preferred view keeps the current thesis".
+
+        A judgement that names current, admitted thesis versions but proposes
+        neither a new statement nor a new confidence has nothing a person
+        could accept: a candidate written for it offered 「接受」 and the
+        thesis authority refused it, correctly, as a rewrite of an unchanged
+        view (ADR-0008).  It is recorded here instead -- one row per
+        judgement, keyed on it, so the forward path and the backfill write it
+        once -- and it is listed in the weekly brief.  It decides nothing.
+        """
+
+        if decision not in DECISION_VOCABULARY or decision == "NO_CHANGE":
+            raise EventJudgementValidationError(
+                "only a decision other than NO_CHANGE owes a follow-up"
+            )
+        refs = [_text(ref, "evidence_refs[]") for ref in (evidence_refs or ())]
+        if not refs:
+            raise EventJudgementValidationError("a follow-up must name its evidence")
+        theses = []
+        for thesis in maintained_theses:
+            theses.append({
+                "thesis_version_ref": _text(thesis.get("ref"), "thesis.ref"),
+                "thesis_version_hash": thesis.get("content_hash"),
+                "thesis_ref": thesis.get("thesis_ref"),
+                "confidence": thesis.get("confidence"),
+            })
+        if not theses:
+            raise EventJudgementValidationError(
+                "a no-revision follow-up names the theses it keeps"
+            )
+        record = {
+            "schema_version": SCHEMA_VERSION,
+            "id": "judgement-no-revision-followup:" + content_hash({
+                "judgement_ref": judgement_ref,
+            })[:32],
+            "created_at": _now(),
+            "judgement_ref": judgement_ref,
+            "company_ref": company_ref,
+            "followup_kind": "no_revision_needed",
+            "label": NO_REVISION_FOLLOWUP_LABEL,
+            "decision": decision,
+            "action": action,
+            "because": _text(because, "because", maximum=MAX_BECAUSE_CHARS),
+            "evidence_refs": list(dict.fromkeys(refs)),
+            "maintained_theses": theses,
+            "reflection_ref": reflection_ref,
+            "mission_version_ref": mission["id"],
+            "mission_version_hash": mission["content_hash"],
+            "actor_ref": actor_ref,
+        }
+        record["content_hash"] = content_hash(record)
+        with self.store._transaction() as cur:
+            existing = cur.execute(
+                "SELECT * FROM judgement_no_revision_followups WHERE judgement_ref=?",
+                (judgement_ref,),
+            ).fetchone()
+            if existing is not None:
+                return {**_decode(existing, "JudgementNoRevisionFollowup"),
+                        "status": "duplicate"}
+            cur.execute(
+                "INSERT INTO judgement_no_revision_followups(followup_id,judgement_ref,"
+                "company_ref,decision,record_json,content_hash,actor_ref,created_at) "
+                "VALUES(?,?,?,?,?,?,?,?)",
+                (
+                    record["id"], judgement_ref, company_ref, decision,
+                    canonical_json(record), record["content_hash"], actor_ref,
+                    record["created_at"],
+                ),
+            )
+        return {**record, "status": "fresh"}
+
+    def _has_table(self, name: str) -> bool:
+        return self.connection.execute(
+            "SELECT 1 FROM sqlite_master WHERE type='table' AND name=?", (name,)
+        ).fetchone() is not None
+
+    def record_followup_notice(
+        self,
+        *,
+        judgement_ref: str,
+        company_ref: str,
+        notice_kind: str,
+        decision: str,
+        action: str,
+        because: str,
+        reason: str,
+        evidence_refs: Sequence[str],
+        named_thesis_refs: Sequence[str],
+        admitted_thesis_refs: Sequence[str],
+        model_version_ref: str | None,
+        mission: Mapping[str, Any],
+        actor_ref: str,
+    ) -> dict[str, Any]:
+        """The owner-facing notice for a judgement nothing else could carry.
+
+        One per judgement, keyed on it, so a retry or a backfill that reaches
+        the same judgement twice finds the first and writes nothing.
+        """
+
+        if notice_kind not in FOLLOWUP_NOTICE_KINDS:
+            raise EventJudgementValidationError(
+                f"a follow-up notice is one of {list(FOLLOWUP_NOTICE_KINDS)}"
+            )
+        if decision not in DECISION_VOCABULARY or decision == "NO_CHANGE":
+            raise EventJudgementValidationError(
+                "only a decision other than NO_CHANGE owes a follow-up"
+            )
+        refs = [_text(ref, "evidence_refs[]") for ref in (evidence_refs or ())]
+        if not refs:
+            raise EventJudgementValidationError("a follow-up notice must name its evidence")
+        record = {
+            "schema_version": SCHEMA_VERSION,
+            "id": "judgement-followup-notice:" + content_hash({
+                "judgement_ref": judgement_ref,
+            })[:32],
+            "created_at": _now(),
+            "judgement_ref": judgement_ref,
+            "company_ref": company_ref,
+            "notice_kind": notice_kind,
+            "label": FOLLOWUP_NOTICE_LABELS[notice_kind],
+            "decision": decision,
+            "action": action,
+            "because": _text(because, "because", maximum=MAX_BECAUSE_CHARS),
+            "reason": _text(reason, "reason", maximum=500),
+            "evidence_refs": list(dict.fromkeys(refs)),
+            "named_thesis_refs": list(dict.fromkeys(named_thesis_refs or ())),
+            "admitted_thesis_refs": list(dict.fromkeys(admitted_thesis_refs or ())),
+            "model_version_ref": model_version_ref,
+            "mission_version_ref": mission["id"],
+            "mission_version_hash": mission["content_hash"],
+            "actor_ref": actor_ref,
+        }
+        record["content_hash"] = content_hash(record)
+        with self.store._transaction() as cur:
+            existing = cur.execute(
+                "SELECT * FROM judgement_followup_notices WHERE judgement_ref=?",
+                (judgement_ref,),
+            ).fetchone()
+            if existing is not None:
+                return {**_decode(existing, "JudgementFollowupNotice"), "status": "duplicate"}
+            cur.execute(
+                "INSERT INTO judgement_followup_notices(notice_id,judgement_ref,company_ref,"
+                "notice_kind,decision,record_json,content_hash,actor_ref,created_at) "
+                "VALUES(?,?,?,?,?,?,?,?,?)",
+                (
+                    record["id"], judgement_ref, company_ref, notice_kind, decision,
+                    canonical_json(record), record["content_hash"], actor_ref,
+                    record["created_at"],
+                ),
+            )
+        return {**record, "status": "fresh"}
+
+
+# ---------------------------------------------------------------------------
+# the governed follow-up (ADR-0010): no judgement other than NO_CHANGE vanishes
+# ---------------------------------------------------------------------------
+
+#: Why a judgement left a notice instead of a candidate or a forecast change.
+FOLLOWUP_NOTICE_KINDS: tuple[str, ...] = ("needs_thesis", "thesis_superseded")
+FOLLOWUP_NOTICE_LABELS: Mapping[str, str] = MappingProxyType({
+    "needs_thesis": "需要论点：这条判断改变了看法，但没有可绑定的已准入论点，"
+                    "也没有可修订的公司模型；请在论点准入队列决定是否为它立论",
+    "thesis_superseded": "论点已更新：这条判断针对的论点版本在它之后已由人修订，"
+                         "已按资料变化阈值重新检查是否需要更新研究；达到阈值时重新开放复核",
+})
+#: The words the weekly brief shows for a judgement that keeps the thesis.
+NO_REVISION_FOLLOWUP_LABEL = (
+    "无需修订：这条判断首选维持现有论点，没有提出新的论点表述或置信度，"
+    "已留档，不进入待决定队列"
+)
+
+
+def proposed_thesis_revision(
+    judgement: Mapping[str, Any],
+) -> tuple[str | None, str | None]:
+    """What the judgement itself proposes the thesis should now say.
+
+    New revise_thesis decisions name a complete statement and explicit confidence.
+    Historical judgements without those fields remain readable and cannot create
+    an empty revision candidate.
+    """
+
+    statement = judgement.get("proposed_statement")
+    confidence = judgement.get("proposed_confidence")
+    statement = statement.strip() if isinstance(statement, str) and statement.strip() else None
+    confidence = confidence if confidence in ("low", "medium", "high") else None
+    return statement, confidence
+
+
+#: The statuses an effect reports when the forecast chain really moved.
+_FORECAST_MOVED = frozenset({"fresh", "published", "duplicate"})
+
+
+def forecast_moved(effect: Mapping[str, Any] | None) -> bool:
+    """Whether the judgement's own effect already published a forecast version."""
+
+    return bool(
+        effect
+        and effect.get("kind") == "revise_forecast"
+        and effect.get("status") in _FORECAST_MOVED
+        and effect.get("model_version_ref")
+    )
+
+
+def resolve_named_theses(
+    connection: sqlite3.Connection, company_ref: str, refs: Sequence[str],
+) -> tuple[list[dict[str, Any]], list[str]]:
+    """Split the thesis versions a judgement named into current and superseded.
+
+    Current means what ``company_theses`` shows the judge, so the forward path
+    and a later backfill bind to the same thing.  A ref that names no thesis
+    version this company can see is dropped: the judge was never allowed to
+    cite it.
+    """
+
+    named = [ref for ref in dict.fromkeys(refs or ()) if isinstance(ref, str)]
+    if not named:
+        return [], []
+    current = {thesis["ref"]: thesis for thesis in company_theses(connection, company_ref)}
+    live = [current[ref] for ref in named if ref in current]
+    superseded: list[str] = []
+    for ref in named:
+        if ref in current:
+            continue
+        try:
+            row = connection.execute(
+                "SELECT thesis_id FROM thesis_versions WHERE version_id=?", (ref,)
+            ).fetchone()
+        except sqlite3.OperationalError:
+            row = None
+        if row is not None and any(
+            thesis.get("thesis_ref") == row["thesis_id"] for thesis in current.values()
+        ):
+            superseded.append(ref)
+    return live, superseded
+
+
+def record_judgement_followups(
+    judgements: EventJudgementAuthority,
+    *,
+    judgement_ref: str,
+    event_ref: str,
+    company_ref: str,
+    judgement: Mapping[str, Any],
+    effect: Mapping[str, Any] | None,
+    mission: Mapping[str, Any],
+    actor_ref: str,
+    model_version_ref: str | None = None,
+    reflection_ref: str | None = None,
+) -> dict[str, Any]:
+    """Write the governed follow-up a decision other than NO_CHANGE owes.
+
+    The one place the forward path (the judgement child) and the backfill
+    sweep both go through.  In order:
+
+    1. every admitted thesis version the judgement named, still current,
+       gets an ADR-0007 ThesisRevisionCandidate -- whatever the action was,
+       because the decision word is itself a statement about the thesis;
+    2. a ``revise_forecast`` whose effect did not already publish a version
+       becomes a ForecastRevisionProposal against the company's model, when
+       there is one (the mission did not grant the write, the invariants
+       refused it, or it predates this code);
+    3. a judgement that got neither leaves one labelled notice for the owner.
+
+    Every write is keyed on the judgement, so calling this twice writes once.
+    """
+
+    decision = judgement.get("decision")
+    if decision == "NO_CHANGE" or decision not in DECISION_VOCABULARY:
+        return {"status": "not_owed", "candidates": [], "proposal_ref": None,
+                "notice_ref": None}
+    autonomy = mission["autonomy"]
+    # ADR-0007: the candidate (and the notice that stands in for one) needs
+    # the scope and its checkpoint. The forecast proposal never did: it is
+    # what a revise_forecast becomes precisely when a write is not granted.
+    thesis_granted = ("thesis_revision_candidate" in autonomy["may_write"]
+                      and "thesis_revision_candidate" in autonomy["human_checkpoints"])
+    action = str(judgement.get("action") or "")
+    because = str(judgement.get("because") or "")[:MAX_BECAUSE_CHARS] or decision
+    evidence = [ref for ref in (judgement.get("citations") or ()) if isinstance(ref, str)]
+    evidence = evidence or [event_ref]
+    named = [ref for ref in (judgement.get("thesis_refs") or ()) if isinstance(ref, str)]
+    connection = judgements.connection
+    live, superseded = resolve_named_theses(connection, company_ref, named)
+
+    # 2026-10-06: a candidate is written only when the judgement proposes
+    # something the thesis could become.  One that names current theses and
+    # proposes nothing is the judgement keeping them (live legacy ACN,
+    # THESIS_WEAKENED, "首选判断是维持…"): accepting such a candidate is a
+    # rewrite of an unchanged view and the thesis authority refuses it
+    # (ADR-0008), so it becomes a governed no-revision follow-up instead.
+    # ``revise_thesis`` is the judge asking a person to rewrite the thesis, so
+    # it stays a candidate even without proposed words; every other action
+    # with nothing proposed is the judgement keeping the thesis as it is.
+    proposed_statement, proposed_confidence = proposed_thesis_revision(judgement)
+    proposes = proposed_confidence is not None
+    if action == "revise_thesis" and not proposes and live:
+        return {"status": "blocked", "reason": "incomplete_revision_proposal", "candidates": [],
+                "proposal_ref": None, "notice_ref": None,
+                "display_reason": "旧建议未写明新的论点和证据充分度，需基于当前证据重新复核。"}
+    candidates = [] if not (thesis_granted and proposes) else [
+        judgements.record_thesis_candidate(
+            # ``company_theses`` names a version ``ref``; the candidate binds
+            # by ``id``. Passing the row through unchanged was a KeyError the
+            # revise_thesis path never lived long enough to raise.
+            judgement_ref=judgement_ref, thesis={**thesis, "id": thesis["ref"]},
+            company_ref=company_ref,
+            decision=decision, because=because, evidence_refs=evidence,
+            falsifier_ref=next(iter(thesis.get("falsifier_refs") or ()), None),
+            proposed_statement=proposed_statement,
+            proposed_confidence=proposed_confidence,
+            mission=mission, actor_ref=actor_ref, reflection_ref=reflection_ref,
+        )["id"]
+        for thesis in live
+    ]
+    no_revision_ref = None
+    if thesis_granted and live and not candidates:
+        no_revision_ref = judgements.record_no_revision_followup(
+            judgement_ref=judgement_ref, company_ref=company_ref, decision=decision,
+            action=action, because=because, evidence_refs=evidence,
+            maintained_theses=live, mission=mission, actor_ref=actor_ref,
+            reflection_ref=reflection_ref,
+        )["id"]
+
+    proposal_ref = None
+    moved = forecast_moved(effect)
+    change = judgement.get("forecast_change")
+    if (action == "revise_forecast" and not moved and model_version_ref
+            and isinstance(change, Mapping)
+            and all(change.get(key) for key in ("driver_ref", "period_end", "value"))):
+        reason = str((effect or {}).get("reason") or "").strip() or (
+            "the judgement's own effect did not revise the model")
+        proposal_ref = judgements.record_forecast_proposal(
+            judgement_ref=judgement_ref, company_ref=company_ref,
+            model_version_ref=model_version_ref, change=change, decision=decision,
+            because=because, evidence_refs=evidence, mission=mission,
+            actor_ref=actor_ref, reason=reason,
+        )["id"]
+
+    if not thesis_granted and not moved and proposal_ref is None:
+        return {"status": "queued", "candidates": [], "proposal_ref": None,
+                "forecast_version_ref": None, "notice_ref": None,
+                "reason": "the mission does not grant thesis_revision_candidate with its "
+                          "checkpoint; ADR-0007's follow-up waits for that mission version"}
+
+    notice_ref = None
+    reopen = None
+    if superseded and thesis_granted:
+        reopen = reopen_superseded_thesis(judgements, company_ref, mission)
+    if (not candidates and no_revision_ref is None and not moved
+            and proposal_ref is None):
+        admitted = [thesis["ref"] for thesis in company_theses(connection, company_ref)]
+        if superseded:
+            kind = "thesis_superseded"
+            reason = ("the thesis version this judgement named was revised by a person "
+                      "after it: " + ", ".join(superseded))
+        else:
+            kind = "needs_thesis"
+            reason = (
+                "no admitted thesis was named by this judgement"
+                + ("" if admitted else " and none is admitted for this company")
+                + ("; no company model to propose a forecast change against"
+                   if action == "revise_forecast" and not model_version_ref else "")
+            )
+        notice_ref = judgements.record_followup_notice(
+            judgement_ref=judgement_ref, company_ref=company_ref, notice_kind=kind,
+            decision=decision, action=action, because=because, reason=reason,
+            evidence_refs=evidence, named_thesis_refs=named,
+            admitted_thesis_refs=admitted, model_version_ref=model_version_ref,
+            mission=mission, actor_ref=actor_ref,
+        )["id"]
+    return {
+        "status": "recorded",
+        "candidates": candidates,
+        "proposal_ref": proposal_ref,
+        "forecast_version_ref": (effect or {}).get("model_version_ref") if moved else None,
+        "notice_ref": notice_ref,
+        "no_revision_ref": no_revision_ref,
+        "reopen": reopen,
+    }
+
+
+def reopen_superseded_thesis(judgements, company_ref, mission):
+    """Use the existing C thresholds; a superseded version is not a terminal exemption."""
+    from .deliverable_reopen import GateReopenAuthority
+    from .redraft_policy import auto_reopen
+    path = getattr(judgements.store, "path", ":memory:")
+    if path == ":memory:":
+        return {"status": "unavailable", "reason": "persistent evidence state is unavailable"}
+    return auto_reopen(GateReopenAuthority(judgements.store), judgements.connection,
+                       Path(path).parent, company_ref, mission=mission)
+
+
+def sweep_judgement_followups(
+    judgements: EventJudgementAuthority,
+    mission: Mapping[str, Any],
+    *,
+    actor_ref: str,
+    model_version_for: Callable[[str], str | None] | None = None,
+    apply: bool = True,
+    limit: int = 200,
+) -> dict[str, Any]:
+    """Backfill: route every owed judgement through ``record_judgement_followups``.
+
+    Reads the ledger, not a batch: every primary judgement other than
+    NO_CHANGE that has no follow-up yet.  A grouped alias shares its primary's
+    follow-up and is skipped.  Safe on every tick -- a judgement that already
+    has a candidate, a proposal, a notice or a published forecast version is
+    left alone, and each write is keyed on the judgement.  ``apply=False``
+    reports what would be written and writes nothing.
+    """
+
+    report: dict[str, Any] = {"mode": "apply" if apply else "dry_run", "examined": 0,
+                              "satisfied": 0, "grouped": 0, "owed": [], "written": [],
+                              "errors": []}
+    rows = judgements.connection.execute(
+        "SELECT judgement_id, event_ref, company_ref, record_json FROM event_judgements "
+        "WHERE decision != 'NO_CHANGE' ORDER BY created_at, judgement_id"
+    ).fetchall()
+    for row in rows:
+        if len(report["owed"]) >= limit:
+            break
+        report["examined"] += 1
+        try:
+            record = json.loads(row["record_json"])
+        except (TypeError, json.JSONDecodeError):
+            report["errors"].append({"judgement_ref": row["judgement_id"],
+                                     "reason": "record_json is not JSON"})
+            continue
+        effect = record.get("effect") or {}
+        if effect.get("kind") == "grouped_judgement":
+            report["grouped"] += 1
+            continue
+        existing = judgements.followups_for(row["judgement_id"])
+        if any(existing.values()) or forecast_moved(effect):
+            report["satisfied"] += 1
+            continue
+        model_ref = None
+        if record.get("action") == "revise_forecast" and model_version_for is not None:
+            try:
+                model_ref = model_version_for(row["company_ref"])
+            except Exception:  # noqa: BLE001 - no model is "no model", not a crash
+                model_ref = None
+        live, superseded = resolve_named_theses(
+            judgements.connection, row["company_ref"], record.get("thesis_refs") or ())
+        entry = {"judgement_ref": row["judgement_id"], "company_ref": row["company_ref"],
+                 "decision": record.get("decision"), "action": record.get("action"),
+                 "model_version_ref": model_ref,
+                 "current_thesis_refs": [thesis["ref"] for thesis in live],
+                 "superseded_thesis_refs": superseded}
+        report["owed"].append(entry)
+        if not apply:
+            continue
+        reflection = judgements.reflection_for(row["judgement_id"])
+        try:
+            written = record_judgement_followups(
+                judgements, judgement_ref=row["judgement_id"], event_ref=row["event_ref"],
+                company_ref=row["company_ref"], judgement=record, effect=effect,
+                mission=mission, actor_ref=actor_ref, model_version_ref=model_ref,
+                reflection_ref=None if reflection is None else reflection["id"],
+            )
+        except EventJudgementError as exc:
+            report["errors"].append({"judgement_ref": row["judgement_id"],
+                                     "reason": f"{type(exc).__name__}: {exc}"})
+            continue
+        report["written"].append({"judgement_ref": row["judgement_id"], **written})
+    return report
 
 
 # ---------------------------------------------------------------------------
@@ -2017,11 +2809,15 @@ def company_theses(connection: sqlite3.Connection, company_ref: str) -> list[dic
         theses.append({
             "ref": row["version_id"],
             "thesis_ref": wire.get("thesis_ref"),
-            "statement": str(wire.get("statement") or "")[:1200],
+            "statement": str(wire.get("statement") or ""),
             "mechanism": str(wire.get("mechanism") or "")[:800],
             "confidence": wire.get("confidence"),
             "falsifier_refs": list(wire.get("falsifier_refs") or ()),
             "content_hash": wire.get("content_hash"),
+            "question_ref": wire.get("question_ref"),
+            "stance": wire.get("stance"),
+            "proposition_direction": wire.get("proposition_direction"),
+            "view_status": wire.get("view_status"),
             "subject_ref": subject,
             "created_at": row["created_at"],
         })
@@ -2104,6 +2900,9 @@ def recent_claims(
 #: the eleven kinds whose payload already says everything there is to say.
 DERIVED_CONTEXT_KINDS: frozenset[str] = frozenset({
     "insider_transaction", "insider_trading_plan", "buyback_disclosure",
+    # ADR-0015: the release's preliminary rows and the provisional
+    # reconciliation, read from the ledger.
+    "earnings_release",
 })
 
 
@@ -2132,15 +2931,24 @@ def derived_context(
         return None
     company_ref = str(event.get("company_ref"))
     try:
+        if kind == "earnings_release":
+            from .earnings_release_intake import judgement_lines
+
+            return {"context": dict(event.get("payload") or {}),
+                    "lines": judgement_lines(event, connection),
+                    "refs": [event["id"], *event.get("source_refs", ())]}
         if kind == "insider_trading_plan":
             payload = event.get("payload") or {}
             return {
                 "context": payload,
                 "lines": [
-                    "SEC Item 5 trading-arrangement disclosure (a plan action, not an executed trade):",
-                    f"person={payload.get('person_name')}; action={payload.get('action')}; "
+                    "SEC Item 5 / Item 9B trading-arrangement disclosure (a plan action, not an executed trade):",
+                    f"person={payload.get('person_name')}; title={payload.get('person_title')}; "
+                    f"action={payload.get('action')}; plan_type={payload.get('plan_type')}; "
                     f"action_date={payload.get('action_date')}; direction={payload.get('securities_direction')}; "
                     f"aggregate_shares={payload.get('aggregate_shares')}; expiration_date={payload.get('expiration_date')}",
+                    f"filed in {payload.get('form')} {payload.get('accession')} on "
+                    f"{payload.get('filing_date')}; filed text: {payload.get('material_terms_excerpt')}",
                 ],
                 "refs": [event["id"], *event.get("source_refs", ())],
             }
@@ -2281,6 +3089,7 @@ def publish_event_note(
     mission: Mapping[str, Any],
     playbook: Mapping[str, Any],
     actor_ref: str,
+    context: Mapping[str, Any] | None = None,
 ) -> dict[str, Any]:
     """The short note a ``note`` decision produces.
 
@@ -2291,21 +3100,42 @@ def publish_event_note(
     """
 
     title = f"{event['kind']} {event['occurred_at'][:10]}"
+    claim_refs = [ref for ref in judgement["citations"] if ref.startswith("claim-version:")]
+    sections: list[dict[str, Any]] = [{
+        "title": title, "body": judgement["note"], "claim_refs": claim_refs, "numbers": [], "gaps": [],
+    }]
+    extra: dict[str, Any] = {}
+    material = (context or {}).get("result") or {}
+    if material.get("tags"):
+        # Batch F: the note's figures and the 实际 vs 预期 lines are printed
+        # with the passage or pack number each came from.
+        allow = publisher_resolves_pack_numbers(deliverables)
+        bindings, texts = material.get("tags") or {}, material.get("tag_texts") or {}
+        passages = {ref: texts.get(tag, "") for tag, ref in bindings.items() if str(ref).startswith("doc-passage:")}
+        numbers_by_ref = ({ref: texts.get(tag, "") for tag, ref in bindings.items()
+                           if str(ref).startswith("pack-json:")} if allow else {})
+        numbers_by_ref.update(payload_number_sources(event) if allow else {})
+        body, entries, _dropped = _sourced_prose(judgement["note"], sources=numbers_by_ref, passages=passages)
+        sections[0].update({"body": body, "numbers": [
+            {k: v for k, v in entry.items() if k != "source_text"} for entry in entries][:60]})
+        if judgement.get("result"):
+            row = {**judgement, "result_material": {**material, "dates": material.get("dates"),
+                                                    "main_event_ref": material.get("main_event_ref")}}
+            result_body, result_entries = _result_section_body(row, allow_pack_numbers=allow)
+            sections.append({"title": "实际 vs 预期", "body": result_body, "claim_refs": [],
+                             "numbers": [{k: v for k, v in entry.items() if k != "source_text"}
+                                         for entry in result_entries][:60], "gaps": []})
+            entries = entries + result_entries
+        if allow:
+            extra["pack_numbers"] = {entry["number_ref"]: entry.get("source_text") or ""
+                                     for entry in entries if entry.get("number_ref")}
     return deliverables.publish(
         kind="event_note",
         subject_ref=event["company_ref"],
         mission=mission,
         playbook=playbook,
         template_ref="template:event-note:p14a:v1",
-        sections=[{
-            "title": title,
-            "body": judgement["note"],
-            "claim_refs": [
-                ref for ref in judgement["citations"] if ref.startswith("claim-version:")
-            ],
-            "numbers": [],
-            "gaps": [],
-        }],
+        sections=sections,
         summary=f"{event['id']} -> {judgement['decision']} / {judgement['action']}: "
                 f"{judgement['because'][:400]}",
         gaps=[],
@@ -2314,6 +3144,7 @@ def publish_event_note(
         ],
         actor_ref=actor_ref,
         idempotency_key=f"event-note:{event['id']}",
+        **extra,
     )
 
 
@@ -2336,8 +3167,14 @@ def revision_for_event(
 
 
 def _event_evidence_refs(event: Mapping[str, Any]) -> list[dict[str, Any]]:
-    return [{"kind": "event", "ref": event["id"], "concept": None,
+    refs = [{"kind": "event", "ref": event["id"], "concept": None,
              "period_end": None, "accession": None}]
+    for ref in event.get("source_refs") or []:
+        kind = ("doc_passage" if str(ref).startswith("doc-passage:") else
+                "figure" if str(ref).startswith(("earnings-release-outlook:", "consensus-estimate-version:", "guidance:", "consensus:")) else None)
+        if kind:
+            refs.append({"kind": kind, "ref": ref, "concept": None, "period_end": None, "accession": None})
+    return refs
 
 
 def apply_effect(
@@ -2352,8 +3189,14 @@ def apply_effect(
     model_version: Mapping[str, Any] | None,
     research_admitter: Callable[[Mapping[str, Any], Mapping[str, Any]], dict[str, Any]] | None,
     actor_ref: str,
+    material_opener: Callable[[Mapping[str, Any]], dict[str, Any]] | None = None,
 ) -> dict[str, Any]:
-    """Do what the decision said; a NO_CHANGE note waits for the daily digest."""
+    """Do what the decision said; a NO_CHANGE note waits for the daily digest.
+
+    Batch F, decision-action consistency: ``action=research`` always opens a
+    MaterialRequest through ``material_opener`` (batch E's
+    ``open_for_effect``), so a research decision has a consumer.
+    """
 
     if judgement["decision"] == "NO_CHANGE" and judgement["action"] == "note":
         effect: dict[str, Any] = {
@@ -2368,9 +3211,39 @@ def apply_effect(
             forecast_models=forecast_models, model_version=model_version,
             research_admitter=research_admitter, actor_ref=actor_ref,
         )
+    if judgement["action"] == "research":
+        effect = {**effect, **open_research_material(event, judgement, context, material_opener)}
     if judgement["decision"] == "NO_CHANGE":
         effect = {**effect, "daily_digest": DAILY_DIGEST_MARKER}
     return effect
+
+
+def open_research_material(
+    event: Mapping[str, Any], judgement: Mapping[str, Any], context: Mapping[str, Any],
+    material_opener: Callable[[Mapping[str, Any]], dict[str, Any]] | None,
+) -> dict[str, Any]:
+    """The MaterialRequest a research decision (or 证据不足) opens, as effect fields."""
+
+    from .event_judgement_result import gap_need, research_need
+
+    result = judgement.get("result") or {}
+    material = context.get("result") or {}
+    if result.get("evidence_status") == "insufficient" and not material.get("body_read"):
+        spec = gap_need(event, material)
+    else:
+        spec = research_need(event, judgement)
+    if material_opener is None:
+        return {"material_request": {"id": None, "status": "not_opened",
+                                     "reason": "no material request ledger on this run",
+                                     "need": spec["need"], "period": spec["period"]}}
+    try:
+        opened = material_opener(spec)
+    except Exception as exc:  # noqa: BLE001 - a ledger refusal is an outcome, not a crash
+        return {"material_request": {"id": None, "status": "refused",
+                                     "reason": f"{type(exc).__name__}: {exc}"[:300]}}
+    return {"material_request": {"id": opened.get("id"), "status": opened.get("status") or "open",
+                                 "write_status": opened.get("write_status"), "via": opened.get("via"),
+                                 "kind": spec["kind"], "period": spec["period"]}}
 
 
 def _apply_effect(
@@ -2405,7 +3278,7 @@ def _apply_effect(
         try:
             published = publish_event_note(
                 deliverables, event=event, judgement=judgement, mission=mission,
-                playbook=playbook, actor_ref=actor_ref,
+                playbook=playbook, actor_ref=actor_ref, context=context,
             )
         except Exception as exc:  # noqa: BLE001 - a refused note is an outcome, not a crash
             return {"kind": "note", "status": "refused", "reason": f"{type(exc).__name__}: {exc}"}
@@ -2502,23 +3375,112 @@ def _apply_effect(
                       "dossier lane will read it when it exists"}
 
 
-def _figure_free(text: Any, *, limit: int = 1200) -> str:
-    """The judgement's own words, less any figure no Claim in the digest carries.
+_DIGEST_SENTENCE_RE = re.compile(r"[^。！？；;!?\n]+(?:[。！？；;!?]|\n|$)")
 
-    The digest is published through the same authority as every note and is
-    held to the same rule: a figure with nothing behind it is refused.  A
-    NO_CHANGE ``because`` routinely quotes the forecast it left alone, so the
-    figure is elided in place rather than letting one sentence refuse the day.
+
+def payload_number_sources(event: Mapping[str, Any] | None) -> dict[str, str]:
+    """``event-payload:<event>/<field>`` -> ``"<field> <value>"`` for every numeric payload field.
+
+    A price move's close, previous close and returns are ledger facts the
+    event carries; a digest sentence restating them cites them here (batch F:
+    rendered with their source instead of elided).
+    """
+
+    out: dict[str, str] = {}
+    if not event:
+        return out
+    for field, value in sorted((event.get("payload") or {}).items()):
+        if isinstance(value, bool) or value is None or isinstance(value, (dict, list)):
+            continue
+        text = str(value)
+        if re.fullmatch(r"[-+]?\d[\d,]*(?:\.\d+)?", text):
+            out[f"event-payload:{event['id']}/{field}"] = f"{field} {text}"
+    return out
+
+
+def _sourced_entries(sentence: str, sources: Mapping[str, str],
+                     passages: Mapping[str, str]) -> list[dict[str, Any]] | None:
+    """Number entries for every figure in ``sentence``, or None when one has no source."""
+
+    from .event_judgement_result import _bare, _source_values
+    from .mission_deliverable import value_tokens
+
+    entries: list[dict[str, Any]] = []
+    for token in value_tokens(sentence):
+        bare = _bare(token)
+        found = None
+        for ref, text in passages.items():
+            if bare is not None and bare in _source_values(text):
+                found = {"text": token, "passage_ref": ref}
+                break
+        if found is None:
+            # The closest source first: the exact digits as written, then (for a
+            # percent) a percent field, then any field holding the value.
+            ranked = sorted(sources.items(), key=lambda item: (
+                token.lstrip("$€£+").rstrip("%") not in item[1],
+                token.endswith("%") and "percent" not in item[0], item[0]))
+            for ref, text in ranked:
+                if bare is not None and bare in _source_values(text):
+                    found = {"text": token, "number_ref": ref, "source_text": text[:400]}
+                    break
+        if found is None:
+            return None
+        entries.append(found)
+    return entries
+
+
+def _sourced_prose(text: Any, *, sources: Mapping[str, str], passages: Mapping[str, str] | None = None,
+                   claim_numbers: Sequence[Mapping[str, Any]] = (), limit: int = 1200,
+                   ) -> tuple[str, list[dict[str, Any]], int]:
+    """The judgement's own words with their figures sourced; unsourceable sentences left out.
+
+    Replaces the old elision (〔…〕 in place of a figure): a figure is either
+    bound to the passage, ledger field or Claim it restates and printed, or
+    its sentence is not printed.  Returns (body, number entries, dropped).
     """
 
     from .mission_deliverable import unsourced_numbers
 
     cleaned = " ".join(str(text or "").split())[:limit]
-    for token in sorted(set(unsourced_numbers(cleaned, [])), key=len, reverse=True):
-        cleaned = cleaned.replace(token, DAILY_DIGEST_FIGURE_ELIDED)
-    if not cleaned or unsourced_numbers(cleaned, []):
-        return DAILY_DIGEST_FIGURE_FALLBACK
-    return cleaned
+    kept: list[str] = []
+    entries: list[dict[str, Any]] = []
+    dropped = 0
+    for sentence in (match.group(0).strip() for match in _DIGEST_SENTENCE_RE.finditer(cleaned)):
+        if not sentence:
+            continue
+        if not unsourced_numbers(sentence, list(claim_numbers)):
+            kept.append(sentence)
+            continue
+        found = _sourced_entries(sentence, sources, passages or {})
+        if found is None:
+            dropped += 1
+            continue
+        kept.append(sentence)
+        entries.extend(found)
+    body = "".join(kept)
+    if dropped:
+        note = DAILY_DIGEST_DROPPED_NOTE.format(n=dropped) if kept else DAILY_DIGEST_EMPTY_NOTE
+        body = (body + "\n" + note) if body else note
+    return body, entries, dropped
+
+
+def _result_section_body(row: Mapping[str, Any], *, allow_pack_numbers: bool) -> tuple[str, list[dict[str, Any]]]:
+    """A result-contract judgement's lines, each figure bound; unbindable parts left out."""
+
+    from .event_judgement_result import summary_lines
+    from .mission_deliverable import unsourced_numbers
+
+    lines, entries = summary_lines(row)
+    usable = [entry for entry in entries if allow_pack_numbers or "passage_ref" in entry]
+    kept, dropped = [], 0
+    for line in lines:
+        if unsourced_numbers(line, [{"text": entry["text"]} for entry in usable]):
+            dropped += 1
+            continue
+        kept.append(line)
+    if dropped:
+        kept.append(DAILY_DIGEST_DROPPED_NOTE.format(n=dropped))
+    return "\n".join(kept), usable
 
 
 def build_daily_digest(
@@ -2527,12 +3489,22 @@ def build_daily_digest(
     judgements: Sequence[Mapping[str, Any]],
     *,
     live_claim_refs: set[str] | None = None,
+    events: Mapping[str, Mapping[str, Any]] | None = None,
+    claim_texts: Mapping[str, str] | None = None,
+    allow_pack_numbers: bool = False,
 ) -> dict[str, Any] | None:
     """One company's closed UTC day of judgements as event_note sections.
 
     Pure and ordered by ``(created_at, id)``, so the same ledger always renders
     the same document.  ``None`` when the day holds no NO_CHANGE judgement
     carrying the digest marker: everything else was already published.
+
+    Batch F: figures are rendered with their sources -- a result-type
+    judgement's 实际 vs 预期 lines bind each figure to its passage or pack
+    number, other judgements bind restated figures to the event's own payload
+    (``events``) or to the Claims they cite (``claim_texts``).  A sentence with a
+    figure nothing sources is left out and counted, never elided in place.
+    ``allow_pack_numbers`` says the publisher resolves ``number_ref`` entries.
     """
 
     rows = sorted(
@@ -2560,26 +3532,60 @@ def build_daily_digest(
                  f"NO_CHANGE {no_change} 条",
         "body": opening, "claim_refs": [], "numbers": [], "gaps": [],
     }]
+    pack_numbers: dict[str, str] = {}
     for row in rows[:DAILY_DIGEST_MAX_ENTRIES]:
         effect = row.get("effect") or {}
-        if effect.get("kind") == "grouped_judgement":
-            body = "与同组主事件一并研判，结论与主事件相同。"
-        elif effect.get("deliverable_version_ref"):
-            body = "结论已即时发布为独立事件笔记。"
-        else:
-            body = _figure_free(row.get("note") or row.get("because"))
-            question = row.get("research_question")
-            if question:
-                body += "\n待研究：" + _figure_free(question, limit=400)
+        primary = str(effect.get("primary_event_ref") or "") if effect.get("kind") in (
+            "grouped_judgement", "repeated_result_event") else ""
         claims = [
             ref for ref in dict.fromkeys(row.get("citations") or ())
             if isinstance(ref, str) and ref.startswith("claim-version:")
             and (live_claim_refs is None or ref in live_claim_refs)
         ][:200]
+        numbers: list[dict[str, Any]] = []
+        if effect.get("kind") == "grouped_judgement":
+            # 2026-10-09 (batch am, coordinator): a grouped input names the
+            # event it was judged with -- the ID is in this section's title
+            # (the body is held to the no-unsourced-figure rule, an ID is not).
+            body = ("与同组主事件一并研判，结论与主事件相同；主事件编号见本节标题，"
+                    "其研判正文见本汇总中以该编号为标题的一节。" if primary else
+                    "与同组主事件一并研判，结论与主事件相同。")
+        elif effect.get("deliverable_version_ref"):
+            body = "结论已即时发布为独立事件笔记。"
+        elif isinstance(row.get("result"), Mapping):
+            body, numbers = _result_section_body(row, allow_pack_numbers=allow_pack_numbers)
+        else:
+            event_ref = str(row.get("event_ref") or "").split("#", 1)[0]
+            sources = payload_number_sources((events or {}).get(event_ref)) if allow_pack_numbers else {}
+            from .mission_deliverable import value_tokens
+
+            claim_numbers = [{"text": (claim_texts or {})[ref], "claim_version_ref": ref}
+                             for ref in claims if (claim_texts or {}).get(ref)
+                             and len((claim_texts or {})[ref]) <= 1000
+                             and value_tokens((claim_texts or {})[ref])][:20]
+            body, numbers, _dropped = _sourced_prose(
+                row.get("note") or row.get("because"), sources=sources, claim_numbers=claim_numbers)
+            used_claims = [entry for entry in claim_numbers
+                           if any(token in body for token in value_tokens(entry["text"]))]
+            numbers = used_claims + numbers
+            question = row.get("research_question")
+            if question:
+                asked, asked_numbers, _ = _sourced_prose(question, sources=sources,
+                                                         claim_numbers=claim_numbers, limit=400)
+                if asked:
+                    body += "\n待研究：" + asked
+                    numbers.extend(asked_numbers)
+        for entry in numbers:
+            if entry.get("number_ref"):
+                pack_numbers[entry["number_ref"]] = entry.get("source_text") or ""
+        suffix = f" · 主事件 {primary}"[:120] if primary else ""
         sections.append({
             "title": (f"{row.get('event_kind')} · {row.get('decision')}/"
-                      f"{row.get('action')} · {row.get('event_ref')}")[:200],
-            "body": body, "claim_refs": claims, "numbers": [], "gaps": [],
+                      f"{row.get('action')} · {row.get('event_ref')}")[:200 - len(suffix)] + suffix,
+            "body": body, "claim_refs": claims,
+            "numbers": [{key: value for key, value in entry.items() if key != "source_text"}
+                        for entry in numbers][:60],
+            "gaps": [],
         })
     if len(rows) > DAILY_DIGEST_MAX_ENTRIES:
         sections.append({
@@ -2605,7 +3611,19 @@ def build_daily_digest(
         "sections": sections, "summary": summary,
         "model_invocation_refs": invocations,
         "idempotency_key": f"event-note-daily-digest:{company_ref}:{day}",
+        "pack_numbers": pack_numbers,
     }
+
+
+def publisher_resolves_pack_numbers(deliverables: Any) -> bool:
+    """Whether ``deliverables.publish`` takes ``pack_numbers`` (batch D's number source)."""
+
+    import inspect
+
+    try:
+        return "pack_numbers" in inspect.signature(deliverables.publish).parameters
+    except (TypeError, ValueError):
+        return False
 
 
 def publish_daily_digests(
@@ -2660,16 +3678,20 @@ def publish_daily_digests(
         ]
         if live is None:
             live = deliverables.live_claim_version_refs()
-        digest = build_daily_digest(company_ref, day, rows, live_claim_refs=live)
+        allow = publisher_resolves_pack_numbers(deliverables)
+        digest = build_daily_digest(
+            company_ref, day, rows, live_claim_refs=live, allow_pack_numbers=allow,
+            events=_digest_events(connection, rows), claim_texts=_digest_claims(connection, rows))
         if digest is None:
             continue
         try:
+            extra = {"pack_numbers": digest["pack_numbers"]} if allow else {}
             published = deliverables.publish(
                 kind="event_note", subject_ref=company_ref, mission=mission,
                 playbook=playbook, template_ref=DAILY_DIGEST_TEMPLATE_REF,
                 sections=digest["sections"], summary=digest["summary"], gaps=[],
                 model_invocation_refs=digest["model_invocation_refs"],
-                actor_ref=actor_ref, idempotency_key=digest["idempotency_key"],
+                actor_ref=actor_ref, idempotency_key=digest["idempotency_key"], **extra,
             )
         except Exception as exc:  # noqa: BLE001 - one refused company is not the tick's
             results.append({"company_ref": company_ref, "day": day, "status": "refused",
@@ -2685,8 +3707,46 @@ def publish_daily_digests(
     return results
 
 
+def _digest_events(connection: sqlite3.Connection, rows: Sequence[Mapping[str, Any]]) -> dict[str, Any]:
+    out: dict[str, Any] = {}
+    for row in rows:
+        ref = str(row.get("event_ref") or "").split("#", 1)[0]
+        if not ref or ref in out:
+            continue
+        try:
+            found = connection.execute("SELECT record_json FROM research_events WHERE event_id=?",
+                                       (ref,)).fetchone()
+        except sqlite3.Error:
+            found = None
+        if found is not None:
+            out[ref] = json.loads(found["record_json"])
+    return out
+
+
+def _digest_claims(connection: sqlite3.Connection, rows: Sequence[Mapping[str, Any]]) -> dict[str, str]:
+    """Cited Claims' statements: a figure a NO_CHANGE restates from a Claim is sourced by it."""
+
+    refs = sorted({ref for row in rows for ref in row.get("citations") or ()
+                   if isinstance(ref, str) and ref.startswith("claim-version:")})
+    out: dict[str, str] = {}
+    for ref in refs[:400]:
+        try:
+            found = connection.execute("SELECT claim_json FROM claim_versions WHERE claim_version_id=?",
+                                       (ref,)).fetchone()
+        except sqlite3.Error:
+            found = None
+        if found is None:
+            continue
+        claim = json.loads(found[0])
+        statement = str(claim.get("normalized_statement") or claim.get("statement") or "")
+        if statement:
+            out[ref] = statement[:2000]
+    return out
+
+
 __all__ = [
     "ACTION_VOCABULARY",
+    "DAILY_DIGEST_DROPPED_NOTE",
     "DAILY_DIGEST_MARKER",
     "DAILY_DIGEST_TEMPLATE_REF",
     "build_daily_digest",
@@ -2695,6 +3755,8 @@ __all__ = [
     "DERIVED_CONTEXT_KINDS",
     "EventJudgementAuthority",
     "EventJudgementConflict",
+    "FOLLOWUP_NOTICE_KINDS",
+    "FOLLOWUP_NOTICE_LABELS",
     "EventJudgementError",
     "EventJudgementValidationError",
     "MAX_NOTE_SENTENCES",
@@ -2720,6 +3782,7 @@ __all__ = [
     "build_verifier_prompt",
     "company_theses",
     "derived_context",
+    "forecast_moved",
     "judge",
     "market_view_rows",
     "model_drivers",
@@ -2727,10 +3790,13 @@ __all__ = [
     "pool_state",
     "publish_event_note",
     "recent_claims",
+    "record_judgement_followups",
     "reflect",
+    "resolve_named_theses",
     "revision_for_event",
     "reflection_is_owed",
     "route_family_resolver",
+    "sweep_judgement_followups",
     "validate_judge_output",
     "validate_reflection_output",
     "validate_verifier_output",

@@ -21,6 +21,136 @@ class CallBudgetError(ValueError):
     pass
 
 
+# ---------------------------------------------------------------------------
+# Long-context purposes: a code floor every environment's stored config obeys
+# ---------------------------------------------------------------------------
+#
+# 2026-10-09 (batch C2): the STRL-shaped products read the whole material pack
+# -- 150-250K characters, which the WorkOrder counts as UTF-8 bytes -- and
+# write one document of up to 16K tokens.  Every environment's stored model
+# config said otherwise: ``purpose_call_budgets`` of 1 USD per purpose, and the
+# host's shared call-cost policy (default 1 USD) overriding ``max_cost_usd``
+# for every purpose it does not name.  At 1 USD the router refuses every
+# long-context link with ``work_order_cost_budget_exceeded`` (claude-opus-5 at
+# 600K input is ~2.9 USD by the router's plain estimate) and the call either
+# fails or lands on whichever flash model is cheap enough.
+#
+# The owner accepted the cost of these products (batch D, decision 3), so the
+# bounds are a property of the product, not of the environment: the code
+# floor below is applied *after* the packaged defaults, the installed
+# ``call_budget`` / ``purpose_call_budgets`` and the shared cost policy, and
+# only ever raises a field.  A stored value above the floor still wins; a
+# lower one cannot make the product unroutable.  The floor is a ceiling on
+# what one call may cost -- the reservation the day ledger takes is still the
+# priced chain ceiling for the actual prompt, and the mission's day budget
+# and pools still bound real spend.
+LONG_CONTEXT_INPUT_TOKENS = 600_000
+LONG_CONTEXT_OUTPUT_TOKENS = 16_000
+LONG_CONTEXT_TIMEOUT_SECONDS = 900
+# The rate card the cost floor is sized for: the dearest long-context link in
+# the code-default chains (gpt-6-astra / claude-fable-5-1, 10 / 50 USD per
+# million tokens), served through a CLI gateway, which is the most expensive
+# way to bill it (all input at the cache-write multiplier plus the gateway's
+# hidden system prompt -- ``cockpit_model.profile_call_ceiling_usd``).  The
+# adapter refuses a result whose metered cost exceeds the WorkOrder cap *after*
+# paying for it, so the cap must cover the worst link, not the typical one.
+LONG_CONTEXT_REFERENCE_RATES_USD = {"input_per_million_usd": 10.0, "output_per_million_usd": 50.0}
+
+
+def long_context_call_cost_usd(*, input_tokens: int = LONG_CONTEXT_INPUT_TOKENS,
+                               output_tokens: int = LONG_CONTEXT_OUTPUT_TOKENS,
+                               rates: Mapping[str, Any] = LONG_CONTEXT_REFERENCE_RATES_USD) -> float:
+    """Whole-dollar ceiling of one gateway-billed call at the reference rates."""
+
+    from decimal import Decimal
+
+    from .model_profile_bounds import (CLI_GATEWAY_CACHE_WRITE_MULTIPLIER,
+                                       CLI_GATEWAY_SYSTEM_PROMPT_TOKENS)
+
+    cost = (Decimal(str(rates["input_per_million_usd"])) * CLI_GATEWAY_CACHE_WRITE_MULTIPLIER
+            * (int(input_tokens) + CLI_GATEWAY_SYSTEM_PROMPT_TOKENS)
+            + Decimal(str(rates["output_per_million_usd"])) * int(output_tokens)) / Decimal(1_000_000)
+    return float(math.ceil(cost))
+
+
+LONG_CONTEXT_CALL_FLOOR: dict[str, Any] = {
+    "max_input_tokens": LONG_CONTEXT_INPUT_TOKENS,
+    "max_output_tokens": LONG_CONTEXT_OUTPUT_TOKENS,
+    "max_cost_usd": long_context_call_cost_usd(),
+    "timeout_seconds": LONG_CONTEXT_TIMEOUT_SECONDS,
+}
+#: Batch ar item 14 extends C2's product floor and routing preference to
+#: memo, dossier and debate map drafting and verification. A bounded evidence
+#: projection does not remove the product's long-context routing contract.
+LONG_CONTEXT_PURPOSES: frozenset[str] = frozenset({
+    "initial_screen", "initial_screen_verifier",
+    "investment_memo", "investment_memo_verifier",
+    "dossier", "dossier_verifier", "debate_map", "debate_map_verifier",
+})
+#: The same set tries the links that can carry the pack first
+#: (``model_router.resolve_chain``).
+LONG_CONTEXT_CHAIN_PURPOSES: frozenset[str] = LONG_CONTEXT_PURPOSES
+
+# aw: explicit request controls, independent of gateway/interactive defaults.
+THINKING_LEVELS: frozenset[str] = frozenset({"off", "minimal", "low", "medium", "high"})
+MEDIUM_THINKING_PURPOSES: frozenset[str] = frozenset({
+    "initial_screen", "investment_memo", "deep_insight_gate", "industry_framework",
+})
+
+
+def resolve_thinking_level(purpose: str | None, *, policy: Mapping[str, Any] | None = None,
+                          requested: str | None = None, verifier: bool = False) -> str:
+    """Freeze an explicit level; independent verifiers can only request low."""
+    override = ((policy or {}).get("thinking_level_overrides") or {}).get(purpose, {})
+    level = requested if requested is not None else override.get("level")
+    if level is None:
+        level = "medium" if purpose in MEDIUM_THINKING_PURPOSES else "low"
+    if not isinstance(level, str) or level not in THINKING_LEVELS:
+        raise CallBudgetError("thinking level must be off/minimal/low/medium/high")
+    if (verifier or (isinstance(purpose, str) and purpose.endswith("_verifier"))) and level != "low":
+        raise CallBudgetError("independent verifier thinking level must be low")
+    return level
+
+
+def call_budget_floor(purpose: str) -> dict[str, Any] | None:
+    """The code floor for ``purpose``'s call budget, or None."""
+
+    return dict(LONG_CONTEXT_CALL_FLOOR) if purpose in LONG_CONTEXT_PURPOSES else None
+
+
+def run_budget_floor(purpose: str, *, max_units: int | None = None,
+                     call_budgets: Mapping[str, Mapping[str, Any]] | None = None) -> dict[str, Any] | None:
+    """Reserve the required drafts and one verifier, without buying repairs.
+
+    This is a per-run ceiling, like the per-call floor; mission/day/pool
+    authorization still governs admission and actual spend. Old installed
+    caps cannot make a product unrunnable, and higher call caps are included.
+    """
+    if max_units is not None:
+        validate_run_budget_overrides({"max_units": max_units})
+    drafts = {"investment_memo": 4, "dossier": max_units if max_units is not None else 3,
+              "debate_map": 1}.get(purpose)
+    if drafts is None:
+        return None
+    budgets = call_budgets or {}
+    if not isinstance(budgets, Mapping):
+        raise CallBudgetError("run call budgets must be an object")
+    floor = float(LONG_CONTEXT_CALL_FLOOR["max_cost_usd"])
+
+    def cost(name: str) -> float:
+        checked = _checked(budgets.get(name, {}), f"run call budgets.{name}")
+        return max(floor, float(checked.get("max_cost_usd", floor)))
+    return {"max_cost_usd": drafts * cost(purpose) + cost(purpose + "_verifier")}
+
+
+def _apply_floor(resolved: dict[str, Any], floor: Mapping[str, Any] | None) -> dict[str, Any]:
+    if floor:
+        for field, minimum in floor.items():
+            if field in resolved and resolved[field] < minimum:
+                resolved[field] = minimum
+    return resolved
+
+
 def _checked(value: Any, name: str) -> dict[str, Any]:
     if not isinstance(value, Mapping):
         raise CallBudgetError(f"{name} must be an object")
@@ -67,8 +197,10 @@ def validate_run_budget_overrides(value: Any) -> dict[str, Any]:
 
 
 def resolve_run_budget(config: Mapping[str, Any], purpose: str, *,
-                       defaults: Mapping[str, Any]) -> dict[str, Any]:
-    """Return purpose > general > caller defaults for a bounded multi-unit run."""
+                       defaults: Mapping[str, Any],
+                       call_budgets: Mapping[str, Mapping[str, Any]] | None = None,
+                       max_units: int | None = None) -> dict[str, Any]:
+    """Resolve overrides, then enforce required product-call arithmetic."""
     if not isinstance(config, Mapping):
         raise CallBudgetError("model configuration must be an object")
     if not isinstance(purpose, str) or not _PURPOSE.fullmatch(purpose):
@@ -85,7 +217,13 @@ def resolve_run_budget(config: Mapping[str, Any], purpose: str, *,
             raise CallBudgetError("purpose_run_budgets keys must be canonical purpose tokens")
         validate_run_budget_overrides(value)
     resolved.update(validate_run_budget_overrides(per_purpose.get(purpose, {})))
-    return resolved
+    if max_units is not None:
+        resolved.update(validate_run_budget_overrides({"max_units": max_units}))
+    if purpose in {"investment_memo", "dossier", "debate_map"} and call_budgets is None:
+        call_budgets = {name: resolve_call_budget(config, name, defaults=LONG_CONTEXT_CALL_FLOOR)
+                        for name in (purpose, purpose + "_verifier")}
+    return _apply_floor(resolved, run_budget_floor(
+        purpose, max_units=resolved.get("max_units"), call_budgets=call_budgets))
 
 
 def default_run_budget(purpose: str, *,
@@ -121,7 +259,7 @@ def default_run_budget(purpose: str, *,
         raise CallBudgetError("packaged run budget defaults are missing")
     if not resolved:
         raise CallBudgetError("run budget defaults must not be empty")
-    return resolved
+    return _apply_floor(resolved, run_budget_floor(purpose, max_units=resolved.get("max_units")))
 
 
 def default_call_budget(purpose: str, *,
@@ -162,7 +300,7 @@ def default_call_budget(purpose: str, *,
     missing = sorted(set(FIELDS) - set(base))
     if missing:
         raise CallBudgetError(f"call budget defaults are missing fields: {missing}")
-    return {field: base[field] for field in FIELDS}
+    return _apply_floor({field: base[field] for field in FIELDS}, call_budget_floor(purpose))
 
 
 def resolve_call_budget(config: Mapping[str, Any], purpose: str, *,
@@ -189,7 +327,9 @@ def resolve_call_budget(config: Mapping[str, Any], purpose: str, *,
                                                 load_shared_call_budget_policy)
         resolved["max_cost_usd"] = effective_shared_max_cost(
             load_shared_call_budget_policy(shared_path), purpose)
-    return {field: resolved[field] for field in FIELDS}
+    # Last, so neither an installed override nor the shared cost policy can
+    # take a long-context purpose below what its prompt needs.
+    return _apply_floor({field: resolved[field] for field in FIELDS}, call_budget_floor(purpose))
 
 
 def budget_fingerprint(budget: Mapping[str, Any]) -> str:
@@ -201,6 +341,8 @@ def budget_fingerprint(budget: Mapping[str, Any]) -> str:
     return hashlib.sha256(wire.encode("utf-8")).hexdigest()
 
 
-__all__ = ["CallBudgetError", "budget_fingerprint", "default_call_budget", "default_run_budget",
-           "resolve_call_budget", "resolve_run_budget", "validate_budget_overrides",
+__all__ = ["CallBudgetError", "LONG_CONTEXT_CALL_FLOOR", "LONG_CONTEXT_CHAIN_PURPOSES", "LONG_CONTEXT_PURPOSES",
+           "THINKING_LEVELS", "MEDIUM_THINKING_PURPOSES", "resolve_thinking_level",
+           "budget_fingerprint", "call_budget_floor", "long_context_call_cost_usd", "default_call_budget", "default_run_budget",
+           "resolve_call_budget", "resolve_run_budget", "run_budget_floor", "validate_budget_overrides",
            "validate_run_budget_overrides"]

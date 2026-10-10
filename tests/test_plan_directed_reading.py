@@ -601,7 +601,7 @@ class PlanNextStepTests(unittest.TestCase):
         self.assertIn("年报", steps[0]["suggestion"])
         self.assertIn("研发支出为什么翻倍？", steps[0]["suggestion"])
         # Read-only: saying so is the whole feature, and nothing was started.
-        self.assertIn("授权链", steps[0]["suggestion"])
+        self.assertIn("现有研究授权或配置不完整", steps[0]["suggestion"])
 
     def test_an_earnings_call_follow_up_is_offered_too(self):
         self.store.add_plan([_inquiry("管理层怎么解释订单下滑？", document_ref="doc:call")])

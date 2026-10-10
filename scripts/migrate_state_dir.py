@@ -522,7 +522,7 @@ def apply_rollback(args: argparse.Namespace) -> dict[str, Any]:
 def main(argv: list[str] | None = None) -> int:
     parser = argparse.ArgumentParser(description=__doc__.splitlines()[0])
     parser.add_argument("--dest", type=Path, required=True,
-                        help="外置盘上的目标根目录，例如 /Volumes/EveSSD/Dalton")
+                        help="外置盘上的目标根目录，例如 /path/to/external/Dalton")
     parser.add_argument("--legacy-state", type=Path, default=DEFAULT_LEGACY)
     parser.add_argument("--workspaces", type=Path, default=DEFAULT_WORKSPACES)
     parser.add_argument("--releases", type=Path, default=DEFAULT_RELEASES)

@@ -121,6 +121,30 @@ def _sample(bucket: list[Any], item: Any) -> None:
         bucket.append(item)
 
 
+def _preliminary_pass(connection: Any, company_ref: str | None) -> dict[str, Any]:
+    """Preliminary claim rows per company, for the summary (no writes)."""
+
+    from .earnings_release_intake import PRELIMINARY_LABEL, preliminary_claim_rows
+
+    try:
+        if company_ref is not None:
+            refs = [company_ref]
+        else:
+            refs = [row[0] for row in connection.execute(
+                "SELECT DISTINCT company_ref FROM preliminary_actuals").fetchall()]
+    except Exception:  # noqa: BLE001 - a Core without the table has none
+        return {"label": PRELIMINARY_LABEL, "rows": 0, "by_company": {}}
+    by_company = {}
+    for ref in refs:
+        rows = preliminary_claim_rows(connection, ref)
+        if rows:
+            by_company[ref] = [{key: row[key] for key in (
+                "metric_or_aspect", "fiscal_period", "value", "unit", "scale",
+                "source_document_ref", "normalized_statement")} for row in rows[:20]]
+    return {"label": PRELIMINARY_LABEL, "admitted": 0,
+            "rows": sum(len(rows) for rows in by_company.values()), "by_company": by_company}
+
+
 def run_promotion(
     *,
     state_dir: Path,
@@ -351,6 +375,14 @@ def run_promotion(
                        candidate_claim_ref=claim_ref,
                        claim_version_ref=promoted.get("claim_version_ref"),
                        ledger_write=promoted.get("status") == "fresh")
+
+        # -- 3. preliminary actuals (ADR-0015) --------------------------------
+        # The company's own earnings-release numbers, in claim shape and
+        # labelled 「初步，待 10-K/10-Q 核对」.  Reported, never admitted:
+        # ``claim_versions`` holds filed numbers only, so a press-release
+        # figure can never tie with or outrank the 10-Q/10-K line that
+        # replaces it.  A superseded row is not listed at all.
+        summary["preliminary"] = _preliminary_pass(store.connection, company_ref)
 
         summary["held_totals"] = ledger.counts()
         summary["status"] = "succeeded"

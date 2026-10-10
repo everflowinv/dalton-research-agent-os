@@ -251,6 +251,6 @@
     }
   ],
   "note": "发布哈希 = sha256(canonical_json({'dependency_lock_hash':D,'wheel_sha256':W}))；D 是历史上固定的依赖锁哈希，其原始计算方式已不可考，因此在此按值钉住，并用下面的 62 个依赖 wheel 清单作为它所代表的确切依赖集。依赖集一旦变化，必须由人显式更新本文件的 dependency_lock_hash。",
-  "observed_in": "/Users/everflow/Projects/dalton-owner-activation-20260910/workspace-runtime-release-20260914/builds/2fc55611c253225479a9847e68ebec28416e93fa.json",
+  "observed_in": "historical build receipt identifier: 2fc55611c253225479a9847e68ebec28416e93fa; machine-local path omitted",
   "schema_version": "dalton-release-dependency-lock:0.1"
 }

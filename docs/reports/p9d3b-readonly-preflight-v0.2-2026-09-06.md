@@ -79,7 +79,7 @@ SQLite 即使 `mode=ro`，也可能在缺 sidecar 且目录可写时创建 WAL/S
 
 ### 运行隔离与失败记录
 
-- 只在 `/Users/everflow/.openclaw/workspace/temp/dalton-p9d3b-preflight` 写入。原仓仅作为既有 Python 解释器/依赖的只读来源；用 `PYTHONPATH=<clone>/src` 验证源码 import。安装验收移除 src 路径，另外核验 site-packages。
+- 只在 `$HOME/.openclaw/workspace/temp/dalton-p9d3b-preflight` 写入。原仓仅作为既有 Python 解释器/依赖的只读来源；用 `PYTHONPATH=<clone>/src` 验证源码 import。安装验收移除 src 路径，另外核验 site-packages。
 - 测试使用 clone 内 TMPDIR、禁止自动写 bytecode 的环境变量和自建的更严格 macOS 验证 sandbox；最终 sandbox 禁止 clone 外写入和非 loopback 网络。没有修改 OpenClaw 配置、skills、原 venv 或系统权限。
 - 长目录会超过 macOS Unix socket 限长。仅测试环境用 `sitecustomize.py` / `node-paths.cjs` 把 in-clone socket 地址改成指向同一文件的较短相对拼写，不移动到别处、不使用 symlink、不修改生产接口或 fixture 输出。
 - 既有两处测试/canary 原来硬编码 `/tmp`，本轮改为遵循 TMPDIR。broker 虽没有 node_modules，check 只需已安装 Node 的 builtin 模块，无需下载依赖。

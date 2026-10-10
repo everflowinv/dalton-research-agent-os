@@ -14,7 +14,7 @@ import re
 from typing import Any, Mapping
 
 from .agenda import AgendaStore, read_exact_agenda_cycle, read_exact_mandate_version
-from .bounded_planner_loop import BoundedPlannerAuthority
+from .bounded_planner_loop import BoundedPlannerAuthority, terminal_event_table
 from .research_question_backlog import ResearchQuestionBacklog
 from .store import canonical_json, content_hash
 
@@ -166,7 +166,7 @@ class IntentWriterAuthority:
             "SELECT v.version_id FROM bounded_planner_loop_versions v "
             "WHERE NOT EXISTS (SELECT 1 FROM bounded_planner_loop_versions newer "
             " WHERE newer.loop_ref=v.loop_ref AND newer.version_number>v.version_number) "
-            "AND NOT EXISTS (SELECT 1 FROM bounded_planner_terminal_events t "
+            f"AND NOT EXISTS (SELECT 1 FROM {terminal_event_table(self.connection)} t "
             " WHERE t.loop_version_ref=v.version_id) ORDER BY v.version_id"
         ).fetchall()
         for row in rows:

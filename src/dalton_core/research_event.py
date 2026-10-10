@@ -110,6 +110,14 @@ EVENT_KINDS: tuple[str, ...] = (
     # alone.  Whether the print moves next year is a decision, and P14f does
     # not make decisions.
     "calibration",
+    # ADR-0012: a condition of a scenario the owner adopted is now met (or
+    # an invalidator is).  Derived: the evaluator compared an observed value
+    # with a threshold the owner accepted; the judge decides what it means.
+    "scenario_trigger",
+    # ADR-0015: the company's own earnings release (8-K Item 2.02, Exhibit
+    # 99.1), its income statement read deterministically.  Preliminary until
+    # the 10-Q/10-K lands; the payload says so and carries the accession.
+    "earnings_release",
 )
 
 # How much a reader should believe one event before reading it.  Ordered best
@@ -265,6 +273,20 @@ PAYLOAD_FIELDS: Mapping[str, frozenset[str]] = MappingProxyType({
         "overturn_candidates", "notable", "within_tolerance", "decision",
         "forward_estimates_revised",
     }),
+    "earnings_release": frozenset({
+        "accession", "form", "items", "report_date", "period", "period_end",
+        "exhibit", "exhibit_url", "artifact_hash", "document_ref", "status",
+        "label_note", "row_count", "event_key",
+        "revenue", "revenue_unit", "operating_income", "operating_income_unit",
+        "net_income", "net_income_unit", "eps_diluted", "eps_diluted_unit",
+        "revenue_vs_forecast_percent", "revenue_vs_forecast_band",
+    }),
+    "scenario_trigger": frozenset({
+        "scenario_ref", "scenario_version_ref", "scenario_name", "probability",
+        "condition_id", "condition_kind", "condition_label", "observed_by",
+        "metric_ref", "transform", "comparator", "threshold", "horizon",
+        "observed_value", "value_as_of", "source_ref", "observation_ref", "thesis_ref",
+    }),
 })
 
 # The tier a kind carries when nothing more specific is known.  ``news`` has
@@ -299,6 +321,11 @@ DEFAULT_TIER_BY_KIND: Mapping[str, str] = MappingProxyType({
     # Computed from what was filed and what we had held: derived, like the
     # reconciliation rows it summarises.
     "calibration": "derived",
+    # ADR-0012: computed by the scenario evaluator from observed values.
+    "scenario_trigger": "derived",
+    # ADR-0015: furnished, not filed, and unaudited -- the company's own
+    # words about its quarter, a tier below the 10-Q/10-K that replaces it.
+    "earnings_release": "management_direct",
 })
 
 MAX_PAYLOAD_TEXT = 600
@@ -933,6 +960,10 @@ def claim_event_candidates(
     rows = connection.execute(
         "SELECT claim_version_id AS id, claim_ref, claim_json, created_at FROM claim_versions "
         "WHERE json_extract(claim_json,'$.subject_ref')=? AND created_at>=? "
+        # F10: a market proxy is restated with every settled bar of its source
+        # series. A daily ETF close is a model input, not news about the
+        # company, and as an event it would buy one judgement call a day each.
+        "AND claim_ref NOT LIKE 'claim:market-proxy:%' "
         # Oldest first, for the reason above.
         "ORDER BY created_at ASC, claim_version_id ASC LIMIT ?",
         (company_ref, since, int(limit)),

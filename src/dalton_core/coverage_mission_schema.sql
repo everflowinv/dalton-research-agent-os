@@ -730,6 +730,7 @@ CREATE TABLE IF NOT EXISTS coverage_mission_statement_lines (
     dimension_axis TEXT,
     dimension_member TEXT,
     dimension_count INTEGER CHECK(dimension_count IS NULL OR dimension_count >= 0),
+    dimensions_json TEXT,
     period_start TEXT,
     period_end TEXT NOT NULL,
     value TEXT,

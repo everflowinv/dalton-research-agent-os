@@ -122,7 +122,7 @@ class FundXlsxCashFlowCompanionTests(unittest.TestCase):
             row = rows[result["ref"]]
             labels = " ".join(str(financials.cell(row, column).value or "")
                               for column in range(1, 5))
-            self.assertIn("Forecast unavailable", labels)
+            self.assertEqual("Forecast unavailable" in labels,result["status"]=="unavailable")
             actual_column = next(column for column in range(1, financials.max_column + 1)
                                  if financials.cell(1, column).value == "1Q25")
             self.assertIsNotNone(financials.cell(row, actual_column).value)
@@ -235,10 +235,11 @@ class FundXlsxCashFlowCompanionTests(unittest.TestCase):
                 "interest_income": 10, "interest_expense": 20, "pretax": 270,
                 "tax": 60, "net": 210, "nci": 5, "parent": 205,
                 "eps_numerator": 205, "shares": 100, "eps": "2.05",
+                "us-gaap:LongTermDebtNoncurrent":1000,
             }
             for line in current["filed_lines"]:
                 line["cells"]["2026-03-31"] = {
-                    "period_start": "2026-01-01",
+                    "period_start": None if line["concept"]=="us-gaap:LongTermDebtNoncurrent" else "2026-01-01",
                     "value": str(actuals[line["concept"]]),
                     "unit": next(iter(line["cells"].values()))["unit"],
                     "basis": "reported", "source_accessions": [ACCESSION],
@@ -308,7 +309,7 @@ class FundXlsxCashFlowCompanionTests(unittest.TestCase):
                 str(financials.cell(result_rows[result["ref"]], column).value or "")
                 for column in range(1, 5)
             )
-            self.assertIn("Forecast unavailable", label)
+            self.assertEqual("Forecast unavailable" in label,result["status"]=="unavailable")
 
 
 if __name__ == "__main__":

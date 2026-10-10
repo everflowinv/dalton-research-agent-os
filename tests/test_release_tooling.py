@@ -80,7 +80,8 @@ class _Fleet(unittest.TestCase):
             path = self.agents / f"{label}.plist"
             with path.open("wb") as stream:
                 plistlib.dump({"Label": label, "ProgramArguments": [
-                    f"{self.old_venv}/bin/python", "-m", "dalton_core.writer_server"]},
+                    f"{self.old_venv}/bin/python", "-m", "dalton_core.writer_server",
+                    *(["--socket", str(self.root / "writer.sock")] if label.endswith(".writer") else [])]},
                     stream)
         self.manager = self.host / "manager.json"
         self.manager.write_text(json.dumps({
@@ -365,8 +366,9 @@ class LogRotateLaunchAgentTemplateTests(unittest.TestCase):
         # argparse exits (SystemExit 2) on an unknown argument such as "apply".
         parsed = parser.parse_args(arguments[2:])
         self.assertTrue(parsed.apply, "模板必须真正轮转，而不是每天 dry-run")
-        self.assertEqual(parsed.log_dir, [Path("/l/Logs/Dalton"),
-                                          Path("/h/.dalton/workspace-logs")])
+        # Only the directory launchd actually writes to; the stale
+        # ~/.dalton/workspace-logs tree was dropped on 2026-09-30.
+        self.assertEqual(parsed.log_dir, [Path("/l/Logs/Dalton")])
         self.assertEqual(parsed.keep, 5)
         self.assertEqual(parsed.max_bytes, 16 * 1024 * 1024)
 

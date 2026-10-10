@@ -67,3 +67,32 @@ CREATE TRIGGER IF NOT EXISTS claim_review_rereviews_no_delete
 BEFORE DELETE ON claim_review_rereviews BEGIN
     SELECT RAISE(ABORT, 'claim review re-reviews cannot be deleted');
 END;
+
+-- 2026-10-09 (P0, research artifact quality review): which admitted Claims the
+-- issuer-attribution audit has read under which rule.  A cache like the two
+-- above -- the authority is ``claim_retirement_challenges`` /
+-- ``claim_retirement_decisions`` (reason ``issuer_misattribution``); this only
+-- keeps an audited Claim from being re-read every tick.  A new rule ref
+-- re-audits every Claim once.
+CREATE TABLE IF NOT EXISTS claim_attribution_audits (
+    claim_version_ref TEXT PRIMARY KEY,
+    rule_ref TEXT NOT NULL,
+    outcome TEXT NOT NULL CHECK (outcome IN (
+        'not_applicable', 'consistent', 'ambiguous', 'misattributed', 'unreadable')),
+    attempts INTEGER NOT NULL DEFAULT 1 CHECK (attempts >= 1),
+    audited_at TEXT NOT NULL
+);
+CREATE TRIGGER IF NOT EXISTS claim_attribution_audits_authorized_insert
+BEFORE INSERT ON claim_attribution_audits
+WHEN dalton_claim_review_authorized() = 0 BEGIN
+    SELECT RAISE(ABORT, 'claim attribution audit insert requires authority');
+END;
+CREATE TRIGGER IF NOT EXISTS claim_attribution_audits_authorized_update
+BEFORE UPDATE ON claim_attribution_audits
+WHEN dalton_claim_review_authorized() = 0 BEGIN
+    SELECT RAISE(ABORT, 'claim attribution audit update requires authority');
+END;
+CREATE TRIGGER IF NOT EXISTS claim_attribution_audits_no_delete
+BEFORE DELETE ON claim_attribution_audits BEGIN
+    SELECT RAISE(ABORT, 'claim attribution audits cannot be deleted');
+END;

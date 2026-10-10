@@ -7,7 +7,8 @@ from dalton_core.research_gap_display import ask_gap_display_fields, display_met
 from dalton_core.research_language_runtime import run
 from dalton_core.cockpit_model import unwrap_json_object
 from dalton_core.ask_answer import parse_answer
-from dalton_core.ask_context import BLOCK_LABELS, BLOCK_TAGS
+# Old prompts carry the ask v0.1 tags; batch G froze those tables for exactly this reader.
+from dalton_core.ask_context import LEGACY_BLOCK_LABELS as BLOCK_LABELS, LEGACY_BLOCK_TAGS as BLOCK_TAGS
 from dalton_core.store import canonical_json
 
 def shown_from_prompt(prompt):

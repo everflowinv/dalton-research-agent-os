@@ -104,7 +104,7 @@ class CostSpecToForecastTests(unittest.TestCase):
         self.assertEqual(driver["history"][0]["value"], "70")
 
     def test_cost_template_survives_authority_roundtrip_into_model_inputs(self):
-        body = _spec()
+        body = executable_cost_fixture()
         body["expense_lines"][0]["cost_driver_slot"] = "delivery_cost"
         decided = spec_from_response(self.state(), body, decided_by=DECIDED_BY)
         store = DaltonStore(":memory:")
@@ -114,12 +114,12 @@ class CostSpecToForecastTests(unittest.TestCase):
             decided, mission_version_ref="coverage-mission-version:test:1")
         self.assertEqual(held["content_hash"], decided["content_hash"])
         self.assertEqual(held["cost_driver_template"], decided["cost_driver_template"])
-        missions = FakeMissions([
+        missions = FakeMissions(cost_history([
             _line("us-gaap:Revenues", "2026-03-01", "2026-05-31", "100"),
             _line("us-gaap:CostOfRevenue", "2026-03-01", "2026-05-31", "70"),
             _line("us-gaap:SellingGeneralAndAdministrativeExpense",
                   "2026-03-01", "2026-05-31", "10"),
-        ])
+        ]))
         table = build_model_inputs(missions, held)
         cost = next(row for row in table["rows"] if row["ref"] == "cost-of-services")
         self.assertEqual(cost["cost_driver_slot"], "delivery_cost")
@@ -134,17 +134,17 @@ class CostSpecToForecastTests(unittest.TestCase):
         self.assertEqual(reloaded_driver["cost_driver_slots"], ["delivery_cost"])
 
     def test_forecast_contract_refuses_unknown_or_duplicate_cost_slots(self):
-        body = _spec()
+        body = executable_cost_fixture()
         body["expense_lines"][0]["cost_driver_slot"] = "delivery_cost"
         decided = spec_from_response(self.state(), body, decided_by=DECIDED_BY)
         store = DaltonStore(":memory:")
         self.addCleanup(store.close)
         decided = CoverageMissionAuthority(store).record_company_model_spec(
             decided, mission_version_ref="coverage-mission-version:test:1")
-        table = build_model_inputs(FakeMissions([
+        table = build_model_inputs(FakeMissions(cost_history([
             _line("us-gaap:Revenues", "2026-03-01", "2026-05-31", "100"),
             _line("us-gaap:CostOfRevenue", "2026-03-01", "2026-05-31", "70"),
-        ]), decided)
+        ])), decided)
         forecast = build_forecast_model(decided, table)
         stored = ForecastModelAuthority(store).publish(forecast)
         driver = next(item for item in stored["drivers"]
@@ -192,3 +192,23 @@ class CostSpecToForecastTests(unittest.TestCase):
 
 if __name__ == "__main__":
     unittest.main()
+
+
+def executable_cost_fixture():
+    body=_spec()
+    body["revenue_drivers"]=[{"ref":"filed-mix","label":"Single consolidated mix","kind":"mix","basis_concept":"us-gaap:Revenues","unit":"USD","because":"Synthetic cost-slot fixture has one filed revenue total with no separate economic split."}]
+    body["driver_formulas"] = [{
+        "output_ref": "revenue", "operator": "sum",
+        "driver_refs": ["filed-mix"],
+        "because": "The single filed revenue total is the fixture executed mix driver.",
+    }]
+    for row in body["expense_lines"]:
+        if row.get("driver_ref") is not None:row["driver_ref"]="filed-mix"
+    return body
+
+
+def cost_history(lines):
+    result=[]
+    for start,end in (("2025-06-01","2025-08-31"),("2025-09-01","2025-11-30"),("2025-12-01","2026-02-28"),("2026-03-01","2026-05-31")):
+        for line in lines:result.append({**line,"period_start":start,"period_end":end})
+    return result

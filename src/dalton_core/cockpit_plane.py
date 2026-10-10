@@ -24,6 +24,7 @@ principal, exactly as the review plane does.  Model calls go through
 from __future__ import annotations
 
 import json
+import logging
 import base64
 import binascii
 import hashlib
@@ -34,7 +35,7 @@ import sqlite3
 import sys
 import threading
 import time
-from collections.abc import Mapping
+from collections.abc import Mapping, Sequence
 from contextlib import closing, contextmanager
 from dataclasses import dataclass
 from datetime import date, datetime, timedelta, timezone
@@ -43,6 +44,8 @@ from typing import Any, Callable, Iterator
 
 from .cockpit_model import CockpitModel, CockpitModelError, unwrap_json_object
 from .final_text_contract import final_text_instructions
+from .terminology import LABELS as _TERM_LABELS
+from .terminology import label as _term
 from .claim_retirement import REASON_LABELS as CLAIM_REASON_LABELS
 from .coverage_mission import STAGE_REOPENED
 from .mission_stage import evaluate_mission, planned_spec_refs_from_directory, retired_claim_refs
@@ -59,15 +62,9 @@ LANE_LABELS = {
 COMPANY_NAMES = {
     "ACN": "Accenture", "CTSH": "Cognizant", "EPAM": "EPAM", "IBM": "IBM", "DXC": "DXC Technology",
 }
-SOURCE_LABELS = {
-    "source:sec-edgar": "SEC 财报数据", "source:alphaengine": "卖方研报与电话会",
-    "source:company-ir": "公司官网投资者关系页面", "source:guidepoint": "专家访谈", "source:web-search": "公开网页搜索",
-    "source:sales-notes": "卖方销售快报", "source:company-wiki": "公司知识库",
-    "source:prior-research": "历史研究资料",
-    # S3 crowd sources, named like the rest rather than by their refs.
-    "source:xueqiu": "雪球散户讨论", "source:x": "X（推特）公开讨论",
-    "source:blind": "匿名员工评价（Blind）",
-}
+from .terminology import labels as terminology_labels
+SOURCE_LABELS = dict(terminology_labels("research_source"))
+
 SOURCE_SLUG_LABELS = {
     "alphaengine": "卖方研报与电话会", "catalyst-calendar": "催化剂日历",
     "cn-hk-findata": "沪深港财务与交易数据", "cninfo": "巨潮资讯",
@@ -82,6 +79,97 @@ SOURCE_SLUG_LABELS = {
     "employee-reviews": "匿名员工评价（Blind）",
     "yfinance": "Yahoo Finance 市场数据",
 }
+
+
+def _company_display_name(member: Mapping[str, Any], company_ref: str) -> str:
+    from .financial_display import company_display_name
+
+    return company_display_name(member, company_ref)
+
+
+#: What a thesis revision did, from the decision word its change reason starts with.
+THESIS_CHANGE_LABELS = {
+    "THESIS_STRENGTHENED": "论点增强", "THESIS_WEAKENED": "论点受损",
+    "THESIS_BROKEN": "论点被推翻", "NEW_THESIS": "新论点",
+}
+
+
+def _thesis_views(theses: Sequence[Mapping[str, Any]],
+                  members: Mapping[str, Mapping[str, Any]]) -> list[dict[str, Any]]:
+    """The thesis rows of the overview, oldest first as before.
+
+    ``ref``/``confidence``/``summary`` are unchanged (their localization keys
+    with them).  Batch ah (2026-10-09, review O02) adds display fields so a
+    page can show one current view per thesis and keep the earlier versions
+    as history: ``current``, ``version``, ``at``, ``superseded_at``,
+    ``change_label`` and the ``company_ref`` the thesis is about (from its
+    ``thesis:<ticker>:`` ref; an industry thesis has none).
+    """
+
+    newest: dict[str, Mapping[str, Any]] = {}
+    for item in theses:
+        ref = item.get("thesis_ref") or item.get("id")
+        old = newest.get(ref)
+        if old is None or (int(item.get("version") or 0), str(item.get("created_at") or "")) > (int(old.get("version") or 0), str(old.get("created_at") or "")):
+            newest[ref] = item
+    by_ticker = {str(m.get("ticker") or "").lower(): ref for ref, m in members.items() if m.get("ticker")}
+    out = []
+    for item in theses:
+        ref = item.get("thesis_ref") or item.get("id")
+        later = [t for t in theses if (t.get("thesis_ref") or t.get("id")) == ref
+                 and str(t.get("created_at") or "") > str(item.get("created_at") or "")]
+        word = str(item.get("change_reason") or "").split("｜", 1)[0].strip()
+        parts = str(ref or "").split(":")
+        out.append({
+            "ref": ref, "confidence": item.get("confidence"),
+            "summary": item.get("summary") or item.get("statement") or item.get("change_reason"),
+            "question_ref": item.get("question_ref"), "stance": item.get("stance"),
+            "view_status": item.get("view_status"), "proposition_direction": item.get("proposition_direction"),
+            "disagreement": item.get("disagreement"),
+            "falsification_conditions": item.get("falsification_conditions") or [],
+            "version_ref": item.get("id"), "version": item.get("version"),
+            "at": item.get("created_at"), "current": newest.get(ref) is item,
+            "superseded_at": (min(str(t.get("created_at")) for t in later) if later else None),
+            "change_label": THESIS_CHANGE_LABELS.get(word, "首次建立" if item.get("version") == 1 else None),
+            "company_ref": by_ticker.get(parts[1]) if len(parts) > 2 else None,
+        })
+    return out
+
+
+def _current_thesis_views(views: Sequence[Mapping[str, Any]]) -> list[dict[str, Any]]:
+    """The current version of each thesis, one per ref, in ``views`` order.
+
+    The guard behind ``theses_current`` (P0 2026-10-09: the overview showed a
+    superseded thesis beside the version that refuted it).  A row is current
+    only when ``_thesis_views`` said so; should two rows of one ref both claim
+    it, the later one wins.
+    """
+
+    keep: dict[str, dict[str, Any]] = {}
+    for view in views:
+        if view.get("current") is True:
+            keep.pop(view.get("ref"), None)
+            keep[view.get("ref")] = dict(view)
+    return list(keep.values())
+
+
+def _model_empty_label(entry: Mapping[str, Any], note: str | None, has_spec: bool) -> str:
+    """「该公司的预测模型还没有生成：<原因/所处阶段>」 from the stage ledger."""
+
+    if has_spec:
+        reason = "模型规格已经确定，预测数字还没有算出来"
+    else:
+        reason = "还没有确定模型规格（预测哪些报表行、用哪些驱动因素）"
+    if entry.get("stage") is None:
+        where = "研究还没有开始"
+    else:
+        where = f"目前处于「{entry.get('stage_label') or '研究'}」阶段"
+        status = entry.get("stage_status_label")
+        if status:
+            where += f"（{status}）"
+        if note:
+            where += f"，{note}"
+    return f"该公司的预测模型还没有生成：{reason}；{where}。"
 
 
 def _stage_readiness_labels(entry: Mapping[str, Any]) -> dict[str, Any]:
@@ -126,11 +214,65 @@ def _initial_screen_failure_label(summary: Mapping[str, Any]) -> str | None:
             or "no model route is available right now" in reasons.casefold()):
         return "最新一次报告生成失败：模型服务或当时可用运行额度未能承接请求"
     reason = str(summary.get("failure_reason") or "").strip()
-    return f"最新一次报告生成失败：{reason}" if reason else "最新一次报告生成失败"
+    if reason.startswith("核验未通过"):
+        if "forecast_eps_basis_" in reason:
+            return "最新一次报告尚未发布：每股收益的比较口径仍需核对"
+        return "最新一次报告尚未发布：报告中的数字、来源或推理仍需核对"
+    return (f"最新一次报告生成失败：{_display_reason(reason)}" if reason
+            else "最新一次报告生成失败")
+
+
+def _candidate_period_steps(state_dir: Path, *, now: datetime | None = None) -> dict[str, str]:
+    """Ticker -> the step its found earnings-call candidate is really at.
+
+    2026-10-08 (ws-7d MSFT FY2026-Q4): the card could only say a quarter was
+    "found, waiting for selection/acquisition" while a *selected* transcript
+    sat behind an exhausted call budget.  The AlphaEngine coordinator now puts
+    the real step in the tick ledger (``candidate_step``); this reads the
+    newest one, if under an hour old.  A display field beside the item's
+    ``note`` -- the note itself, and so its localization key, is unchanged.
+    """
+
+    from .tick_ledger import TickLedger, TickLedgerError, default_path
+
+    path = default_path(state_dir)
+    if not path.is_file():
+        return {}
+    try:
+        with TickLedger(path, read_only=True) as ledger:
+            state = ledger.latest_coordinator_state("mission_source_discovery", "alphaengine")
+    except (TickLedgerError, sqlite3.Error, OSError, ValueError):
+        return {}
+    step = (state or {}).get("candidate_step")
+    if not isinstance(step, str) or "：" not in step:
+        return {}
+    try:
+        at = datetime.fromisoformat(str(state.get("started_at")))
+    except ValueError:
+        return {}
+    moment = now or datetime.now(timezone.utc)
+    if at.tzinfo is None:
+        at = at.replace(tzinfo=timezone.utc)
+    if moment - at > timedelta(hours=1):
+        return {}
+    subject, text = step.split("：", 1)
+    ticker, _, spec_ref = subject.partition("/")
+    if spec_ref != "earnings-call-transcripts" or not ticker or not text:
+        return {}
+    return {ticker.upper(): text}
 
 
 def _latest_initial_screen_failures(state_dir: Path) -> dict[str, str]:
-    latest: dict[str, tuple[str, str]] = {}
+    """The failure label of each company's *latest* generation, if it failed.
+
+    2026-09-30 (P0-1): this used to skip every succeeded ticket and keep the
+    newest failure, so a success could never clear an older failure and EPAM's
+    card said "最新一次报告生成失败" for three weeks after two later successes.
+    The newest ticket per company decides, whatever its status; only a failed
+    one yields a label.
+    """
+
+    latest: dict[str, tuple[str, str, dict[str, Any]]] = {}
     root = state_dir / "initial-screens"
     if not root.is_dir():
         return {}
@@ -139,13 +281,19 @@ def _latest_initial_screen_failures(state_dir: Path) -> dict[str, str]:
         if not isinstance(ticket, dict) or not isinstance(summary, dict):
             continue
         company_ref = (summary.get("drafted") or {}).get("company_ref")
-        label = _initial_screen_failure_label(summary)
-        if not company_ref or not label:
+        if not company_ref:
             continue
         at = str(ticket.get("completed_at") or ticket.get("started_at") or "")
-        if company_ref not in latest or at > latest[company_ref][0]:
-            latest[company_ref] = (at, label)
-    return {company_ref: value[1] for company_ref, value in latest.items()}
+        # Ties on the instant go to the directory name so the answer does not
+        # depend on the order the filesystem lists them in.
+        if company_ref not in latest or (at, path.name) > latest[company_ref][:2]:
+            latest[company_ref] = (at, path.name, summary)
+    out: dict[str, str] = {}
+    for company_ref, (_at, _name, summary) in latest.items():
+        label = _initial_screen_failure_label(summary)
+        if label:
+            out[company_ref] = label
+    return out
 # P11x: what a figure is worth, in the owner's language. A number the company
 # filed is its published figure; a number said on a call is a record of the
 # saying. Both are kept; the label is how the difference stays visible.
@@ -164,11 +312,10 @@ FIGURE_GRADE_LABELS = {
     "company-filed-document": "公司文件披露",
     "earnings-call-transcript": "电话会口述（未经财报核对）",
 }
-STAGE_LABELS = {
-    "industry_framework": "行业框架", "initial_screen": "初步筛选", "industry_model": "行业模型",
-    "company_model": "公司模型", "forecast_lines": "预测线", "investment_memo": "投资备忘录",
-    "weekly_brief": "每周简报", "deep_insight_gate": "深度洞察", "continuous_coverage": "持续覆盖",
-}
+# Batch am: from the terminology registry (one vocabulary for every page).
+STAGE_LABELS = {stage: _term("stage", stage) for stage in (
+    "industry_framework", "initial_screen", "industry_model", "company_model", "forecast_lines",
+    "investment_memo", "weekly_brief", "deep_insight_gate", "continuous_coverage")}
 # -- P11a / P11c / P12b / P13-M2 / Q1 -----------------------------------------
 #
 # What the four Wave 1 lanes put in the Core, in the owner's language. Every
@@ -258,6 +405,9 @@ LANE_STATUS_NOTES = {
     "recovery_required": "上次执行留下待恢复事项，本轮未继续处理",
     "duplicate": "已有相同结果，无需重复生成",
     "dispatched": "本轮任务已派发处理",
+    "resumed": "已恢复此前暂停的任务",
+    "not_applicable": "当前研究目标不需要这项流程",
+    "recorded": "本轮结果已记录",
     "proposed": "已提交重审建议，等待你的决定",
     "irrelevant": "当前没有需要处理的事项",
 }
@@ -310,11 +460,71 @@ REGISTRY_LANE_LABELS = {
     "conviction_call_verifier": "独立核验投资判断",
     "mission_reopen": "评估已通过阶段评审的报告是否需要更新",
     "catalog_sync": "同步可用模型目录",
+    "owner_delivery": "飞书推送（周报、需要你处理、模型回退、紧急停机）",
     "industry_framework": "构建行业分析框架与多标的横向对比",
     "model_stage_bridge": "校验行业与公司模型勾稽并推进研究阶段",
     "investment_memo": "起草投资备忘录，经独立复核后提交人工决策",
     "zero_base_review": "月度归零复核：降低锚定偏差并重估投资假设",
+    "scenario_proposal": "把档案里的情景整理成可跟踪的触发条件，提交人工裁决",
+    "scenario_observation": "每轮检查已采纳情景的触发条件",
+    # F14: the names four lanes' own failure budgets write the ledger under,
+    # which are not their registry keys.  Without them the ops page showed a
+    # raw ``hkex_filings`` where every other row has a sentence.
+    "crowd_source": "监测散户舆情与职场评价",
+    "hkex_filings": "监测港股回购与董事增减持披露",
+    "document_extraction": "从已获取原文中提取研究论点",
+    "mission_source_discovery": "按计划检索 AlphaEngine、网页与 SEC 新资料",
+    "return_attribution": "按申报报表勾稽利润桥与每股序列，拆解持有期回报",
+    # Batch A: the passage-level full-text evidence index (no model).
+    "document_index": "为已获取的全部原文建立全文段落索引",
+    # Batch E: the material acquisition service (no model).
+    "material_acquisition": "按需要从各个资料来源补齐缺少的研究材料",
 }
+
+
+# The daemon's own lanes as they appear in its heartbeat (service.py).
+HEARTBEAT_LANE_LABELS = {
+    "bounded_planner": "研究调度", "outbox": "消息投递", "weekly_brief": "每周简报",
+    "backup": "备份", "agenda": "研究议程", "projection": "页面数据整理",
+}
+
+
+def heartbeat_lanes_in_error(heartbeat: Mapping[str, Any] | None) -> list[dict[str, Any]]:
+    """Which heartbeat lanes are in ``error`` (or ``degraded``) right now.
+
+    The same conditions service.py uses to write ``state = degraded``, one
+    entry per lane, so the shell can say how many and which.  A degraded
+    heartbeat whose cause is the sweep itself (no lane in error) gets one
+    「后台调度」 entry so the count is never zero for a degraded service.
+    """
+
+    value = heartbeat if isinstance(heartbeat, Mapping) else {}
+    out: list[dict[str, Any]] = []
+
+    def add(key: str, label: str, lane: Mapping[str, Any]) -> None:
+        error = lane.get("last_error")
+        out.append({"key": key, "label": label, "state": lane.get("state"),
+                    "since": lane.get("last_completed_at") or lane.get("last_started_at"),
+                    "has_error_detail": bool(error)})
+
+    for key, label in HEARTBEAT_LANE_LABELS.items():
+        lane = value.get(key)
+        if not isinstance(lane, Mapping):
+            continue
+        state = lane.get("state")
+        if state == "error" or (key == "outbox" and state == "degraded"):
+            add(key, label, lane)
+    plugins = value.get("plugins")
+    if isinstance(plugins, Mapping):
+        for name, lane in sorted(plugins.items()):
+            if isinstance(lane, Mapping) and lane.get("state") == "error":
+                add(f"plugin:{name}", REGISTRY_LANE_LABELS.get(name, name), lane)
+    if not out and value.get("state") == "degraded":
+        out.append({"key": "service", "label": "后台调度", "state": "degraded",
+                    "since": value.get("last_tick_at"), "has_error_detail": bool(value.get("last_error"))})
+    return out
+
+
 # Already shown by name above the registry rows, with their budgets.
 LANES_SHOWN_ELSEWHERE = frozenset({"mission_source_discovery", "document_extraction"})
 
@@ -339,6 +549,16 @@ LANE_STATUS_BUCKET_OF: dict[str, str] = {
     "held": "held", "failed": "held", "unavailable": "held",
     "rejected": "held", "terminal": "held", "recovery_required": "held",
     "duplicate": "idle",
+    # 2026-09-30 (P2-2): words the live lanes report that this table did not
+    # know, so they fell into ``other`` and out of the headline ("11 项执行
+    # 中，23 项待命，5 项受阻" with 39 rows on the page).  ``dispatched`` and
+    # ``resumed`` are work handed out this tick; ``waiting`` is a lane whose
+    # next run is not due (weekly framework, cadence); ``not_applicable`` and
+    # ``recorded`` are lanes with nothing to do or a result already written.
+    "dispatched": "running", "resumed": "running",
+    "waiting": "idle", "not_applicable": "idle", "recorded": "idle",
+    # The weekly brief row carries the brief's own state word.
+    "ready": "idle", "disabled": "unconfigured",
 }
 
 # P17d: what a parked work item is waiting on, in the owner's language.  The
@@ -358,6 +578,7 @@ DEPENDENCY_LABELS: dict[str, str] = {
     "transport": "网络 / 连接器",
     "writer_rpc": "写入服务（重启中或忙）",
     "source": "外部数据源",
+    "changedetection": "本机网页变动监测（changedetection，127.0.0.1:5055）",
     "unknown": "未识别的依赖（原始记录见技术详情）",
 }
 FAILURE_CLASS_LABELS: dict[str, str] = {
@@ -441,7 +662,98 @@ def _ops_waiting_reason(reason: Any, *, permission: bool = False) -> str:
         return "相关数据源或操作尚未获得使用批准"
     if "alphaengine" in text:
         return "AlphaEngine 桌面端当前不可用"
+    # F14 tail: the sources the newly recorded lanes wait on, so their rows
+    # read as a sentence rather than as the generic fallback.
+    if "changedetection" in text or "127.0.0.1:5055" in text:
+        return "本机网页变动监测服务（changedetection）未运行或无法连接"
+    if "sec.gov" in text or "edgar" in text:
+        return "SEC EDGAR 当前无法访问"
+    if "guidepoint" in text:
+        return "Guidepoint 当前不可用"
+    if "timed out" in text or "timeout" in text:
+        return "外部服务响应超时，稍后自动重试"
+    if "writer" in text and ("busy" in text or "unavailable" in text):
+        return "写入服务正在重启或繁忙"
     return "任务正在等待依赖恢复，具体原因见技术详情"
+
+
+OPS_PAGE_DEFAULT = 50
+OPS_PAGE_MAX = 500
+OPS_GROUP_SAMPLES = 3
+
+
+def _ops_page(name: str, rows: Sequence[Mapping[str, Any]], offset: int,
+              limit: int) -> dict[str, Any]:
+    """``<name>_items`` (one page) and ``<name>_page`` (where it sits)."""
+
+    offset = max(0, int(offset))
+    limit = max(1, min(int(limit), OPS_PAGE_MAX))
+    page = list(rows[offset:offset + limit])
+    following = offset + len(page)
+    return {
+        f"{name}_items": page,
+        f"{name}_page": {"offset": offset, "limit": limit, "returned": len(page),
+                         "total": len(rows),
+                         "next_offset": following if following < len(rows) else None},
+    }
+
+
+def _ops_terminal_groups(rows: Sequence[Mapping[str, Any]]) -> list[dict[str, Any]]:
+    """Stopped attempts by lane and reason, counted over all of them."""
+
+    groups: dict[tuple[str, str], dict[str, Any]] = {}
+    for row in rows:
+        reason = str(row.get("display_reason") or "任务已经结束，具体原因暂未记录")
+        key = (str(row.get("lane") or ""), reason)
+        group = groups.get(key)
+        if group is None:
+            group = groups[key] = {
+                "lane": row.get("lane"), "lane_label": row.get("lane_label"),
+                "display_reason": reason, "count": 0, "last_seen": None,
+                "technical_samples": [],
+            }
+        group["count"] += 1
+        seen = row.get("last_seen")
+        if isinstance(seen, str) and (group["last_seen"] is None or seen > group["last_seen"]):
+            group["last_seen"] = seen
+        if len(group["technical_samples"]) < OPS_GROUP_SAMPLES:
+            group["technical_samples"].append(row.get("technical_details"))
+    return sorted(groups.values(),
+                  key=lambda group: (-group["count"], str(group["lane_label"] or ""),
+                                     group["display_reason"]))
+
+
+def _failure_ledger_coverage() -> dict[str, Any]:
+    """F14: which lanes this panel can see, said once under the tile.
+
+    The panel is a fold over the failure ledger; a lane that never writes the
+    ledger is a lane whose failures the panel cannot show, and "nothing
+    waiting" from a panel blind to half the lanes is the Chem health page
+    again.  Every driven lane is either ``own`` (its budget writes the ledger)
+    or ``observed`` (the writer writes it for the lane), and the count says so.
+    """
+
+    from .lane_registry import failure_ledger_coverage
+
+    try:
+        lanes = failure_ledger_coverage()
+    except Exception:  # noqa: BLE001 - a registry problem is not a page error
+        return {"available": False, "total": 0, "own": 0, "observed": 0,
+                "uncovered": [], "note": "无法读取流程登记表，失败账本覆盖情况未知"}
+    own = sorted(key for key, row in lanes.items() if row["mode"] == "own")
+    observed = sorted(key for key, row in lanes.items() if row["mode"] == "observed")
+    uncovered = sorted(set(lanes) - set(own) - set(observed))
+    return {
+        "available": True, "total": len(lanes), "own": len(own),
+        "observed": len(observed), "uncovered": uncovered,
+        "observed_lanes": [{"lane": key,
+                            "lane_label": REGISTRY_LANE_LABELS.get(key, key)}
+                           for key in observed],
+        "note": (f"全部 {len(lanes)} 条流程的失败都会记入失败账本："
+                 f"{len(own)} 条自带失败预算，{len(observed)} 条由调度器代为记录"
+                 + ("" if not uncovered else
+                    f"；{len(uncovered)} 条尚未接入：" + "、".join(uncovered))),
+    }
 
 
 def _ops_item_label(item_key: Any,
@@ -454,6 +766,10 @@ def _ops_item_label(item_key: Any,
         return CockpitPlane._label(members, company_ref)
     if company_ref.startswith("industry:"):
         return "行业任务"
+    if raw == "ir-pages":
+        return "投资者关系页面监测"
+    if raw == "lane" or raw.startswith("part:"):
+        return "整条流程"
     return "任务记录"
 
 def _ops_superseded_mission(item_key: Any, current: str | None) -> bool:
@@ -584,19 +900,56 @@ def _judgement_outcome_panel(metric: Any) -> dict[str, Any]:
 # had. What is new here is that most of these words are *judgements* rather
 # than counts, and a judgement shown in the machine's vocabulary is a
 # judgement the owner cannot argue with.
-EVENT_KIND_LABELS = {
-    "price_move": "股价异动", "price_divergence": "股价与我们的判断持续背离",
-    "news": "新闻", "filing": "公司报表", "transcript": "电话会纪要",
-    "rating_change": "评级变化", "calendar": "日程",
-    "reconciliation": "预测与实际对账", "claim": "新结论",
-    "sales_note": "卖方销售简报", "crowd_post": "散户与市场讨论",
-    "expert_excerpt": "专家访谈摘录",
-    "insider_transaction": "董事与高管的买卖",
-    "insider_trading_plan": "董事与高管的交易计划变更",
-    "ownership_change": "大股东持股变化",
-    "holdings_change": "机构持仓变化",
-    "buyback_disclosure": "公司回购自己的股票",
+#: An internal reference that must never be the text an analyst reads.
+_INTERNAL_REF = re.compile(r"^[a-z][a-z0-9-]*(?::[A-Za-z0-9._-]+)+$|sha256:[0-9a-f]{6,}|^[0-9a-f]{32,64}$")
+#: What a new document of each kind is, in the analyst's words (batch am,
+#: text evaluation 3.3).  ``{title}`` is the document's own title when known.
+_MATERIAL_SUMMARIES = {
+    "filing": ("新增 SEC 官方申报：{title}", "新增 SEC 官方申报（内容读取中）"),
+    "expert_excerpt": ("新增专家访谈纪要：{title}（内容解析中）", "新增专家访谈纪要（内容解析中）"),
+    "transcript": ("新增电话会纪要：{title}", "新增电话会纪要（内容解析中）"),
+    "sales_note": ("新增券商销售简报：{title}", "新增券商销售简报（内容解析中）"),
+    "news": ("新增新闻：{title}", "新增新闻（内容解析中）"),
+    "crowd_post": ("新增市场讨论：{title}", "新增市场讨论（内容解析中）"),
 }
+
+
+def _is_internal_ref(text: Any) -> bool:
+    value = str(text or "").strip()
+    return bool(value) and bool(_INTERNAL_REF.search(value))
+
+
+def event_display_summary(kind: str, payload: Mapping[str, Any]) -> str:
+    """One event in an analyst's words: never an internal ref or a raw concept id.
+
+    A document event names what arrived and its title (「新增专家访谈纪要：<title>
+    （内容解析中）」, 「新增 SEC 官方申报：Form 8-K」); a reconciliation names the
+    line in Chinese; everything else is the event's own summary through the
+    terminology registry.
+    """
+
+    from .terminology import scrub as _scrub
+
+    payload = payload or {}
+    if kind in _MATERIAL_SUMMARIES:
+        named, unnamed = _MATERIAL_SUMMARIES[kind]
+        title = str(payload.get("title") or "").strip()
+        if kind == "filing" and title and re.fullmatch(r"(?:Form\s+)?\d{1,2}-[A-Z]{1,2}(?:/A)?", title):
+            title = title if title.startswith("Form") else f"Form {title}"
+        return named.format(title=title[:160]) if title and not _is_internal_ref(title) else unnamed
+    if kind == "reconciliation":
+        metric = str(payload.get("metric_ref") or "").rsplit(":", 1)[-1]
+        name = _term("statement_line", metric, "") or "预测科目"
+        return (f"{name}（{payload.get('period_end')}）实际值与我们的预测偏离 "
+                f"{payload.get('deviation_percent')}%")
+    text = CockpitPlane._event_summary(kind, payload)
+    if _is_internal_ref(text):
+        return "新增资料（内容解析中）"
+    return _scrub(text)
+
+
+# Batch am: the registry owns these words (terminology LABELS).
+EVENT_KIND_LABELS = dict(_TERM_LABELS["event_kind"])
 # Ordered best first, the same order the Playbook reads them in.
 EVIDENCE_TIER_LABELS = {
     "primary_filing": "公司报表原文", "management_direct": "管理层直接表述",
@@ -605,21 +958,39 @@ EVIDENCE_TIER_LABELS = {
     "market_price": "市场价格", "derived": "系统计算结果",
     "news_media": "新闻报道", "crowd": "公开市场讨论",
 }
+def _event_result_display(record: Mapping[str, Any], effect: Mapping[str, Any]) -> dict[str, Any]:
+    """Batch F: an event judgement's analyst-facing result fields (empty when it has none)."""
+
+    from .event_judgement_result import dates_line, display_fields
+
+    out: dict[str, Any] = {}
+    shown = display_fields(record)
+    if shown:
+        out.update({key: value for key, value in shown.items() if value not in (None, [], {})})
+    main = record.get("main_event_ref") or effect.get("primary_event_ref")
+    if main and main != record.get("event_ref"):
+        out["main_event_ref"] = main
+        out["main_event_label"] = "与主事件一并研判"
+    dates = (record.get("result_material") or {}).get("dates") or record.get("event_dates")
+    if dates:
+        out["event_dates"] = dates
+        out["event_dates_label"] = dates_line(dates)
+    rejudge = record.get("rejudgement")
+    if rejudge:
+        out["rejudgement"] = rejudge
+        out["rejudgement_label"] = (f"第 {rejudge.get('sequence')} 次重判："
+                                    f"{rejudge.get('label') or rejudge.get('reason')}")
+        out["event_ref"] = rejudge.get("of_event_ref") or record.get("event_ref")
+    return out
+
+
 # The five words the judgement layer may say, and the six things it may do.
-JUDGEMENT_DECISION_LABELS = {
-    "NO_CHANGE": "维持现有判断", "THESIS_STRENGTHENED": "论点得到加强",
-    "THESIS_WEAKENED": "论点被削弱了", "THESIS_BROKEN": "论点被打破了",
-    "NEW_THESIS": "形成新的投资论点",
-}
-JUDGEMENT_ACTION_LABELS = {
-    "no_change": "维持现状", "note": "记录研究说明",
-    "research": "启动专项研究", "revise_forecast": "修订预测",
-    "revise_thesis": "提出论点修订候选", "revise_dossier": "修订公司档案",
-}
+JUDGEMENT_DECISION_LABELS = dict(_TERM_LABELS["judgement_decision"])
+JUDGEMENT_ACTION_LABELS = dict(_TERM_LABELS["judgement_action"])
 # What the independent reader said about that decision. ``none`` is not a
 # verdict: it is the absence of one, and the two must not look alike.
 VERIFIER_VERDICT_LABELS = {
-    "pass": "独立复核通过", "reject": "独立复核不通过",
+    "pass": "独立逻辑交叉质检：通过", "reject": "独立逻辑交叉质检：存疑需复核",
     "none": "没有独立复核",
 }
 # What a source can hand over, in the words a person would use to ask for it.
@@ -1205,7 +1576,7 @@ FIGURE_METRIC_LABELS = {
     "metric:ebit-margin": "EBIT 利润率",
     "metric:adjusted-eps": "调整后每股收益",
     "metric:adj-eps": "调整后每股收益",
-    "metric:adjusted-diluted-eps-growth": "调整后稀释每股收益增长",
+    "metric:adjusted-diluted-eps-growth": "调整后摊薄每股收益增速（Non-GAAP EPS YoY）",
     "metric:bookings-growth": "签约额增长",
     "metric:book-to-bill-ratio": "订单收入比（book-to-bill）",
 }
@@ -1219,6 +1590,137 @@ def _figure_display_label(metric_ref: Any, as_reported_label: Any) -> str:
     if isinstance(as_reported_label, str) and not re.search(r"[A-Za-z]", as_reported_label):
         return as_reported_label
     return "已核实指标（原始名称见技术详情）"
+
+
+# 2026-10-07 inspection (结论库): a figure Claim's statement is generated from
+# one English template (``claim_index_figures.figure_claim_semantics`` plus
+# ``document_figure_grade.qualify``).  It is rendered here deterministically in
+# Chinese for display; the stored statement is never changed and is shown
+# under 技术详情.
+_FIGURE_STATEMENT = re.compile(
+    r"^(?P<label>.+?) for (?P<period>.+?)(?: \(reported as: (?P<reported>.+?)\))? was "
+    r"(?:(?P<currency>[A-Z]{3}) )?(?P<value>-?\d[\d,]*(?:\.\d+)?) "
+    r"(?:(?P<scale>thousand|million|billion|trillion) )?\((?P<unit>[^()]+)\), "
+    r"(?P<qualifier>as .+?)\.?$", re.S)
+_FIGURE_QUALIFIERS = (
+    ("as published by the company", "依据公司申报文件披露"),
+    ("as spoken on the earnings call", "据业绩电话会口述，并非申报报表数据"),
+    ("as stated by this broker", "据券商研报，为该券商的估计"),
+    ("as written in this fund's own earlier work", "据本基金此前的内部研究"),
+)
+_FIGURE_LABELS = (
+    (r"adjusted diluted (?:eps|earnings per share)", "调整后稀释每股收益"),
+    (r"adjusted (?:eps|earnings per share)", "调整后每股收益"),
+    (r"diluted (?:eps|earnings per share)", "稀释每股收益"),
+    (r"basic (?:eps|earnings per share)", "基本每股收益"),
+    (r"adjusted operating margin", "调整后营业利润率"),
+    (r"adjusted effective tax rate", "调整后有效税率"),
+    (r"book-to-bill ratio.*", "订单收入比（新签订单/收入）"),
+    (r"net income attributable to .+ common (?:stockholders|shareholders)", "归属普通股股东净利润"),
+    (r"net income", "净利润"),
+    (r"operating income", "营业利润"),
+    (r"operating margin", "营业利润率"),
+    (r"(?:total )?revenues?", "营业收入"),
+    (r"(?:total |consolidated )?(?:net )?(?:sales|revenues?)", "营业收入"),
+    (r"free cash flow", "自由现金流"),
+)
+
+
+_MONTHS = {name: index for index, name in enumerate(
+    ("january", "february", "march", "april", "may", "june", "july", "august",
+     "september", "october", "november", "december"), 1)}
+
+
+def _statement_period_text(period: str) -> str:
+    """The template's period phrase in Chinese, or the phrase unchanged."""
+
+    ended = re.fullmatch(
+        r"(?P<kind>fiscal years?|years?|quarters?|three months|six months|nine months) ended "
+        r"(?P<month>[a-z]+) (?P<day>\d{1,2}), (?P<year>\d{4})"
+        r"(?: vs\.? .+)?", period.strip(), flags=re.I)
+    if ended and ended["month"].lower() in _MONTHS:
+        kind = ended["kind"].lower()
+        noun = {"three months": "三个月", "six months": "六个月", "nine months": "九个月"}.get(
+            kind, "财年" if kind.startswith("fiscal") else "季度" if kind.startswith("quarter") else "年度")
+        return (f"截至 {ended['year']} 年 {_MONTHS[ended['month'].lower()]} 月 "
+                f"{int(ended['day'])} 日的{noun}")
+    fiscal = re.fullmatch(r"fiscal (\d{4})", period.strip(), flags=re.I)
+    if fiscal:
+        return f"{fiscal[1]}财年"
+    compared = re.fullmatch(r"(\d{4}) compared to (\d{4})", period.strip(), flags=re.I)
+    if compared:
+        return f"{compared[1]} 年，与 {compared[2]} 年比较"
+    if re.fullmatch(r"\d{4}", period.strip()):
+        return f"{period.strip()} 年"
+    return period
+
+
+def claim_statement_display(statement: Any) -> str | None:
+    """The Chinese reading of a generated figure statement, or ``None``.
+
+    ``Net income for Fiscal Year Ended March 31, 2026 was USD 28 million
+    (currency), as published by the company in this document.`` reads
+    「净利润（截至 2026 年 3 月 31 日的财年）为 2800 万美元，依据公司申报文件披露。」
+    Any other statement returns ``None`` and is shown as written.
+    """
+
+    from .numeric_display import format_typed_value
+    from .financial_display import quarter_comparison_display
+
+    text = str(statement or "").strip()
+    comparison = quarter_comparison_display(text)
+    if comparison is not None:
+        return comparison
+    found = _FIGURE_STATEMENT.match(text)
+    if not found:
+        return None
+    qualifier = next((label for prefix, label in _FIGURE_QUALIFIERS
+                      if found["qualifier"].startswith(prefix)), None)
+    if qualifier is None:
+        return None
+    raw_label = found["label"].strip()
+    label = next((name for pattern, name in _FIGURE_LABELS
+                  if re.fullmatch(pattern, raw_label, flags=re.I)), None)
+    if label is None:
+        label = raw_label if _CJK.search(raw_label) else f"「{raw_label}」"
+    period = found["period"].strip()
+    period_label = claim_period_display_label(period)
+    if not period_label or period_label == "期间说明见技术详情" or period_label == period:
+        period_label = _statement_period_text(period)
+    unit = found["unit"].strip().lower()
+    value = found["value"].replace(",", "")
+    currency = found["currency"]
+    scale = found["scale"] or "one"
+    per_share = bool(re.search(r"\beps\b|per share", raw_label, flags=re.I))
+    if unit == "percent":
+        amount = f"{value}%"
+    elif unit == "ratio":
+        amount = value
+    elif unit in {"currency", "usd", "monetary"} and (currency or "USD") == "USD":
+        amount = format_typed_value(value, unit="usd", scale=scale, currency="USD",
+                                    metric="eps" if per_share else "")
+    else:
+        amount = " ".join(x for x in (currency, value, found["scale"], found["unit"]) if x)
+    return f"{label}（{period_label}）为 {amount}，{qualifier}。"
+
+
+def _owner_terms(value: Any) -> str | None:
+    """The owner glossary on a stored text, or ``None`` when nothing changes."""
+
+    from .research_gap_display import owner_terms_text
+
+    if not isinstance(value, str):
+        return None
+    shown = owner_terms_text(value)
+    return shown if shown != value else None
+
+
+def statement_display(value: Any) -> str | None:
+    """``financial_display.statement_display``: amounts and XBRL ids for people."""
+
+    from .financial_display import statement_display as shown
+
+    return shown(value)
 
 
 def claim_period_display_label(value: Any) -> str | None:
@@ -1537,6 +2039,8 @@ RESEARCH_TASK_TERMINAL_LABELS = {
     "evidence_observed_for_review": "有发现，待复核",
     "coverage_complete_unobservable_candidate": "查遍了，没有可观察到的证据",
     "budget_exhausted": "预算已用完，研究尚未完成",
+    "source_material_unchanged_waiting_new_material": "资料未变化，等待新材料后再研究",
+    "source_unavailable_waiting_material_request": "资料连续不可用，已登记材料需求",
     "human_replan_required": "等待人工重新规划",
     "human_deprioritized": "人工降低了优先级",
 }
@@ -1545,19 +2049,69 @@ RESEARCH_TASK_TERMINAL_LABELS = {
 # describes what a stage does when every explicitly selected model
 # model the owner named has been retired.
 MODEL_SELECTION_MODE_LABELS = {
-    "tier": "使用系统推荐配置",
+    "tier": "使用本类任务的默认顺序",
     "explicit": "手动指定模型",
     "tier_after_retirement": "指定模型已退役，暂时使用该环节的默认模型顺序",
     "legacy_pin": "沿用当前策略固定的模型",
     "policy_filters": "由当前策略筛选模型",
-    "tier_preview": "默认档位预览（尚未绑定策略）",
+    "tier_preview": "默认 AI 服务顺序预览（尚未绑定策略）",
 }
 WORK_STATE_LABELS = {
     "ready": "排队", "leased": "开始执行", "succeeded": "完成",
     "failed": "失败", "deferred": "延后", "cancelled": "取消",
+    # P2-3: the scheduler also writes these (its CHECK allows retryable and
+    # expired), and the trajectory printed "工单retryable：goal-0ef0…".
+    "retryable": "失败，稍后重试", "running": "执行中", "expired": "租约过期",
 }
+# P2-3: the non-model work kinds a work-order id starts with, for the
+# trajectory title.  Model work is ``work:cockpit-<purpose>-<hash>`` and is
+# named by its purpose.
+WORK_KIND_LABELS = {
+    "document-extraction": "阅读并提炼结论", "web-fetch": "获取网页",
+    "alphaengine-search": "检索研报与电话会", "alphaengine-doc": "获取研报原文",
+    "guidepoint-search": "检索专家访谈", "gemini-web-search": "公开网页搜索",
+    "sec-filings-index": "读取 SEC 申报索引", "metric-discovery": "发现财务指标",
+    "bounded-planner": "研究调度", "agenda": "研究议程",
+    "llm-research-planner": "制定研究计划", "thesis-impact-assessment": "评估论点影响",
+}
+_WORK_ID_TAIL = re.compile(r"[-:][0-9a-f]{12,}$")
+_COMPANY_REF = re.compile(r"company:(?:sec-cik:\d+|[a-z0-9][a-z0-9.-]*)")
+
+
+def _work_title_parts(work_order_id: str, work_order_json: Any,
+                      members: Mapping[str, Mapping[str, Any]]) -> tuple[str, str | None]:
+    """(lane label, company label or None) for a scheduler work order.
+
+    The id carries the work kind and a hash; the hash means nothing to the
+    owner.  The company is named when the work order mentions exactly one
+    company of this mission -- most model work carries it in its prompt --
+    and left out otherwise rather than guessed.
+    """
+
+    from .model_selection import PURPOSE_LABELS
+
+    kind = work_order_id.split(":", 1)[1] if work_order_id.startswith("work:") else work_order_id
+    kind = _WORK_ID_TAIL.sub("", kind)
+    record: Any = None
+    if isinstance(work_order_json, str) and work_order_json:
+        try:
+            record = json.loads(work_order_json)
+        except ValueError:
+            record = None
+    purpose = ((record or {}).get("metadata") or {}).get("purpose") if isinstance(record, Mapping) else None
+    if kind.startswith("cockpit-"):
+        purpose = purpose or kind.removeprefix("cockpit-")
+    label = (PURPOSE_LABELS.get(str(purpose)) if purpose else None) or WORK_KIND_LABELS.get(kind)
+    if label is None:
+        label = "研究任务"
+    company = None
+    if isinstance(work_order_json, str) and members:
+        found = {ref for ref in _COMPANY_REF.findall(work_order_json) if ref in members}
+        if len(found) == 1:
+            company = CockpitPlane._label(members, found.pop())
+    return label, company
 SKIP_REASON_LABELS = {
-    "budget_refused": "当时预算未放行",
+    "budget_refused": "当时预算未批准",
     "profile_retired": "模型已下线",
     "profile_not_allowed": "该环境未获授权使用此模型",
     "credential_slot_unavailable": "对应渠道凭证暂不可用",
@@ -1589,7 +2143,98 @@ BUDGET_REASON_LABELS = {
     "mission_budget_exceeded": "任务当日额度已用完",
     "outer_research_budget_exceeded": "跨任务当日额度已用完",
     "pool_exhausted": "分项预算池已用完",
+    "shared_daily_budget_exceeded": "本机共享的当日额度已用完",
+    "day_budget_exceeded": "当日总预算已用完",
 }
+
+
+def _group_fallback_notices(notices: Sequence[Mapping[str, Any]]) -> list[dict[str, Any]]:
+    """P2-6: one "model disappeared" notice per model, not one per stage.
+
+    The router writes a notice per calling stage that fell back, so a single
+    model leaving the gateway showed up three times on each page (grok-4-6:
+    model_spec, dossier, debate_map).  Grouped by the model that went away,
+    newest group first; ``refs`` lists every underlying notice so one 知道了
+    can acknowledge all of them.
+    """
+
+    from .model_selection import PURPOSE_LABELS
+
+    groups: dict[str, dict[str, Any]] = {}
+    for notice in notices:
+        key = str(notice.get("profile_id") or notice.get("id"))
+        group = groups.get(key)
+        if group is None:
+            group = groups[key] = {"profile_id": notice.get("profile_id"), "notices": []}
+        group["notices"].append(notice)
+    out: list[dict[str, Any]] = []
+    for group in groups.values():
+        members = sorted(group["notices"], key=lambda n: (str(n.get("created_at") or ""),
+                                                          str(n.get("id") or "")))
+        first = members[0]
+        purposes = [str(n.get("purpose") or "") for n in members]
+        labels = [PURPOSE_LABELS.get(purpose, purpose) for purpose in purposes]
+        replacements = sorted({str(n.get("replacement_profile_id") or "")
+                               for n in members} - {""})
+        profile = group["profile_id"] or "一个模型"
+        if len(members) == 1:
+            message = str(first.get("message") or "")
+        else:
+            message = (f"模型 {profile} 已在 OpenClaw 消失；{len(members)} 个环节"
+                       f"（{'、'.join(labels)}）已自动回退到 "
+                       f"{'、'.join(replacements) or '没有可用的模型'}；"
+                       "如需更改请到 cockpit 模型页选择")
+        out.append({
+            "ref": first.get("id"), "refs": [n.get("id") for n in members],
+            "hash": first.get("content_hash"),
+            "at": max(str(n.get("created_at") or "") for n in members),
+            "profile_id": group["profile_id"], "purposes": purposes,
+            "purpose_labels": labels, "replacements": replacements,
+            "tiers": sorted({str(n.get("tier") or "") for n in members} - {""}),
+            "message": message, "purpose": first.get("purpose"),
+            "acknowledged": all(n.get("acknowledged_by") is not None for n in members),
+        })
+    out.sort(key=lambda row: (row["at"], str(row["ref"])), reverse=True)
+    return out
+
+
+def _budget_rejection_detail(record: Mapping[str, Any]) -> str:
+    """One refusal, with the numbers of the cap that actually fired (P1-6).
+
+    The persisted rejection keeps the day policy's numbers whichever cap
+    refused, and this line used to read ``committed_micros`` / ``cap_micros``
+    -- fields the record has never had -- so every refusal said "已用 $0.00 /
+    上限 $0".  The cap is taken from the tier the reason names.
+    """
+
+    from decimal import Decimal
+
+    def usd(micros: Any, places: str = "0.01") -> str:
+        try:
+            value = Decimal(int(micros)) / Decimal(1_000_000)
+        except (TypeError, ValueError):
+            return "?"
+        return f"${value.quantize(Decimal(places))}"
+
+    reason = str(record.get("reason") or "day_budget_exceeded")
+    binding = record.get("mission_binding") if isinstance(
+        record.get("mission_binding"), Mapping) else {}
+    reserved = f"本次预留 {usd(record.get('reserved_micros'), '0.0001')}"
+    if reason == "mission_budget_exceeded":
+        cap = binding.get("max_daily_cost_micros")
+        calls = binding.get("max_daily_paid_calls")
+        return (f"{reserved}；触发的是本研究任务自己的每日额度（上限 {usd(cap)}"
+                + (f"、{calls} 次付费调用" if calls is not None else "") + "）")
+    if reason == "outer_research_budget_exceeded":
+        outer = binding.get("outer_budget") if isinstance(binding.get("outer_budget"), Mapping) else {}
+        return (f"{reserved}；触发的是跨任务的每日研究额度（上限 "
+                f"{usd(outer.get('max_daily_cost_micros'))}）")
+    if reason == "shared_daily_budget_exceeded":
+        return f"{reserved}；触发的是本机所有研究环境共享的每日额度"
+    return (f"{reserved}；当日已用 {usd(record.get('day_committed_micros'))}"
+            f" / 当日总上限 {usd(record.get('day_cap_micros'))}")
+
+
 MODEL_TIER_LABELS = {
     "brain": "高阶推理与规划",
     "cheap": "批量阅读与整理",
@@ -1610,10 +2255,11 @@ CHECKPOINT_TABLES = {
 }
 # P12d: the three words the gate authority accepts, so a button cannot offer
 # something the writer would refuse.
+# Batch am (text evaluation 7.2): review language, from the registry.
 GATE_ACTIONS = (
-    {"decision": "approve", "label": "通过"},
-    {"decision": "return_for_more_work", "label": "退回补充"},
-    {"decision": "reject", "label": "否决"},
+    {"decision": "approve", "label": _term("decision_button", "gate_approve")},
+    {"decision": "return_for_more_work", "label": _term("decision_button", "gate_return")},
+    {"decision": "reject", "label": _term("decision_button", "gate_reject")},
 )
 
 
@@ -1910,10 +2556,14 @@ APPROVAL_DETAIL_LABELS = {
     "deep_insight_gate": {"行业分类": "行业分类"},
     "investment_memo": {"独立核验": "独立核验结果"},
     "claim": {"发现的问题": "需要处理的问题", "依据": "判断依据"},
+    "company_scenario_set": {"已剔除的条件": "已剔除的条件"},
     "conviction_call": {
         "我们的看法": "当前投资判断", "市场的看法": "市场一致预期",
         "时间跨度": "投资期限", "信心": "置信度",
         "风险回报是否达标": "风险回报标准", "怎么裁决": "所需决定",
+        # ADR-0013: a v0.2 call's three components.
+        "证据置信度": "证据置信度", "投资期限": "投资期限",
+        "期望回报": "期望回报", "与市场看法": "与市场看法",
     },
     "thesis_revision_candidate": {
         "大脑的判断": "系统研判", "提议改成": "建议修订为",
@@ -1929,7 +2579,7 @@ APPROVAL_DETAIL_LABELS = {
         "哪一期": "预测期间", "想改成": "建议值",
         "为什么没直接改": "需要人工决定的原因",
     },
-    "model_fallback": {"环节": "受影响的研究环节", "档位": "模型档位"},
+    "model_fallback": {"环节": "受影响的研究环节", "AI 服务等级": "AI 服务等级"},
 }
 # What each one's buttons say, when this Core can actually decide it. The
 # words are the authorities' own verdict vocabularies -- ``accept / reject /
@@ -1946,6 +2596,39 @@ CHECKPOINT_ACTIONS = {
         {"decision": "decline", "label": "保留当前版本"},
     ),
 }
+# 2026-10-06: a thesis revision candidate that proposes neither a new
+# statement nor a new confidence (live legacy ACN, two event-judgement
+# candidates of 10-01) has nothing to accept -- the thesis authority refuses
+# it as a rewrite of an unchanged view (ADR-0008) -- so its card offers only
+# the two answers that can be recorded.  「确认维持」 is a closing ``reject``
+# whose reason says the current thesis stands; it needs no typing, so the
+# owner clears it in one click (a note may still be added).
+EMPTY_THESIS_CANDIDATE_ACTIONS = (
+    {"decision": "maintain", "label": "确认维持现有论点"},
+    {"decision": "reject", "label": "拒绝这条判断"},
+)
+EMPTY_THESIS_CANDIDATE_NOTE = (
+    "这条建议没有提出新的论点表述，也没有调整置信度（判断首选维持现有论点），"
+    "接受不会产生新版本，所以不提供「接受」。点「确认维持现有论点」即可关闭，"
+    "理由会自动记录；不同意这条判断就点「拒绝」。"
+)
+MAINTAIN_THESIS_REASON = "确认维持现有论点：这条建议没有提出新的论点表述或置信度"
+
+
+def thesis_candidate_proposes_nothing(record: Mapping[str, Any]) -> bool:
+    """Whether accepting this candidate could ever produce a new version.
+
+    Read off the candidate's own two proposal fields, which every ADR-0007
+    candidate carries; a record without them says nothing about it.
+    """
+
+    if "proposed_statement" not in record or "proposed_confidence" not in record:
+        return False
+    statement = record.get("proposed_statement")
+    return ((statement is None or (isinstance(statement, str) and not statement.strip()))
+            and record.get("proposed_confidence") is None)
+
+
 # And what it says instead, on a Core whose writer predates the decision ops.
 CHECKPOINT_UNDECIDABLE_NOTES = {
     "thesis_revision_candidate": "需要人工决策；当前版本尚不能记录这类决定",
@@ -2057,6 +2740,15 @@ def _alphaengine_cap_note(cap: Mapping[str, Any] | None) -> str:
         # Say it plainly: the owner raised a budget and something else is
         # holding it down. Silence here is how 30 looked like 130 for days.
         note += f"（任务预算 {cap['mission_cap']}，被程序内置的 owner 安全上限压到 {cap['cap']}）"
+    elif cap.get("bound_by") == "plan" and cap.get("mission_cap"):
+        # 2026-10-07: the approved search plan's own daily budget, which used
+        # to be folded into the owner cap and read as "owner".
+        note += f"（任务预算 {cap['mission_cap']}，按已批准的检索计划预算 {cap['cap']} 执行）"
+    elif cap.get("bound_by") == "search_floor":
+        note += (f"（其中 {cap.get('search_floor')} 次留给检索，"
+                 "文档获取暂时只能用剩下的部分）")
+    if cap.get("search_floor") and cap.get("bound_by") != "search_floor":
+        note += f"；至少 {cap['search_floor']} 次留给检索"
     return note
 
 
@@ -2079,6 +2771,42 @@ def _interval_label(seconds: Any) -> str | None:
             return f"每天 {24 // hours} 次"
         return f"每 {hours} 小时一次"
     return f"每 {max(1, seconds // 60)} 分钟一次"
+
+
+def _reconciliation_display(item: Mapping[str, Any]) -> dict[str, Any]:
+    """Display fields of one provisional reconciliation (batch am, 5.6).
+
+    ``actual_label`` / ``forecast_label`` in 亿美元 / 万美元, ``period_label``
+    in words and ``forecast_version_label`` naming the forecast version, so
+    the page can say 「FY… 营业收入录得 180.4 亿美元，较我们的预测（v3，
+    2026-09-30 生成）偏离 −1.6%」.  Missing inputs leave the field out.
+    """
+
+    from decimal import Decimal, InvalidOperation
+
+    from .forecast_reconciliation import SCALE_FACTORS
+    from .numeric_display import format_display_number, format_prose_date_ranges
+
+    out: dict[str, Any] = {}
+    scale = SCALE_FACTORS.get(str(item.get("unit") or ""))
+    for key, field in (("actual_value", "actual_label"), ("forecast_value", "forecast_label")):
+        try:
+            value = Decimal(str(item[key])) * scale if scale is not None and item.get(key) is not None else None
+        except (InvalidOperation, ValueError):
+            value = None
+        if value is not None:
+            out[field] = format_display_number(value, kind="amount_usd")
+    if isinstance(item.get("period"), str):
+        out["period_label"] = format_prose_date_ranges(item["period"])
+    version = item.get("forecast_version")
+    if version is not None:
+        made = str(item.get("forecast_created_at") or "")[:10]
+        out["forecast_version_label"] = f"v{version}" + (f"，{made} 生成" if made else "")
+    return out
+
+def _bounded_terminal_table(connection):
+    from .bounded_planner_loop import terminal_event_table
+    return terminal_event_table(connection)
 
 
 def _table_exists(connection, name: str) -> bool:
@@ -2164,6 +2892,147 @@ def _text(value: Any, name: str, *, maximum: int = 4000, minimum: int = 1) -> st
     if len(stripped) < minimum or len(stripped) > maximum:
         raise CockpitError(f"{name} must be {minimum}..{maximum} characters")
     return stripped
+
+
+def _verifier_capability_coverage(rows: list[Mapping[str, Any]]) -> dict[str, Any]:
+    """Whether each bound verifier-tier stage's chain can serve its WorkOrder."""
+
+    from .cockpit_model import verifier_route_capability
+
+    covered_purposes: list[str] = []
+    # 2026-09-23: three outcomes, not two.  A stage whose chain has no
+    # controlled verifier really would be rejected before the call, and
+    # the owner has to be able to see which models it is pinned to.  A
+    # stage with *no chain at all* -- no model configuration bound in
+    # this environment -- is a different thing entirely: it is not
+    # routing to an ineligible model, it is not routing.  Counting the
+    # second as the first is what made this tier read 受控核验部分不可用
+    # in both environments while every bound verifier chain was in fact
+    # covered, and it pointed the owner at a gateway capability problem
+    # that did not exist.
+    #
+    # 2026-09-29: and the requirement is the stage's own.  Only the
+    # stages with a provider output contract ask the router for
+    # provider-controlled-verify; the thesis-impact verifier service
+    # (and the annual-report verifier) ask for plain ``verify``.
+    # Holding them to the contract capability made legacy read
+    # 受控核验部分不可用 for 核验论点影响评估, whose pinned chain
+    # (Antigravity gemini-3.8-flash, glm-5.3) declares ``verify`` and
+    # routes -- it was never rejected before a call.
+    uncovered: list[dict[str, Any]] = []
+    unbound: list[dict[str, Any]] = []
+    controlled: set[str] = set()
+    required_by_purpose: dict[str, str] = {}
+    for row in rows:
+        chain = row["chain"]
+        required = verifier_route_capability(row["purpose"])
+        required_by_purpose[row["purpose"]] = required
+        links = [
+            link["model"] for link in chain
+            if required in (link.get("capabilities") or [])
+        ]
+        if links:
+            covered_purposes.append(row["purpose"])
+            if required == "provider-controlled-verify":
+                controlled.update(links)
+        elif chain:
+            uncovered.append({
+                "purpose": row["purpose"], "label": row["label"],
+                "required": required,
+                "models": [link["model"] for link in chain],
+                "display_names": [link["display_name"] for link in chain],
+            })
+        elif row["mode"] != "deterministic":
+            unbound.append({
+                "purpose": row["purpose"], "label": row["label"],
+                "configuration_status": row["configuration_status"],
+                "configuration_source": row["configuration_source"],
+            })
+    status = (
+        ("missing" if not covered_purposes else "partial") if uncovered
+        else "covered" if covered_purposes
+        else "unbound"
+    )
+    unbound_note = (
+        None if not unbound else
+        "以下环节在本环境还没有绑定模型配置，因此不会发起调用（绑定后按本层调用链执行）："
+        + "、".join(f"{item['label']}（{item['configuration_source']}）"
+                    for item in unbound)
+    )
+    # Named, always: "有环节的调用链缺少……" left the owner with a
+    # sentence and nothing to act on. Which stage, and which models it
+    # would have reached, is the whole of the fix.
+    def _named(required: str) -> str:
+        return "；".join(
+            f"{item['label']}：{'、'.join(item['display_names'])}"
+            for item in uncovered if item["required"] == required)
+    named = _named("provider-controlled-verify")
+    named_plain = _named("verify")
+    # A stage that asks only for ``verify`` and whose chain has no
+    # model declaring even that is rejected too, but not for want of
+    # gateway controls; it gets its own sentence.
+    plain_clause = (
+        "" if not named_plain else
+        f"以下环节的调用链没有声明核验能力的模型，会在调用前被拒绝——{named_plain}"
+    )
+    if status == "covered":
+        note = "受控核验可用：调用链中有仍有效的供应商验证控件。"
+    elif status == "partial":
+        note = "；".join(part for part in (
+            (f"受控核验部分不可用：以下环节的调用链缺少仍有效的供应商验证控件，"
+             f"会在调用前被拒绝——{named}") if named else "",
+            plain_clause) if part)
+    elif status == "missing":
+        note = "；".join(part for part in (
+            # term-ok: administrator page (AI 服务与模型路由)
+            ("受控核验不可用：当前调用链没有仍有效的供应商验证控件；"
+             "所有 provider-controlled-verify 工单都会在调用前被拒绝。"
+             "请先在模型网关更新有依据且未过期的 providerControls 声明。"
+             f"受影响的环节——{named}") if named else "",
+            plain_clause) if part)
+    else:
+        note = "本环境还没有任何受控核验环节绑定模型配置。"
+    return {
+        "status": status,
+        "required": ["provider-controlled-verify"],
+        # What each bound stage's WorkOrder actually asks the router
+        # for; plain ``verify`` stages are not held to the contract.
+        "required_by_purpose": required_by_purpose,
+        "covered_by": sorted(controlled),
+        "covered_purposes": covered_purposes,
+        # Kept as the list of stages whose *chain* cannot satisfy the
+        # capability. Stages with no chain are reported separately
+        # rather than folded in here.
+        "missing_purposes": [item["purpose"] for item in uncovered],
+        "uncovered_chains": uncovered,
+        "unbound_purposes": unbound,
+        "unbound_note": unbound_note,
+        "note": note,
+    }
+
+def _tier_card_call_budget(view: Any) -> dict[str, Any] | None:
+    """The part of a stage's call-budget view the tier card needs.
+
+    ``editable`` is only true when the effective budget, the stage's own
+    override and the configuration hash the save must name are all known.
+    """
+
+    if not isinstance(view, Mapping):
+        return None
+    effective = view.get("effective")
+    if not isinstance(effective, Mapping) or "max_output_tokens" not in effective:
+        return {"editable": False, "effective": None,
+                "reason": view.get("reason") or "该环节没有单次输出上限配置"}
+    editable = bool(view.get("editable")) and isinstance(view.get("config_hash"), str)
+    return {
+        "editable": editable,
+        "effective": {key: effective.get(key) for key in (
+            "max_input_tokens", "max_output_tokens", "max_cost_usd", "timeout_seconds")},
+        "overrides": dict(view.get("overrides") or {}),
+        "config_hash": view.get("config_hash") if editable else None,
+        "requires_restart": bool(view.get("requires_restart")),
+        "reason": None if editable else (view.get("reason") or "此环节的预算不在本页修改"),
+    }
 
 
 def _sha(value: Any, name: str) -> str:
@@ -2350,7 +3219,18 @@ def _trimmed_summary(summary: Any) -> dict[str, Any] | None:
 #: something stale that they would otherwise have seen fresh -- it only stops
 #: three overlapping readers from each paying for a full rebuild.  Small
 #: enough that a person who clicks refresh after an action still sees it.
-OVERVIEW_TTL_SECONDS = 8.0
+#:
+#: 2026-09-30 (P2-4): sixty seconds, not eight.  Eight was shorter than one
+#: legacy rebuild (~16 s) and than the goal page's 6 s "refreshing" retry, so
+#: with a tab open the process was rebuilding almost without pause -- and a
+#: rebuild running in the background thread is what made every other page in
+#: the same process slow (the model page went 0.2 s -> 15-40 s behind a busy
+#: thread: each SQLite call is a GIL hand-off that waits up to the 5 ms switch
+#: interval).  Keying on heartbeat ``last_tick_at`` would not help: legacy
+#: ticks every 5 s.  Sixty matches the page's own poll, so one open tab costs
+#: at most one rebuild a minute.  Writes through this plane still invalidate
+#: outright (``invalidate_overview``), so acting and then looking stays exact.
+OVERVIEW_TTL_SECONDS = 60.0
 #: 2026-09-25: how long a built overview may still answer a reader at once
 #: while a single background build replaces it (stale-while-revalidate).
 #:
@@ -2369,6 +3249,58 @@ OVERVIEW_STALE_SECONDS = 300.0
 #: on because it is the only one with overlapping readers, and it invalidates
 #: the snapshot itself on every write it makes (``invalidate_overview``), so
 #: even there a person who acts and then looks sees the result of acting.
+
+
+#: 2026-09-30 (P1-1): the model and sources pages log where their time went,
+#: one line to stderr (control.stderr.log), whenever a page takes at least
+#: this long.  ``DALTON_COCKPIT_PAGE_TIMING_SECONDS`` overrides it; ``0``
+#: logs every request.  ``thread_cpu`` is this request thread's own CPU time:
+#: a total far above it is time spent waiting -- for disk, or for the GIL
+#: while the overview rebuild thread runs (``overview_building``).
+PAGE_TIMING_LOG_SECONDS = 1.0
+
+
+class _PageTimer:
+    """Wall-clock laps for one page request, printed only when it was slow."""
+
+    def __init__(self, page: str, plane: Any = None) -> None:
+        self.page = page
+        self.plane = plane
+        self.sections: dict[str, float] = {}
+        self._started = self._mark = time.perf_counter()
+        self._cpu = time.thread_time()
+        self._busy_at_start = bool(getattr(plane, "_overview_building", False))
+
+    def lap(self, name: str) -> None:
+        """Charge the time since the previous lap to ``name``."""
+        now = time.perf_counter()
+        self.sections[name] = self.sections.get(name, 0.0) + (now - self._mark)
+        self._mark = now
+
+    def add(self, name: str, seconds: float) -> None:
+        """Charge a sub-span measured inside a lap (reported, not subtracted)."""
+        self.sections[name] = self.sections.get(name, 0.0) + seconds
+
+    def threshold(self) -> float:
+        raw = os.environ.get("DALTON_COCKPIT_PAGE_TIMING_SECONDS")
+        try:
+            return PAGE_TIMING_LOG_SECONDS if raw is None else max(0.0, float(raw))
+        except ValueError:
+            return PAGE_TIMING_LOG_SECONDS
+
+    def finish(self) -> str | None:
+        total = time.perf_counter() - self._started
+        if total < self.threshold():
+            return None
+        cpu = time.thread_time() - self._cpu
+        busy = self._busy_at_start or bool(
+            getattr(self.plane, "_overview_building", False))
+        line = (f"cockpit page timing: page={self.page} total_ms={total * 1000:.0f} "
+                f"thread_cpu_ms={cpu * 1000:.0f} overview_building={str(busy).lower()} "
+                + " ".join(f"{name}_ms={value * 1000:.0f}"
+                           for name, value in self.sections.items()))
+        print(line, file=sys.stderr, flush=True)
+        return line
 
 
 class _TicketCache:
@@ -2513,10 +3445,9 @@ class CockpitPlane:
         self._overview_building = False
         self._overview_generation = 0
         self._overview_result: dict[str, Any] | None = None
-        # B1-5: how long a built overview is served without rebuilding.  Eight
-        # seconds, because the page polls at sixty and the controller ticks at
-        # roughly three hundred: nothing a reader can see changes faster than
-        # this, and a rebuild is the most expensive thing this process does.
+        # B1-5: how long a built overview is served without rebuilding (the
+        # serving process passes OVERVIEW_TTL_SECONDS; see there for why it
+        # is sixty): a rebuild is the most expensive thing this process does.
         self._overview_ttl_seconds = float(overview_ttl_seconds)
         self._overview_built_at: float | None = None
         self._overview_monotonic = monotonic or time.monotonic
@@ -2871,8 +3802,16 @@ class CockpitPlane:
             bars = record.get("bars") or []
             if not bars:
                 continue
-            newest, window = bars[-1], bars[-RANGE_BARS:]
-            first = window[0]
+            newest = bars[-1]
+            annual_end = date.fromisoformat(newest["date"])
+            try:
+                annual_start = annual_end.replace(year=annual_end.year - 1)
+            except ValueError:  # Leap day has no exact prior-year counterpart.
+                annual_start = annual_end.replace(year=annual_end.year - 1, day=28)
+            candidates = [item for item in bars if item["date"] <= annual_start.isoformat()]
+            first = candidates[-1] if candidates else None
+            if first is not None and (annual_start - date.fromisoformat(first["date"])).days > 7:
+                first = None
             try:
                 change = round(
                     (float(newest["close"]) / float(first["close"]) - 1) * 100, 1)
@@ -2917,10 +3856,33 @@ class CockpitPlane:
                 "note": ("这是盘中价，当天还没有收盘定价"
                          if provisional else "收盘价"),
                 "bars": len(bars), "since": record.get("first_bar_date"),
-                "change_percent": change, "change_since": first["date"],
+                "change_percent": change, "change_since": first["date"] if first else None,
+                "change_horizon": "1Y", "change_status": "available" if change is not None else "unavailable",
+                "change_reason": None if change is not None else "缺少一年前日期附近的收盘价，近一年涨跌幅不可计算",
                 "changes": changes,
                 "version": record.get("version"),
             }
+        return out
+
+    def _numbers(self, core: Any, company_refs: Sequence[str]) -> dict[str, dict[str, Any]]:
+        """Batch B: the compact 数字 block per company (``numbers_pack.display_block``).
+
+        Display only and read-only; a company whose block cannot be built is
+        left out rather than failing the page.
+        """
+
+        from .numbers_pack import display_block
+
+        today = self.clock().date().isoformat()
+        out: dict[str, dict[str, Any]] = {}
+        cache: dict[str, Any] = {}
+        for company_ref in company_refs:
+            try:
+                block = display_block(core, company_ref, as_of=today, basket=company_refs, cache=cache)
+            except Exception:  # noqa: BLE001 - one company's numbers, not the page
+                continue
+            if block is not None:
+                out[company_ref] = block
         return out
 
     def _valuation(self, core: Any) -> dict[str, dict[str, Any]]:
@@ -2934,6 +3896,8 @@ class CockpitPlane:
 
         if not _table_exists(core, "valuation_snapshot_versions"):
             return {}
+        from .valuation_history import percentile_reading
+
         out: dict[str, dict[str, Any]] = {}
         for row in self._latest_by(
             core, "valuation_snapshot_versions", "snapshot_ref", "version_number"
@@ -2955,6 +3919,12 @@ class CockpitPlane:
                     "percentile_basis_label": PERCENTILE_BASIS_LABELS.get(basis),
                     "percentile_reason": percentile.get("reason"),
                     "sample_size": percentile.get("sample_size"),
+                    # Batch B (owner review §P1): the only words this
+                    # percentile may be shown with -- 「样本不足」 below three
+                    # years or two financial windows, never 「历史低位/高位」.
+                    "percentile_reading": (None if percentile.get("value") is None else percentile_reading(
+                        percentile.get("value"), sample_size=percentile.get("sample_size"),
+                        windows=(record.get("basis") or {}).get("fundamental_window_count"))),
                 })
             basis = record.get("basis") or {}
             dated = basis.get("shares_basis") == "dated_shares"
@@ -3064,6 +4034,59 @@ class CockpitPlane:
         from .cockpit_model_display import present_invariants
         return present_invariants(out)
 
+    def _consistency(self, core: Any, company_refs: Sequence[str]) -> dict[str, dict[str, Any]]:
+        """Batch an: per company, the 「研究一致性」 view and invariant coverage.
+
+        Read-only.  ``view``: plain-language conflicts and stale results;
+        ``coverage``: each model output's current version, its rules as
+        通过 / 未通过 / 未覆盖, and whether that exact version has a verdict;
+        ``stale_index``: version ref -> binding status, used to mark cards.
+        """
+
+        out: dict[str, dict[str, Any]] = {}
+        try:
+            from .economic_invariants import coverage_report
+            from .product_consistency import binding_status_index, consistency_view
+
+            today = self.clock().date().isoformat()
+            coverage = coverage_report(core)
+            for company_ref in company_refs:
+                view = consistency_view(core, company_ref, today=today)
+                out[company_ref] = {
+                    "view": view, "coverage": coverage.get(company_ref) or {},
+                    "stale_index": {ref: item for ref, item in binding_status_index(
+                        core, company_ref, today=today).items()
+                        if item.get("binding_status") != "current"}}
+        except Exception:  # noqa: BLE001 - the block degrades, the page does not
+            return out
+        return out
+
+    @staticmethod
+    def _mark_stale(cards: Any, consistency: Mapping[str, Mapping[str, Any]]) -> None:
+        """Mark every card entry whose version is bound to a superseded upstream."""
+
+        def walk(node: Any, index: Mapping[str, Any]) -> None:
+            if isinstance(node, dict):
+                for key in ("id", "version_ref", "version_id"):
+                    item = index.get(node.get(key)) if isinstance(node.get(key), str) else None
+                    if item is not None:
+                        node["binding_status"] = item.get("binding_status")
+                        node["binding_label"] = item.get("display_status")
+                        node["binding_note"] = item.get("display_note")
+                        break
+                for value in node.values():
+                    walk(value, index)
+            elif isinstance(node, list):
+                for value in node:
+                    walk(value, index)
+
+        if not isinstance(cards, dict):
+            return
+        for company_ref, card in cards.items():
+            index = (consistency.get(company_ref) or {}).get("stale_index") or {}
+            if index:
+                walk(card, index)
+
     def _forecast(self, core: Any) -> dict[str, dict[str, Any]]:
         """P13-M2: how much of each company's model actually stands up."""
 
@@ -3161,7 +4184,7 @@ class CockpitPlane:
                 "criteria": criteria,
                 "below_passing": [c["question"] for c in criteria if c["below_passing"]],
                 # An independent reader confirmed this reading, or nobody did.
-                "verified": verifier.get("status") == "verified",
+                "verified": verifier.get("status") == "verified" and verifier.get("verdict") == "pass",
             }
         return out
 
@@ -3242,7 +4265,52 @@ class CockpitPlane:
                     f"{payload.get('deviation_percent')}%")
         if kind == "claim":
             return str(payload.get("statement") or payload.get("claim_ref") or "")[:200]
+        if kind == "earnings_release":
+            return (f"{payload.get('period')} 业绩稿（8-K {payload.get('accession')}，"
+                    f"{payload.get('report_date')}）：{payload.get('label_note')}")
         return str(payload.get("title") or payload.get("document_ref") or "")[:200]
+
+    @staticmethod
+    def _preliminary_results(core: Any, company_refs: Sequence[str]) -> dict[str, dict[str, Any]]:
+        """ADR-0015: per company, the newest earnings release's preliminary rows."""
+
+        if not _table_exists(core, "preliminary_actuals"):
+            return {}
+        from .earnings_release_intake import amount_text, latest_preliminary
+
+        out: dict[str, dict[str, Any]] = {}
+        for company_ref in company_refs:
+            try:
+                latest = latest_preliminary(core, company_ref)
+            except Exception:  # noqa: BLE001 - one company's card, not the page
+                continue
+            # Once the 10-Q/10-K is in, the filed figures are the card's; a
+            # superseded release is not shown at all.
+            if latest is None or latest["status"] == "superseded":
+                continue
+            superseded = False
+            out[company_ref] = {
+                "title": "最新业绩（已被申报数取代）" if superseded else "最新业绩（初步）",
+                "period": latest["period"], "period_end": latest["period_end"],
+                "report_date": latest["report_date"], "accession": latest["accession"],
+                "exhibit_url": latest["exhibit_url"], "status": latest["status"],
+                "note": ("10-Q/10-K 已入库，以下初步数仅作对照，以申报数为准" if superseded else
+                         "以下为公司业绩稿（8-K 附件 99.1）里的初步数，"
+                         "10-Q/10-K 申报数入库后会自动取代它们"),
+                "rows": [{"label": row["label"], "text": amount_text(row), "value": row["value"],
+                          "unit": row["unit"], "scale": row["scale"], "status": row["status"],
+                          "source": row.get("source"), "ref": row["id"],
+                          "filed": (row.get("filed_line") or {}).get("value")}
+                         for row in latest["rows"]],
+                "provisional_reconciliations": [
+                    {"period": item["period"], "deviation_percent": item["deviation_percent"],
+                     "band": item["band"], "status": item["status"], "note": item["note"],
+                     # Batch am (text evaluation 5.6): the amount, the period
+                     # and the forecast version the deviation is measured on.
+                     **_reconciliation_display(item)}
+                    for item in latest["provisional_reconciliations"]],
+            }
+        return out
 
     def _events(self, core: Any) -> dict[str, dict[str, Any]]:
         """P14a: what happened to each company, by kind and with its tier."""
@@ -3275,6 +4343,9 @@ class CockpitPlane:
                 "tier": tier, "tier_label": EVIDENCE_TIER_LABELS.get(tier, tier),
                 "occurred_at": row["occurred_at"],
                 "summary": self._event_summary(row["kind"], record.get("payload") or {}),
+                # Batch am: what an analyst reads -- never an internal ref
+                # (guidepoint-excerpt:sha256:… / sec:filing:… / public-web-url:…).
+                "display_summary": event_display_summary(row["kind"], record.get("payload") or {}),
                 "ref": record.get("id"),
             })
         for entry in out.values():
@@ -3331,13 +4402,22 @@ class CockpitPlane:
                 "verifier_verdict": verdict,
                 "verifier_label": VERIFIER_VERDICT_LABELS.get(verdict, verdict),
             }
+            # Batch F: the result contract's display fields -- 实际 vs 预期,
+            # the move against its benchmark, the verdict, the material
+            # requests -- plus the main event a grouped input was judged with
+            # and the original / information-available dates.
+            item.update(_event_result_display(record, effect))
             # A judgement is immutable; one resting on a Claim retired since
             # (or before -- live 2026-09-24) is marked, never rewritten.
             stale = [ref for ref in item["citations"]
                      if isinstance(ref, str) and ref in retired]
             if stale:
+                from .product_rewrite_flags import HISTORICAL_CITATION_LABEL
+
                 item["retired_citations"] = stale
                 item["retired_citation_label"] = retired_citation_notice(len(stale))
+                # Batch an: until rewritten, the reasoning reads as 历史引用.
+                item["citation_status_label"] = HISTORICAL_CITATION_LABEL
             by_ref[row["judgement_id"]] = item
             bucket = by_company.setdefault(
                 row["company_ref"], {"total": 0, "latest": []})
@@ -3431,6 +4511,9 @@ class CockpitPlane:
             # The lane's own reader view rather than a second computation of
             # the caveat here: the caveat travels with the date by design.
             view = CatalystCalendarAuthority._reader_view(version, entry, today)
+            from .research_lifecycle import observation_points, catalyst_status
+            lifecycle = catalyst_status(core, version["company_ref"], entry, today)
+            observations = observation_points(core, version["company_ref"], entry, today)
             kind = view.get("event_kind")
             out[version["company_ref"]] = {
                 "event_kind": kind,
@@ -3447,6 +4530,7 @@ class CockpitPlane:
                 "disagreement": view.get("disagreement"),
                 "disagreeing_dates": list(view.get("disagreeing_dates") or ()),
                 "version_ref": view.get("version_ref"),
+                **lifecycle, **observations,
             }
         return out
 
@@ -3518,7 +4602,7 @@ class CockpitPlane:
             rounds[row["loop_version_ref"]] = row["n"]
         terminal: dict[str, str] = {
             row["loop_version_ref"]: row["terminal_state"] for row in self._rows(core,
-                "SELECT loop_version_ref, terminal_state FROM bounded_planner_terminal_events")
+                f"SELECT loop_version_ref, terminal_state FROM {_bounded_terminal_table(core)}")
         }
         questions: dict[str, dict[str, Any]] = {
             row["version_id"]: {"question": row["question"],
@@ -3797,6 +4881,14 @@ class CockpitPlane:
             valuation = self._valuation(core)
             forecasts = self._forecast(core)
             invariants = self._invariants(core)
+            model_specs = self._model_spec_companies(core)
+            from .model_coverage_status import model_coverage_status
+            model_coverage = model_coverage_status(core)
+            registered_names = {}
+            if _table_exists(core, "coverage_mission_statement_filings"):
+                registered_names = {row["company_ref"]: row["entity_name"] for row in core.execute(
+                    "SELECT company_ref,entity_name FROM coverage_mission_statement_filings ORDER BY filed,ingest_id"
+                ) if row["entity_name"]}
             quality = self._quality(core)
             journal = self._journal(core)
             # INT2: P14a's daily tracking, C1's calendar and P14e's tasks.
@@ -3808,11 +4900,30 @@ class CockpitPlane:
             catalysts = self._catalysts(core)
             cadences = self._cadences(core, policy)
             tasks = self._research_tasks(core)
+            # ADR-0012: 情景与触发. {} on a Core without the scenario tables.
+            from .cockpit_scenarios import card_views as scenario_card_views
+
+            scenarios = scenario_card_views(core)
+            # ADR-0014: 回报归因. {} on a Core without the tables.
+            from .cockpit_return_attribution import card_views as return_card_views
+
+            returns = return_card_views(core, list(members), mission.get("industry_ref"))
+            # ADR-0015 最新业绩（初步）. {} on a Core without the tables.
+            preliminary = self._preliminary_results(core, list(members))
+            # Batch B 数字: consensus / street / valuation / market per company.
+            numbers = self._numbers(core, list(members))
+            # Batch an 研究一致性: cross-product conflicts, derived results
+            # bound to superseded upstream versions (shown as 已过期, never as
+            # current), and each model output's per-rule invariant coverage.
+            consistency = self._consistency(core, list(members))
+            self._mark_stale(scenarios, consistency)
+            self._mark_stale(returns, consistency)
         today = self.clock().date().isoformat()
         by_company: dict[str, list[dict[str, Any]]] = {}
         for claim in claims:
             by_company.setdefault(claim["subject_ref"], []).append(claim)
         generation_failures = _latest_initial_screen_failures(self.config.state_dir)
+        period_steps = _candidate_period_steps(self.config.state_dir, now=self.clock())
         companies = []
         for entry in stages:
             company_ref = entry["company_ref"]
@@ -3863,20 +4974,43 @@ class CockpitPlane:
                         "entries": journal["by_target"].get(deliverable["version_ref"], []),
                     },
                 }
+            from .house_view import build_house_view, stage_note
+            note=stage_note(stage_ref=entry.get("stage"),deliverable=deliverable,model_coverage=model_coverage.get(company_ref),current_note=note)
+            house_view=build_house_view(company_ref=company_ref,ticker=member.get("ticker"),theses=theses,claims=own,
+                judgements=(judgements["by_company"].get(company_ref) or {}).get("latest") or [],
+                scenario_valuation=(scenarios.get(company_ref) or {}).get("valuation"),catalyst=catalysts.get(company_ref),today=today)
             companies.append({
+                "house_view":house_view,
                 "company_ref": company_ref, "ticker": member.get("ticker"),
+                "full_name": registered_names.get(company_ref) or member.get("name"),
+                "exchange": member.get("exchange"),
                 "name": (member.get("name") or COMPANY_NAMES.get(member.get("ticker", ""), "")
                          or member.get("ticker") or company_ref.rsplit(":", 1)[-1]),
+                # batch ah (2026-10-09): the header name every surface shares
+                # ("Accenture ACN"); display only, never a CIK.
+                "display_name": _company_display_name(member, company_ref),
                 "priority": member.get("bootstrap_priority"), "tier": member.get("coverage_tier"),
                 "stage": entry["stage_label"], "stage_ref": entry["stage"],
                 "stage_status": entry["stage_status_label"], "note": note,
                 **stage_readiness,
-                "checklist": entry["items"],
+                "checklist": [
+                    {**item, "period_step": period_steps[str(member.get("ticker") or "").upper()]}
+                    if (item.get("item_ref") == "earnings_calls" and item.get("candidate_periods")
+                        and str(member.get("ticker") or "").upper() in period_steps)
+                    else item
+                    for item in entry["items"]],
                 "document": deliverable,
                 "progress": {"found": found, "held": held, "read": read, "waiting": waiting,
+                             "waiting_label": _term("document_review_state", "awaiting_human_extraction"),
                              "percent": int(round(100 * len(done) / len(countable))) if countable else 0},
                 "claims": {"total": len(own), "today": today_claims,
-                           "latest": [{"statement": c["statement"], "at": c["created_at"], "ref": c["ref"]}
+                           # P2-1: every live version, not the claims page's
+                           # one-per-fact count; the page labels it.
+                           "basis": "all_versions",
+                           "latest": [{"statement": c["statement"],
+                                       "display_statement": (claim_statement_display(c["statement"])
+                                                             or statement_display(c["statement"])),
+                                       "at": c["created_at"], "ref": c["ref"]}
                                       for c in own[-3:][::-1]]},
                 # P11x: figures read out of this company's own documents, each
                 # verified against the bytes it cited. Shown by grade, because
@@ -3889,13 +5023,28 @@ class CockpitPlane:
                 # P11c: the four multiples with their percentiles and the
                 # basis each percentile rests on.
                 "valuation": valuation.get(company_ref),
+                # Batch B (2026-10-09): 一致预期（已更正财期）、券商、前瞻估值、
+                # 流动性与相对表现. Absent (None) when the company has neither.
+                "numbers": numbers.get(company_ref),
                 # P13-M2: how much of this company's forecast model stands up,
                 # counted rather than scored.
                 "model": forecasts.get(company_ref),
+                # 2026-10-08 (DEFECT-03): the model tab printed nothing at all
+                # for a company with no model yet; it now says so and why,
+                # from the stage ledger and whether a model spec exists.
+                "model_coverage": model_coverage.get(company_ref),
+                "model_empty_label": (None if forecasts.get(company_ref) else
+                    (model_coverage.get(company_ref) or {}).get("label") or _model_empty_label(
+                    entry, note, company_ref in model_specs)),
                 # P17b: the outputs that are absent from the three cards above
                 # because an economic invariant refused them, each with the
                 # reasons. An empty dict is the normal case and reads as one.
                 "invariants": invariants.get(company_ref) or {},
+                # Batch an: 「研究一致性」 -- conflicts between this company's
+                # products and the derived results that are 已过期 -- and the
+                # model outputs' per-rule invariant coverage (未覆盖 ≠ 通过).
+                "consistency": (consistency.get(company_ref) or {}).get("view"),
+                "invariant_coverage": (consistency.get(company_ref) or {}).get("coverage") or {},
                 # Q1: what the PM has said about this company's work so far.
                 "feedback": journal["by_company"].get(company_ref),
                 # P14a 今日事件: what happened to this company, by kind, each
@@ -3918,7 +5067,28 @@ class CockpitPlane:
                 # P14e 专项研究: what is being researched, on what budget,
                 # and what it concluded or is still missing.
                 "research_tasks": tasks.get(company_ref),
+                # ADR-0012 情景与触发: the scenarios the owner adopted, each
+                # trigger's latest status with its value and source, and any
+                # proposal still waiting for a decision.
+                "scenarios": scenarios.get(company_ref),
+                # ADR-0014 回报归因: the income bridge table, the per-share
+                # series with its period semantics and missing rows, and the
+                # realised / expected return decomposition with its sources.
+                "return_attribution": returns.get(company_ref),
+                # ADR-0015 最新业绩（初步）: the income-statement lines of the
+                # company's own earnings release, each with its accession and
+                # span, until the 10-Q/10-K replaces them.
+                "preliminary_results": preliminary.get(company_ref),
             })
+        surface_rows: list[tuple[dict[str, Any], str, Any]] = []
+        for company in companies:
+            for row in (company.get("judgements") or {}).get("latest") or []:
+                surface_rows.append((row, "surface_event_judgement", company["company_ref"]))
+            for row in company.get("reflections") or []:
+                surface_rows.append((row, "surface_thesis_reflection", company["company_ref"]))
+        if surface_rows:
+            with self._core() as states_core:
+                self._attach_final_text(states_core, mission, surface_rows)
         planner = (heartbeat.get("bounded_planner") or {}).get("last_result") or {}
         discovery = planner.get("mission_source_discovery") or {}
         extraction = planner.get("document_extraction") or {}
@@ -3952,12 +5122,17 @@ class CockpitPlane:
                 "failures": self._panel_failures(),
                 "acceptance": self._panel_acceptance(ops_core),
             }
+        thesis_views = _thesis_views(theses, members)
         return {
             "schema_version": SCHEMA_VERSION, "as_of": _iso(self.clock()),
             "workspace": self.workspace_context,
             "goal": {
                 "mission_ref": mission["mission_ref"], "version": mission["version"], "id": mission["id"],
                 "hash": mission["content_hash"], "title": mission["title"], "objective": mission["objective"],
+                # 2026-10-08 (section 三): display only, after any reviewed
+                # translation the page holds; the published text is unchanged.
+                "display_title": _owner_terms(mission["title"]),
+                "display_objective": _owner_terms(mission["objective"]),
                 "budget": dict(mission["budget"]),
                 "research_questions": list(mission["research_questions"]),
                 "deliverables": [STAGE_LABELS.get(d, d) for d in mission["deliverables"]],
@@ -3981,10 +5156,17 @@ class CockpitPlane:
                 "read": sum(c["progress"]["read"] for c in companies),
                 "waiting": sum(c["progress"]["waiting"] for c in companies),
                 "claims": len(claims), "claims_today": sum(1 for c in claims if c["created_at"][:10] == today),
+                "claims_basis": "all_versions",
                 "theses": len(theses),
             },
-            "theses": [{"ref": t.get("thesis_ref") or t.get("id"), "confidence": t.get("confidence"),
-                        "summary": t.get("summary") or t.get("statement") or t.get("change_reason")} for t in theses],
+            "theses": thesis_views,
+            # P0 2026-10-09: the current version of each thesis only, so a page
+            # can never show a superseded version as a conclusion.  Derived
+            # from ``theses`` (same summaries, so the same localization keys);
+            # ``theses`` itself is unchanged for the old cockpit.
+            "theses_current": _current_thesis_views(thesis_views),
+            "counter_views": [t for t in _current_thesis_views(thesis_views)
+                              if t.get("stance") == "counter" and t.get("view_status") != "broken"],
             "activity": {
                 "service_state": heartbeat.get("state"), "last_tick_at": heartbeat.get("last_tick_at"),
                 "lanes": lane_rows,
@@ -4055,6 +5237,12 @@ class CockpitPlane:
     def _deliverables(self, core: sqlite3.Connection, mission: Mapping[str, Any]) -> dict[str, dict[str, Any]]:
         """P10c: each company's latest Initial Screen, as a card-sized summary."""
 
+        from .final_text_state import reviewed_product_state
+        from .research_localization_store import (
+            directory_for_connection, reviewed_index_entries)
+
+        root = directory_for_connection(core)
+        entries = reviewed_index_entries(root) if root is not None else {}
         result: dict[str, dict[str, Any]] = {}
         for row in self._rows(core,
             "SELECT v.record_json AS record_json FROM mission_deliverable_pointer p "
@@ -4062,6 +5250,14 @@ class CockpitPlane:
             "WHERE v.mission_version_ref=? AND v.kind='initial_screen'", (mission["id"],),
         ):
             record = json.loads(row["record_json"])
+            try:
+                # BUG-01: the card's summary is final, being checked, or a
+                # draft by the ledger state of this exact screen version.
+                final_text: dict[str, Any] | None = reviewed_product_state(
+                    core, self._deliverable_display_product(record, mission),
+                    since=record.get("created_at"), entries=entries)
+            except (OSError, ValueError, KeyError, TypeError, sqlite3.Error):
+                final_text = None
             written = [section for section in record["sections"] if section["body"]]
             result[record["subject_ref"]] = {
                 "ref": record["deliverable_ref"], "version_ref": record["id"],
@@ -4070,9 +5266,13 @@ class CockpitPlane:
                 "content_hash": record["content_hash"],
                 "version": record["version"], "created_at": record["created_at"],
                 "summary": record["summary"][:400],
+                # 2026-10-08 (DEFECT-04): display only; the stored summary is
+                # what the language review is bound to.
+                "display_summary": statement_display(record["summary"][:400]),
                 "sections_written": len(written), "sections_total": len(record["sections"]),
                 "gaps": len(record["gaps"]),
                 "claims_cited": len({ref for section in record["sections"] for ref in section["claim_refs"]}),
+                **({"final_text": final_text} if final_text is not None else {}),
             }
         return result
 
@@ -4107,16 +5307,45 @@ class CockpitPlane:
 
         product = self._deliverable_display_product(record, mission)
         root = directory_for_connection(core)
-        if root is None or not has_reviewed_attachment(root, product):
-            return {**dict(record), "sections": [],
+
+        def unreviewed() -> dict[str, Any]:
+            # 2026-10-07: the same ledger rule as the library (final_text_state):
+            # hidden while a review can still be under way, the draft --
+            # watermarked -- once it has been given up on or is overdue.
+            from .final_text_state import (
+                DRAFT, DRAFT_LABEL, PENDING, PENDING_TEXT, final_text_state)
+            state = final_text_state(None if root is None else root.parent, product,
+                                     reviewed=False, since=record.get("created_at"))
+            if state["status"] not in {DRAFT, PENDING}:
+                from .final_text_state import PENDING_BADGE
+                state = {"status": PENDING, "message": PENDING_TEXT,
+                         "show_draft": True, "badge": PENDING_BADGE}
+            if state["status"] == DRAFT:
+                return {**dict(record), "publication_status": "draft",
+                        "draft_label": DRAFT_LABEL, "final_text": state,
+                        "display_reason": f"{DRAFT_LABEL}。{state.get('reason') or ''}".strip()}
+            if state.get("show_draft"):
+                # 2026-10-09 (analyst UX reviews, 痛点 5): while the Chinese
+                # final text is still being reviewed, show the draft under a
+                # visible badge instead of a blank reader.  The status stays
+                # ``pending_language_review`` so the old cockpit's gate and
+                # the exports keep their behaviour; only the sections and the
+                # badge are added for readers that honour ``show_draft``.
+                badge = str(state.get("badge") or _term("report_state", "draft"))
+                return {**dict(record), "final_text": state,
+                        "publication_status": "pending_language_review",
+                        "draft_label": badge,
+                        "display_reason": f"{badge}。中文定稿生成后会自动替换。"}
+            return {**dict(record), "sections": [], "final_text": state,
                     "publication_status": "pending_language_review",
                     "display_reason": "正文正在进行语言检查，完成后会在这里显示。"}
+
+        if root is None or not has_reviewed_attachment(root, product):
+            return unreviewed()
         shown = localize_library(core, {"products": [product]})["products"][0]
         if (shown.get("publication_status") != "ready"
                 or not isinstance(shown.get("sections"), list)):
-            return {**dict(record), "sections": [],
-                    "publication_status": "pending_language_review",
-                    "display_reason": "正文正在进行语言检查，完成后会在这里显示。"}
+            return unreviewed()
         from .research_gap_display import display_metadata_text, gap_display_text
         sections = []
         for original, display in zip(record.get("sections") or [], shown["sections"]):
@@ -4127,7 +5356,7 @@ class CockpitPlane:
                              "display_gaps": [gap_display_text(gap)
                                               for gap in display.get("gaps") or []]})
         return {**dict(record), "sections": sections,
-                "publication_status": "ready",
+                "publication_status": "ready", "final_text": {"status": "ready"},
                 "localization": shown.get("localization")}
 
     def document(self, version_ref: str) -> dict[str, Any]:
@@ -4143,7 +5372,7 @@ class CockpitPlane:
             if (record["content_hash"] != rows[0]["content_hash"]
                     or content_hash({k: v for k, v in record.items()
                                      if k != "content_hash"}) != rows[0]["content_hash"]):
-                raise CockpitConflict("文档记录与哈希不符")
+                raise CockpitConflict("文档记录与数字指纹不符")
             mission = self._mission(core)
             record = self._localized_deliverable(core, record, mission)
             members = self._members(mission)
@@ -4392,7 +5621,10 @@ class CockpitPlane:
         except (LaneFailureLedgerError, sqlite3.Error, OSError, ValueError):
             return None
 
-    def ops_backlog(self) -> dict[str, Any]:
+    def ops_backlog(self, *, terminal_offset: int = 0,
+                    terminal_limit: int = OPS_PAGE_DEFAULT,
+                    historical_offset: int = 0,
+                    historical_limit: int = OPS_PAGE_DEFAULT) -> dict[str, Any]:
         """P17d 运维待办: what is parked, on which dependency, since when.
 
         Read-only and derived: the rows are a fold over the append-only lane
@@ -4409,9 +5641,10 @@ class CockpitPlane:
         if rows is None:
             return {
                 "available": False,
-                "reason": "这台机器还没有任何流水线因为依赖不可用而挂起过工作",
+                "reason": "还没有任何研究流程因为依赖不可用而挂起过工作",
                 "dependencies": [], "parked_items": 0,
-                "terminal_items": [], "terminal_count": 0,
+                **_ops_page("terminal", [], terminal_offset, terminal_limit),
+                "terminal_groups": [], "terminal_count": 0,
                 "permission_items": [], "permission_count": 0,
             }
         backlog = summarise_events(rows)
@@ -4566,17 +5799,32 @@ class CockpitPlane:
                                           "lane": row.get("lane")},
                 })
         active_parked = sum(bucket["item_count"] for bucket in dependencies)
+        # P1-7: legacy had 1,849 stopped attempts and every open of this page
+        # downloaded all of them (2.2 MB) to show a grouped list.  The groups
+        # are computed here, with their full counts; the rows themselves come
+        # a page at a time, newest first.
+        terminal.sort(key=lambda row: (str(row.get("last_seen") or ""),
+                                       str(row.get("lane") or ""),
+                                       str(row.get("item_key") or "")), reverse=True)
+        historical_items.sort(key=lambda row: (str(row.get("last_seen") or ""),
+                                               str(row.get("lane") or ""),
+                                               str(row.get("item_key") or "")), reverse=True)
         return {
             "available": True, "as_of": _iso(self.clock()),
             "window": backlog["window"], "events": backlog["events"],
             "dependencies": dependencies,
             "parked_items": active_parked,
-            "terminal_items": terminal,
+            **_ops_page("terminal", terminal, terminal_offset, terminal_limit),
+            "terminal_groups": _ops_terminal_groups(terminal),
             "terminal_count": backlog["terminal_count"],
             "permission_items": permissions,
             "permission_count": len(permissions),
-            "historical_items": historical_items,
+            **_ops_page("historical", historical_items, historical_offset, historical_limit),
             "historical_count": len(historical_items),
+            # 2026-10-09: parked items released automatically (dependency
+            # recovered elsewhere, or not parked again for a week) -- not
+            # waiting, so not in ``parked_items``; counted for the record.
+            "released_count": int(backlog.get("released_count") or 0),
             "class_labels": dict(FAILURE_CLASS_LABELS),
             "note": ("暂缓的任务会在相关服务恢复后自动重试；待授权的任务会在批准后继续。"
                      "已停止的任务保留具体原因，修复问题后再安排执行。"),
@@ -4587,20 +5835,31 @@ class CockpitPlane:
 
         counts = {key: 0 for key in LANE_STATUS_BUCKETS}
         other = 0
+        other_statuses: dict[str, int] = {}
         for row in lanes:
-            bucket = LANE_STATUS_BUCKET_OF.get(str(row.get("status") or ""))
+            status = str(row.get("status") or "")
+            bucket = LANE_STATUS_BUCKET_OF.get(status)
             if bucket is None:
                 other += 1
+                other_statuses[status or "unknown"] = other_statuses.get(status or "unknown", 0) + 1
             else:
                 counts[bucket] += 1
         stuck = counts["ungranted"] + counts["unapproved"] + counts["held"]
+        not_configured = counts["unconfigured"]
+        note = f"{counts['running']} 项执行中，{counts['idle']} 项待命，{stuck} 项受阻"
+        # Every row on the page is in the sentence: the tile says how many
+        # lanes it is about, so a sum that falls short reads as lanes missing.
+        if not_configured:
+            note += f"，{not_configured} 项尚未配置"
+        if other:
+            note += f"，{other} 项状态未归类"
         return {
             "counts": counts, "labels": dict(LANE_STATUS_BUCKETS),
-            "other": other, "total": len(lanes),
+            "other": other, "other_statuses": dict(sorted(other_statuses.items())),
+            "total": len(lanes),
             "waiting_on_you": counts["ungranted"] + counts["unapproved"],
             "headline": stuck,
-            "note": (f"{counts['running']} 项执行中，{counts['idle']} 项待命，"
-                     f"{stuck} 项受阻"),
+            "note": note,
             "link": "lanes",
         }
 
@@ -4725,11 +5984,13 @@ class CockpitPlane:
         """Count current recovery/authorization work; retain stopped attempts as history."""
 
         backlog = self.ops_backlog()
+        coverage = _failure_ledger_coverage()
         if not backlog["available"]:
             return {
                 "available": False, "headline": 0,
                 "note": backlog["reason"], "link": "ops",
                 "parked_items": 0, "terminal_count": 0, "dependencies": [],
+                "coverage": coverage,
             }
         top = [
             {"dependency": bucket["dependency"],
@@ -4753,6 +6014,7 @@ class CockpitPlane:
             "parked_items": backlog["parked_items"],
             "terminal_count": backlog["terminal_count"],
             "dependencies": top, "note": note, "link": "ops",
+            "coverage": coverage,
         }
 
     def _panel_acceptance(self, core: sqlite3.Connection) -> dict[str, Any]:
@@ -4984,6 +6246,7 @@ class CockpitPlane:
         company_ref = ticket.get("company_ref") or summary.get("company_ref") or auth.get("company_ref")
         who = self._label(members, company_ref)
         detail, title = None, LANE_LABELS[lane]
+        technical: dict[str, Any] | None = None
         if lane == "discoveries":
             found = summary.get("discovered_urls") or summary.get("discovered_documents") or summary.get("document_refs") or []
             n = len(found) if isinstance(found, list) else 0
@@ -4998,7 +6261,10 @@ class CockpitPlane:
             title = ("正在获取网页" if state == "running" else "获取了网页" if state == "done" else "网页获取失败") + f"（{who}）"
             detail = label if summary.get("canonical_url") is None else summary["canonical_url"]
             if state == "failed" and summary.get("error"):
-                detail = f"{detail} — {summary['error']}"
+                shown_error, error_technical = _log_detail(summary["error"])
+                detail = f"{detail} — {shown_error}"
+                if error_technical:
+                    technical = {"original_error": str(summary["error"])}
         elif lane == "acquisitions":
             chars = summary.get("content_chars")
             title = ("正在获取研报原文" if state == "running" else "获取了研报原文" if state == "done" else "研报获取失败") + f"（{who}）"
@@ -5025,6 +6291,7 @@ class CockpitPlane:
             "at": ticket.get("completed_at") or ticket.get("started_at") or summary.get("created_at") or item.get("ticket_mtime"),
             "started_at": ticket.get("started_at"), "kind": lane, "lane": LANE_LABELS[lane], "title": title,
             "detail": detail, "state": state, "company": who if company_ref else None,
+            **({"technical": technical} if technical else {}),
         }
 
     def _journal_event_view(self, row: Mapping[str, Any]) -> dict[str, Any]:
@@ -5125,13 +6392,15 @@ class CockpitPlane:
                 detail = f"入库 {admitted.group(1)} 条结论" if admitted else "结论已入库"
                 if refused and refused.group(1) != "0":
                     detail += f"，另有 {refused.group(1)} 条未通过核验"
-            else:
-                detail = "这份文档里没有可用的观点" if "no admissible" in (row["rationale"] or "") else (row["rationale"] or "")[:200]
+            technical = None
+            if not closed:
+                detail, technical = _log_detail(row["rationale"])
             events.append({
                 "id": f"review:{row['review_id']}", "at": row["updated_at"], "kind": "review", "lane": "读完文档",
                 "title": ("读完并入库：" if closed else "读完，没有可用结论：") + self._document_label(row["document_ref"], urls),
                 "detail": detail, "state": "done" if closed else "skipped",
                 "company": self._label(members, row["company_ref"]),
+                **({"technical": technical} if technical else {}),
             })
         for row in self._rows_from(self.config.core_db,
             "SELECT record_json FROM mission_deliverable_versions ORDER BY created_at DESC LIMIT ?", (limit,),
@@ -5139,6 +6408,8 @@ class CockpitPlane:
             record = json.loads(row["record_json"])
             written = sum(1 for section in record["sections"] if section["body"])
             summary, summary_technical = self._deliverable_log_summary(record["summary"])
+            if _DAILY_DIGEST.match(str(record["summary"] or "")):
+                summary, summary_technical = _log_detail(record["summary"])
             events.append({
                 "id": f"deliverable:{record['id']}", "at": record["created_at"],
                 "kind": "deliverable", "lane": "写文档",
@@ -5156,7 +6427,9 @@ class CockpitPlane:
                 "kind": "claim_decision", "lane": "账本更正",
                 "title": ("退役了一条结论：" if retired else "保留了一条被标记的结论：") + (
                     CLAIM_REASON_LABELS.get(record["reason_code"], record["reason_code"])),
-                "detail": record["rationale"], "state": "done" if retired else "skipped",
+                "detail": _log_detail(record["rationale"])[0],
+                "technical": _log_detail(record["rationale"])[1],
+                "state": "done" if retired else "skipped",
                 "company": None,
             })
         # 2026-09-24: a retirement withdrawn by a later record is shown as its
@@ -5185,13 +6458,15 @@ class CockpitPlane:
                            "title": shown["title"], "detail": shown["detail"],
                            "technical": shown["technical"], "state": "done", "company": None})
         heartbeat = _load_json(self.config.heartbeat_path) or {}
-        for key, label in (("bounded_planner", "研究调度"), ("outbox", "消息投递"), ("weekly_brief", "每周简报"), ("backup", "备份")):
+        for key, label in HEARTBEAT_LANE_LABELS.items():
+            if key in {"agenda", "projection"}:
+                continue
             lane = heartbeat.get(key) or {}
             if lane.get("last_error"):
                 raw_error = str(lane["last_error"])[:400]
                 events.append({"id": f"error:{key}:{lane.get('last_completed_at')}", "at": lane.get("last_completed_at") or heartbeat.get("last_tick_at"),
                                "kind": "problem", "lane": label, "title": f"{label}遇到问题",
-                               "detail": _runtime_error_display(raw_error),
+                               "detail": _reason_text(raw_error) or _runtime_error_display(raw_error),
                                "technical": {"original_error": raw_error},
                                "state": "failed", "company": None})
         events = [e for e in events if e.get("at")]
@@ -5201,7 +6476,10 @@ class CockpitPlane:
         events = events[:limit]
         return {"schema_version": SCHEMA_VERSION, "as_of": _iso(self.clock()), "events": events,
                 "cursor": events[0]["at"] if events else since, "service_state": heartbeat.get("state"),
-                "last_tick_at": heartbeat.get("last_tick_at")}
+                "last_tick_at": heartbeat.get("last_tick_at"),
+                # The top-bar pill counts these: "degraded" with a fresh tick
+                # is a running service with N lanes in error, not a pause.
+                "lanes_in_error": heartbeat_lanes_in_error(heartbeat)}
 
     # -- approvals -------------------------------------------------------------------
 
@@ -5234,11 +6512,12 @@ class CockpitPlane:
                 content = json.loads(row["content_json"])
                 items.append({
                     "kind": "thesis", "ref": row["candidate_id"], "hash": row["record_hash"], "at": row["created_at"],
-                    "title": f"是否接受研究论点：{row['thesis_ref'].split(':', 1)[-1]}",
+                    "title": f"是否接受{self._label(members, row['company_ref'])}的研究论点",
                     "who": self._label(members, row["company_ref"]),
                     "summary": content.get("summary") or content.get("statement") or content.get("change_reason") or "",
-                    "details": {"信心": content.get("confidence"), "证伪条件": content.get("falsifier_refs"),
-                                "催化剂": content.get("catalyst_refs"), "提议者": row["proposed_by"]},
+                    "details": {"信心": CONFIDENCE_LABELS.get(content.get("confidence"), "尚未说明"), "证伪条件": content.get("falsifier_refs"),
+                                "催化剂": content.get("catalyst_refs"), "提议者": "研究人员" if str(row["proposed_by"]).startswith("human:") else "研究系统"},
+                    "proposed_by": row["proposed_by"],
                     "actions": [{"decision": "admit", "label": "接受"}, {"decision": "reject", "label": "拒绝"}],
                     "needs_rationale": True,
                 })
@@ -5264,7 +6543,7 @@ class CockpitPlane:
             for row in self._rows(core,
                 "SELECT p.* FROM bounded_planner_proposal_versions p "
                 "LEFT JOIN bounded_planner_proposal_decisions d ON d.proposal_ref=p.proposal_id "
-                "LEFT JOIN bounded_planner_terminal_events t ON t.loop_version_ref=p.loop_version_ref "
+                f"LEFT JOIN {_bounded_terminal_table(core)} t ON t.loop_version_ref=p.loop_version_ref "
                 "WHERE d.decision_id IS NULL AND t.event_id IS NULL AND p.loop_version_ref IN ("
                 " SELECT v.version_id FROM bounded_planner_loop_versions v WHERE v.version_number="
                 " (SELECT MAX(w.version_number) FROM bounded_planner_loop_versions w WHERE w.loop_ref=v.loop_ref)) "
@@ -5325,11 +6604,14 @@ class CockpitPlane:
                 # revision without showing the objection it answers is asking
                 # the owner to remember what they typed three days ago.
                 context = _gate_review_context(core, record)
+                who = self._label(members, row["company_ref"])
                 items.append({
                     "kind": "deep_insight_gate", "ref": row["version_id"],
                     "hash": row["content_hash"], "at": row["created_at"],
-                    "title": "深度认知评审十二问：是否让这家公司进入完整覆盖",
-                    "who": self._label(members, row["company_ref"]),
+                    # P2-7: two undecided gates had the same title and the
+                    # owner had to open each to learn which company it was.
+                    "title": f"深度认知评审十二问：是否让 {who} 进入完整覆盖",
+                    "who": who,
                     "summary": (f"第 {row['version_number']} 版；十二问答了 "
                                 f"{len(answered)} 问，其余写明缺什么、下一步取什么。"),
                     **context,
@@ -5375,11 +6657,15 @@ class CockpitPlane:
             # version remains readable under documents but cannot receive a
             # verdict meant for different bytes.
             try:
+                # Any version of the active mission (ADR-0011): a memo waiting
+                # for its owner stays decidable across a budget signing.
                 memo_rows = self._rows(core,
                     "SELECT v.* FROM mission_deliverable_pointer p "
                     "JOIN mission_deliverable_versions v ON v.version_id=p.version_id "
-                    "WHERE v.kind='investment_memo' AND v.mission_version_ref=? "
-                    "ORDER BY v.created_at", (mission["id"],))
+                    "WHERE v.kind='investment_memo' AND v.mission_version_ref IN ("
+                    "SELECT mission_version_id FROM coverage_mission_versions "
+                    "WHERE mission_ref=?) ORDER BY v.created_at",
+                    (mission["mission_ref"],))
             except sqlite3.OperationalError:
                 memo_rows = []
             for row in memo_rows:
@@ -5416,10 +6702,15 @@ class CockpitPlane:
                     if router_path is None:
                         raise ValueError("model router authority is unavailable")
                     from .investment_memo_evidence import replay_memo_model_evidence
+                    bound_rows = self._rows(core,
+                        "SELECT record_json FROM coverage_mission_versions "
+                        "WHERE mission_version_id=?", (record["mission_version_ref"],))
+                    if not bound_rows:
+                        raise ValueError("the memo's mission version is missing")
                     model_evidence = replay_memo_model_evidence(
                         scheduler_db=self.config.scheduler_db,
                         model_router_db=Path(router_path), gate=record["gate"],
-                        mission=mission,
+                        mission=json.loads(bound_rows[0]["record_json"]),
                     )
                     if model_evidence["status"] != "verified":
                         raise ValueError(model_evidence.get("reason") or "formal model evidence is unverified")
@@ -5500,6 +6791,12 @@ class CockpitPlane:
                 "WHERE d.decision_id IS NULL ORDER BY p.created_at",
             ):
                 record = json.loads(row["record_json"])
+                if record.get("schema_version") == "0.2":
+                    # ADR-0013: the three components, side by side.
+                    from .cockpit_conviction import v2_approval_item
+                    items.append(v2_approval_item(
+                        row, record, self._label(members, row["company_ref"])))
+                    continue
                 variant = record.get("variant_view") or {}
                 low_information = low_information_call(row)
                 items.append({
@@ -5542,8 +6839,19 @@ class CockpitPlane:
         # decide them are on another branch, and offering a button that goes
         # nowhere is worse than showing the item and saying who owes what.
         items.extend(self._revision_checkpoints())
+        # ADR-0012: structured-scenario proposals waiting for the owner.
+        with self._core() as core:
+            from .cockpit_scenarios import approval_items as scenario_approval_items
+
+            items.extend(scenario_approval_items(
+                core, lambda company_ref: self._label(members, company_ref)))
         for row in self.journal.rows("SELECT * FROM cockpit_drafts WHERE status='open' ORDER BY created_at"):
             draft = json.loads(row["draft_json"])
+            if row["kind"] == "coverage":
+                # 2026-10-06 (vision-gap #12): the scope_expansion review card.
+                from .cockpit_owner_levers import coverage_approval_item
+                items.append(coverage_approval_item(row, draft))
+                continue
             items.append({
                 "kind": f"draft:{row['kind']}", "ref": row["draft_id"], "hash": row["content_hash"], "at": row["created_at"],
                 "title": "待你确认的新研究目标" if row["kind"] == "goal" else "待你确认的方向调整",
@@ -5557,6 +6865,7 @@ class CockpitPlane:
         # owner did not choose, and the only thing that would ever surface that
         # is a notice that stays until somebody reads it.
         items.extend(self._model_fallback_items())
+        self._attach_approval_final_text(items)
         for item in items:
             labels = APPROVAL_DETAIL_LABELS.get(item["kind"], {})
             if labels:
@@ -5574,7 +6883,8 @@ class CockpitPlane:
         return {"schema_version": SCHEMA_VERSION, "as_of": _iso(self.clock()),
                 "items": items,
                 "count": sum(1 for item in items
-                             if item["kind"] not in INFORMATIONAL_APPROVAL_KINDS)}
+                             if item["kind"] not in INFORMATIONAL_APPROVAL_KINDS
+                             and item.get("decision_required") is not False)}
 
     def workspaces(self, login: str) -> dict[str, Any]:
         from .workspace import WorkspaceError
@@ -5598,6 +6908,28 @@ class CockpitPlane:
             raise CockpitError(str(exc)) from exc
         except (OSError, ValueError, subprocess.TimeoutExpired) as exc:
             raise CockpitError("研究环境尚未准备完成，可以重试同一次创建请求") from exc
+
+    def workspace_lifecycle(self, login: str, value: Mapping[str, Any]) -> dict[str, Any]:
+        from .workspace_lifecycle import request_transition
+        from .workspace import WorkspaceError
+        path = getattr(self.config, "workspace_manager_config_path", None)
+        if path is None:
+            raise CockpitError("研究环境管理尚未配置")
+        try:
+            return request_transition(path, login, value)
+        except WorkspaceError as exc:
+            raise CockpitError(str(exc)) from exc
+
+    def workspace_research(self, login: str, slug: str) -> dict[str, Any]:
+        from .workspace_lifecycle import readonly_research
+        from .workspace import WorkspaceError
+        path = getattr(self.config, "workspace_manager_config_path", None)
+        if path is None:
+            raise CockpitError("研究环境管理尚未配置")
+        try:
+            return readonly_research(path, login, slug)
+        except WorkspaceError as exc:
+            raise CockpitError(str(exc)) from exc
 
     def rename_workspace(self, login: str, value: Mapping[str, Any]) -> dict[str, Any]:
         from .workspace import WorkspaceError
@@ -5658,19 +6990,22 @@ class CockpitPlane:
         except (sqlite3.Error, OSError, ValueError):
             return []
         items: list[dict[str, Any]] = []
-        for notice in notices:
-            replacement = notice["replacement_profile_id"]
+        for group in _group_fallback_notices(notices):
+            count = len(group["refs"])
             items.append({
-                "kind": "model_fallback", "ref": notice["id"],
-                "hash": notice["content_hash"], "at": notice["created_at"],
-                "title": "有个环节换模型了：原来用的那个在 OpenClaw 上没有了",
+                "kind": "model_fallback", "ref": group["ref"], "refs": group["refs"],
+                "hash": group["hash"], "at": group["at"],
+                "title": (f"模型 {group['profile_id']} 在 OpenClaw 上没有了："
+                          + (f"{count} 个环节已换用其他模型" if count > 1
+                             else "有个环节已换用其他模型")),
                 "who": "模型",
-                "summary": notice["message"],
+                "summary": group["message"],
                 "details": {
-                    "消失的模型": notice["profile_id"],
-                    "环节": notice["purpose"],
-                    "现在用": replacement or "没有可用的模型",
-                    "档位": MODEL_TIER_LABELS.get(notice["tier"], notice["tier"]),
+                    "消失的模型": group["profile_id"],
+                    "环节": "、".join(group["purpose_labels"]),
+                    "现在用": "、".join(group["replacements"]) or "没有可用的模型",
+                    "AI 服务等级": "、".join(MODEL_TIER_LABELS.get(tier, tier)
+                                     for tier in group["tiers"]),
                 },
                 # 「知道了」 changes no routing -- the fall already happened -- so
                 # it needs no reason. Re-selecting is the other way to clear it,
@@ -5712,6 +7047,9 @@ class CockpitPlane:
             members = self._members(mission)
             reflections = self._reflections(core)
             checkpoint_tables = list(CHECKPOINT_TABLES.items())
+            from .research_followup import approval_items as followup_approval_items
+            items.extend(followup_approval_items(
+                core, lambda company_ref: self._label(members, company_ref), today=_iso(self.clock())[:10]))
             checkpoint_tables.append(("thesis_revision_candidate", (
                 "zero_base_revision_candidates", "candidate_id",
                 "thesis_revision_decisions", "candidate_ref")))
@@ -5803,6 +7141,7 @@ class CockpitPlane:
                         details.update(extra)
                     actions = list(CHECKPOINT_ACTIONS[kind]) if decidable else []
                     stale_reason = None
+                    empty_candidate = False
                     if kind == "thesis_revision_candidate":
                         # A candidate is written against one immutable thesis
                         # version.  Accepting one the thesis has moved past is
@@ -5827,6 +7166,15 @@ class CockpitPlane:
                                 )
                                 actions = [{"decision": "reject",
                                             "label": "关闭这条过期建议"}] if decidable else []
+                        if stale_reason is None and thesis_candidate_proposes_nothing(record):
+                            empty_candidate = True
+                            stale_reason = EMPTY_THESIS_CANDIDATE_NOTE
+                            actions = list(EMPTY_THESIS_CANDIDATE_ACTIONS) if decidable else []
+                        if stale_reason is None:
+                            from .thesis_revision import revision_readiness
+                            stale_reason = revision_readiness(core, record)
+                            if stale_reason:
+                                actions = [a for a in actions if a["decision"] != "accept"]
                     items.append({
                         "kind": kind, "ref": row[key], "hash": row["content_hash"],
                         "at": row["created_at"],
@@ -5843,7 +7191,12 @@ class CockpitPlane:
                         "reflection": reflections["by_judgement"].get(
                             record.get("judgement_ref")),
                         "actions": actions,
-                        "needs_rationale": False if stale_reason else decidable,
+                        # An empty candidate keeps the (optional) note box:
+                        # its two answers are recorded with a reason either way.
+                        "needs_rationale": (decidable if empty_candidate
+                                            else False if stale_reason else decidable),
+                        **({"rationale_hint": "理由（选填）：不填写时按「确认维持现有论点」自动记录"}
+                           if empty_candidate and decidable else {}),
                         **({"occurrence_count": superseded_counts[row[key]] + 1}
                            if row[key] in superseded_counts else {}),
                         **({} if decidable else {
@@ -5994,12 +7347,24 @@ class CockpitPlane:
             if decision != "acknowledge":
                 raise CockpitError("这条提示只能「知道了」")
             return self.acknowledge_model_notice(login, {"ref": ref})
-        if kind == "thesis":
+        if kind == "research_followup":
+            if not supplied_rationale:
+                raise CockpitError("研究跟进事项必须写明处理理由")
+            operation, params = "decide_research_followup", {
+                "request_ref": ref, "request_hash": digest, "action": decision,
+                "reason": supplied_rationale, "closure_evidence": value.get("closure_evidence") or [],
+                "owner_ref": actor if decision == "assign" else None,
+                "due_on": value.get("due_on") if decision == "assign" else None,
+                "idempotency_key": f"cockpit-research-followup:{ref}:{request_id}",
+            }
+            title = "已登记研究跟进决定"
+        elif kind == "thesis":
             if decision not in {"admit", "reject"}:
                 raise CockpitError("decision must be admit or reject")
             operation, params = "decide_thesis_admission", {
                 "candidate_id": ref, "candidate_hash": digest, "verdict": decision, "rationale": recorded_rationale,
-                "decision_id": f"thesis-admission-decision:cockpit:{content_hash({'candidate': ref, 'request': request_id})[:24]}"}
+                "decision_id": f"thesis-admission-decision:cockpit:{content_hash({'candidate': ref, 'request': request_id})[:24]}",
+                "idempotency_key": "cockpit-thesis-admission:"+content_hash({'candidate':ref,'request':request_id})}
             title = ("接受了研究论点" if decision == "admit" else "拒绝了研究论点")
         elif kind == "capability":
             if decision not in {"approve", "reject"}:
@@ -6063,13 +7428,30 @@ class CockpitPlane:
             # ADR-0007: automation may never take this branch. The cockpit
             # mints an ephemeral *human* principal for the call, and the
             # writer refuses the operation for anything else.
-            if decision not in {"accept", "reject", "defer"}:
-                raise CockpitError("decision must be accept, reject or defer")
+            if decision not in {"accept", "reject", "defer", "maintain"}:
+                raise CockpitError("decision must be accept, reject, defer or maintain")
+            if decision in {"accept", "maintain"}:
+                candidate_record = self._thesis_candidate_record(ref)
+                empty = (candidate_record is not None
+                         and thesis_candidate_proposes_nothing(candidate_record))
+                if decision == "accept" and empty:
+                    raise CockpitError(
+                        "这条建议没有提出新的论点表述或置信度，接受不会产生新版本"
+                        "（系统会拒绝）。请点「确认维持现有论点」或「拒绝」。")
+                if decision == "maintain" and not empty:
+                    raise CockpitError(
+                        "这条建议提出了具体修订，请选择接受、不接受或暂不处理。")
+            verdict = "reject" if decision == "maintain" else decision
+            reason = recorded_rationale
+            if decision == "maintain":
+                reason = (MAINTAIN_THESIS_REASON
+                          + (f"。补充说明：{supplied_rationale}" if supplied_rationale else ""))
             operation, params = "decide_thesis_revision_candidate", {
                 "candidate_ref": ref, "candidate_hash": digest,
-                "verdict": decision, "reason": recorded_rationale}
+                "verdict": verdict, "reason": reason}
             title = {"accept": "接受了论点修订", "reject": "未接受论点修订",
-                     "defer": "暂缓决定论点修订"}[decision]
+                     "defer": "暂缓决定论点修订",
+                     "maintain": "确认维持现有论点"}[decision]
         elif kind == "conviction_call":
             # All three of the authority's decisions.  This branch used to
             # accept only ``reject``, on the theory that accepting a call
@@ -6088,6 +7470,11 @@ class CockpitPlane:
             title = {"accept": "采纳了一条投资 call 提案",
                      "reject": "驳回了一条投资 call 提案",
                      "defer": "暂缓决定一条投资 call 提案"}[decision]
+        elif kind == "company_scenario_set":
+            from .cockpit_scenarios import decide_params as scenario_decide_params
+
+            operation, params, title = scenario_decide_params(
+                ref, digest, decision, recorded_rationale, request_id)
         elif kind == "gate_reopen":
             if decision not in {"approve", "decline"}:
                 raise CockpitError("decision must be approve or decline")
@@ -6102,7 +7489,32 @@ class CockpitPlane:
             result = self.governance_call(self.token_config, self.writer_socket, actor_ref=actor, operation=operation, params=params)
         except (GovernanceCliError, RemoteError) as exc:
             raise CockpitConflict(f"这项决定没有被接受：{_reason(exc)}") from exc
-        self.journal.record_event(kind="approval", title=title,
+        if kind == "thesis":
+            from .coverage_admission import CoverageAdmissionAuthority, CoverageAdmissionError
+            try:
+                with self._core() as core:
+                    authority=CoverageAdmissionAuthority.__new__(CoverageAdmissionAuthority)
+                    authority.connection=core
+                    saved=authority.decision(params["decision_id"])
+                returned=result.get("decision") if isinstance(result,Mapping) else None
+                if (saved != returned or saved.get("candidate_ref")!=ref or saved.get("candidate_hash")!=digest
+                        or saved.get("verdict")!=decision or saved.get("reviewer_ref")!=actor
+                        or saved.get("rationale")!=recorded_rationale):
+                    raise CockpitConflict("论点决定回执与已保存记录不一致，请刷新核对")
+            except (CoverageAdmissionError, sqlite3.Error) as exc:
+                raise CockpitConflict("论点决定尚未读回，请刷新核对保存状态") from exc
+        if kind == "research_followup":
+            from .research_followup import requests as followup_requests
+            with self._core() as core:
+                held = next((r for r in followup_requests(core) if r['id']==ref and r['content_hash']==digest), None)
+            saved = next((d for d in (held or {}).get('decisions', [])
+                          if isinstance(result,Mapping) and d['id']==result.get('id')
+                          and d['actor_ref']==actor and d['action']==decision
+                          and d.get('idempotency_key')==params['idempotency_key']), None)
+            if saved is None:
+                raise CockpitConflict("研究跟进决定尚未读回，请刷新核对保存状态")
+        if not (kind=="thesis" and isinstance(result,Mapping) and result.get("status")=="duplicate"):
+            self.journal.record_event(kind="approval", title=title,
                                   detail=supplied_rationale or None, login=login,
                                   refs={"kind": kind, "ref": ref,
                                         "decision": decision, "operation": operation,
@@ -6117,16 +7529,64 @@ class CockpitPlane:
                    else {}),
                 "result": result if isinstance(result, (dict, list)) else None}
 
+    def _thesis_candidate_record(self, ref: str) -> dict[str, Any] | None:
+        """The candidate a thesis decision is about, read before deciding."""
+
+        try:
+            with self._core() as core:
+                for table in ("thesis_revision_candidates",
+                              "zero_base_revision_candidates"):
+                    if not _table_exists(core, table):
+                        continue
+                    row = core.execute(
+                        f"SELECT record_json FROM {table} WHERE candidate_id=?", (ref,),
+                    ).fetchone()
+                    if row is not None:
+                        record = json.loads(row["record_json"])
+                        return record if isinstance(record, dict) else None
+        except (sqlite3.Error, TypeError, ValueError):
+            return None
+        return None
+
     def decision_status(self, query: Mapping[str, Any]) -> dict[str, Any]:
         """Confirm one exact human decision after a lost HTTP response."""
         kind = _text(query.get("kind"), "kind", maximum=64)
         ref = _text(query.get("ref"), "ref", maximum=512)
         digest = _sha(query.get("hash"), "hash")
         decision = _text(query.get("decision"), "decision", maximum=32)
+        if kind == "thesis":
+            from .coverage_admission import CoverageAdmissionAuthority, CoverageAdmissionError
+            try:
+                with self._core() as core:
+                    row=core.execute("SELECT decision_id FROM thesis_admission_decisions WHERE candidate_id=?",(ref,)).fetchone()
+                    if row is None:return {"status":"not_confirmed","decided":False}
+                    authority=CoverageAdmissionAuthority.__new__(CoverageAdmissionAuthority);authority.connection=core
+                    saved=authority.decision(row["decision_id"])
+            except (CoverageAdmissionError,sqlite3.Error):
+                return {"status":"not_confirmed","decided":False}
+            request=query.get("request_id")
+            expected=("thesis-admission-decision:cockpit:"+content_hash({'candidate':ref,'request':_text(request,"request_id",maximum=128)})[:24]) if request else None
+            if (saved["candidate_hash"]!=digest or saved["verdict"]!=decision or
+                    (expected is not None and saved["id"]!=expected)):
+                return {"status":"different_decision","decided":False}
+            return {"status":"decided","decided":True,"kind":kind,"ref":ref,"decision":decision,
+                    "decision_ref":saved["id"],"decision_hash":saved["content_hash"],
+                    "resulting_version_ref":saved["resulting_thesis_version_ref"]}
+        if kind == "research_followup":
+            from .research_followup import requests as followup_requests
+            with self._core() as core:
+                request = next((r for r in followup_requests(core) if r['id'] == ref), None)
+            exact = request is not None and request['content_hash'] == digest
+            key=f"cockpit-research-followup:{ref}:{query['request_id']}" if query.get('request_id') else None
+            matching = next((d for d in reversed(request['decisions']) if d['action'] == decision
+                             and (key is None or d.get('idempotency_key')==key)), None) if exact else None
+            return {"status": "decided" if matching else "not_confirmed", "decided": matching is not None,
+                    "decision_ref": matching['id'] if matching else None}
         if kind != "thesis_revision_candidate" or decision not in {
-            "accept", "reject", "defer",
+            "accept", "reject", "defer", "maintain",
         }:
             return {"status": "not_confirmed", "decided": False}
+        verdict = "reject" if decision == "maintain" else decision
         try:
             with self._core() as core:
                 row = core.execute(
@@ -6141,7 +7601,7 @@ class CockpitPlane:
         if not row:
             return {"status": "not_confirmed", "decided": False}
         exact = (row["candidate_hash"] == digest
-                 and row["verdict"] == decision
+                 and row["verdict"] == verdict
                  and int(row["terminal"] or 0) == 1)
         if not exact:
             return {"status": "different_decision", "decided": False}
@@ -6246,6 +7706,8 @@ class CockpitPlane:
         selected = remaining[:page_limit]
         items = [{
             "ref": row["ref"], "statement": row["statement"],
+            "display_statement": (claim_statement_display(row["statement"])
+                                  or statement_display(row["statement"])),
             "company": self._label(members, row["subject_ref"]),
             "company_ref": row["subject_ref"], "period": row["period"],
             "period_label": _claim_period_label(row["period"]),
@@ -6267,9 +7729,24 @@ class CockpitPlane:
                 "filters": fingerprint,
                 "after": [last["index_order"], last["created_at"], last["ref"]],
             }, sort_keys=True, separators=(",", ":")).encode()).decode().rstrip("=")
+        # P2-1: the cards and the overview count every live version; this
+        # page, canonical by default, counts each fact once.  Both numbers
+        # are given so the page can say what the difference is instead of
+        # showing 2,304 where the card said 2,539.
+        all_versions_total = (len(rows) if index_aspect is None and importance is None
+                              else None)
+        if canonical_only and all_versions_total is not None and all_versions_total > len(annotated):
+            count_basis = (f"同一件事只算一次，共 {len(annotated)} 条；含重复版本共 "
+                           f"{all_versions_total} 条（公司卡片和总览按含重复版本计数），"
+                           f"差额 {all_versions_total - len(annotated)} 条是已合并的重复版本")
+        elif canonical_only:
+            count_basis = "同一件事只算一次"
+        else:
+            count_basis = "含重复版本（与公司卡片和总览的计数口径相同）"
         return {
             "as_of": _iso(self.clock()), "indexed": indexed,
             "total": len(annotated), "returned_count": len(items),
+            "all_versions_total": all_versions_total, "count_basis": count_basis,
             "next_cursor": next_cursor, "items": items,
             "filters": {
                 "company_ref": company_ref, "aspect": index_aspect,
@@ -6285,8 +7762,14 @@ class CockpitPlane:
                           for ref in members],
         }
 
-    def export_research(self, company_ref: str, format: str) -> dict[str, Any]:
-        """Download a read-only research artifact in the current mission scope."""
+    def export_research(self, company_ref: str, format: str,
+                        template: str | None = None) -> dict[str, Any]:
+        """Download a read-only research artifact in the current mission scope.
+
+        An Excel model uses the fund template chosen for the company
+        (vision-gap #4); ``template`` names another registered version for
+        this one download.
+        """
         from .cockpit_research_export import export_download
 
         ref = _text(company_ref, "company_ref", maximum=512)
@@ -6299,12 +7782,27 @@ class CockpitPlane:
             if member is None:
                 raise CockpitError("公司不在当前研究任务范围内")
         try:
+            if template is not None and format != "xlsx":
+                raise CockpitError("只有 Excel 模型可以选择模板")
             return export_download(self.config.core_db, ref, format,
                                    mission_ref=mission["mission_ref"],
+                                   template_version_ref=(
+                                       None if template is None
+                                       else _text(template, "template", maximum=240)),
                                    company_label="_".join(str(member[key])
                                        for key in ("ticker", "name") if member.get(key)))
+        except CockpitError:
+            raise
         except (ValueError, RuntimeError, OSError, sqlite3.Error) as exc:
-            raise CockpitError(f"无法导出：{exc}") from exc
+            logging.getLogger(__name__).exception("Research export failed (%s)", format)
+            reasons = {
+                "company has no current model": "这家公司尚未生成财务模型。请先在「财务模型」查看缺少的材料与假设。",
+                "forecast model's exact specification is unavailable": "当前模型缺少对应版本的建模假设，暂时不能导出。请在「财务模型」查看模型状态。",
+                "forecast model does not bind this specification": "模型与建模假设的版本不一致，暂时不能导出。",
+                "forecast model does not bind these model inputs": "财报数据已更新，这版模型尚未完成相应重算，暂时无法导出。",
+            }
+            reason = reasons.get(str(exc), "导出未完成。请稍后重试；若仍失败，请联系管理员检查导出记录。")
+            raise CockpitError(reason) from exc
 
     def research_library(self, company_ref: str) -> dict[str, Any]:
         from .cockpit_research_library import research_library
@@ -6316,6 +7814,14 @@ class CockpitPlane:
             except ValueError as exc:
                 raise CockpitError(str(exc)) from exc
         return {"as_of": _iso(self.clock()), **result}
+
+    def _model_spec_companies(self, core: sqlite3.Connection) -> set[str]:
+        """Companies with at least one decided model specification."""
+
+        if not _table_exists(core, "coverage_mission_company_model_specs"):
+            return set()
+        return {row[0] for row in core.execute(
+            "SELECT DISTINCT company_ref FROM coverage_mission_company_model_specs")}
 
     def company_model(self, company_ref: str) -> dict[str, Any]:
         """One company's forecast model, printed so a person can argue with it.
@@ -6362,15 +7868,30 @@ class CockpitPlane:
             model_text = {}
         policy = _load_json(self.config.core_db.parent / "research-language-policy.json") or {}
         review_required = isinstance(policy, Mapping) and policy.get("required") is True
-        def display_model_text(value: str) -> str:
+        from .cockpit_model_display import (
+            native_chinese_model_text, statement_line_label)
+
+        def reviewed_model_text(value: str) -> str | None:
             if value in model_text:
                 return model_text[value]
-            from .cockpit_model_display import native_chinese_model_text
-            native = native_chinese_model_text(value)
-            if native is not None:
-                return native
+            # The closed vocabularies of the record itself.
+            closed = CHANGE_REASON_LABELS.get(value) or JUDGEMENT_DECISION_LABELS.get(value)
+            if closed is not None:
+                return closed
+            return native_chinese_model_text(value)
+
+        def display_model_text(value: str) -> str:
+            # Prose only (assumption reasons, notes): gated while unreviewed.
+            shown = reviewed_model_text(value)
+            if shown is not None:
+                return shown
             return ("正文正在检查文字表达，完成后会显示。"
                     if review_required else value)
+
+        # 2026-10-08 (DEFECT-02): line names are never gated -- the metric
+        # table's Chinese account name, else the name as filed.
+        def model_line_label(row: Mapping[str, Any]) -> str:
+            return statement_line_label(row, reviewed_model_text)
         return {
             "as_of": _iso(self.clock()), "company_ref": ref, "company": label,
             "version": record.get("version"), "version_ref": record.get("id"),
@@ -6379,15 +7900,28 @@ class CockpitPlane:
             "change_reason_label": CHANGE_REASON_LABELS.get(
                 record.get("change_reason"), record.get("change_reason")),
             "decision": record.get("decision"),
-            "readiness": readiness_labels(record, readiness, display_model_text),
+            "readiness": readiness_labels(record, readiness, display_model_text,
+                                          line_label=model_line_label),
             "note": self._forecast_note(readiness),
             "table": render_forecast_model(
                 record, entity_name=label,
-                display_text=display_model_text, include_technical=False),
+                display_text=display_model_text, include_technical=False,
+                line_label=model_line_label),
             "technical_table": render_forecast_model(record, entity_name=label),
             "history": history,
             "invariants": refused,
+            # Batch an: per-rule coverage of this exact model version
+            # (未覆盖 never reads as 通过) and the 研究一致性 block.
+            **self._model_consistency(ref),
         }
+
+    def _model_consistency(self, company_ref: str) -> dict[str, Any]:
+        try:
+            with self._core() as core:
+                found = self._consistency(core, [company_ref]).get(company_ref) or {}
+        except Exception:  # noqa: BLE001 - the model page stands without it
+            return {"invariant_coverage": {}, "consistency": None}
+        return {"invariant_coverage": found.get("coverage") or {}, "consistency": found.get("view")}
 
     # -- INT2: 来源 and 模型 --------------------------------------------------
 
@@ -6402,6 +7936,43 @@ class CockpitPlane:
         offers.
         """
 
+        timer = _PageTimer("sources", self)
+        try:
+            return self._sources_page(timer)
+        finally:
+            timer.finish()
+
+    def _mark_login_lapses(self, rows: list[dict[str, Any]]) -> None:
+        from .connector_health import SOURCE_APPS, held_records
+        from .needs_human import _local_time as _local_clock
+
+        try:
+            held = {str(record.get("source_ref")): record
+                    for record in held_records(getattr(self.config, "state_dir", None))}
+        except Exception:  # noqa: BLE001 - an unreadable health file costs the badge only
+            held = {}
+        for row in rows:
+            record = held.get(row.get("source_ref"))
+            if record is None:
+                continue
+            blocked = record.get("blocked") or {}
+            app = SOURCE_APPS.get(row["source_ref"], "对应客户端")
+            row["health"] = {
+                "status": "login_expired", "status_label": "登录失效",
+                "since": record.get("since"), "hold_until": record.get("hold_until"),
+                "blocked_searches": int(blocked.get("search") or 0),
+                "blocked_acquisitions": int(blocked.get("acquisition") or 0),
+                "provider_message": (record.get("last_detail") or {}).get("message"),
+            }
+            row["health_note"] = (
+                f"登录失效：服务器拒绝了当前登录（自 {_local_clock(record.get('since'))} 起）；"
+                f"请在 {app} 重新登录/刷新，恢复后系统自动继续")
+            connector = dict(row.get("connector") or {})
+            connector.update({"status": "login_expired", "status_label": "登录失效"})
+            row["connector"] = connector
+            row["status_label"] = "登录失效"
+
+    def _sources_page(self, timer: _PageTimer) -> dict[str, Any]:
         from .source_capability_map import build_map
         from .tracking_cadence import baseline_cadences
 
@@ -6434,10 +8005,12 @@ class CockpitPlane:
                 return {"sources": rows, "routing": {"available": False,
                             "reason": "本环境尚未配置研究调用"},
                         "policy_note": "这里只共用资料来源的连接，资料和研究审批保存在各自的研究环境。"}
+        timer.lap("mission")
         projection = build_map(
             mission=mission,
             cadences=None if policy is None else baseline_cadences(policy),
         )
+        timer.lap("capability_map")
         rows = []
         for entry in projection["sources"]:
             status = entry["connection_status"]
@@ -6494,9 +8067,15 @@ class CockpitPlane:
                 "markets": list(entry["markets"]),
                 "note": entry["note"],
             })
+        # 2026-10-08: a host-tool source whose login the provider stopped
+        # accepting reads 「登录失效」 here, not "connected".
+        self._mark_login_lapses(rows)
         # Specific sources first, generic last, exactly the order the map's
         # own ``sources_for`` hands them to a research decision.
         rows.sort(key=lambda row: (row["generic"], row["slug"]))
+        timer.lap("rows")
+        routing = self._routing()
+        timer.lap("routing")
         return {
             "as_of": _iso(self.clock()),
             "schema_version": SCHEMA_VERSION,
@@ -6506,7 +8085,7 @@ class CockpitPlane:
             "policy_ref": None if policy is None else policy["policy_ref"],
             "policy_note": (None if policy is not None else
                             "这台机器上还没有跟踪频率政策，所以频率一栏是空的"),
-            "routing": self._routing(),
+            "routing": routing,
         }
 
     # -- P14-M2: the 「模型」 page ------------------------------------------------
@@ -6602,10 +8181,12 @@ class CockpitPlane:
 
         def push(at: str, kind: str, status: str, title: str, *,
                  detail: str | None = None, cost_usd: str | None = None,
-                 actor: str | None = None) -> None:
+                 actor: str | None = None,
+                 technical: Mapping[str, Any] | None = None) -> None:
             events.append({
                 "at": at, "kind": kind, "status": status, "title": title,
                 "detail": detail, "cost_usd": cost_usd, "actor": actor,
+                **({"technical": dict(technical)} if technical else {}),
             })
 
         router_path = self._model_router_db()
@@ -6684,22 +8265,36 @@ class CockpitPlane:
                 where = "WHERE created_at < ?"
                 params.append(before)
             rows = scheduler.execute(
-                "SELECT work_order_id,state,reason,created_at "
+                "SELECT e.work_order_id,e.state,e.reason,e.created_at,w.work_order_json "
+                "FROM (SELECT work_order_id,state,reason,created_at,event_seq "
                 "FROM scheduler_attempt_events " + where
-                + " ORDER BY event_seq DESC LIMIT ?",
+                + " ORDER BY event_seq DESC LIMIT ?) e "
+                "LEFT JOIN scheduler_work_orders w ON w.work_order_id=e.work_order_id "
+                "ORDER BY e.event_seq DESC",
                 [*params, max(20, limit // 3)],
             ).fetchall()
+            members: dict[str, dict[str, Any]] = {}
+            try:
+                with self._core() as core:
+                    members = self._members(self._mission(core))
+            except (CockpitMissionMissing, sqlite3.Error, OSError, ValueError,
+                    KeyError, TypeError):
+                members = {}
             for row in rows:
-                who = str(row["work_order_id"] or "")
-                if ":" in who:
-                    who = who.split(":", 1)[1]
-                    who = who.split("-", 1)[-1] if "-" in who else who
+                work_order_id = str(row["work_order_id"] or "")
+                lane, company = _work_title_parts(
+                    work_order_id, row["work_order_json"], members)
                 state = str(row["state"] or "")
+                reason = str(row["reason"] or "") or None
+                shown_reason, reason_technical = _log_detail(reason)
                 push(str(row["created_at"]), "work",
                      "failed" if state == "failed"
                      else "ok" if state == "succeeded" else "run",
-                     f"工单{WORK_STATE_LABELS.get(state, state)}：{who[:44]}",
-                     detail=str(row["reason"] or "") or None)
+                     f"研究任务{WORK_STATE_LABELS.get(state, '状态更新')}：{lane}"
+                     + (f" · {company}" if company else ""),
+                     detail=shown_reason,
+                     technical={"work_order_ref": work_order_id, "state": state,
+                                **({"reason": reason} if reason_technical else {})})
             scheduler.close()
         except (sqlite3.Error, OSError, ValueError):
             pass
@@ -6726,10 +8321,7 @@ class CockpitPlane:
                     reason = record.get("reason") or "refused"
                     push(str(record.get("created_at") or ""), "budget", "warn",
                          BUDGET_REASON_LABELS.get(reason, reason),
-                         detail=(
-                             f"预留 ${Decimal(record.get('reserved_micros', 0)) / Decimal(1_000_000):.4f}"
-                             f"，已用 ${Decimal(record.get('committed_micros', record.get('spent', 0))) / Decimal(1_000_000):.2f}"
-                             f" / 上限 ${Decimal(record.get('cap_micros', 0)) / Decimal(1_000_000):.0f}"))
+                         detail=_budget_rejection_detail(record))
                 budget.close()
             except (sqlite3.Error, OSError, ValueError):
                 pass
@@ -6754,6 +8346,13 @@ class CockpitPlane:
         (ADR-0006).
         """
 
+        timer = _PageTimer("models", self)
+        try:
+            return self._models_page(timer)
+        finally:
+            timer.finish()
+
+    def _models_page(self, timer: _PageTimer) -> dict[str, Any]:
         from .model_selection import (
             ModelSelectionError, PURPOSE_LABELS, SELECTION_MODES,
             purpose_policy_bindings,
@@ -6773,11 +8372,12 @@ class CockpitPlane:
             )
         except (ModelSelectionError, OSError, ValueError) as exc:
             return {"available": False, "reason": f"模型配置读不出来：{_reason(exc)}"}
+        timer.lap("bindings")
         broker = (None if self.config.openclaw_config_path is None
                   else _load_json(self.config.openclaw_config_path))
         broker = broker if isinstance(broker, Mapping) else None
         from .cockpit_model_display import (
-            chain_link_note, cooldown_index, purpose_cooldown_note,
+            chain_link_note, cooldown_index, cooldown_view, purpose_cooldown_note,
         )
         from .model_fallback_chain import (
             SKIPPED_LINKS_PER_TIER, FallbackChainError, routing_overview,
@@ -6791,6 +8391,14 @@ class CockpitPlane:
         # longest history -- and each one used to load and parse all 35k chain
         # links, which was 95% of a ten-second page.
         link_digests: dict[str, dict[str, Any]] = {}
+        # 2026-09-30 (P1-1): and one read of everything else a pin does not
+        # change -- catalog, cooldowns, catalog sync, served-link costs --
+        # shared by every overview built against the same router database
+        # (see ``routing_overview(memo=...)``).  Eleven pins on legacy made
+        # ~800 SQLite calls; each is a GIL hand-off that queues behind the
+        # overview rebuild thread when one is running.
+        route_memos: dict[str, dict[str, Any]] = {}
+        checked_at = self.clock()
 
         def digest_for(router: Any, key: str) -> dict[str, Any]:
             if key not in link_digests:
@@ -6800,21 +8408,27 @@ class CockpitPlane:
 
         try:
             with closing(ModelRouter(path, read_only=True)) as router:
+                default_key = str(Path(path).resolve())
                 overview = routing_overview(
-                    router, openclaw_config=broker, checked_at=self.clock(),
-                    link_digest=digest_for(router, str(Path(path).resolve())))
+                    router, openclaw_config=broker, checked_at=checked_at,
+                    link_digest=digest_for(router, default_key),
+                    memo=route_memos.setdefault(default_key, {}))
                 discovery = (
                     {} if broker is None
                     else discover_models(broker, router=router,
-                                         checked_at=self.clock())
+                                         checked_at=checked_at)
                 )
                 notices = router.fallback_notices()
-                catalogue = {
-                    profile["id"]: profile for profile in router.latest_profiles()
-                }
+                catalogue = dict(route_memos[default_key]["latest"])
         except (FallbackChainError, sqlite3.Error, OSError, ValueError) as exc:
             return {"available": False, "reason": f"模型目录读不出来：{_reason(exc)}"}
+        timer.lap("default_overview")
         purposes = []
+        # 2026-10-07: every cooled profile any stage's router knows about, so
+        # the page can mark it in *every* chain it appears in -- the tier
+        # editor, the picker, the stage list -- and not only in the one row
+        # whose overview happened to carry it.
+        cooling_all: dict[str, dict[str, Any]] = dict(cooldown_index(overview.get("cooldowns")))
         default_rows = {row["purpose"]: row for row in overview["purposes"]}
         bound_views: dict[tuple[str, str], tuple[dict[str, Any], dict[str, Any],
                                                 dict[str, dict[str, Any]]]] = {}
@@ -6831,17 +8445,18 @@ class CockpitPlane:
                 key = (str(Path(bound_db).expanduser().resolve()), policy_ref)
                 try:
                     if key not in bound_views:
+                        started = time.perf_counter()
+                        memo = route_memos.setdefault(key[0], {})
                         with closing(ModelRouter(key[0], read_only=True)) as bound_router:
                             bound_policy = bound_router.get_policy(policy_ref)
                             bound_overview = routing_overview(
                                 bound_router, openclaw_config=broker,
-                                checked_at=self.clock(), policy_version_ref=policy_ref,
-                                link_digest=digest_for(bound_router, key[0]))
-                            bound_catalog = {
-                                profile["id"]: profile
-                                for profile in bound_router.latest_profiles()
-                            }
+                                checked_at=checked_at, policy_version_ref=policy_ref,
+                                link_digest=digest_for(bound_router, key[0]),
+                                memo=memo)
+                            bound_catalog = memo["latest"]
                         bound_views[key] = (bound_overview, bound_policy, bound_catalog)
+                        timer.add("pin_overviews", time.perf_counter() - started)
                     selected, pinned, bound_catalogue = bound_views[key]
                 except (FallbackChainError, ModelRouterError, sqlite3.Error,
                         OSError, ValueError) as exc:
@@ -6879,6 +8494,7 @@ class CockpitPlane:
             # setting, so there is nothing to press here.
             cooling = cooldown_index(
                 (selected or overview).get("cooldowns"))
+            cooling_all.update(cooling)
             chain = [{
                 "position": link["position"], "model": link["profile_id"],
                 "display_name": self._model_display_name(
@@ -6902,7 +8518,13 @@ class CockpitPlane:
                 ),
             } for link in row["chain"]]
             served = row["last_served"]
+            from .call_budget import THINKING_LEVELS, resolve_thinking_level
+            thinking = resolve_thinking_level(purpose, policy=pinned)
             purposes.append({
+                "thinking_level": thinking,
+                "thinking_level_choices": (["low"] if purpose.endswith("_verifier")
+                                           else ["off", "minimal", "low", "medium", "high"]),
+                "thinking_override": (((pinned or {}).get("thinking_level_overrides") or {}).get(purpose)),
                 "purpose": row["purpose"],
                 "label": PURPOSE_LABELS.get(row["purpose"], row["purpose"]),
                 "tier": row["tier"],
@@ -6919,14 +8541,15 @@ class CockpitPlane:
                 "configuration_source": binding["source"],
                 "policy_version_ref": policy_ref,
                 "requires_restart": bool(binding.get("requires_restart")),
-                "editable": bool(binding.get("editable")),
+                "editable": bool(binding.get("editable")) and not binding.get("retired_by"),
+                "retired_by": binding.get("retired_by"),
                 # 2026-09-16: the verification purposes are pinned by explicit
                 # overrides to the only profiles whose broker routes declare
                 # provider-controlled-verify.  An owner reading the page saw
                 # "第 1 顺位 gemini-3.8-flash · Google" against their own tier
                 # choice and reasonably asked why.  The row now says it is a
                 # contract pin, not their selection.
-                "pin_note": (
+                "pin_note": (  # term-ok: administrator page (AI 服务与模型路由)
                     "独立复核契约钉定：验证类工单需要供应商侧验证控件，"
                     "目录中只有个别模型声明支持，因此这一列不走你选的层级链。"
                     if isinstance(override, Mapping) and row["tier"] == "verifier"
@@ -6973,13 +8596,17 @@ class CockpitPlane:
                         if served["estimated_cost_usd"] else ""))
                 ),
             })
+        timer.lap("purposes")
         # Everything live, in one list, because a selector that only offered
         # what is already in some chain could never be used to choose a model
         # the catalog lane has just registered -- which is the whole point.
+        from .cockpit_model_variants import broker_choice_metadata
+        choice_variants = broker_choice_metadata(broker, catalogue)
         choices = sorted(
             (
                 {
                     "model": profile_id,
+                    **choice_variants.get(profile_id, {}),
                     "display_name": self._model_display_name(profile_id, catalogue),
                     "provider": profile.get("provider"),
                     "model_ref": profile.get("model"),
@@ -7016,6 +8643,8 @@ class CockpitPlane:
         # masquerade as the tier's choice.
         tier_cards: dict[str, dict[str, Any]] = {}
         for row in purposes:
+            if row.get("retired_by"):
+                continue
             tier = row["tier"]
             card = tier_cards.setdefault(tier, {
                 "tier": tier,
@@ -7030,10 +8659,26 @@ class CockpitPlane:
                 "requires_restart": row["requires_restart"],
                 "editable": row["editable"],
                 "pin_note": row["pin_note"],
+                # 2026-09-29: the per-call output ceiling, shown and editable
+                # per stage.  The 09-15 simplification dropped every budget
+                # form from this page, which left no way to raise it when a
+                # reasoning model spent a stage's whole output allowance
+                # thinking (glm-5.3 on 从已登记原文起草定向回答, 4096 tokens,
+                # empty answer, paid call).  Saving goes through the same
+                # governed writer operation as before (set_model_call_budget).
+                "call_budget": _tier_card_call_budget(row.get("call_budget")),
             })
             card["requires_restart"] = card["requires_restart"] or row["requires_restart"]
             if not card["chain"] and row["mode"] == "tier":
                 card["chain"] = list(row["chain"])
+            if row["mode"] == "tier":
+                # 2026-10-08 save-path audit: the editor opens on the first
+                # tier-following stage's pinned chain, and a save writes that
+                # list to every stage of the tier.  When the pins disagree
+                # (a lane still on an older version), the owner must see
+                # that the order they are editing is one of several.
+                card.setdefault("_tier_variants", {}).setdefault(
+                    tuple(link["model"] for link in row["chain"]), []).append(row["label"])
             card.setdefault("_pinned", []).append(list(row["chain"]))
             card.setdefault("_coverage_chains", []).append(row)
         # A tier none of whose stages follows the tier -- every member still
@@ -7042,6 +8687,14 @@ class CockpitPlane:
         # empty editor and invite the owner to build the chain again from
         # nothing.  When the pins all agree, they *are* the tier's chain in
         # everything but name, so the editor opens on them instead.
+        for card in tier_cards.values():
+            variants = card.pop("_tier_variants", {})
+            if len(variants) > 1:
+                opened = tuple(link["model"] for link in card["chain"])
+                first = (variants.get(opened) or ["第一个环节"])[0]
+                card["chain_variants_note"] = (
+                    f"这一类有 {len(variants)} 种不同的当前顺序（各环节固定的策略版本不一致）；"
+                    f"编辑器按「{first}」的顺序打开；保存更新共用默认，单独指定的环节保持原设置。")
         for card in tier_cards.values():
             pinned = card.pop("_pinned", [])
             if card["chain"] or not pinned or not pinned[0]:
@@ -7057,85 +8710,30 @@ class CockpitPlane:
                 }
                 continue
             rows = card.pop("_coverage_chains", [])
-            covered_purposes: list[str] = []
-            # 2026-09-23: three outcomes, not two.  A stage whose chain has no
-            # controlled verifier really would be rejected before the call, and
-            # the owner has to be able to see which models it is pinned to.  A
-            # stage with *no chain at all* -- no model configuration bound in
-            # this environment -- is a different thing entirely: it is not
-            # routing to an ineligible model, it is not routing.  Counting the
-            # second as the first is what made this tier read 受控核验部分不可用
-            # in both environments while every bound verifier chain was in fact
-            # covered, and it pointed the owner at a gateway capability problem
-            # that did not exist.
-            uncovered: list[dict[str, Any]] = []
-            unbound: list[dict[str, Any]] = []
-            controlled: set[str] = set()
-            for row in rows:
-                chain = row["chain"]
-                links = [
-                    link["model"] for link in chain
-                    if "provider-controlled-verify" in
-                    (link.get("capabilities") or [])
-                ]
-                if links:
-                    covered_purposes.append(row["purpose"])
-                    controlled.update(links)
-                elif chain:
-                    uncovered.append({
-                        "purpose": row["purpose"], "label": row["label"],
-                        "models": [link["model"] for link in chain],
-                        "display_names": [link["display_name"] for link in chain],
-                    })
-                elif row["mode"] != "deterministic":
-                    unbound.append({
-                        "purpose": row["purpose"], "label": row["label"],
-                        "configuration_status": row["configuration_status"],
-                        "configuration_source": row["configuration_source"],
-                    })
-            status = (
-                ("missing" if not covered_purposes else "partial") if uncovered
-                else "covered" if covered_purposes
-                else "unbound"
-            )
-            unbound_note = (
-                None if not unbound else
-                "以下环节在本环境还没有绑定模型配置，因此不会发起调用（绑定后按本层调用链执行）："
-                + "、".join(f"{item['label']}（{item['configuration_source']}）"
-                            for item in unbound)
-            )
-            # Named, always: "有环节的调用链缺少……" left the owner with a
-            # sentence and nothing to act on. Which stage, and which models it
-            # would have reached, is the whole of the fix.
-            named = "；".join(
-                f"{item['label']}：{'、'.join(item['display_names'])}"
-                for item in uncovered)
-            note = (
-                "受控核验可用：调用链中有仍有效的供应商验证控件。"
-                if status == "covered" else
-                f"受控核验部分不可用：以下环节的调用链缺少仍有效的供应商验证控件，会在调用前被拒绝——{named}"
-                if status == "partial" else
-                "受控核验不可用：当前调用链没有仍有效的供应商验证控件；"
-                "所有 provider-controlled-verify 工单都会在调用前被拒绝。"
-                "请先在模型网关更新有依据且未过期的 providerControls 声明。"
-                f"受影响的环节——{named}"
-                if status == "missing" else
-                "本环境还没有任何受控核验环节绑定模型配置。"
-            )
-            card["capability_coverage"] = {
-                "status": status,
-                "required": ["provider-controlled-verify"],
-                "covered_by": sorted(controlled),
-                "covered_purposes": covered_purposes,
-                # Kept as the list of stages whose *chain* cannot satisfy the
-                # capability. Stages with no chain are reported separately
-                # rather than folded in here.
-                "missing_purposes": [item["purpose"] for item in uncovered],
-                "uncovered_chains": uncovered,
-                "unbound_purposes": unbound,
-                "unbound_note": unbound_note,
-                "note": note,
-            }
+            card["capability_coverage"] = _verifier_capability_coverage(rows)
+
+        def cooled_name(profile_id: str) -> str:
+            return self._model_display_name(profile_id, catalogue)
+
+        cooldown_views = {
+            profile_id: view for profile_id, view in (
+                (profile_id, cooldown_view(item, display_name=cooled_name))
+                for profile_id, item in sorted(cooling_all.items()))
+            if view is not None
+        }
+        for card in tier_cards.values():
+            card["chain"] = [
+                {**link, "cooldown": link.get("cooldown") or cooling_all.get(link["model"])}
+                for link in card["chain"]]
+            card["cooldown_note"] = purpose_cooldown_note(
+                [{"profile_id": link["model"]} for link in card["chain"]],
+                cooling_all, display_name=cooled_name)
+            for member in card["purposes"]:
+                own = next((row for row in purposes
+                            if row["purpose"] == member["purpose"]), None)
+                member["cooldown_note"] = None if own is None else own.get("cooldown_note")
+        for choice in choices:
+            choice["cooldown"] = cooldown_views.get(choice["model"])
         from .model_fallback_chain import CHAIN_ELIGIBILITY_ENFORCED
         # 2026-09-16: the picker's verifier column keeps the honest contract
         # facts even with eligibility enforcement off. The owner's freedom
@@ -7160,6 +8758,7 @@ class CockpitPlane:
             offered = set(discovery.get("provider_model_refs") or [])
             choices = [choice for choice in choices
                        if f"{choice['provider']}/{choice['model_ref']}" in offered]
+        timer.lap("choices_and_cards")
         return {
             "available": True,
             "as_of": _iso(self.clock()),
@@ -7176,14 +8775,25 @@ class CockpitPlane:
                 discovery, broker is not None,
                 follow_provider_catalog=follows_providers,
             ),
-            "notices": [{
-                "ref": notice["id"], "at": notice["created_at"],
-                "message": notice["message"],
-                "purpose": notice["purpose"],
-                "acknowledged": notice["acknowledged_by"] is not None,
-            } for notice in notices],
+            "notices": _group_fallback_notices(notices),
             "tiers": overview["tiers"],
+            "cooldowns": cooldown_views,
         }
+
+    def verifier_independence(self) -> dict[str, Any]:
+        """「核验独立性 · 起草模型顺序」: every verified draft stage, every environment.
+
+        Read-only (every database ``mode=ro``); the card's 保存 goes back out
+        through ``select_model`` like any other model choice.
+        """
+
+        from .cockpit_verifier_card import build_card
+
+        try:
+            return build_card(self, now=self.clock())
+        except (sqlite3.Error, OSError, ValueError) as exc:
+            return {"available": False, "reason": f"核验独立性读不出来：{_reason(exc)}",
+                    "rows": []}
 
     @staticmethod
     def _model_catalog(discovery: Mapping[str, Any], configured: bool, *,
@@ -7192,7 +8802,7 @@ class CockpitPlane:
 
         if not configured or not discovery:
             return {"available": False,
-                    "reason": "尚未配置模型网关文件位置，暂时无法读取模型目录"}
+                    "reason": "尚未配置模型网关文件位置，暂时无法读取模型目录"}  # term-ok: administrator page
         return {
             "available": True,
             "follow_provider_catalog": follow_provider_catalog,
@@ -7210,13 +8820,13 @@ class CockpitPlane:
             "in_openclaw_not_allowed_note":
                 ("新模型正在等待自动同步，无需另行允许使用。"
                  if follow_provider_catalog else
-                 "模型网关已提供，但 Dalton 尚未获准使用；可通过「允许使用」提交授权操作"),
+                 "模型网关已提供，但 Dalton 尚未获准使用；可通过「允许使用」提交授权操作"),  # term-ok: administrator page
             "allowed_not_in_dalton": list(discovery["allowed_not_in_dalton"]),
             "allowed_not_in_dalton_note":
                 "Dalton 已获授权，但本机尚未登记模型档案；同步任务会按计划自动登记",
             "dalton_not_in_openclaw": list(discovery["dalton_not_in_openclaw"]),
             "dalton_not_in_openclaw_note":
-                "本机仍有模型档案，但模型网关已不再提供；同步任务会将档案标记为退役并保留记录",
+                "本机仍有模型档案，但模型网关已不再提供；同步任务会将档案标记为退役并保留记录",  # term-ok: administrator page
             "allowed_without_broker_profile":
                 list(discovery.get("allowed_without_broker_profile") or []),
         }
@@ -7230,7 +8840,9 @@ class CockpitPlane:
         if not path or not Path(str(path)).is_file():
             return {"available": False,
                     "reason": "本机尚未配置模型路由库，暂时无法读取路由"}
-        from .model_fallback_chain import FallbackChainError, routing_overview
+        from .model_fallback_chain import (
+            SKIPPED_LINKS_PER_TIER, FallbackChainError, routing_overview,
+        )
         from .model_selection import PURPOSE_LABELS
         from .model_router import ModelRouter
 
@@ -7238,16 +8850,24 @@ class CockpitPlane:
                   else _load_json(self.config.openclaw_config_path))
         try:
             with closing(ModelRouter(str(path), read_only=True)) as router:
+                # 2026-09-30 (P1-1): the indexed digest of the link ledger,
+                # passed explicitly as models() does, so this page can never
+                # fall back to a replay of every chain link.
                 overview = routing_overview(
                     router,
                     openclaw_config=broker if isinstance(broker, Mapping) else None,
                     checked_at=self.clock(),
+                    link_digest=router.chain_link_digest(
+                        skipped_limit=SKIPPED_LINKS_PER_TIER),
                 )
                 catalogue = {
                     profile["id"]: profile for profile in router.latest_profiles()
                 }
         except (FallbackChainError, sqlite3.Error, OSError, ValueError) as exc:
             return {"available": False, "reason": f"路由库读不出来：{_reason(exc)}"}
+        from .cockpit_model_display import cooldown_index, cooldown_view, purpose_cooldown_note
+
+        cooling = cooldown_index(overview.get("cooldowns"))
         tiers = []
         for tier, entry in overview["tiers"].items():
             served = entry["last_served"]
@@ -7263,7 +8883,15 @@ class CockpitPlane:
                     "family": link["family"],
                     "note": (None if link["registered"]
                              else "这台机器上没有这个模型的档案"),
+                    "cooldown": cooldown_view(
+                        cooling.get(link["profile_id"]),
+                        display_name=lambda profile_id: self._model_display_name(
+                            profile_id, catalogue)),
                 } for link in entry["chain"]],
+                "cooldown_note": purpose_cooldown_note(
+                    entry["chain"], cooling,
+                    display_name=lambda profile_id: self._model_display_name(
+                        profile_id, catalogue)),
                 "last_served": None if served is None else {
                     "model": served["profile_id"],
                     "display_name": self._model_display_name(
@@ -7337,6 +8965,63 @@ class CockpitPlane:
                              "没有配置 OpenClaw 网关的位置，所以无法比对模型目录"),
         }
 
+    #: Approval cards whose prose is a publication surface, by card kind.
+    _APPROVAL_SURFACES = {"deep_insight_gate": "surface_deep_insight",
+                          "conviction_call": "surface_conviction"}
+
+    def _attach_approval_final_text(self, items: list[dict[str, Any]]) -> None:
+        rows: list[tuple[dict[str, Any], str, Any]] = []
+        for item in items:
+            company = item.get("company_ref")
+            kind = self._APPROVAL_SURFACES.get(item.get("kind"))
+            if kind is None and item.get("zero_base_review"):
+                kind = "surface_zero_base_review"
+            if kind is not None:
+                rows.append((item, kind, company))
+            if isinstance(item.get("reflection"), dict):
+                rows.append((item["reflection"], "surface_thesis_reflection",
+                             item["reflection"].get("company_ref") or company))
+        if not rows:
+            return
+        try:
+            with self._core() as core:
+                mission = self._mission(core)
+                self._attach_final_text(core, mission, rows)
+        except (CockpitMissionMissing, OSError, sqlite3.Error):
+            return
+
+    def _attach_final_text(self, core: sqlite3.Connection, mission: Mapping[str, Any],
+                           rows: list[tuple[dict[str, Any], str, Any]]) -> None:
+        """Mark each ``(row, surface kind, company_ref)`` with its ledger state.
+
+        2026-10-07 (BUG-01): the page shows a row's prose as final, as
+        "being checked", or as a watermarked draft by this ``final_text``
+        state -- read from the localization ledger and the publication
+        worker for the exact version (``final_text_state``) -- instead of by
+        whether each sentence happens to be in its UI-text dictionary.  A row
+        whose version the worker does not review gets no state, and the page
+        keeps its previous rule for it.  Never raises: a state that cannot be
+        read is simply not attached.
+        """
+
+        from .final_text_state import surface_states
+
+        wanted = [(kind, row.get("ref"), company_ref, row.get("at"))
+                  for row, kind, company_ref in rows if isinstance(row, dict)]
+        if not wanted:
+            return
+        try:
+            states = surface_states(core, mission, wanted)
+        except (OSError, ValueError, KeyError, TypeError, sqlite3.Error) as exc:
+            print(f"cockpit: final-text states unavailable ({type(exc).__name__}: {exc})",
+                  file=sys.stderr, flush=True)
+            return
+        for row, kind, _company_ref in rows:
+            if isinstance(row, dict):
+                state = states.get((kind, row.get("ref")))
+                if state is not None:
+                    row["final_text"] = state
+
     def cycle_reflection(self) -> dict[str, Any]:
         """Q2: 每周回头看 -- the latest week's "我们把时间花在哪"."""
 
@@ -7358,11 +9043,24 @@ class CockpitPlane:
                 "SELECT DISTINCT iso_week FROM research_cycle_reflection_versions "
                 "WHERE mission_ref=? ORDER BY iso_week DESC LIMIT 12",
                 (mission["mission_ref"],))]
+            final_text: dict[str, Any] | None = None
+            if rows:
+                # BUG-01: whether this exact version's prose is final comes
+                # from the localization ledger, not from the page's dictionary.
+                from .final_surface_products import cycle_reflection_product
+                from .final_text_state import reviewed_product_state
+                try:
+                    final_text = reviewed_product_state(
+                        core, cycle_reflection_product(core, mission),
+                        since=rows[0]["created_at"])
+                except (OSError, ValueError, KeyError, TypeError, sqlite3.Error):
+                    final_text = None
         if not rows:
             return {"as_of": _iso(self.clock()), "available": False,
                     "reason": "这个研究目标还没有写过每周回头看"}
         record = json.loads(rows[0]["record_json"])
         narrative = record.get("narrative") or {}
+        from .research_cycle_reflection import owner_view as owner_reflection_view
         return {
             "as_of": _iso(self.clock()), "available": True,
             "historical": True,
@@ -7393,7 +9091,12 @@ class CockpitPlane:
             # has no path to change a policy and says so in its own record.
             "policy_suggestions": list(record.get("policy_suggestions") or ()),
             "authority_note": record.get("authority_note"),
+            # 2026-10-08 (DEFECT-06/07): the same metrics in the owner's
+            # words, rendered by code (no model wrote any of it); the stored
+            # wording above stays for 技术详情 and the language review.
+            "owner": owner_reflection_view(record),
             "weeks": weeks,
+            **({"final_text": final_text} if final_text is not None else {}),
         }
 
     def record_feedback(self, login: str, value: Mapping[str, Any]) -> dict[str, Any]:
@@ -7468,6 +9171,92 @@ class CockpitPlane:
                 "duplicate": status == "duplicate"}
 
     # -- P14-M2: the three model decisions, all through the writer ---------------
+
+    def retry_language_review(self, login: str, value: Mapping[str, Any]) -> dict[str, Any]:
+        """「重试语言质检」: reopen one product's language review (BUG-02).
+
+        Through the writer as the owner's own principal, like every other
+        cockpit decision (ADR-0006); the writer refuses a non-``human:``
+        actor and writes the append-only retry record that is the receipt.
+        """
+
+        if not isinstance(value, Mapping):
+            raise CockpitError("请求格式不正确")
+        request_id = _text(value.get("request_id"), "request_id", maximum=128)
+        reason = value.get("reason") or "负责人在投研工作台要求重新进行语言质检"
+        reason = _text(reason, "reason", maximum=600)
+        if value.get("batch_ref") is not None:
+            # 2026-10-09: a blocked UI-text batch (界面文字) is retried by its
+            # batch ref, from a fresh draft.
+            batch_ref = _text(value.get("batch_ref"), "batch_ref", maximum=96)
+            identity_hash = batch_ref
+            params: dict[str, Any] = {"batch_ref": batch_ref}
+        else:
+            identity_hash = _sha(value.get("identity_hash"), "identity_hash")
+            product_hash = _sha(value.get("product_hash"), "product_hash")
+            params = {"identity_hash": identity_hash, "product_hash": product_hash}
+        result = self._governance(login, "retry_publication_language_review", {
+            **params, "reason": reason, "idempotency_key": f"cockpit:{request_id}"},
+            failure="没有发起语言质检重试")
+        status = result.get("status")
+        receipt = result.get("receipt") or {}
+        self.journal.record_event(
+            kind="lever", title="要求重新进行语言质检", detail=reason, login=login,
+            refs={"identity_hash": identity_hash, "receipt_ref": receipt.get("content_hash"),
+                  "sequence": receipt.get("sequence", receipt.get("generation"))})
+        message = ("已请求重试，系统会在下一轮发布检查（约 5 分钟内）重新校对。"
+                   if status == "requested" else
+                   "此前已经请求过重试，正在等待下一轮发布检查。")
+        return {"status": status, "message": message,
+                "receipt": {key: receipt.get(key) for key in (
+                    "sequence", "created_at", "content_hash", "reason")} if receipt else None}
+
+    def acknowledge_needs_human(self, login: str, value: Mapping[str, Any]) -> dict[str, Any]:
+        """「已知悉 / 暂不提醒 N 天 / 放弃这份资料」 on one 待我处理 card (2026-10-09).
+
+        Bound to what the owner saw: the card's ``condition_hash`` comes from
+        the page and the writer records it, so the card comes back by itself
+        as soon as what it is about changes.  Through the writer as the
+        owner's own principal; the append-only row is the receipt.
+        """
+
+        from .needs_human_ack import CHOICE_LABELS, KIND_CHOICES
+
+        if not isinstance(value, Mapping):
+            raise CockpitError("请求格式不正确")
+        kind = _text(value.get("kind"), "kind", maximum=64)
+        choice = _text(value.get("choice"), "choice", maximum=32)
+        if kind not in KIND_CHOICES or choice not in KIND_CHOICES[kind]:
+            raise CockpitError("这张卡片不能这样处理")
+        card_ref = _text(value.get("card_ref"), "card_ref", maximum=512)
+        condition = _sha(value.get("condition_hash"), "condition_hash")
+        reason = _text(value.get("reason"), "reason", maximum=600)
+        request_id = _text(value.get("request_id"), "request_id", maximum=128)
+        days = value.get("snooze_days")
+        params: dict[str, Any] = {
+            "card_ref": card_ref, "kind": kind, "choice": choice,
+            "condition_hash": condition, "reason": reason,
+            "idempotency_key": f"cockpit:{request_id}"}
+        if choice == "snooze":
+            if isinstance(days, bool) or not isinstance(days, int) or not 1 <= days <= 30:
+                raise CockpitError("请选择静音提示的天数（1 到 30 天）")
+            params["snooze_days"] = days
+        result = self._governance(login, "acknowledge_needs_human_card", params,
+                                  failure="这张卡片没有处理")
+        receipt = result.get("receipt") or {}
+        self.journal.record_event(
+            kind="lever", title=f"待办「{CHOICE_LABELS[choice]}」", detail=reason, login=login,
+            refs={"card_ref": card_ref, "kind": kind, "choice": choice,
+                  "receipt_ref": receipt.get("id"), "until": receipt.get("until")})
+        message = {
+            "noted": "已记下。情况没有变化前不再提醒；一旦变化会自动重新出现。",
+            "snooze": f"已暂停提醒 {days} 天；到期或情况变化时会重新出现。",
+            "abandon_document": "已忽略该缺失资料：系统不再尝试获取它，这张卡片也不再出现。",
+            "approve_spend": "已批准追加材料获取额度，下一轮继续检索。",
+        }[choice]
+        return {"status": result.get("status"), "message": message,
+                "receipt": {key: receipt.get(key) for key in (
+                    "id", "choice", "until", "created_at", "content_hash")} if receipt else None}
 
     def _governance(self, login: str, operation: str, params: dict[str, Any],
                     *, failure: str) -> dict[str, Any]:
@@ -7593,10 +9382,29 @@ class CockpitPlane:
 
         if not isinstance(value, Mapping):
             raise CockpitError("选择必须是一个对象")
+        if value.get("thinking_level") is not None:
+            from .call_budget import CallBudgetError, resolve_thinking_level
+            purpose = _text(value.get("purpose"), "purpose", maximum=80)
+            if (purpose not in PURPOSE_LABELS or value.get("tier") is not None or value.get("chain")
+                    or value.get("mode") not in (None, "thinking")):
+                raise CockpitError("思考强度必须按已登记的环节调整")
+            reason = _text(value.get("reason"), "reason", maximum=300)
+            try:
+                level = resolve_thinking_level(purpose, requested=value["thinking_level"])
+            except CallBudgetError as exc:
+                raise CockpitError(str(exc)) from exc
+            params = {"purpose": purpose, "thinking_level": level, "reason": reason}
+            result = self._governance(login, "set_model_selection", params, failure="思考强度没有生效")
+            sync = self._sync_model_selection(login, params)
+            self.journal.record_event(kind="model_selection",
+                title=f"已调整「{PURPOSE_LABELS[purpose]}」的思考强度为 {level}",
+                detail=reason, login=login, refs={"purpose": purpose, "thinking_level": level,
+                                       "reason": reason, "synchronization": sync})
+            return {**result, "sync": sync}
         tier = value.get("tier")
         mode = _text(value.get("mode"), "mode", maximum=32)
         if mode not in SELECTION_MODES:
-            raise CockpitError("请选择“使用系统推荐配置”或“手动指定模型”")
+            raise CockpitError("请选择使用默认顺序或手动指定模型")
         chain = value.get("chain") or []
         if not isinstance(chain, list) or any(
             not isinstance(item, str) for item in chain
@@ -7604,12 +9412,21 @@ class CockpitPlane:
             raise CockpitError("手动指定的模型必须是模型标识列表")
         if mode == "explicit" and not chain:
             raise CockpitError("手动指定模型时至少需要一个模型，并按调用顺序排列")
+        # 2026-10-08: the verifier-independence card says why it reorders a
+        # stage.  The reason is the owner's sentence for the journal -- who,
+        # when, why, and what every environment answered -- and deliberately
+        # not policy content: an override entry with a key an older router
+        # does not know would make every later save of that lineage fail
+        # validation after a rollback.  The writer call is unchanged.
+        reason = value.get("reason")
+        if reason is not None:
+            reason = _text(reason, "reason", maximum=300)
         if tier is not None:
             from .model_fallback_chain import purpose_tiers
             tiers = {held for held in purpose_tiers().values()}
             tier = _text(tier, "tier", maximum=32)
             if tier not in tiers:
-                raise CockpitError("模型类别必须是高阶推理、批量阅读或独立复核")
+                raise CockpitError("请选择高阶推理、批量阅读、交付物起草或独立复核任务类别")
             params: dict[str, Any] = {"tier": tier, "mode": mode}
             if mode == "explicit":
                 params["chain"] = [_text(item, "chain[]", maximum=256) for item in chain]
@@ -7617,11 +9434,12 @@ class CockpitPlane:
                 login, "set_model_selection", params, failure="这个选择没有生效")
             sync = self._sync_model_selection(login, params)
             self.journal.record_event(
-                kind="model_selection", title=f"你给「{MODEL_TIER_LABELS[tier]}」整类选了模型",
+                kind="model_selection", title=f"已调整「{MODEL_TIER_LABELS[tier]}」的共用默认顺序",
                 detail=("使用系统推荐配置" if mode == "tier"
-                        else " → ".join(chain)) + f"（{sync['note']}）",
+                        else " → ".join(chain)) + f"（{sync['note']}）"
+                       + (f"理由：{reason}" if reason else ""),
                 login=login, refs={"tier": tier, "mode": mode,
-                                   "profile_ids": ",".join(chain)})
+                                   "profile_ids": ",".join(chain), "reason": reason})
             return {**result, "tier": tier, "label": MODEL_TIER_LABELS[tier],
                     "sync": sync,
                     "reload_note": _with_sync_note(result.get("reload_note"), sync)}
@@ -7650,11 +9468,13 @@ class CockpitPlane:
                              for profile_id in chain]
         self.journal.record_event(
             kind="model_selection", title=f"你给「{label}」选了模型",
-            detail=("使用系统推荐配置" if mode == "tier"
-                    else " → ".join(display_chain)) + f"（{sync['note']}）",
+            detail=("使用本类任务的默认顺序" if mode == "tier"
+                    else " → ".join(display_chain)) + f"（{sync['note']}）"
+                   + (f"理由：{reason}" if reason else ""),
             login=login, refs={"purpose": purpose, "mode": mode,
                                "profile_ids": ",".join(chain)})
         return {**result, "purpose": purpose, "label": label, "sync": sync,
+                "reason": reason,
                 "reload_note": _with_sync_note(result.get("reload_note"), sync)}
 
     def allow_model(self, login: str, value: Mapping[str, Any]) -> dict[str, Any]:
@@ -7721,10 +9541,35 @@ class CockpitPlane:
         if not isinstance(value, Mapping):
             raise CockpitError("请求必须是一个对象")
         notice_ref = _text(value.get("ref"), "ref", maximum=256)
-        result = self._governance(
-            login, "acknowledge_model_fallback_notice", {"notice_id": notice_ref},
-            failure="这条提示没有被记下")
-        return {**result, "ref": notice_ref}
+        # P2-6: the page shows one notice per disappeared model, so 知道了
+        # acknowledges every still-open notice for that model.
+        refs = [notice_ref] + [ref for ref in self._sibling_fallback_notices(notice_ref)
+                               if ref != notice_ref]
+        result: dict[str, Any] = {}
+        for ref in refs:
+            result = self._governance(
+                login, "acknowledge_model_fallback_notice", {"notice_id": ref},
+                failure="这条提示没有被记下")
+        return {**result, "ref": notice_ref, "refs": refs}
+
+    def _sibling_fallback_notices(self, notice_ref: str) -> list[str]:
+        """Open notices about the same disappeared model as ``notice_ref``."""
+
+        path = self._model_router_db()
+        if path is None:
+            return []
+        from .model_router import ModelRouter
+
+        try:
+            with closing(ModelRouter(path, read_only=True)) as router:
+                notices = router.fallback_notices(open_only=True)
+        except (sqlite3.Error, OSError, ValueError):
+            return []
+        target = next((n for n in notices if n.get("id") == notice_ref), None)
+        if target is None:
+            return []
+        return [str(n["id"]) for n in notices
+                if n.get("profile_id") == target.get("profile_id") and n.get("id")]
 
     # -- jobs (model work off the request thread) -----------------------------------------
 
@@ -7786,6 +9631,32 @@ class CockpitPlane:
         public = {k: v for k, v in job.items() if not k.startswith("_")}
         if public.get("kind") == "ask":
             public["result"] = _answer_citation_period_labels(public.get("result"))
+        public.update(_job_recovery_fields(public.get("kind"), public.get("status"), public.get("error")))
+        return public
+
+    def _with_answer_state(self, result: Any) -> Any:
+        """An answer's ``final_text`` state (BUG-01).
+
+        An answer is reviewed synchronously before it is published, so the
+        server knows its state outright: ``display_answer`` is the reviewed
+        text (``ready``).  A stored answer without one was published before
+        that review existed or where it is not required; nothing will review
+        it later, so it is never "being checked": under a required policy it
+        is a ``draft`` -- shown, watermarked -- and otherwise ``ready``.
+        """
+
+        if not isinstance(result, Mapping):
+            return result
+        from .final_text_state import DRAFT, DRAFT_LABEL, READY, language_policy
+
+        public = dict(result)
+        if isinstance(result.get("display_answer"), str) and result["display_answer"]:
+            public["final_text"] = {"status": READY}
+        elif language_policy(self.config.core_db.parent)["required"]:
+            public["final_text"] = {"status": DRAFT, "label": DRAFT_LABEL,
+                                    "reason": "这条回答发布时还没有文字校对环节，之后也不会自动校对。"}
+        else:
+            public["final_text"] = {"status": READY}
         return public
 
     def job(self, login: str, job_id: str) -> dict[str, Any]:
@@ -7794,24 +9665,33 @@ class CockpitPlane:
             if job is not None:
                 if job["login"] != login:
                     raise CockpitError("job not found")
-                return self._public_job(job)
+                public = self._public_job(job)
+                if public.get("error") and not public.get("display_message"):
+                    public["display_message"] = _job_error_message(public["error"])
+                if public.get("kind") == "ask":
+                    public["result"] = self._with_answer_state(public.get("result"))
+                return public
         rows = self.journal.rows("SELECT * FROM cockpit_jobs WHERE job_id=? AND login=?", (job_id, login))
         if not rows:
             raise CockpitError("job not found")
         row = rows[0]
         result = None if row["result_json"] is None else json.loads(row["result_json"])
         if row["kind"] == "ask":
-            result = _answer_citation_period_labels(result)
+            result = self._with_answer_state(_answer_citation_period_labels(result))
         return {"job_id": row["job_id"], "kind": row["kind"], "login": row["login"], "status": row["status"],
                 "request": json.loads(row["request_json"]), "result": result,
-                "error": row["error"], "created_at": row["created_at"], "updated_at": row["updated_at"]}
+                "error": row["error"], "display_message": _job_error_message(row["error"]),
+                "created_at": row["created_at"], "updated_at": row["updated_at"],
+                **_job_recovery_fields(row["kind"], row["status"], row["error"])}
 
     def history(self, login: str, kind: str, limit: int = 20) -> list[dict[str, Any]]:
         rows = self.journal.rows("SELECT * FROM cockpit_jobs WHERE kind=? AND login=? ORDER BY created_at DESC LIMIT ?",
                                  (kind, login, max(1, min(int(limit), 100))))
         return [{"job_id": r["job_id"], "status": r["status"], "request": json.loads(r["request_json"]),
-                 "result": _answer_citation_period_labels(None if r["result_json"] is None else json.loads(r["result_json"])) if kind == "ask" else (None if r["result_json"] is None else json.loads(r["result_json"])), "error": r["error"],
-                 "created_at": r["created_at"]} for r in rows]
+                 "result": self._with_answer_state(_answer_citation_period_labels(None if r["result_json"] is None else json.loads(r["result_json"]))) if kind == "ask" else (None if r["result_json"] is None else json.loads(r["result_json"])), "error": r["error"],
+                 "display_message": _job_error_message(r["error"]),
+                 "created_at": r["created_at"],
+                 **_job_recovery_fields(kind, r["status"], r["error"])} for r in rows]
 
     # -- ask -----------------------------------------------------------------------------------
 
@@ -7822,11 +9702,37 @@ class CockpitPlane:
         # never a default.  A panel that searched whenever the model said it
         # would like to would spend the mission's connector quota on curiosity.
         refresh = bool(value.get("refresh"))
+        # 2026-10-09 (A01): a follow-up names the answer it follows; the server
+        # reads that answer (the same owner's, finished) and carries it --
+        # bounded -- as context.  The page never pastes text into the question.
+        previous = self._follow_up_of(login, value.get("follow_up_of"))
         model = self._model_instance()
-        return self._start_job("ask", login, {"question": question, "request_id": request_id,
-                                              "refresh": refresh},
+        request = {"question": question, "request_id": request_id, "refresh": refresh}
+        if previous is not None:
+            request["follow_up_of"] = previous["job_id"]
+            request["follow_up_question"] = previous["question"]
+        return self._start_job("ask", login, request,
                                lambda: self._answer(model, login, question, request_id,
-                                                    refresh=refresh))
+                                                    refresh=refresh, previous=previous))
+
+    def _follow_up_of(self, login: str, job_id: Any) -> dict[str, Any] | None:
+        """The previous answer a follow-up carries, or ``None`` when not a follow-up."""
+
+        if job_id is None or job_id == "":
+            return None
+        job_id = _text(job_id, "follow_up_of", maximum=128)
+        from .ask_context import previous_turn
+
+        try:
+            job = self.job(login, job_id)
+        except CockpitError:
+            raise CockpitError("要追问的那条回答找不到了，请从历史记录里重新选择") from None
+        if job.get("kind") != "ask" or job.get("status") != "done":
+            raise CockpitError("只能追问已经完成的回答")
+        turn = previous_turn({**job, "job_id": job_id})
+        if turn is None:
+            raise CockpitError("要追问的那条回答没有可用的内容")
+        return turn
 
     def _indexed_claims(self, core: Any, rows: list[dict[str, Any]]) -> list[dict[str, Any]]:
         """The answer context, read through P12b's index.
@@ -7873,9 +9779,13 @@ class CockpitPlane:
         return any(json.loads(row["refs_json"]).get("request_id") == request_id
                    for row in rows)
 
-    def _answer(self, model: CockpitModel, login: str, question: str, request_id: str,
-                *, refresh: bool = False) -> dict[str, Any]:
-        from . import ask_answer, ask_context, ask_refresh
+    def _ask_state_dir(self) -> Path:
+        return Path(self.config.state_dir)
+
+    def _ask_context(self, question: str, *, previous: Mapping[str, Any] | None = None) -> dict[str, Any]:
+        """Batch G: dates, retrieval, the material pack and our own view, for one question."""
+
+        from . import ask_context, ask_refresh
 
         today = _iso(self.clock())[:10]
         with self._core() as core:
@@ -7888,23 +9798,85 @@ class CockpitPlane:
             members = self._members(mission)
             context = ask_context.build_context(
                 core, question=question, mission=mission, members=members,
-                claims=claims, theses=theses,
+                state_dir=self._ask_state_dir(), claims=claims, theses=theses,
                 company_names={**COMPANY_NAMES, **{
                     str(m.get("ticker")): m["name"] for m in members.values()
                     if m.get("ticker") and m.get("name")}},
                 label=lambda ref: self._label(members, ref),
                 today=today,
                 duplicates_dropped=len(everything) - len(claims),
+                subject_hint=(previous or {}).get("question") or "",
+                previous=previous,
             )
-            # The policy governs a company, so it is read after the question's
-            # subjects are resolved rather than before.
             named = list(context["subjects"]["companies"])
             policy_state = self._answer_policy(core, named[0] if named else None)
             specs = ask_refresh.known_specs(core, mission["mission_ref"])
             pool = ask_refresh.pool_balance(core, mission, day=today)
-        prompt = ask_answer.build_prompt(context, mission=mission)
+        return {"context": context, "mission": mission, "claims_total": len(everything),
+                "duplicates_dropped": len(everything) - len(claims), "journal_enabled": journal_enabled,
+                "policy_state": policy_state, "specs": specs, "pool": pool}
+
+    def _ask_requests(self, login: str, context: Mapping[str, Any], request_id: str,
+                      ) -> tuple[list[dict[str, Any]], str | None]:
+        """Open (or join) the MaterialRequest this question's missing material needs, as the owner.
+
+        Through the writer (the cockpit holds no write handle); a refusal never
+        costs the owner the answer -- it is recorded beside it instead.
+        """
+
+        spec = (context.get("sufficiency") or {}).get("request")
+        if not spec:
+            return [], None
+        params = {"subject": spec["subject"], "need": dict(spec["need"]), "period": spec.get("period"),
+                  "acceptance": dict(spec.get("acceptance") or {}),
+                  "product_ref": f"cockpit-ask:{request_id}"[:200], "run_ref": request_id[:128]}
+        try:
+            reply = self.governance_call(
+                self.token_config, self.writer_socket, actor_ref=_subject_for_login(login),
+                operation="open_ask_material_request", params=params)
+        except Exception as exc:  # noqa: BLE001 - the answer stands; the missing request is said plainly
+            return [], f"材料获取请求没有登记成功：{_reason(exc)}"
+        request = (reply or {}).get("request") if isinstance(reply, Mapping) else None
+        if not isinstance(request, Mapping) or not request.get("id"):
+            return [], "材料获取请求没有登记成功：写入端没有返回请求编号"
+        return [{"id": request["id"], "status": request.get("status") or "open",
+                 "status_label": request.get("status_label") or "待获取", "what": spec.get("what"),
+                 "period": request.get("period") or spec.get("period"), "subject": spec["subject"],
+                 "deadline": request.get("deadline")}], None
+
+    def _ask_passage_resolver(self) -> Callable[[str], Any]:
+        from .evidence_index import passage_resolver
+
+        return passage_resolver(self._ask_state_dir())
+
+    def _answer(self, model: CockpitModel, login: str, question: str, request_id: str,
+                *, refresh: bool = False, previous: Mapping[str, Any] | None = None,
+                resume: Mapping[str, Any] | None = None) -> dict[str, Any]:
+        from . import ask_answer, ask_context, ask_refresh
+
+        state = self._ask_context(question, previous=previous)
+        context = state["context"]
+        mission = state["mission"]
+        policy_state = state["policy_state"]
+        if resume is not None:
+            # Resume over newly acquired material: no second bill when the
+            # index holds nothing this answer has not already read.
+            fresh = ask_refresh.new_passages(resume["original"], context)
+            if not fresh:
+                original = dict(resume["original"])
+                return {**original, "resume": {
+                    "status": "nothing_new", "of": resume["job_id"],
+                    "request_ids": list(resume["request_ids"]),
+                    "label": "材料请求已有结果，但全文索引里还没有新的段落；这次没有重新作答，也没有产生费用。"},
+                    "cost_usd": 0.0, "replayed": True, "answered_at": _iso(self.clock())}
+        requests, request_error = self._ask_requests(login, context, request_id)
+        if resume is not None:
+            requests = [dict(item) for item in resume.get("requests") or ()] or requests
+        resolver = self._ask_passage_resolver()
+        prompt = ask_answer.build_prompt(context, mission=mission, previous=previous)
         call = model.call(purpose="ask", request_id=request_id, prompt=prompt, mission=mission)
-        answer = ask_answer.parse_answer(unwrap_json_object(call["text"]) or {}, context=context)
+        answer = ask_answer.parse_answer(unwrap_json_object(call["text"]) or {}, context=context,
+                                         resolve_passage=resolver, material_requests=requests)
         cost_micros = call["cost_micros"]
         replayed = call["replayed"]
         answer_route_decision_ref = call["route_decision_ref"]
@@ -7912,9 +9884,10 @@ class CockpitPlane:
         plan = ask_refresh.plan_refresh(
             answer, context, mission=mission,
             policy=policy_state["policy"] if policy_state["state"] == "active" else None,
-            specs=specs, pool=pool,
+            specs=state["specs"], pool=state["pool"],
             already_refreshed=self._already_refreshed(request_id))
         outcome: dict[str, Any] | None = None
+        fresh_after_refresh: list[dict[str, Any]] = []
         if refresh and plan["available"]:
             outcome = ask_refresh.run_refresh(
                 plan,
@@ -7931,22 +9904,22 @@ class CockpitPlane:
             plan = {**plan, "available": False, "reasons": ["already_refreshed"],
                     "reason_labels": [ask_refresh.GRANT_LABELS["already_refreshed"]]}
             if outcome["headers"]:
-                # The second and last call.  A new request id, because it is a
-                # different prompt and the scheduler is content-addressed on
-                # it; the same day ledger, because it is the same mission's
-                # money. Nothing found means nothing new to read, so the first
-                # answer stands and the owner is told the search came back
-                # empty rather than charged for a second identical call.
-                again = ask_refresh.with_headers(context, outcome["headers"])
-                second = model.call(purpose="ask", request_id=f"{request_id}:refresh",
-                                    prompt=ask_answer.build_prompt(again, mission=mission),
-                                    mission=mission)
-                answer = ask_answer.parse_answer(
-                    unwrap_json_object(second["text"]) or {}, context=again)
-                context = again
-                cost_micros += second["cost_micros"]
-                replayed = replayed and second["replayed"]
-                answer_route_decision_ref = second["route_decision_ref"]
+                # Batch G: retrieve again over the evidence index.  Only
+                # passages this answer has not read justify a second call; a
+                # document whose body is not indexed yet is listed, not cited.
+                again = self._ask_context(question, previous=previous)["context"]
+                fresh_after_refresh = ask_refresh.new_passages(context, again)
+                if fresh_after_refresh:
+                    second = model.call(purpose="ask", request_id=f"{request_id}:refresh",
+                                        prompt=ask_answer.build_prompt(again, mission=mission, previous=previous),
+                                        mission=mission)
+                    answer = ask_answer.parse_answer(
+                        unwrap_json_object(second["text"]) or {}, context=again,
+                        resolve_passage=resolver, material_requests=requests)
+                    context = again
+                    cost_micros += second["cost_micros"]
+                    replayed = replayed and second["replayed"]
+                    answer_route_decision_ref = second["route_decision_ref"]
 
         language_review = {"status": "not_configured"}
         reviewed_display_answer = None
@@ -7993,24 +9966,26 @@ class CockpitPlane:
             raise CockpitError("回答已生成，但发布前语言审查尚未配置，尚未发布")
 
         shown = [dict(row) for row in context["shown"]]
+        sufficiency = dict(context.get("sufficiency") or {})
         result = {
             "question": question,
             "answer": answer["answer"],
             "display_answer": reviewed_display_answer,
             "display_gaps": reviewed_display_gaps,
             "display_gap_details": reviewed_gap_details,
+            # Batch G: the four parts, in order, for the page.
+            "sections": [{key: section[key] for key in ("key", "title", "body", "system_lines")}
+                         for section in answer["sections"]],
+            "our_view": answer["our_view"],
             "sentences": answer["sentences"],
-            # The page's existing citation card reads ``statement``,
-            # ``company``, ``period`` and ``at``; those four keep their names
-            # so that an answer citing a valuation row renders in the card
-            # that already exists. ``block`` and ``block_label`` are what let
-            # it say which kind of thing was cited.
             "citations": [{
                 "tag": row["tag"], "statement": row["statement"], "ref": row["ref"],
                 "period": row["period"], "period_label": _claim_period_label(row["period"]),
                 "company": row.get("company") or "",
                 "at": row.get("at") or "", "block": row["block"],
                 "block_label": ask_context.BLOCK_LABELS[row["block"]],
+                "kind_label": row.get("kind_label"), "house": row.get("house"), "title": row.get("title"),
+                "first_hand": bool(row.get("first_hand")),
             } for row in answer["citations"]],
             "gaps": answer["gaps"],
             "unknowns": answer["unknowns"],
@@ -8025,6 +10000,8 @@ class CockpitPlane:
                 "question_kind": context["question_kind"],
                 "wants_market_vs_us": context["wants_market_vs_us"],
                 "companies": context["companies"],
+                "dates": context.get("dates"),
+                "windows": context.get("windows"),
                 "blocks": [{"block": b["block"], "label": b["label"],
                             "available": b["available"], "reason": b["reason"],
                             "rows": len(b["rows"])} for b in context["blocks"]],
@@ -8032,10 +10009,22 @@ class CockpitPlane:
                 "context_hash": context["context_hash"],
                 "budget_chars": context["budget_chars"],
                 "spent_chars": context["spent_chars"],
+                "passage_refs": ask_context.passage_refs(context),
+                "retrieval_status": (context.get("retrieval") or {}).get("status"),
+                "material_packs": [{key: (pack.get("record") or {}).get(key) for key in
+                                    ("company_ref", "recipe_version", "content_hash", "total_chars")}
+                                   for pack in context.get("material_packs") or () if pack.get("record")],
             },
-            # Why the answer policy did or did not govern this question, in the
-            # router's own three words. A refresh shut because the policy is
-            # ``stale`` is a different fix from one shut because there is none.
+            "sufficiency": {key: sufficiency.get(key) for key in
+                            ("status", "reason", "window", "first_hand_in_window", "street_in_window", "tried")},
+            # The MaterialRequests this question opened (or joined); the page
+            # polls their status and offers the resume when one resolves.
+            "material_requests": requests,
+            "material_request_error": request_error,
+            "resume": None if resume is None else {
+                "status": "answered", "of": resume["job_id"], "request_ids": list(resume["request_ids"]),
+                "new_passages": len(ask_refresh.new_passages(resume["original"], context)),
+                "label": "已用新取到的材料重新作答"},
             "answer_policy": {"state": policy_state["state"],
                               "reason": policy_state["reason"],
                               "mandate_ref": policy_state["mandate_ref"]},
@@ -8043,56 +10032,109 @@ class CockpitPlane:
                 "available": plan["available"],
                 "reasons": plan["reasons"], "reason_labels": plan["reason_labels"],
                 "suggestion": plan["suggestion"],
-                # True whenever a search actually ran, including the run that
-                # found nothing: "we looked and there was nothing" is not the
-                # same answer as "we did not look".
                 "ran": bool(outcome and outcome["ran"]),
                 "status": None if outcome is None else outcome["status"],
                 "status_label": None if outcome is None else outcome["status_label"],
                 "ticket_ref": None if outcome is None else outcome["ticket_ref"],
                 "discovery_ref": None if outcome is None else outcome["discovery_ref"],
+                "new_passages": len(fresh_after_refresh),
             },
             "refreshed_with": [] if outcome is None else outcome["headers"],
-            "refresh_note": None if outcome is None else outcome["note"],
+            "follow_up": None if previous is None else {
+                "of": previous["job_id"], "question": previous["question"],
+                "citations_carried": len(previous["citations"]),
+                "passages_carried": int(context.get("carried_passages") or 0)},
+            "refresh_note": None if outcome is None else (
+                outcome["note"] if not outcome["headers"] or fresh_after_refresh else
+                "补搜到的文件正文还没有进入全文索引，这次没有重新作答；进入索引后可以用新材料续答"),
             "claims_considered": context["claims_considered"],
-            "claims_total": len(everything),
-            # How many copies of a fact the index took out before the
-            # model saw them. Shown because "we read 400 conclusions"
-            # and "we read 400 conclusions, 90 of them the same fact
-            # three times" are different statements about an answer.
-            "duplicates_dropped": len(everything) - len(claims),
+            "claims_total": state["claims_total"],
+            "duplicates_dropped": state["duplicates_dropped"],
             "cost_usd": round(cost_micros / 1_000_000, 4),
             "replayed": replayed, "answered_at": _iso(self.clock()),
             "language_review": {key: language_review.get(key) for key in
                                 ("status", "source_hash", "revision_hash",
                                  "content_hash", "artifact_ref", "artifact_sha256")},
         }
-        # Q1: the answer is a cockpit artifact with no Core record, so the
-        # thing a verdict binds to is a hash of what was said and what it
-        # cited. Keyed on the request rather than the job, so feedback on a
-        # replayed answer lands on the same answer instead of splitting.
         from .research_quality_rubrics import rubric as get_rubric
         from .research_quality_score import artefact_from_ask_answer, run_deterministic
 
         artefact = artefact_from_ask_answer(
             result, shown_claims=shown, ref=f"cockpit-ask:{request_id}")
         result["feedback"] = {"target_ref": artefact["ref"], "target_hash": artefact["hash"],
-                              "target_kind": "ask_answer", "enabled": journal_enabled}
-        # P15a: Q1's deterministic layer runs on every answer, not only on the
-        # ones somebody later thinks to grade, and its result rides with the
-        # answer. It is a cockpit artefact like the answer: nothing is recorded
-        # to the Core, and no score authority is touched from this process.
+                              "target_kind": "ask_answer", "enabled": state["journal_enabled"]}
         rubric = get_rubric("ask_answer")
         result["quality"] = {
             "rubric_ref": rubric.rubric_ref, "rubric": rubric.title,
             "recorded": False,
             **run_deterministic(artefact, rubric),
         }
+        if resume is not None:
+            for request_ref in resume["request_ids"]:
+                self.journal.record_event(kind="ask_resume", title=f"用新取到的材料续答：{question[:80]}",
+                                          detail=None, login=login,
+                                          refs={"job_id": resume["job_id"], "request_id": request_ref})
         self.journal.record_event(kind="question", title=f"你问了：{question[:120]}",
                                   detail=answer["answer"][:300], login=login,
                                   refs={"job_kind": "ask", "request_id": request_id,
                                         "work_order_ref": call["work_order_ref"]})
         return result
+
+    # -- resume over newly acquired material ------------------------------------------------
+
+    def _resumed_requests(self, job_id: str) -> list[str]:
+        rows = self.journal.rows("SELECT refs_json FROM cockpit_events WHERE kind='ask_resume'")
+        out = []
+        for row in rows:
+            refs = json.loads(row["refs_json"] or "{}")
+            if refs.get("job_id") == job_id and refs.get("request_id"):
+                out.append(str(refs["request_id"]))
+        return out
+
+    def ask_resume_state(self, login: str, job_id: str) -> dict[str, Any]:
+        """Whether one finished answer can be resumed over newly acquired material."""
+
+        from . import ask_refresh, material_requests
+
+        job = self.job(login, job_id)
+        if job.get("kind") != "ask" or job.get("status") != "done" or not isinstance(job.get("result"), Mapping):
+            raise CockpitError("只能续答已经完成的回答")
+        result = job["result"]
+        views = {}
+        for item in result.get("material_requests") or ():
+            if item.get("id"):
+                try:
+                    views[str(item["id"])] = material_requests.request(self._ask_state_dir(), str(item["id"]),
+                                                                       with_events=False)
+                except Exception:  # noqa: BLE001 - an unreadable ledger is "unknown", not resolved
+                    views[str(item["id"])] = None
+        state = ask_refresh.resume_state(result, views, resumed=self._resumed_requests(job_id))
+        state["requests"] = [{"id": rid, "status": (view or {}).get("status"),
+                              "status_label": (view or {}).get("status_label")} for rid, view in views.items()]
+        return state
+
+    def resume_ask(self, login: str, value: Mapping[str, Any]) -> dict[str, Any]:
+        """「用新材料续答」: one resume per resolved MaterialRequest, no bill when nothing is new."""
+
+        job_id = _text(value.get("job_id"), "job_id", maximum=128)
+        state = self.ask_resume_state(login, job_id)
+        if state["state"] != "ready":
+            raise CockpitConflict(state["label"])
+        job = self.job(login, job_id)
+        request = job.get("request") or {}
+        question = str(request.get("question") or job["result"].get("question") or "")
+        request_id = f"{str(request.get('request_id') or job_id)[:80]}:resume:{len(self._resumed_requests(job_id)) + 1}"
+        model = self._model_instance()
+        current = {item["id"]: item for item in state.get("requests") or ()}
+        resume = {"job_id": job_id, "request_ids": list(state["ready"]), "original": dict(job["result"]),
+                  # The chips show where each request stands now, not where it stood.
+                  "requests": [{**item, **{key: value for key, value in (current.get(item.get("id")) or {}).items()
+                                           if value is not None and key != "id"}}
+                               for item in job["result"].get("material_requests") or ()]}
+        body = {"question": question, "request_id": request_id, "refresh": False, "resume_of": job_id,
+                "material_request_ids": list(state["ready"])}
+        return self._start_job("ask", login, body,
+                               lambda: self._answer(model, login, question, request_id, resume=resume))
 
     # -- the one bounded look, through the writer -------------------------------------------
 
@@ -8396,6 +10438,9 @@ class CockpitPlane:
         draft = json.loads(row["draft_json"])
         if draft.get("schema_version") == "workspace-first-mission-draft-0.1":
             return self._publish_first_mission(login, draft_id, draft)
+        if row["kind"] == "coverage":
+            from .cockpit_owner_levers import publish_coverage
+            return publish_coverage(self, login, draft_id, draft)
         with self._core() as core:
             mission = self._mission(core)
         if draft["based_on"]["mission_version_ref"] != mission["id"] or draft["based_on"]["mission_version_hash"] != mission["content_hash"]:
@@ -8480,8 +10525,167 @@ class CockpitPlane:
                 "mission_version_ref": published, "version": result.get("version", 1)}
 
 
+# 2026-09-30 (P0-1 / P1-7): the one table that turns a machine sentence into
+# the owner's language.  Ordered: the first matching rule wins, so a specific
+# rule sits above the general one it would otherwise be swallowed by.  Every
+# rule matches on the lower-cased text.  Display only -- the raw sentence is
+# kept beside the translation wherever it is shown, never replaced in storage.
+_REASON_RULES: tuple[tuple[tuple[str, ...], str], ...] = (
+    (("durably unreadable", "not valid utf-8"),
+     "资料原文无法读取（网页编码无法识别），没有产生结论"),
+    (("durably unreadable",), "资料原文无法读取，没有产生结论"),
+    (("not valid utf-8",), "来源网页编码无法识别，无法读取正文"),
+    # 2026-10-07 inspection (待办审批): fetch failures shown to the owner as
+    # raw transport exceptions.
+    (("responsetoolarge",), "目标文件过大，超出单次下载上限"),
+    (("authority deadline",), "连接超时，稍后自动重试"),
+    (("publictransportnetworkerror",), "网络连接失败，稍后自动重试"),
+    (("sourceenvelope refs differ",), "搜索结果引用的网页与原文出处对不上，没有采用"),
+    (("manifest body_bytes",), "抓取结果为空或不完整，没有入库"),
+    (("acquisition ended orphaned",), "采集任务中途中断，稍后自动重试"),
+    (("acquisition ended failed",), "采集任务执行失败，稍后自动重试"),
+    (("leaseexpired",), "任务超过时限后才完成，结果没有采用，稍后自动重试"),
+    (("owner_emergency_stop",), "你按下了紧急停机：新的任务和付费模型调用都已暂停，恢复后继续"),
+    (("paused by owner",), "你暂停了这项研究，恢复后继续"),
+    (("lanechildownerpaused",), "你暂停了这项研究，恢复后继续"),
+    (("mission_budget_exceeded",), "研究任务自身的每日模型预算已用完"),
+    (("outer_research_budget_exceeded",), "研究总预算（外层上限）今天已用完"),
+    (("shared_daily_budget_exceeded",), "本机所有研究环境共享的每日模型预算已用完"),
+    (("owner_budget_exceeded",), "每日模型预算上限已用完"),
+    (("day_budget_exceeded",), "每日模型预算上限已用完"),
+    (("pool_exhausted",), "本次工作使用的模型预算池今天余额不足"),
+    (("budget_refused",), "本次请求超出适用的调用或任务预算限制"),
+    (("budget refused",), "本次请求超出适用的调用或任务预算限制"),
+    (("model_chain_exhausted",), "可用模型链均未成功完成本次请求"),
+    (("every model in the brain chain failed",), "可用模型链均未成功完成本次请求"),
+    (("invalid_host_result",), "模型返回的内容无法解析"),
+    (("host returned invalid text",), "模型返回的内容无法解析"),
+    (("model_route_rejected",), "当时没有可用的模型路线"),
+    (("no model route is available",), "当时没有可用的模型路线"),
+    # 2026-10-08 (DEFECT-10): not a transient failure -- retrying the same
+    # question fails the same way.
+    (("exceed the model input bound",),
+     "这次问题连同检索到的资料超出了模型单次能读的上限，重试同样的问题不会成功；"
+     "请缩小问题范围（例如指定季度、公司或具体指标）后再问"),
+    (("rate_limited",), "模型服务限流，稍后自动重试"),
+    (("the model call did not succeed",), "模型调用没有成功"),
+    (("missiondeliverablevalidationerror",), "生成的报告未通过格式校验（字段内容或长度不符合要求）"),
+    (("must be text of",), "生成的内容长度不符合要求"),
+    (("longer than",), "生成的内容长度不符合要求"),
+    (("must be at most",), "生成的内容长度不符合要求"),
+    (("http error 403",), "数据来源拒绝访问（HTTP 403）"),
+    (("http 403",), "数据来源拒绝访问（HTTP 403）"),
+    (("public web fetch returned http",), "来源网页拒绝访问或返回了失败状态"),
+    (("publicwebsourceerror",), "来源网页无法读取"),
+    (("empty response body",), "来源页面没有返回正文"),
+    (("empty_body",), "来源页面没有返回正文"),
+    (("no admissible",), "这份文档里没有可用的观点"),
+    (("document never names this company",), "文档没有提到这家公司，判定与它无关，未入库"),
+    (("database is locked",), "数据库繁忙，稍后自动重试"),
+    (("timed out",), "等待超时，稍后可以重试"),
+    (("timeout",), "等待超时，稍后可以重试"),
+)
+_CJK = re.compile(r"[㐀-鿿豈-﫿]")
+_MACHINE_MARKERS = re.compile(r"\b[A-Z][A-Za-z]+(?:Error|Exception)\b|Traceback|\b[A-Z][A-Z0-9_]{5,}\b")
+
+
+def _reason_text(text: Any) -> str | None:
+    """The owner's-language rendering of a machine reason, or ``None``."""
+
+    folded = str(text or "").casefold()
+    if not folded:
+        return None
+    for markers, label in _REASON_RULES:
+        if all(marker in folded for marker in markers):
+            return label
+    return None
+
+
+def _job_recovery_fields(kind: Any, status: Any, error: Any) -> dict[str, Any]:
+    """Display-only closed recovery guidance; journal errors are never rewritten."""
+    if kind != "ask" or status != "failed":
+        return {}
+    permanent = "exceed the model input bound" in str(error or "").casefold()
+    return {"recovery": {"schema_version": "cockpit-job-recovery:0.1",
+                         "code": "model_input_bound" if permanent else "retry_or_edit",
+                         "retryable": not permanent,
+                         "action": "edit_question" if permanent else "retry_or_edit"}}
+
+
+def _job_error_message(error: Any) -> str | None:
+    """A failed job's reason in the owner's words, when there is a rule for it."""
+
+    if not error:
+        return None
+    text = str(error)
+    if _CJK.search(text) and not _MACHINE_MARKERS.search(text):
+        return text[:300]
+    translated = _reason_text(text)
+    return None if translated is None else translated + "。"
+
+
+def _display_reason(text: Any, *,
+                    fallback: str = "运行未完成，具体原因见技术详情") -> str:
+    """A reason fit for the page: Chinese already, translated, or the fallback.
+
+    A sentence already written for the owner (it carries Chinese and no
+    exception class) is shown as it is.  Anything else is translated by
+    :data:`_REASON_RULES`; an English sentence nobody has a rule for gets the
+    fallback, and the caller keeps the original under 技术详情.
+    """
+
+    raw = str(text or "").strip()
+    if not raw:
+        return fallback
+    if _CJK.search(raw) and not _MACHINE_MARKERS.search(raw):
+        return raw[:300]
+    return _reason_text(raw) or fallback
+
+
+_DAILY_DIGEST = re.compile(
+    r"^daily digest \S+ (\d{4}-\d{2}-\d{2}): (\d+) inputs?, (\d+) NO_CHANGE", re.I)
+
+
+def _log_detail(text: Any) -> tuple[str | None, dict[str, Any] | None]:
+    """A log line's detail for the page, plus the original when it was changed.
+
+    P1-7: the log sent machine sentences straight to the page -- "Document
+    original is durably unreadable; ... PublicWebSourceError: fetched page is
+    not valid UTF-8" -- and the page could only fold them away as technical.
+    A sentence a rule knows is translated; one that carries an exception class
+    or a machine constant gets the generic line; plain prose (a person's own
+    rationale, a URL, a query) is left alone.  The original always travels in
+    ``technical`` when the shown text differs.
+    """
+
+    raw = str(text or "").strip()
+    if not raw:
+        return None, None
+    digest = _DAILY_DIGEST.match(raw)
+    if digest:
+        shown = (f"{digest.group(1)} 每日事件摘要：{digest.group(2)} 条输入，"
+                 f"其中 {digest.group(3)} 条无需调整研究判断")
+    elif _CJK.search(raw) and not _MACHINE_MARKERS.search(raw):
+        shown = raw[:300]
+    else:
+        shown = _reason_text(raw) or (
+            "具体原因见技术详情" if _MACHINE_MARKERS.search(raw) else raw[:300])
+    return shown, ({"original_detail": raw} if shown != raw else None)
+
+
 def _reason(exc: BaseException) -> str:
+    """An exception's reason for a refusal the owner reads.
+
+    Known machine reasons are translated by the same table the log and ops
+    pages use; any other text passes through, because most refusals from the
+    writer are already written in Chinese for the owner.
+    """
+
     text = str(exc) or type(exc).__name__
+    if not _CJK.search(text):
+        translated = _reason_text(text)
+        if translated is not None:
+            return translated
     return text[:300]
 
 

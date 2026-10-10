@@ -7,7 +7,7 @@ The shared harness now exposes an explicit `add_issuer_proof()` fixture operatio
 Validation with Python 3.13:
 
 ```text
-PYTHONPATH=/Users/everflow/Projects/dalton-foundation-issuer-regression-worktree/src /opt/homebrew/bin/python3.13 -m unittest tests.test_document_extraction_automation tests.test_document_numeric_lane tests.test_metric_discovery_lane tests.test_admission_attribution tests.test_document_subject
+PYTHONPATH=$HOME/Projects/dalton-foundation-issuer-regression-worktree/src /opt/homebrew/bin/python3.13 -m unittest tests.test_document_extraction_automation tests.test_document_numeric_lane tests.test_metric_discovery_lane tests.test_admission_attribution tests.test_document_subject
 ```
 
 Result: 64 tests passed. The absolute `PYTHONPATH` is material because the

@@ -31,6 +31,7 @@ from dalton_core.company_dossier_draft import (
     DossierDraftRefused,
     build_unit_prompt,
     build_verifier_prompt,
+    legacy_unit_prompt_v09,
     draft_hash,
     draft_contract_fingerprint,
     draft_unit,
@@ -169,24 +170,34 @@ class PromptTests(unittest.TestCase):
             material=material(), company=COMPANY, market_view_available=False)
         self.assertIn("Do not speculate about what the market thinks", prompt)
 
-    def test_variant_prompt_carries_the_exact_investment_conclusion_boundary(self):
+    def test_variant_prompt_allows_a_labelled_view(self):
+        # Batch D (owner decision 2026-10-09): the forbidden-phrase table is
+        # gone; the variant view may state our view, labelled as ours.
         arguments = dict(
             unit="variant_view",
             structure=[{"slot_id": slot, "prompt": slot} for slot in VARIANT_SLOTS],
             material=material(), company=COMPANY,
         )
         prompt = build_unit_prompt(**arguments)
-        self.assertIn("Describe only the cited evidence about the market view", prompt)
-        for phrase in _CONCLUSION_PATTERNS:
-            self.assertIn(phrase, prompt)
+        self.assertNotIn("Variant-view boundary:", prompt)
+        self.assertNotIn("Do not use these investment-conclusion phrases", prompt)
+        self.assertIn("label each as our", prompt)
+        self.assertIn("「我们的估计」", prompt)
+        self.assertIn("backlog_as_near_term_revenue", prompt)
         legacy = legacy_unit_prompt_v02(**arguments)
         self.assertNotIn("Variant-view boundary:", legacy)
-        self.assertNotEqual(content_hash(prompt), content_hash(legacy))
+        self.assertNotIn("Batch D contract", legacy)
+        before = legacy_unit_prompt_v09(**arguments)
+        self.assertIn("Variant-view boundary:", before)
+        for phrase in _CONCLUSION_PATTERNS:
+            self.assertIn(phrase, before)
+        self.assertNotEqual(content_hash(prompt), content_hash(before))
 
         other = build_unit_prompt(
             unit="business_model", structure=STRUCTURE,
             material=material(), company=COMPANY)
-        self.assertNotIn("Variant-view boundary:", other)
+        self.assertNotIn("Variant view:", other)
+        self.assertIn("Batch D contract", other)
 
     def test_the_guidance_prompt_hands_over_a_computed_table(self):
         prompt = build_unit_prompt(

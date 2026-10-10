@@ -14,7 +14,7 @@ The extraction service integration must expose `read_completion_receipt(review_i
 
 ## Verification
 
-`PYTHONPATH=/Users/everflow/Projects/dalton-document-read-proof-worktree/src /Users/everflow/Projects/dalton-research-agent-os/.venv/bin/python -m unittest tests.test_document_read_completion tests.test_mission_stage`
+`PYTHONPATH=$HOME/Projects/dalton-document-read-proof-worktree/src $HOME/Projects/dalton-research-agent-os/.venv/bin/python -m unittest tests.test_document_read_completion tests.test_mission_stage`
 
 The focused suite covers successful multi-window proof, proof-before-resolution crash behavior, idempotent replay after resolution, failed and incomplete chains, authority drift, wrong actor/review hash, raw insert refusal, legacy unresolved read counts, and acquired-vs-read projection. Result: 60 tests passed across the proof, mission-stage, extraction-service, and automation modules.
 

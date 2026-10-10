@@ -132,6 +132,7 @@ class ValuationTestCase(unittest.TestCase):
             "fundamental_windows": windows if windows is not None else [
                 {"as_of": "2025-12-31", "roles": roles()}],
             "price_history": history() if price_history is None else price_history,
+            "share_history": [{"as_of": "2020-01-01", "shares_outstanding": "1000000"}],
         }
         request.update(overrides)
         return self.authority.publish_snapshot(**request)
@@ -157,8 +158,8 @@ class FormulaTests(ValuationTestCase):
         self.assertEqual(self.by_metric["price_to_sales"]["value"], "2")
         self.assertEqual(self.by_metric["ev_to_ebitda"]["value"], "8.2143")
         self.assertEqual(self.by_metric["fcf_yield"]["value"], "0.1")
-        for item in self.by_metric.values():
-            self.assertEqual(item["status"], "available")
+        for key, item in self.by_metric.items():
+            self.assertEqual(item["status"], "unavailable" if key == "core_pe" else "available")
 
     def test_the_formula_is_written_into_every_record(self):
         self.assertEqual(self.published["formula_version"], FORMULA_VERSION)
@@ -260,13 +261,13 @@ class PercentileTests(ValuationTestCase):
         self.assertEqual(published["basis"]["fundamental_window_count"], 2)
 
     def test_without_a_dated_share_history_the_record_says_so(self):
-        published = self.publish()
+        published = self.publish(share_history=[])
         self.assertEqual(
             published["basis"]["shares_basis"],
-            "current_shares_applied_to_history")
+            "historical_shares_not_collected")
         self.assertEqual(
-            self.metrics(published)["trailing_pe"]["percentile"]["shares_basis"],
-            "current_shares_applied_to_history")
+            self.metrics(published)["trailing_pe"]["percentile"]["value"],
+            None)
         self.assertEqual(published["basis"]["share_observation_count"], 0)
 
     def test_a_dated_share_history_values_each_bar_with_the_count_then_known(self):
@@ -291,7 +292,8 @@ class PercentileTests(ValuationTestCase):
         )
         self.assertLess(
             Decimal(percentile["value"]),
-            Decimal(self.metrics(without)["trailing_pe"]["percentile"]["value"]))
+            Decimal("100"))
+        self.assertIsNone(self.metrics(without)["trailing_pe"]["percentile"]["value"])
 
     def test_a_share_observation_of_zero_is_not_a_count(self):
         with self.assertRaises(ValuationSnapshotConflict):
@@ -317,7 +319,7 @@ class UnavailableTests(ValuationTestCase):
         by_metric = self.metrics(published)
         self.assertEqual(by_metric["ev_to_ebitda"]["status"], "unavailable")
         self.assertIsNone(by_metric["ev_to_ebitda"]["value"])
-        self.assertIn("operating income", by_metric["ev_to_ebitda"]["reason"])
+        self.assertIn("营业利润", by_metric["ev_to_ebitda"]["reason"])
         # The others still compute: one absent concept is not four.
         self.assertEqual(by_metric["trailing_pe"]["value"], "10")
 
@@ -327,7 +329,7 @@ class UnavailableTests(ValuationTestCase):
         pe = self.metrics(published)["trailing_pe"]
         self.assertEqual(pe["status"], "unavailable")
         # Not "-40x", which invites a reader to compare it with 40x.
-        self.assertIn("not positive", pe["reason"])
+        self.assertIn("不为正", pe["reason"])
 
     def test_a_negative_free_cash_flow_is_a_number_not_an_error(self):
         published = self.publish(windows=[{"as_of": "2025-12-31", "roles": roles(
@@ -342,7 +344,7 @@ class UnavailableTests(ValuationTestCase):
             windows=[{"as_of": "2026-09-30", "roles": roles()}])
         for item in published["metrics"]:
             self.assertEqual(item["status"], "unavailable")
-            self.assertIn("no filing was on hand", item["reason"])
+            self.assertIn("还没有任何已申报的财务数据", item["reason"])
 
 
 class RefusalTests(ValuationTestCase):

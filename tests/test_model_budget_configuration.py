@@ -26,6 +26,19 @@ class BudgetConfigurationTests(fixtures.StateDirectoryCase):
         return set_model_call_budget(self.root, purpose=purpose, budget=budget,
                                      expected_config_hash=expected or view["config_hash"], actor_ref=actor)
 
+    def test_product_run_view_includes_the_separate_verifier_and_legacy_floor(self):
+        producer = self.root / "dossier-model-config.json"
+        verifier = self.root / "company-dossier-verifier-model-config.json"
+        producer.write_text(json.dumps({**self.model_config,
+            "purpose_call_budgets": {"investment_memo": {"max_cost_usd": 20}},
+            "purpose_run_budgets": {"investment_memo": {"max_cost_usd": 6}}}))
+        verifier.write_text(json.dumps({**self.model_config,
+            "purpose_call_budgets": {"investment_memo_verifier": {"max_cost_usd": 30}}}))
+        view = call_budget_view(self.root, "investment_memo", kind="run")
+        self.assertTrue(view["editable"], view)
+        self.assertEqual(view["effective"]["max_cost_usd"], 4 * 20 + 30)
+        self.assertEqual(view["overrides"]["max_cost_usd"], 6)
+
     def test_budget_change_is_purpose_scoped_audited_and_route_preserving(self):
         original = json.loads(self.event.read_text())
         result = self.save({"max_cost_usd": 1.5, "max_output_tokens": 2200})

@@ -207,6 +207,29 @@ class PolicyTests(unittest.TestCase):
         with self.assertRaises(IndustryFrameworkValidationError):
             validate_policy(wire)
 
+    def test_an_unknown_gap_content_kind_is_refused_when_the_policy_is_read(self):
+        # 2026-10-07: refused before any model call, not after the draft and
+        # the verifier had been paid for.
+        wire = policy()
+        wire["gap_checklist"][0]["content_kind"] = "primary_sauce"
+        with self.assertRaisesRegex(IndustryFrameworkValidationError, "content kind"):
+            validate_policy(wire)
+
+    def test_the_first_mission_setup_s_primary_source_gap_has_candidate_sources(self):
+        # ws-7d's policy names ``primary_source``; the framework child crashed
+        # on it (SourceCapabilityError) after the verifier passed, twice.
+        from dalton_core.industry_framework import assess_gaps, candidate_sources
+
+        wire = policy()
+        wire["gap_checklist"][0]["content_kind"] = "primary_source"
+        validate_policy(wire)
+        slugs = [row["slug"] for row in candidate_sources("primary_source")]
+        self.assertTrue(slugs)
+        self.assertEqual(len(slugs), len(set(slugs)))
+        gaps = assess_gaps(wire)
+        self.assertEqual(gaps[0]["content_kind"], "primary_source")
+        self.assertTrue(gaps[0]["candidate_sources"])
+
     def test_a_criterion_may_bind_two_checks(self):
         # The reason this policy's shape differs from the dossier's: the
         # fourth criterion needs both readings.

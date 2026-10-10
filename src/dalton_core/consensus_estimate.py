@@ -601,6 +601,35 @@ def _decode(row: sqlite3.Row | None, name: str) -> dict[str, Any]:
     return wire
 
 
+def held_view(latest: Mapping[str, Any]) -> dict[str, Any]:
+    """One stored version as the reader's dict (what ``latest_consensus`` returns)."""
+
+    fetch = latest["fetch"]
+    return {
+        "company_ref": latest["company_ref"],
+        "ticker": latest["ticker"],
+        "currency": latest["currency"],
+        "as_of": latest["as_of"],
+        "version_ref": latest["id"],
+        "version_hash": latest["content_hash"],
+        "version": latest["version"],
+        "source_ref": latest["source_ref"],
+        "source_kind": latest["source_kind"],
+        "observation_basis": latest["observation_basis"],
+        "price_target": dict(latest["price_target"]),
+        "recommendations": [dict(row) for row in latest["recommendations"]],
+        "eps_estimates": [dict(row) for row in latest["eps_estimates"]],
+        "revenue_estimates": [dict(row) for row in latest["revenue_estimates"]],
+        "report_consensus": (
+            None if latest["report_consensus"] is None
+            else dict(latest["report_consensus"])
+        ),
+        "fiscal_calendar": dict(latest["fiscal_calendar"]),
+        "invocation_ref": fetch.get("invocation_ref"),
+        "artifact_hash": fetch.get("artifact_hash"),
+    }
+
+
 class ConsensusEstimateAuthority:
     """Append-only street expectations, one version chain per company."""
 
@@ -657,30 +686,7 @@ class ConsensusEstimateAuthority:
         latest = self.latest_version(company_ref)
         if latest is None:
             return None
-        fetch = latest["fetch"]
-        return {
-            "company_ref": latest["company_ref"],
-            "ticker": latest["ticker"],
-            "currency": latest["currency"],
-            "as_of": latest["as_of"],
-            "version_ref": latest["id"],
-            "version_hash": latest["content_hash"],
-            "version": latest["version"],
-            "source_ref": latest["source_ref"],
-            "source_kind": latest["source_kind"],
-            "observation_basis": latest["observation_basis"],
-            "price_target": dict(latest["price_target"]),
-            "recommendations": [dict(row) for row in latest["recommendations"]],
-            "eps_estimates": [dict(row) for row in latest["eps_estimates"]],
-            "revenue_estimates": [dict(row) for row in latest["revenue_estimates"]],
-            "report_consensus": (
-                None if latest["report_consensus"] is None
-                else dict(latest["report_consensus"])
-            ),
-            "fiscal_calendar": dict(latest["fiscal_calendar"]),
-            "invocation_ref": fetch.get("invocation_ref"),
-            "artifact_hash": fetch.get("artifact_hash"),
-        }
+        return held_view(latest)
 
     def consensus_for_period(
         self, company_ref: str, period: str
@@ -987,6 +993,10 @@ MAX_GAP_METRICS = 12
 # Changing the join changes the answer even when neither source version did.
 # It is returned beside every gap and folded into the sensitivity rule hash,
 # so projections made by the old end-date-only join become visibly stale.
+# Batch B re-derives street periods (``financial_period``) before the join.
+# The ref is deliberately left at 1: it is frozen into the forecast
+# sensitivity rule (forecast_sensitivity.SELECTION_RULE, owned by the model
+# lane), so bumping it is a coordinated change, not one this lane makes alone.
 CONSENSUS_GAP_RULE_REF = "rule:consensus-fiscal-period-join:1"
 
 
@@ -1030,6 +1040,10 @@ def _forecast_cells(
         # the model has an exact share-count/per-share result contract.
         if line.get("ref") == "result:revenue" and line.get("role") == "revenue":
             return "revenue"
+        # Batch B: the coverage model's quarterly diluted EPS result
+        # (``result:diluted_eps`` / ``role=diluted_eps``) is that contract.
+        if line.get("ref") == "result:diluted_eps" and line.get("role") == "diluted_eps":
+            return "eps"
         return None
 
     result_lines = [line for line in (latest.get("results") or ())
@@ -1174,17 +1188,26 @@ def _quarter_window(cal: Mapping[str, Any], end: date) -> tuple[str, str]:
 
 def _ours_for_street_period(
     ours: Mapping[Any, Any], metric: str, street: Mapping[str, Any],
-    cal: Mapping[str, Any],
+    cal: Mapping[str, Any], *, relabelled: bool = False,
 ) -> tuple[dict[str, Any] | None, str | None]:
-    """Resolve one street period without crossing quarter/year boundaries."""
+    """Resolve one street period without crossing quarter/year boundaries.
 
-    try:
-        mapped = map_estimate_period(str(street["vendor_period"]), cal)
-    except (KeyError, FiscalMappingError, ValueError):
-        return None, "street_period_mapping_unavailable"
-    for field in ("period_kind", "fiscal_year", "fiscal_quarter", "period_end", "label"):
-        if street.get(field) != mapped[field]:
-            return None, "street_period_mapping_drifted"
+    ``relabelled``: the row's period was re-derived by ``financial_period``
+    (corrected calendar, year-ago and broker-median evidence) and is used as
+    given rather than re-mapped from the stored, possibly stale, calendar.
+    """
+
+    if relabelled:
+        mapped = {field: street.get(field) for field in
+                  ("period_kind", "fiscal_year", "fiscal_quarter", "period_end", "label")}
+    else:
+        try:
+            mapped = map_estimate_period(str(street["vendor_period"]), cal)
+        except (KeyError, FiscalMappingError, ValueError):
+            return None, "street_period_mapping_unavailable"
+        for field in ("period_kind", "fiscal_year", "fiscal_quarter", "period_end", "label"):
+            if street.get(field) != mapped[field]:
+                return None, "street_period_mapping_drifted"
     try:
         end = date.fromisoformat(str(mapped["period_end"]))
     except ValueError:
@@ -1195,7 +1218,7 @@ def _ours_for_street_period(
         found = ours.get((metric, "quarter", start, end_text))
         if found is None:
             return None, "forecast_quarter_unavailable"
-        if street.get("currency") is not None and (
+        if metric != "eps" and street.get("currency") is not None and (
             _unit_key(found.get("unit")) != _unit_key(street.get("currency"))
         ):
             return None, "forecast_street_unit_conflict"
@@ -1207,7 +1230,9 @@ def _ours_for_street_period(
     # quarterly EPS can be compared directly, while annual EPS remains
     # unavailable until that exact definition exists. A single Q4 is never an
     # annual proxy.
-    if metric != "revenue":
+    if metric == "eps" and not any(key[0] == "eps" for key in ours):
+        return None, "forecast_fiscal_year_aggregation_unavailable"
+    if metric not in ("revenue", "eps"):
         return None, "forecast_fiscal_year_aggregation_unavailable"
     quarter_ends = _quarter_ends_of(cal, end)
     quarters: list[dict[str, Any]] = []
@@ -1224,7 +1249,7 @@ def _ours_for_street_period(
     unit = next(iter(units))
     if _unit_key(unit) == "ratio":
         return None, "forecast_fiscal_year_ratio_unavailable"
-    if street.get("currency") is not None and (
+    if metric != "eps" and street.get("currency") is not None and (
         _unit_key(unit) != _unit_key(street.get("currency"))
     ):
         return None, "forecast_street_unit_conflict"
@@ -1236,7 +1261,10 @@ def _ours_for_street_period(
         return None, "forecast_fiscal_year_value_invalid"
     return {
         "value": format(total, "f"), "unit": unit,
-        "label": next(iter(labels)), "kind": "fiscal_year_sum",
+        "label": next(iter(labels)),
+        # Annual EPS is the sum of the four quarterly diluted EPS (the owner's
+        # rule for the coverage model); revenue is a plain sum.
+        "kind": "fiscal_year_sum_of_quarterly_eps" if metric == "eps" else "fiscal_year_sum",
         "period": {
             "calendar": "company:fiscal", "kind": "fiscal_year",
             "start": _quarter_window(cal, quarter_ends[0])[0],
@@ -1254,6 +1282,9 @@ def latest_consensus(store: Any, company_ref: str) -> dict[str, Any] | None:
         return None
     if not held:
         return None
+    relabelled = _relabelled_rows(store, held)
+    if relabelled is not None:
+        held = {**held, "eps_estimates": relabelled["eps"], "revenue_estimates": relabelled["revenue"]}
     ours, forecast_ref, forecast_reason = _forecast_cells(store, company_ref)
     if not ours:
         result = {"metrics": []}
@@ -1277,7 +1308,10 @@ def latest_consensus(store: Any, company_ref: str) -> dict[str, Any] | None:
     cal = held["fiscal_calendar"]
     for metric, key in (("eps", "eps_estimates"), ("revenue", "revenue_estimates")):
         for street in held[key]:
-            mine, reason = _ours_for_street_period(ours, metric, street, cal)
+            if street.get("reported") or street.get("duplicate"):
+                continue  # a pre-report consensus is not a forecast to compare
+            mine, reason = _ours_for_street_period(ours, metric, street, cal,
+                                                   relabelled=relabelled is not None)
             if mine is None:
                 unavailable.append({
                     "metric": metric, "period": street["label"],
@@ -1311,6 +1345,144 @@ def latest_consensus(store: Any, company_ref: str) -> dict[str, Any] | None:
         "metrics": rows[:MAX_GAP_METRICS],
         "unavailable_periods": unavailable,
     }
+
+
+def consensus_as_of(connection: sqlite3.Connection | None, company_ref: str,
+                    as_of: str) -> dict[str, Any] | None:
+    """The newest held version observed on or before ``as_of`` (read-only).
+
+    Batch F: an event is judged against what the street expected the day
+    before it, not against the consensus that already absorbed it.  Reads the
+    table directly (no schema install), so a reader on a ``mode=ro`` Core can
+    ask; a version that fails its hash check is skipped, never believed.
+    """
+
+    if connection is None:
+        return None
+    try:
+        rows = connection.execute(
+            "SELECT * FROM consensus_estimate_versions WHERE consensus_ref=? AND as_of<=? "
+            "ORDER BY as_of DESC, version_number DESC LIMIT 12",
+            (consensus_ref_for(company_ref), _iso_date(as_of, "as_of")),
+        ).fetchall()
+    except sqlite3.Error:
+        return None
+    for row in rows:
+        try:
+            version = _decode(row, f"ConsensusEstimateVersion for {company_ref}")
+        except ConsensusEstimateError:
+            continue
+        if version.get("eps_estimates") or version.get("revenue_estimates"):
+            return held_view(version)
+    return None
+
+
+def period_consensus(store: Any, company_ref: str, *,
+                     as_of: str | None = None) -> list[dict[str, Any]]:
+    """Batch B: the street's numbers per fiscal period end, corrected labels.
+
+    For readers that ask about one period (the earnings preview's
+    ``consensus_block``): each row names its metric with the basis (vendor
+    EPS is normalised, usually adjusted) and the observation date, carries
+    ``period_end`` from the re-derived calendar, and marks ``reported`` rows
+    (a pre-report consensus for a quarter already announced).  Empty when
+    nothing is held; never raises.
+    """
+
+    try:
+        if as_of is None:
+            held = ConsensusEstimateAuthority(store).latest_consensus(company_ref)
+        else:
+            # ``as_of``: the version observed on or before that day (batch F's
+            # pre-event baseline); read-only, any object with ``connection``.
+            held = consensus_as_of(getattr(store, "connection", None), company_ref, as_of)
+    except Exception:  # noqa: BLE001
+        return []
+    if not held:
+        return []
+    relabelled = _relabelled_rows(store, held)
+    if relabelled is not None:
+        held = {**held, "eps_estimates": relabelled["eps"], "revenue_estimates": relabelled["revenue"]}
+    return _period_estimates(held)
+
+
+def _relabelled_rows(store: Any, held: Mapping[str, Any]) -> dict[str, list[dict[str, Any]]] | None:
+    """Batch B: the held rows with their fiscal periods re-derived, or None.
+
+    Read-only (``financial_period.relabel_consensus``): the corrected calendar
+    (8-K releases advance it), year-ago checks against held actuals and the
+    release's own reported figures, and broker medians when stored.  Any
+    failure leaves the stored labels in force -- the join then behaves exactly
+    as before.
+    """
+
+    connection = getattr(store, "connection", None)
+    if connection is None:
+        return None
+    try:
+        from .consensus_table import street_anchors
+        from .earnings_release_outlook import actuals_for_calendar, latest_outlook
+        from .financial_period import relabel_consensus
+        from .street_estimate_tables import street_table_from
+
+        extra: list[dict[str, Any]] = []
+        try:
+            from .earnings_release_intake import core_state_dir
+
+            outlook = latest_outlook(connection, held["company_ref"],
+                                     state_dir=core_state_dir(connection))
+        except Exception:  # noqa: BLE001 - the outlook only sharpens the check
+            outlook = None
+        if outlook and outlook.get("items") and str(outlook.get("report_date") or "") <= str(held["as_of"]):
+            extra = actuals_for_calendar(outlook["items"], f"sec:filing:{outlook.get('accession')}")
+        anchors = street_anchors(street_table_from(connection, held["company_ref"], as_of=held["as_of"]))
+        record = {"id": held["version_ref"], "content_hash": held["version_hash"],
+                  "company_ref": held["company_ref"], "as_of": held["as_of"],
+                  "fiscal_calendar": held["fiscal_calendar"],
+                  "eps_estimates": held["eps_estimates"], "revenue_estimates": held["revenue_estimates"]}
+        derived = relabel_consensus(connection, record, extra, anchors)
+    except Exception:  # noqa: BLE001
+        return None
+    if derived is None:
+        return None
+    return {"eps": derived["eps_estimates"], "revenue": derived["revenue_estimates"]}
+
+
+def _period_estimates(held: Mapping[str, Any]) -> list[dict[str, Any]]:
+    """Street rows keyed by fiscal period end, for readers that ask about one period.
+
+    The shape ``earnings_season.consensus_block`` reads: ``metric``, ``value``,
+    ``unit``, ``estimates`` (analyst count), ``period_end``, ``refs``.  The
+    vendor's EPS is its normalised (usually adjusted, non-GAAP) figure and the
+    metric name says so, with the observation date, so a preview never sets it
+    beside a GAAP guide without the caveat.
+    """
+
+    out: list[dict[str, Any]] = []
+    currency = held.get("currency") or "USD"
+    for metric, key in (("eps", "eps_estimates"), ("revenue", "revenue_estimates")):
+        for row in held.get(key) or ():
+            if row.get("avg") is None or row.get("duplicate"):
+                continue
+            label = row.get("label")
+            name = (f"EPS 一致预期（数据商口径，通常为调整后；{held.get('as_of')}）" if metric == "eps"
+                    else f"收入一致预期（{held.get('as_of')}）")
+            if row.get("reported"):
+                name += "·会前"
+            out.append({
+                "metric": name, "measure": metric, "value": row["avg"],
+                "low": row.get("low"), "high": row.get("high"),
+                "unit": f"{currency}/share" if metric == "eps" else currency,
+                "estimates": row.get("number_of_analysts"),
+                "period": label, "period_end": row.get("period_end"),
+                "period_kind": row.get("period_kind"), "basis": (
+                    "vendor_normalized_eps" if metric == "eps" else "vendor_revenue"),
+                "as_of": held.get("as_of"), "label_basis": row.get("label_basis"),
+                "reported": bool(row.get("reported")),
+                "refs": [held["version_ref"]],
+            })
+    out.sort(key=lambda item: (str(item["period_end"]), item["measure"]))
+    return out
 
 
 def report_consensus(
@@ -1463,6 +1635,8 @@ __all__ = [
     "ConsensusEstimateValidationError",
     "FiscalMappingError",
     "consensus_ref_for",
+    "consensus_as_of",
+    "held_view",
     "MAX_GAP_METRICS",
     "fiscal_calendar",
     "fiscal_year_end_from_quarters",

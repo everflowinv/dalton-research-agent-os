@@ -2,7 +2,7 @@
 
 This acceptance is bound to frozen source commit
 `38721e4413341e8ec8c75ea185413a69845a0eb6` in
-`/Users/everflow/Projects/dalton-v14-product-recovery-acceptance-worktree`.
+`$HOME/Projects/dalton-v14-product-recovery-acceptance-worktree`.
 The frozen checkout and live Dalton root were read only throughout the checks.
 
 ## Wheel
@@ -41,9 +41,9 @@ invocation-environment failure rather than a frozen-source result. The final
 rehearsal used the frozen `src` explicitly and a second new temp root:
 
 ```text
-PYTHONPATH=/Users/everflow/Projects/dalton-v14-product-recovery-acceptance-worktree/src \
+PYTHONPATH=$HOME/Projects/dalton-v14-product-recovery-acceptance-worktree/src \
 python3 scripts/rehearse_deploy.py \
-  --live-root '/Users/everflow/Library/Application Support/Dalton' \
+  --live-root '$HOME/Library/Application Support/Dalton' \
   --temp-root /tmp/dalton-v14-recovery-rehearsal-source \
   --report /tmp/dalton-v14-recovery-rehearsal-report.md
 ```

@@ -476,7 +476,7 @@ class PromptTests(unittest.TestCase):
             ["drop_preview_triplets", "aggregate_unavailable_documents",
              "slim_readable_document_identity", "digest_financial_models",
              "aggregate_readable_document_inventory", "compact_company_detail",
-             "aggregate_companies"])
+             "aggregate_companies", "compact_historical_summaries", "deduplicate_descriptive_audit"])
 
     def test_stage_five_keeps_the_newest_documents_and_aggregates_the_rest(self):
         # 2026-09-16: the identity inventory grows with every document the
@@ -533,6 +533,32 @@ class PromptTests(unittest.TestCase):
             self.assertTrue(all(
                 date >= (summary["latest_doc_date"] or "")
                 for date in kept_dates if date))
+
+    def test_tight_projection_keeps_originals_of_reopened_questions(self):
+        from dalton_core.store import content_hash
+        built = self.heavy_state()
+        for company in built["companies"]:
+            template = company["readable_documents"][0]
+            company["readable_documents"] = [dict(template, document_ref=f"doc:{n}",
+                doc_date="2020-01-01" if n == 0 else "2026-10-01") for n in range(30)]
+            company["document_research_reopened"] = [{"document_ref":"doc:0", "question":"Read this old filing again"}]
+        built.pop("content_hash", None)
+        built["content_hash"] = content_hash(built)
+        full = len(build_prompt(built).encode("utf-8"))
+        checked = False
+        for bound in range(full - 4000, 2000, -2000):
+            try:
+                projected = project_state_for_prompt(built, max_input_bytes=bound)
+            except ResearchPlanInputTooLarge:
+                continue
+            if "aggregate_readable_document_inventory" not in projected["prompt_projection"]["stages_applied"]:
+                continue
+            checked = True
+            for company in projected["companies"]:
+                self.assertIn("doc:0", [d["document_ref"] for d in company["readable_documents"]])
+            self.assertLessEqual(len(build_prompt(projected).encode("utf-8")), bound)
+            break
+        self.assertTrue(checked)
 
     def test_stage_three_drops_verification_fields_and_four_digests_models(self):
         built = self.heavy_state()
@@ -666,11 +692,27 @@ class FeedbackProjectionTests(unittest.TestCase):
         keep = meta["document_research_feedback_keep_per_company"]
         self.assertIn(keep, FEEDBACK_KEEP_LADDER)
         company = projected["companies"][0]
-        summary = company["document_research_feedback_summary"]
         self.assertEqual(len(company["document_research_feedback"]), keep)
-        self.assertEqual(summary["retained_recent"] + summary["aggregated"], 60)
-        self.assertEqual(sum(summary["by_outcome"].values()), summary["aggregated"])
-        self.assertTrue(summary["omitted_rows_hash"])
+        if "document_research_feedback_summary" in company:
+            summary = company["document_research_feedback_summary"]
+            self.assertEqual(summary["retained_recent"] + summary["aggregated"], 60)
+            self.assertEqual(sum(summary["by_outcome"].values()), summary["aggregated"])
+            self.assertTrue(summary["omitted_rows_hash"])
+        else:
+            from dalton_core.research_planner import _FEEDBACK_PLANNER_FIELDS
+            from dalton_core.store import content_hash
+            omitted = sorted(({key: row[key] for key in _FEEDBACK_PLANNER_FIELDS if key in row}
+                              for row in rows), key=lambda row: (row["created_at"], row["id"]), reverse=True)[keep:]
+            outcomes = {}
+            for row in omitted:
+                outcomes[row["outcome"]] = outcomes.get(row["outcome"], 0) + 1
+            summary = {"retained_recent": keep, "aggregated": len(omitted), "by_outcome": dict(sorted(outcomes.items())),
+                       "distinct_documents": len({row["document_ref"] for row in omitted}),
+                       "earliest_created_at": min(row["created_at"] for row in omitted),
+                       "latest_created_at": max(row["created_at"] for row in omitted), "omitted_rows_hash": content_hash(omitted)}
+            self.assertEqual(keep + company["historical_counts"]["document_research_feedback_summary"], 60)
+            self.assertEqual(company["historical_counts"]["content_hash"],
+                             content_hash({"document_research_feedback_summary": summary}))
         if keep:
             self.assertEqual(company["document_research_feedback"][-1]["id"], newest)
         self.assertIn("summary is not a finding", build_prompt(projected))
@@ -712,33 +754,28 @@ class FeedbackProjectionTests(unittest.TestCase):
         built["companies"] = rows
         return self.rebind(built)
 
-    def test_any_number_of_companies_converges_under_the_bound(self):
+    def test_large_universes_keep_every_company_or_refuse_before_routing(self):
         for companies, bound in ((12, self.BOUND), (60, self.BOUND), (300, self.BOUND),
                                  (300, 24_000)):
             with self.subTest(companies=companies, bound=bound):
                 built = self.worst_case(companies)
-                projected = project_state_for_prompt(built, max_input_bytes=bound)
+                try:
+                    projected = project_state_for_prompt(built, max_input_bytes=bound)
+                except ResearchPlanInputTooLarge as exc:
+                    self.assertIn("aggregate_companies", exc.report["stages_applied"])
+                    self.assertGreater(exc.report["prompt_bytes"], bound)
+                    continue
                 size = len(build_prompt(projected).encode("utf-8"))
                 meta = projected["prompt_projection"]
                 self.assertLessEqual(size, bound)
                 self.assertEqual(meta["projected_prompt_bytes"], size)
                 self.assertEqual(meta["companies_total"], companies)
-                carried = meta["companies_carried"]
-                self.assertEqual(len(projected["companies"]), carried)
-                self.assertGreaterEqual(carried, 1)
-                if carried < companies:
-                    summary = projected["companies_omitted_summary"]
-                    self.assertEqual(summary["count"], companies - carried)
-                    self.assertIn("aggregate_companies", meta["stages_applied"])
-                    self.assertIn("companies_omitted_summary", meta["notice"])
-                    # The leading companies are the ones carried.
-                    self.assertEqual(
-                        [c["company_ref"] for c in projected["companies"]],
-                        [c["company_ref"] for c in built["companies"][:carried]])
+                self.assertEqual(meta["companies_carried"], companies)
+                self.assertNotIn("companies_omitted_summary", projected)
+                self.assertEqual([c["company_ref"] for c in projected["companies"]],
+                                 [c["company_ref"] for c in built["companies"]])
                 for company in projected["companies"]:
-                    # A repair target can still be cited by its exact id.
-                    self.assertEqual(
-                        len(company["dossier_feedback"]["repair_target_ids"]), 12)
+                    self.assertEqual(len(company["dossier_feedback"]["repair_target_ids"]), 12)
                     self.assertLessEqual(len(company["readable_documents"]), 1)
 
     def test_twelve_companies_are_all_carried_at_the_live_bound(self):

@@ -22,6 +22,7 @@ makes by publishing a mission version.
 from __future__ import annotations
 
 from datetime import date, datetime, timedelta, timezone
+import re
 from typing import Any, Callable, Mapping, Sequence
 
 from .lane_child_launcher import (
@@ -35,10 +36,14 @@ from .market_price import provisional_bar_date
 
 WRITE_SCOPE = "market_price"
 PROXY_WRITE_SCOPES = frozenset({"claim", "evidence", "claim_index"})
-# How far back a company with no stored history is fetched. Three years is the
-# blueprint's own acceptance bar -- a valuation percentile computed over six
-# months is a number about this year's mood, not about the company.
-BACKFILL_YEARS = 3
+# How far back a company with no stored history is fetched. Three years was the
+# blueprint's acceptance bar; batch B (owner review 2026-10-09 §P1) raises it to
+# ten so valuation percentiles and scenario P20/P50/P80 rest on a cycle rather
+# than on one regime.  Companies already holding three years get the older
+# seven through the existing ``backfill_gap`` path -- one backward request per
+# company, the same connector, governance and daily quota as every other
+# price request.
+BACKFILL_YEARS = 10
 # Yahoo's window excludes ``end``, so asking for tomorrow is how today's bar is
 # included. Not a fudge: it is what the source means by the parameter.
 END_LOOKAHEAD_DAYS = 1
@@ -108,6 +113,23 @@ def may_write_market_price(mission: Mapping[str, Any] | None) -> bool:
     return WRITE_SCOPE in set(scopes)
 
 
+def benchmark_universe(policy: Mapping[str, Any]) -> list[dict[str, str]]:
+    """Resolve explicitly configured benchmark identities without guessing tickers."""
+    refs = (policy.get("abnormal_move") or {}).get("benchmark_refs") or []
+    if not isinstance(refs, (list, tuple)):
+        raise ValueError("benchmark_refs must be a list of benchmark identities")
+    rows = []
+    seen = set()
+    for ref in refs:
+        match = re.fullmatch(r"company:benchmark:([A-Z][A-Z0-9.\-]{0,15}|[0-9]{4}\.HK)", ref) if isinstance(ref, str) else None
+        if match is None:
+            raise ValueError("benchmark identity must name an explicit exchange ticker")
+        if ref not in seen:
+            rows.append({"company_ref": ref, "ticker": match.group(1), "bootstrap_priority": "P8"})
+            seen.add(ref)
+    return rows
+
+
 class MissionMarketPriceLaneCoordinator:
     """Settle the previous tick's price child, then start at most one more."""
 
@@ -122,6 +144,8 @@ class MissionMarketPriceLaneCoordinator:
         failure_ledger_dir: Any | None = None,
         proxy_mappings: Sequence[Mapping[str, Any]] = (),
         proxy_authority: Any | None = None,
+        derived_proxy_mappings: Callable[[Mapping[str, Any]], Sequence[Mapping[str, Any]]] | None = None,
+        benchmark_policy: Callable[[], Mapping[str, Any]] | None = None,
     ) -> None:
         self.authority = authority
         self.launcher = launcher
@@ -130,6 +154,12 @@ class MissionMarketPriceLaneCoordinator:
         self.backfill_years = int(backfill_years)
         self.proxy_mappings = [dict(item) for item in proxy_mappings]
         self.proxy_authority = proxy_authority
+        # F10: catalog mappings for the drivers each covered company's model
+        # declares (``market_proxy_catalog.derive_mappings``), recomputed every
+        # tick from the specifications, merged after the owner's own.
+        self.derived_proxy_mappings = derived_proxy_mappings
+        self.benchmark_policy = benchmark_policy
+        self._explicit_proxy_mappings = list(self.proxy_mappings)
         # The fetch in flight, so the next tick can settle it. A launcher
         # cannot be asked "what did you last run" -- it holds one process, not
         # a history -- and the ticket ref is the only handle on the summary.
@@ -343,7 +373,22 @@ class MissionMarketPriceLaneCoordinator:
         if self._open is not None:
             return {"status": "busy", "settled": settled,
                     "reason": "a price child is still running"}
+        benchmarks = []
+        if self.benchmark_policy is not None and _universe(mission):
+            try:
+                benchmarks = benchmark_universe(self.benchmark_policy())
+            except (ValueError, OSError) as exc:
+                return {"status": "misconfigured", "settled": settled,
+                        "reason": f"tracking benchmark configuration: {exc}"}
         proxy_results = None
+        if self.derived_proxy_mappings is not None:
+            from .market_proxy_catalog import merge_mappings
+
+            try:
+                derived = list(self.derived_proxy_mappings(mission))
+            except Exception:  # noqa: BLE001 - a proxy rule never stops prices
+                derived = []
+            self.proxy_mappings = merge_mappings(self._explicit_proxy_mappings, derived)
         if self.proxy_mappings:
             mission = dict(mission)
             universe = [dict(item) for item in mission.get("universe") or ()]
@@ -374,6 +419,19 @@ class MissionMarketPriceLaneCoordinator:
                 }
             else:
                 proxy_results = self.proxy_authority.refresh_all(self.proxy_mappings)
+        # These are comparison series, not coverage additions or company facts.
+        # They share the existing connector grant, one-child pacing and holds.
+        if benchmarks:
+            universe = [dict(item) for item in mission.get("universe") or ()]
+            known = {item.get("company_ref"): item.get("ticker") for item in universe}
+            for row in benchmarks:
+                ref = row["company_ref"]
+                if ref in known and known[ref] != row["ticker"]:
+                    return {"status": "misconfigured", "settled": settled,
+                            "reason": "benchmark identity has a conflicting ticker"}
+                if ref not in known:
+                    universe.append(row)
+            mission = {**mission, "universe": universe}
         skipped: list[dict[str, Any]] = []
         for company in _universe(mission):
             company_ref = company["company_ref"]
@@ -479,7 +537,8 @@ def dispatch(server: Any, params: Mapping[str, Any]) -> dict[str, Any]:
     coordinator = server.lane_state.get(LAUNCHER_KWARG)
     if coordinator is None:
         from .market_price import MarketPriceSeriesAuthority
-        from .market_proxy_claim import MarketProxyClaimAuthority, load_mappings
+        from .market_proxy_catalog import derive_mappings
+        from .market_proxy_claim import MarketProxyClaimAuthority, load_mapping_config
 
         def mission() -> Any:
             pointer = server.store.connection.execute(
@@ -489,7 +548,20 @@ def dispatch(server: Any, params: Mapping[str, Any]) -> dict[str, Any]:
             return (None if pointer is None
                     else server.coverage_mission.mission(pointer["mission_version_id"]))
 
-        mappings = load_mappings(getattr(launcher, "proxy_config_path", None))
+        config = load_mapping_config(getattr(launcher, "proxy_config_path", None))
+        mappings = config["mappings"]
+        tracking_launcher = server.lane_launcher("tracking_launcher")
+        tracking_policy_path = getattr(tracking_launcher, "policy_path", None)
+
+        def benchmark_policy() -> Mapping[str, Any]:
+            from .tracking_cadence import load_policy
+            return load_policy(tracking_policy_path)
+
+        def derived(current: Mapping[str, Any]) -> list[dict[str, str]]:
+            refs = [str(item.get("company_ref")) for item in current.get("universe") or ()
+                    if isinstance(item, Mapping) and item.get("company_ref")]
+            return derive_mappings(server.store.connection, refs)
+
         coordinator = MissionMarketPriceLaneCoordinator(
             authority=MarketPriceSeriesAuthority(server.store),
             launcher=launcher,
@@ -500,6 +572,8 @@ def dispatch(server: Any, params: Mapping[str, Any]) -> dict[str, Any]:
             failure_ledger_dir=getattr(server, "state_dir", None),
             proxy_mappings=mappings,
             proxy_authority=MarketProxyClaimAuthority(server.store),
+            derived_proxy_mappings=derived if config["derive_from_model_drivers"] else None,
+            benchmark_policy=benchmark_policy if tracking_policy_path is not None else None,
         )
         server.lane_state[LAUNCHER_KWARG] = coordinator
     return coordinator.dispatch_once()
@@ -544,6 +618,7 @@ def argv_fragment(context: Any) -> list[str]:
 
 LANE = register_lane(LaneSpec(
     operation="dispatch_mission_market_prices",
+    failure_ledger="mission_market_prices",
     # After the statements lane and before the model specification: prices are
     # what the specification's valuation section will be read against, and both
     # of them want the tick's single child slot less than a filing does.

@@ -2,7 +2,8 @@
  "case_ref": "industry-view-with-no-market-side",
  "expected": {
   "cited_tags": [
-   "D1"
+   "C1",
+   "O1"
   ],
   "confidence": "medium",
   "quality": {
@@ -14,13 +15,19 @@
   "rationale": "答案本身不假、也有引用，但它没有回答被问的那件事：差在哪。市场那一侧缺席时要说明是没有材料。",
   "refused": false,
   "verification": {
+   "citations_resolve": "skipped",
    "cites_only_shown_rows": "pass",
    "confidence_in_vocabulary": "pass",
    "market_vs_us_present": "fail",
-   "numeric_sentences_cite": "pass",
+   "material_gap_has_request": "skipped",
+   "numbers_sourced": "pass",
+   "our_view_not_used_as_evidence": "pass",
+   "reasoning_lint": "pass",
    "refresh_names_a_capable_source": "skipped",
    "refusal_states_why": "pass",
-   "unknowns_typed": "pass"
+   "structure_present": "pass",
+   "unknowns_typed": "pass",
+   "what_happened_cites_evidence": "pass"
   },
   "wants_market_vs_us": true
  },
@@ -28,17 +35,33 @@
  "question": "我们和市场在这个行业上的看法差在哪？",
  "reply": {
   "confidence": "medium",
+  "market_expected": [
+   {
+    "refs": [],
+    "text": "展示的材料里没有市场对这一分化的定价证据。"
+   }
+  ],
   "market_vs_us": null,
+  "our_view": {
+   "change": "no_change",
+   "house_view": "AI 会先压低可标准化交付的价格，再抬高咨询端的溢价。",
+   "sentences": [
+    {
+     "refs": [
+      "O1"
+     ],
+     "text": "我们认为 AI 会先压低可标准化交付的价格，再抬高咨询端的溢价。"
+    }
+   ]
+  },
   "refresh_suggested": null,
   "refusal_detail": null,
   "refusal_reason": null,
   "refused": false,
-  "sentences": [
+  "uncertainties": [
    {
-    "refs": [
-     "D1"
-    ],
-    "text": "我们认为 AI 会先压低可标准化交付的价格，再抬高咨询端的溢价。"
+    "refs": [],
+    "text": "缺市场对这一分化的定价证据。"
    }
   ],
   "unknowns": [
@@ -47,22 +70,34 @@
     "source": "alphaengine",
     "what": "缺市场对这一分化的定价证据"
    }
+  ],
+  "what_happened": [
+   {
+    "refs": [
+     "C1"
+    ],
+    "text": "龙头公司把客户自建 IT 部门列为竞争对手。"
+   }
   ]
  },
  "shown": [
   {
-   "block": "dossier",
+   "block": "house_view",
+   "evidence": false,
    "period": null,
    "ref": "company-dossier-version:acn:2",
+   "source_text": "客户预算在恢复，但审批链条比 2024 年长；管理层在两次电话会上都提到这一点。",
    "statement": "客户预算在恢复，但审批链条比 2024 年长；管理层在两次电话会上都提到这一点。",
-   "tag": "D1"
+   "tag": "O1"
   },
   {
    "block": "claims",
+   "evidence": true,
    "period": "fiscal 2025",
    "ref": "claim-version:ec52d36d94",
+   "source_text": "Accenture identifies in-house IT departments of large corporations using global capability centers as a competitive threat because clients may use their own resources rather than engage an outside firm.",
    "statement": "Accenture identifies in-house IT departments of large corporations using global capability centers as a competitive threat because clients may use their own resources rather than engage an outside firm.",
-   "tag": "C2"
+   "tag": "C1"
   }
  ],
  "source": "问题是 PM 的原话；答案是「只说了我们的看法」的典型形状。"

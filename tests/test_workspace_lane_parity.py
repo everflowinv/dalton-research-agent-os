@@ -105,14 +105,19 @@ class LaneParityTableTests(unittest.TestCase):
                                  mission=MISSION)
             flags = writer_lane_flags(state)
             for lane in lane_parity_table():
+                if lane.owner_files:
+                    # Nothing derives an owner's declaration; its absence is
+                    # reported (see the audit tests), never papered over.
+                    continue
                 missing = [flag for flag in lane.flags if flag not in flags]
                 self.assertEqual(missing, [], f"{lane.key} is missing {missing}")
 
-    def test_the_hkex_buyback_tape_is_never_staged(self):
-        """install.sh leaves it proposed on purpose; parity must not undo that."""
+    def test_the_hkex_buyback_tape_is_approved_at_creation(self):
+        """Owner instruction 2026-09-30: every connector permission is approved
+        when an environment is created, the buy-back tape included."""
 
         staged = {name for lane in lane_parity_table() for name in lane.governance}
-        self.assertNotIn("hkex-filings-daily-buyback-tape-v1.json", staged)
+        self.assertIn("hkex-filings-daily-buyback-tape-v1.json", staged)
 
     def test_a_source_is_offered_only_when_its_host_input_exists(self):
         with tempfile.TemporaryDirectory(dir="/tmp") as raw:
@@ -127,24 +132,64 @@ class LaneParityTableTests(unittest.TestCase):
             # data, public filing disclosure -- contributes no source ref at
             # all. Naming its source in a mission's source plan would be an
             # authority statement that buys nothing, which is the difference
-            # this function exists to keep.
-            self.assertEqual(host_provisioned_source_refs({}), [])
+            # this function exists to keep.  Prior research is the one
+            # exception: its directory is the environment's own, so it never
+            # waits on the host (owner instruction, 2026-09-30).
+            self.assertEqual(host_provisioned_source_refs({}), ["source:prior-research"])
 
 
 class HostSourceResolutionTests(unittest.TestCase):
     def test_environment_wins_over_another_environment_and_the_default(self):
         with tempfile.TemporaryDirectory(dir="/tmp") as raw:
             root = Path(raw)
-            declared = root / "declared-prior"
-            declared.mkdir()
+            declared = root / "declared-openclaw"
+            (declared / "wiki").mkdir(parents=True)
+            (declared / "wiki" / "vectors.db").write_text("")
             other_state = root / "other" / "dalton-core"
-            (other_state / "feeds").mkdir(parents=True)
-            (other_state / "feeds" / "prior-research").mkdir()
+            (other_state / "feeds" / "company-wiki" / "wiki").mkdir(parents=True)
+            (other_state / "feeds" / "company-wiki" / "wiki" / "vectors.db").write_text("")
             resolved = resolve_host_sources(
-                environ={"DALTON_PRIOR_RESEARCH_DIR": str(declared),
+                environ={"DALTON_OPENCLAW_WORKSPACE": str(declared)},
+                source_state_dir=other_state)
+            self.assertEqual(resolved["feeds/company-wiki"], declared.resolve())
+
+    def test_prior_research_is_never_resolved_from_the_host(self):
+        """Owner instruction 2026-09-30: each environment has its own corpus."""
+
+        with tempfile.TemporaryDirectory(dir="/tmp") as raw:
+            root = Path(raw)
+            other_state = root / "other" / "dalton-core"
+            (other_state / "feeds" / "prior-research").mkdir(parents=True)
+            (root / "declared").mkdir()
+            resolved = resolve_host_sources(
+                environ={"DALTON_PRIOR_RESEARCH_DIR": str(root / "declared"),
                          "DALTON_OPENCLAW_WORKSPACE": str(root / "absent")},
                 source_state_dir=other_state)
-            self.assertEqual(resolved["feeds/prior-research"], declared.resolve())
+            self.assertNotIn("feeds/prior-research", resolved)
+            state = root / "ws" / "dalton-core"
+            state.mkdir(parents=True)
+            actions = plan_parity_actions(state, actor_ref="human:owner",
+                                          host_sources=resolved)
+            own = [action for action in actions if action.kind == "own_dir"]
+            self.assertEqual([Path(action.target).name for action in own], ["prior-research"])
+            apply_parity_actions(own, actor_ref="human:owner")
+            target = state / "feeds" / "prior-research"
+            self.assertTrue(target.is_dir() and not target.is_symlink())
+            self.assertEqual(list(target.iterdir()), [])
+
+    def test_a_linked_prior_research_is_reported_not_replaced(self):
+        with tempfile.TemporaryDirectory(dir="/tmp") as raw:
+            root = Path(raw)
+            elsewhere = root / "legacy" / "prior-research"
+            elsewhere.mkdir(parents=True)
+            state = root / "ws" / "dalton-core"
+            (state / "feeds").mkdir(parents=True)
+            os.symlink(elsewhere, state / "feeds" / "prior-research")
+            actions = plan_parity_actions(state, actor_ref="human:owner", host_sources={})
+            self.assertNotIn("own_dir", {action.kind for action in actions})
+            report = audit_lanes(state, host_sources={})
+            row = next(item for item in report["lanes"] if item["key"] == "prior_research")
+            self.assertTrue(any("localize" in blocker for blocker in row["blockers"]))
 
     def test_an_absent_host_input_is_absent_rather_than_invented(self):
         with tempfile.TemporaryDirectory(dir="/tmp") as raw:
@@ -303,6 +348,41 @@ class AuditTests(unittest.TestCase):
                                 host_sources=self.sources, mission=MISSION),
             actor_ref="human:owner@example.com", mission=MISSION)
         report = audit_lanes(self.state, host_sources=self.sources)
+        # Only the IR watcher waits: its page list is the owner's to write.
+        self.assertEqual(report["unconfigured_lanes"], ["ir_page_watch"])
+        row = next(item for item in report["lanes"] if item["key"] == "ir_page_watch")
+        self.assertEqual(row["missing_governance"], [])
+        self.assertTrue(any("ir-pages.json" in blocker for blocker in row["blockers"]))
+        self.assertFalse((self.state / "ir-pages.json").exists())
+
+    def test_the_findata_and_ir_watch_groups_are_approved_like_legacy(self):
+        """c3: the legacy Core's cn-hk-findata x6 and ir-page-watch x2 records."""
+
+        apply_parity_actions(
+            plan_parity_actions(self.state, actor_ref="human:owner@example.com",
+                                host_sources=self.sources, mission=MISSION),
+            actor_ref="human:owner@example.com", mission=MISSION)
+        governance = self.state / "connector-governance"
+        expected = {
+            "cn-hk-findata-ah-premium-v1.json", "cn-hk-findata-buybacks-v1.json",
+            "cn-hk-findata-financial-statements-v1.json",
+            "cn-hk-findata-margin-balance-v1.json", "cn-hk-findata-northbound-flow-v1.json",
+            "cn-hk-findata-shareholders-v1.json",
+            "ir-page-watch-get-diff-v1.json", "ir-page-watch-list-watches-v1.json",
+            # Owner instruction 2026-09-30: every connector permission at creation.
+            "hkex-filings-daily-buyback-tape-v1.json",
+        }
+        for name in sorted(expected):
+            record = json.loads((governance / name).read_text())
+            self.assertEqual(record["status"], "approved", name)
+            self.assertEqual(record["approved_by"], "human:owner@example.com", name)
+        report = audit_lanes(self.state, host_sources=self.sources)
+        self.assertIn("cn_hk_findata", report["configured_lanes"])
+        # With a declaration the watcher's flag renders, riding on ownership.
+        (self.state / "ir-pages.json").write_text(json.dumps({"pages": {}}))
+        report = audit_lanes(self.state, host_sources=self.sources)
+        row = next(item for item in report["lanes"] if item["key"] == "ir_page_watch")
+        self.assertEqual(row["missing_flags"], [])
         self.assertEqual(report["unconfigured_lanes"], [])
 
     def test_a_lane_whose_mission_never_granted_its_source_says_so(self):
@@ -835,11 +915,16 @@ class RepairPlannerTests(unittest.TestCase):
         self._plan()
         self.assertEqual(content(), before)
 
-    def test_a_workspace_with_no_mission_is_refused_with_a_sentence(self):
+    def test_a_workspace_with_no_mission_is_planned_without_mission_plans(self):
+        """2026-09-30: ws-e399 never published a mission and still needs its
+        credential slots and budgets repaired; only the per-mission retrieval
+        plans wait for the first mission."""
+
         (self.state / "core.sqlite").unlink()
-        with self.assertRaises(self.script.RepairError) as caught:
-            self._plan()
-        self.assertIn("研究任务", str(caught.exception))
+        plan = self._plan()
+        self.assertIsNone(plan["mission_ref"])
+        self.assertNotIn("mission_plan", {action["kind"] for action in plan["actions"]})
+        self.assertIn("尚未发布", self.script.render_plan(plan))
 
     def test_a_live_workspace_is_told_to_stop_before_it_is_repaired(self):
         """A plist cannot be re-rendered under a running service, so say so."""

@@ -17,7 +17,9 @@ Two rules shape it:
 * **Rendering is deterministic and lossless about provenance.**  The same
   bytes always produce the same text, so a quote's offsets and hashes are
   stable.  ``text/html``, ``application/xhtml+xml`` and ``text/plain`` are
-  rendered when they are UTF-8; ``application/pdf`` is rendered through
+  rendered when they are UTF-8; JSON media are rendered as typed paths with exact
+  number lexemes, never asserted to be an article; complete HTML documents with
+  a JSON content type use an explicit mismatch renderer identity. ``application/pdf`` is rendered through
   ``pypdf`` when that optional extra is installed.  Anything else (an image,
   an unknown charset, a password-protected or malformed PDF, or a PDF when the
   extractor is not installed) is refused with its reason rather than decoded
@@ -54,7 +56,7 @@ PDF_MEDIA_TYPE = "application/pdf"
 TEXT_MEDIA_TYPES: frozenset[str] = frozenset({
     "text/html", "application/xhtml+xml", "text/plain",
 })
-RENDERABLE_MEDIA_TYPES: frozenset[str] = TEXT_MEDIA_TYPES | {PDF_MEDIA_TYPE}
+RENDERABLE_MEDIA_TYPES: frozenset[str] = TEXT_MEDIA_TYPES | {PDF_MEDIA_TYPE, "application/json"}
 # A research PDF is bounded: an earnings release is tens of pages, and a
 # document longer than this is refused rather than partly rendered.
 MAX_PDF_PAGES = 400
@@ -155,6 +157,144 @@ class _PublicWebHtmlParser(HTMLParser):
         return "\n\n".join(self.blocks)
 
 
+class _InlineXbrlFilingParser(_PublicWebHtmlParser):
+    """Render an SEC inline-XBRL filing as a reader sees it (2026-10-09).
+
+    Two differences from the generic page renderer, both specific to the
+    inline-XBRL shape and so applied only when the markup carries an
+    ``<ix:header>``:
+
+    * The ``ix:header`` block -- hidden in every browser -- holds the XBRL
+      contexts, units and hidden facts: thousands of ``us-gaap:...Member``
+      names, CIKs and dates.  Rendered as visible text it was the first and
+      largest block of every 10-K, so a directed read searching "segment" or
+      "Americas" retrieved context definitions instead of the segment table.
+      Live: two directed reads of EPAM's 10-K returned "只有 XBRL 元素名称、
+      没有数值".
+    * A table row is one line, its cells separated by `` | `` (a lone ``$``,
+      ``%`` or ``)`` cell joined to its number), instead of one block per cell
+      -- "Financial Services | $603,711 | $519,986 | $83,725 | 16.1%" rather
+      than eleven blocks a reader has to re-assemble into a row.
+    """
+
+    def __init__(self) -> None:
+        super().__init__()
+        self.row: list[str] | None = None
+        self.cell: list[str] | None = None
+
+    def _close_cell(self) -> None:
+        if self.row is not None and self.cell is not None:
+            text = _normalize_inline(" ".join(self.cell))
+            if text:
+                self.row.append(text)
+        self.cell = None
+
+    def _close_row(self) -> None:
+        self._close_cell()
+        row, self.row = self.row, None
+        if not row:
+            return
+        merged: list[str] = []
+        for cell in row:
+            if merged and (cell in {"%", ")", ")%"} or merged[-1] in {"$", "(", "($", "$("}):
+                merged[-1] = merged[-1] + cell
+            else:
+                merged.append(cell)
+        self.blocks.append(" | ".join(merged))
+
+    def handle_starttag(self, tag: str, attrs: list[tuple[str, str | None]]) -> None:
+        tag = tag.lower()
+        if tag == "ix:header":
+            self.hidden_depth += 1
+            return
+        if self.hidden_depth:
+            if tag in self._HIDDEN_TAGS:
+                self.hidden_depth += 1
+            return
+        if tag == "tr":
+            self._close_row()
+            self._flush()
+            self.row = []
+            return
+        if self.row is not None:
+            if tag in {"td", "th"}:
+                self._close_cell()
+                self.cell = []
+            elif tag == "br" or tag in self._BLOCK_TAGS:
+                if self.cell is not None:
+                    self.cell.append(" ")
+            elif tag in self._HIDDEN_TAGS:
+                self.hidden_depth += 1
+            return
+        super().handle_starttag(tag, attrs)
+
+    def handle_endtag(self, tag: str) -> None:
+        tag = tag.lower()
+        if tag == "ix:header":
+            if self.hidden_depth:
+                self.hidden_depth -= 1
+            return
+        if self.hidden_depth:
+            if tag in self._HIDDEN_TAGS:
+                self.hidden_depth -= 1
+            return
+        if tag == "tr" or (tag in {"table", "tbody", "thead"} and self.row is not None):
+            self._close_row()
+            return
+        if self.row is not None:
+            if tag in {"td", "th"}:
+                self._close_cell()
+            return
+        super().handle_endtag(tag)
+
+    def handle_startendtag(self, tag: str, attrs: list[tuple[str, str | None]]) -> None:
+        if self.row is not None and not self.hidden_depth:
+            if tag.lower() == "br" and self.cell is not None:
+                self.cell.append(" ")
+            return
+        super().handle_startendtag(tag, attrs)
+
+    def handle_data(self, data: str) -> None:
+        if self.hidden_depth:
+            return
+        if self.row is not None:
+            if data.strip():
+                if self.cell is None:
+                    self.cell = []
+                self.cell.append(data)
+            return
+        super().handle_data(data)
+
+    def text(self) -> str:
+        self._close_row()
+        return super().text()
+
+
+def renderer_is_legacy_for_inline_xbrl(renderer: Any) -> bool:
+    """Whether a stored renderer identity predates the inline-XBRL renderer.
+
+    Any HTML text hashed under ``html-visible-blocks:0.1`` must be
+    re-rendered with ``legacy=True`` to reproduce it; for a page without an
+    ``ix:header`` the two renderings are identical, so this is always safe.
+    """
+
+    return isinstance(renderer, str) and renderer.split("|")[-1] == "html-visible-blocks:0.1"
+
+
+#: The inline-XBRL filing renderer's identity.  The generic page renderer
+#: (``html-visible-blocks:0.1``) is unchanged for every other page; a reader
+#: that must reproduce a text hashed before 2026-10-09 renders with
+#: ``legacy=True`` (see :func:`render_public_web_text_candidates`).
+INLINE_XBRL_RENDERER = "html-ixbrl-filing:0.2"
+_IX_HEADER_RE = re.compile(r"<ix:header[\s>]", re.IGNORECASE)
+
+
+def is_inline_xbrl(decoded: str) -> bool:
+    """True for an SEC inline-XBRL document (it carries an ``ix:header``)."""
+
+    return _IX_HEADER_RE.search(decoded) is not None
+
+
 def normalized_media_type(raw_media_type: Any) -> tuple[str, str]:
     """Split a recorded media type into ``(type, charset)``, both lowercase."""
 
@@ -212,11 +352,169 @@ def _render_pdf(raw: bytes, *, max_pdf_pages: int = MAX_PDF_PAGES) -> tuple[str,
     return "\n\n".join(blocks), renderer
 
 
+JSON_RENDERER = "json-structured-paths:0.1"
+JSON_DECLARED_HTML_RENDERER = "json-declared-html-document:0.1"
+MAX_JSON_BYTES = 4 * 1024 * 1024
+MAX_JSON_DEPTH = 64
+MAX_JSON_NODES = 50_000
+_JSON_MEDIA_RE = re.compile(r"^application/(?:json|[a-z0-9][a-z0-9!#$&^_.+-]*\+json)$")
+_JSON_HTML_DOCUMENT_RE = re.compile(
+    r"\A\s*<!doctype\s+html(?:\s[^>]*)?>\s*<html(?:\s[^>]*)?>[\s\S]*</html\s*>\s*\Z",
+    re.IGNORECASE,
+)
+
+
+def is_json_media_type(media_type: str) -> bool:
+    return bool(_JSON_MEDIA_RE.fullmatch(media_type))
+
+
+def _is_complete_declared_json_html(decoded: str) -> bool:
+    if not _JSON_HTML_DOCUMENT_RE.fullmatch(decoded):
+        return False
+    class DocumentRoot(HTMLParser):
+        def __init__(self) -> None:
+            super().__init__()
+            self.opened = self.closed = self.invalid = False
+        def handle_starttag(self, tag: str, attrs: Any) -> None:
+            if tag == "html":
+                if self.opened or self.closed:
+                    self.invalid = True
+                self.opened = True
+            elif not self.opened or self.closed:
+                self.invalid = True
+        def handle_endtag(self, tag: str) -> None:
+            if tag == "html":
+                if not self.opened or self.closed:
+                    self.invalid = True
+                self.closed = True
+            elif not self.opened or self.closed:
+                self.invalid = True
+        def handle_data(self, data: str) -> None:
+            if (not self.opened or self.closed) and data.strip():
+                self.invalid = True
+    parser = DocumentRoot()
+    try:
+        parser.feed(decoded)
+        parser.close()
+    except ValueError:
+        return False
+    # HTMLParser treats script/style text as data, so a fake </html> inside
+    # their contents cannot satisfy the complete document-root requirement.
+    return parser.opened and parser.closed and not parser.invalid
+
+
+class _JsonNumber(str):
+    """The exact finite JSON number lexeme; never convert through float."""
+
+
+def _render_json(decoded: str, *, byte_count: int) -> str:
+    if byte_count > MAX_JSON_BYTES:
+        raise PublicWebSourceError("fetched JSON exceeds the structured byte limit")
+    # Bound nesting before json.loads so hostile inputs cannot recurse first.
+    depth = 0
+    in_string = escaped = False
+    for char in decoded:
+        if in_string:
+            if escaped:
+                escaped = False
+            elif char == "\\":
+                escaped = True
+            elif char == '"':
+                in_string = False
+        elif char == '"':
+            in_string = True
+        elif char in "[{":
+            depth += 1
+            if depth > MAX_JSON_DEPTH:
+                raise PublicWebSourceError("fetched JSON exceeds the structured depth limit")
+        elif char in "]}":
+            depth -= 1
+
+    def object_pairs(pairs: list[tuple[str, Any]]) -> dict[str, Any]:
+        result: dict[str, Any] = {}
+        for key, value in pairs:
+            if key in result:
+                raise PublicWebSourceError("fetched JSON has duplicate object keys")
+            result[key] = value
+        return result
+
+    def nonfinite(value: str) -> Any:
+        raise PublicWebSourceError("fetched JSON contains a non-finite number")
+
+    try:
+        value = json.loads(decoded, object_pairs_hook=object_pairs,
+                           parse_int=_JsonNumber, parse_float=_JsonNumber,
+                           parse_constant=nonfinite)
+    except PublicWebSourceError:
+        raise
+    except (ValueError, RecursionError) as exc:
+        raise PublicWebSourceError("fetched JSON is malformed; it is not rendered") from exc
+    if not isinstance(value, (dict, list)) or not value:
+        raise PublicWebSourceError("fetched JSON contains no structured source payload")
+    if isinstance(value, dict):
+        status = value.get("status")
+        if (value.get("error") not in (None, False, "", [], {})
+                or value.get("errors") not in (None, False, "", [], {})
+                or value.get("success") is False
+                or (isinstance(status, str) and str(status).lower() in {"error", "failed", "failure"})
+                or (isinstance(status, _JsonNumber) and re.fullmatch(r"[45]\d\d", status))):
+            raise PublicWebSourceError("fetched JSON is an API error response, not source content")
+        metadata_keys = {"meta", "metadata", "jsonapi", "links", "status", "headers",
+                         "request", "count", "total", "pagination", "page", "success", "code", "message"}
+        payload = [v for k, v in value.items() if k.lower() not in metadata_keys]
+        if not payload or all(v in (None, "", [], {}) for v in payload):
+            raise PublicWebSourceError("fetched JSON contains only API metadata, not source content")
+
+    lines: list[str] = []
+    nodes = 0
+    def visit(item: Any, path: str) -> None:
+        nonlocal nodes
+        nodes += 1
+        if nodes > MAX_JSON_NODES:
+            raise PublicWebSourceError("fetched JSON exceeds the structured node limit")
+        if isinstance(item, dict):
+            if not item:
+                lines.append(f"{json.dumps(path, ensure_ascii=False)} [object]: {{}}")
+            for key, child in item.items():
+                try:
+                    key.encode("utf-8")
+                except UnicodeEncodeError as exc:
+                    raise PublicWebSourceError("fetched JSON has invalid Unicode") from exc
+                visit(child, path + "/" + key.replace("~", "~0").replace("/", "~1"))
+        elif isinstance(item, list):
+            if not item:
+                lines.append(f"{json.dumps(path, ensure_ascii=False)} [array]: []")
+            for index, child in enumerate(item):
+                visit(child, path + "/" + str(index))
+        else:
+            if isinstance(item, _JsonNumber):
+                kind, text = "number", str(item)
+            elif isinstance(item, str):
+                try:
+                    item.encode("utf-8")
+                except UnicodeEncodeError as exc:
+                    raise PublicWebSourceError("fetched JSON has invalid Unicode") from exc
+                kind, text = "string", json.dumps(item, ensure_ascii=False)
+            elif item is None:
+                kind, text = "null", "null"
+            else:
+                kind, text = "boolean", "true" if item else "false"
+            lines.append(f"{json.dumps(path, ensure_ascii=False)} [{kind}]: {text}")
+    visit(value, "")
+    return "\n".join(lines)
+
+
 def render_public_web_text(raw: bytes, *, raw_media_type: str,
                            max_source_chars: int = MAX_SOURCE_CHARS,
                            max_pdf_pages: int = MAX_PDF_PAGES,
-                           max_decompressed_bytes: int = MAX_DECOMPRESSED_BYTES) -> dict[str, Any]:
-    """Render fetched bytes as deterministic text plus how it was rendered."""
+                           max_decompressed_bytes: int = MAX_DECOMPRESSED_BYTES,
+                           legacy: bool = False) -> dict[str, Any]:
+    """Render fetched bytes as deterministic text plus how it was rendered.
+
+    ``legacy`` reproduces the pre-2026-10-09 rendering of an inline-XBRL
+    filing (header text included, one block per table cell).  Only readers
+    that verify a text by the hash it was cited under need it.
+    """
 
     if (type(max_source_chars) is not int or max_source_chars <= 0
             or type(max_pdf_pages) is not int or max_pdf_pages <= 0
@@ -225,7 +523,7 @@ def render_public_web_text(raw: bytes, *, raw_media_type: str,
     if not isinstance(raw, bytes):
         raise PublicWebSourceError("fetched page bytes are unavailable")
     media_type, charset = normalized_media_type(raw_media_type)
-    if media_type not in RENDERABLE_MEDIA_TYPES:
+    if media_type not in RENDERABLE_MEDIA_TYPES and not is_json_media_type(media_type):
         raise PublicWebSourceError(
             f"fetched page media type {media_type} cannot be rendered as text for review"
         )
@@ -262,16 +560,23 @@ def render_public_web_text(raw: bytes, *, raw_media_type: str,
         decoded = raw.decode("utf-8")
     except UnicodeDecodeError as exc:
         raise PublicWebSourceError("fetched page is not valid UTF-8; it is not rendered") from exc
-    if media_type == "text/plain":
+    declared_json_html = is_json_media_type(media_type) and _is_complete_declared_json_html(decoded)
+    if is_json_media_type(media_type) and not declared_json_html:
+        text = _render_json(decoded, byte_count=len(raw))
+        renderer = JSON_RENDERER
+    elif media_type == "text/plain":
         blocks = [_normalize_inline(block) for block in re.split(r"\n\s*\n", decoded)]
         text = "\n\n".join(block for block in blocks if block)
         renderer = "text-plain:0.1"
     else:
-        parser = _PublicWebHtmlParser()
+        inline_xbrl = not legacy and is_inline_xbrl(decoded)
+        parser = _InlineXbrlFilingParser() if inline_xbrl else _PublicWebHtmlParser()
         parser.feed(decoded)
         parser.close()
         text = parser.text()
-        renderer = "html-visible-blocks:0.1"
+        renderer = INLINE_XBRL_RENDERER if inline_xbrl else "html-visible-blocks:0.1"
+        if declared_json_html:
+            renderer = JSON_DECLARED_HTML_RENDERER + "|" + renderer
     if compressed:
         renderer = "gzip:0.1|" + renderer
     truncated = len(text) > max_source_chars
@@ -286,6 +591,23 @@ def render_public_web_text(raw: bytes, *, raw_media_type: str,
     }
 
 
+def render_public_web_text_candidates(raw: bytes, *, raw_media_type: str,
+                                     **limits: Any) -> list[dict[str, Any]]:
+    """Every rendering a stored text hash may have been taken from, newest first.
+
+    A Claim or extraction context cited before 2026-10-09 names the hash of
+    the old inline-XBRL rendering; re-verifying it must still find that text.
+    For every other document the two renderings are identical and one is
+    returned.
+    """
+
+    current = render_public_web_text(raw, raw_media_type=raw_media_type, **limits)
+    if current["renderer"].split("|")[-1] != INLINE_XBRL_RENDERER:
+        return [current]
+    return [current, render_public_web_text(
+        raw, raw_media_type=raw_media_type, legacy=True, **limits)]
+
+
 # ---------------------------------------------------------------------------
 # receipt verification
 # ---------------------------------------------------------------------------
@@ -298,9 +620,12 @@ def _one_row(connection: Any, query: str, params: tuple[Any, ...], label: str) -
 def verified_public_web_source(
     core: Any, spool: Any, manifest: Mapping[str, Any], receipt_reader: Any, *,
     max_source_chars: int = MAX_SOURCE_CHARS, max_pdf_pages: int = MAX_PDF_PAGES,
-    max_decompressed_bytes: int = MAX_DECOMPRESSED_BYTES,
+    max_decompressed_bytes: int = MAX_DECOMPRESSED_BYTES, legacy: bool = False,
 ) -> tuple[dict[str, Any], dict[str, Any]]:
     """Re-verify one fetched page end to end and render it.
+
+    ``legacy`` renders an inline-XBRL filing the pre-2026-10-09 way, for a
+    caller re-verifying a text hashed under that renderer.
 
     Returns ``(manifest, rendering)`` where ``rendering`` carries the exact
     text plus how it was produced.  Every receipt is re-read from Core by the
@@ -433,7 +758,8 @@ def verified_public_web_source(
 
     rendering = render_public_web_text(raw, raw_media_type=manifest["raw_media_type"],
                                       max_source_chars=max_source_chars, max_pdf_pages=max_pdf_pages,
-                                      max_decompressed_bytes=max_decompressed_bytes)
+                                      max_decompressed_bytes=max_decompressed_bytes,
+                                      legacy=legacy)
     return manifest, rendering
 
 
@@ -447,6 +773,10 @@ __all__ = [
     "RENDERABLE_MEDIA_TYPES",
     "SOURCE_REF",
     "normalized_media_type",
+    "INLINE_XBRL_RENDERER",
+    "is_inline_xbrl",
+    "renderer_is_legacy_for_inline_xbrl",
     "render_public_web_text",
+    "render_public_web_text_candidates",
     "verified_public_web_source",
 ]

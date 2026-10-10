@@ -38,6 +38,25 @@ from tests.test_openclaw_model_adapter import (
 )
 
 
+def _verifier_pass(statement):
+    """The 0.2 verifier pass for the one draft these broker tests serve."""
+
+    from dalton_core.document_research_qualitative import verifier_candidate_ref
+
+    draft = {
+        "schema_version": "0.1", "status": "answered", "answer": statement,
+        "candidate": {
+            "normalized_statement": statement,
+            "metric_or_aspect": "customer and operating dependencies",
+            "period": "FY2025 annual report", "basis": "reported",
+            "cited_match_indexes": [0],
+        }, "missing": [],
+    }
+    return {"schema_version": "0.2", "verdict": "pass",
+            "candidate_ref": verifier_candidate_ref(draft), "findings": []}
+
+
+
 class MissionDocumentResearchProductionTests(unittest.TestCase):
     def _public_fixture(self, *, auto_commit=False):
         fixture = MissionAnnualFixture(
@@ -216,10 +235,7 @@ class MissionDocumentResearchProductionTests(unittest.TestCase):
                     "cited_match_indexes": [0],
                 }, "missing": [],
             })),
-            (fixture.verifier_profile, canonical_json({
-                "schema_version": "0.1", "verdict": "pass",
-                "verified_statement": statement, "findings": [],
-            })),
+            (fixture.verifier_profile, canonical_json(_verifier_pass(statement))),
         ))
 
         def respond(request):
@@ -299,10 +315,7 @@ class MissionDocumentResearchProductionTests(unittest.TestCase):
                     "cited_match_indexes": [0],
                 }, "missing": [],
             })),
-            (fixture.verifier_profile, canonical_json({
-                "schema_version": "0.1", "verdict": "pass",
-                "verified_statement": statement, "findings": [],
-            })),
+            (fixture.verifier_profile, canonical_json(_verifier_pass(statement))),
         ))
 
         def respond(request):
@@ -433,9 +446,10 @@ class MissionDocumentResearchProductionTests(unittest.TestCase):
             self.assertEqual(launcher.wait(timeout=60), 0)
         result = coordinator.dispatch_once()
         self.assertEqual(result["status"], "recovery_required")
+        # 2026-10-09: a fresh-work cap names the failure behind it.
         self.assertEqual(
             result["last"]["recovery"]["reason"],
-            "fresh_work_recovery_disabled",
+            "fresh_work_recovery_disabled:atomic_day_budget_refusal",
         )
         self.assertEqual(broker.requests, [])
 
@@ -454,10 +468,7 @@ class MissionDocumentResearchProductionTests(unittest.TestCase):
                     "cited_match_indexes": [0],
                 }, "missing": [],
             })),
-            (fixture.verifier_profile, canonical_json({
-                "schema_version": "0.1", "verdict": "pass",
-                "verified_statement": statement, "findings": [],
-            })),
+            (fixture.verifier_profile, canonical_json(_verifier_pass(statement))),
         ))
 
         def respond(request):
@@ -597,10 +608,7 @@ class MissionDocumentResearchProductionTests(unittest.TestCase):
                     "cited_match_indexes": [0],
                 }, "missing": [],
             })),
-            (fixture.verifier_profile, canonical_json({
-                "schema_version": "0.1", "verdict": "pass",
-                "verified_statement": statement, "findings": [],
-            })),
+            (fixture.verifier_profile, canonical_json(_verifier_pass(statement))),
         ))
 
         failed_work = []
@@ -626,7 +634,7 @@ class MissionDocumentResearchProductionTests(unittest.TestCase):
             response["canonicalModel"] = f"{profile['provider']}/{profile['model']}"
             return seal(response)
 
-        broker = FakeBroker(fixture.state, respond, connections=5)
+        broker = FakeBroker(fixture.state, respond, connections=3)
         self.addCleanup(broker.close)
         document_config = self._install_runtime_authorities(
             fixture,
@@ -671,14 +679,18 @@ class MissionDocumentResearchProductionTests(unittest.TestCase):
             self.assertEqual(resumed["status"], "resumed", resumed)
             self.assertEqual(launcher.wait(timeout=60), 0)
             self.assertEqual(coordinator.dispatch_once()["status"], "idle")
-        self.assertEqual(len(broker.requests), 5)
-        self.assertEqual(
-            {item["workOrderId"] for item in broker.requests[:3]},
-            {broker.requests[0]["workOrderId"]},
-        )
+        # One capped no-send Work, one fresh authorized draft, one verifier.
+        self.assertEqual(len(broker.requests), 3)
+        self.assertEqual(len({item["workOrderId"] for item in broker.requests}), 3)
         self.assertNotEqual(
-            broker.requests[0]["workOrderId"], broker.requests[3]["workOrderId"]
+            broker.requests[0]["workOrderId"], broker.requests[1]["workOrderId"]
         )
+        with sqlite3.connect(fixture.state / "core.sqlite") as scheduler:
+            for request in broker.requests:
+                row = scheduler.execute(
+                    "SELECT max_attempts FROM scheduler_work_orders WHERE work_order_id=?",
+                    (request["workOrderId"],)).fetchone()
+                self.assertEqual(row[0], 1)
         with sqlite3.connect(fixture.state / "budget.sqlite") as budget:
             settlements = budget.execute(
                 "SELECT s.actual_micros FROM thesis_impact_day_admissions a "
@@ -687,7 +699,7 @@ class MissionDocumentResearchProductionTests(unittest.TestCase):
                 "a.work_order_ref LIKE 'work:mission-document-%'"
             ).fetchall()
         self.assertEqual(
-            sorted(row[0] for row in settlements), [0, 0, 0, 10_000, 10_000]
+            sorted(row[0] for row in settlements), [0, 10_000, 10_000]
         )
 
 

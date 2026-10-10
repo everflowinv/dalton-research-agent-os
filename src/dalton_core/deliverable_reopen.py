@@ -1247,6 +1247,90 @@ class GateReopenAuthority:
             result["stage_reopen"] = self._record_stage_reopen(proposal, record)
         return result
 
+    def decide_by_policy(
+        self,
+        *,
+        proposal_ref: str,
+        proposal_hash: str,
+        policy_ref: str,
+        note: str,
+        reasons: Sequence[Mapping[str, Any]],
+        mission: Mapping[str, Any],
+        actor_ref: str,
+    ) -> dict[str, Any]:
+        """Approve a reopen under the owner's redraft thresholds, as automation.
+
+        Owner decision 4 (research capability diagnosis 2026-10-09):
+        ``gate_passed`` is no longer terminal -- once a required material has a
+        new version or enough new material has accumulated
+        (:mod:`redraft_policy`), the gate reopens without a person.  The
+        decision is the same append-only row a person's would be, bound to
+        the proposal's hash, with ``decided_by: "redraft_policy"``, the policy
+        ref, every trigger, and ``owner_note`` -- the sentence the cockpit
+        shows so the owner can see why the screen is being rewritten.  Only
+        the mission's automation principal may write it; the same
+        preconditions as :meth:`decide` apply (the proposal must target the
+        version that is passed right now).
+        """
+
+        proposal_ref = _text(proposal_ref, "proposal_ref")
+        proposal_hash = _sha256(proposal_hash, "proposal_hash")
+        actor_ref = _text(actor_ref, "actor_ref")
+        if actor_ref != (mission.get("autonomy") or {}).get("automation_principal"):
+            raise DeliverableReopenConflict("automation actor is not the mission principal")
+        note = _text(note, "note", maximum=MAX_REASON_CHARS)
+        policy_ref = _text(policy_ref, "policy_ref")
+        proposal = self.proposal(proposal_ref)
+        if proposal["content_hash"] != proposal_hash:
+            raise DeliverableReopenConflict("proposal hash binding failed")
+        existing = self.decision_for(proposal_ref)
+        if existing is not None:
+            if existing["verdict"] == "approve" and existing.get("decided_by") == "redraft_policy":
+                return {**existing, "status": "duplicate",
+                        "stage_reopen": self._record_stage_reopen(proposal, existing)}
+            raise DeliverableReopenConflict(f"this proposal was already {existing['verdict']}d")
+        record = {
+            "schema_version": SCHEMA_VERSION,
+            "id": "gate-reopen-decision:" + content_hash({
+                "proposal_ref": proposal_ref, "proposal_hash": proposal_hash,
+            })[:32],
+            "created_at": _now(),
+            "proposal_ref": proposal_ref,
+            "proposal_hash": proposal_hash,
+            "company_ref": proposal["company_ref"],
+            "deliverable_ref": proposal["deliverable_ref"],
+            "passed_version_ref": proposal["passed_version_ref"],
+            "verdict": "approve",
+            "reason": note,
+            "change_reason": proposal["change_reason"],
+            "evidence_refs": list(proposal["evidence_refs"]),
+            "decided_by": "redraft_policy",
+            "policy_ref": policy_ref,
+            "triggers": [
+                {key: reason.get(key) for key in ("code", "label", "detail", "refs")}
+                for reason in reasons if reason.get("fired")
+            ],
+            "owner_note": note,
+            "reviewer_ref": actor_ref,
+            "actor_ref": actor_ref,
+        }
+        record["content_hash"] = content_hash(record)
+        self._assert_reopenable(proposal)
+        with self.store._transaction() as cur:
+            cur.execute(
+                "INSERT INTO gate_reopen_decisions(decision_id,proposal_ref,proposal_hash,"
+                "company_ref,verdict,reason,record_json,content_hash,actor_ref,created_at) "
+                "VALUES(?,?,?,?,?,?,?,?,?,?)",
+                (
+                    record["id"], proposal_ref, proposal_hash, proposal["company_ref"],
+                    "approve", note, canonical_json(record), record["content_hash"],
+                    actor_ref, record["created_at"],
+                ),
+            )
+        result: dict[str, Any] = {**record, "status": "fresh"}
+        result["stage_reopen"] = self._record_stage_reopen(proposal, record)
+        return result
+
     # -- the ladder entry --------------------------------------------------
 
     def _assert_reopenable(self, proposal: Mapping[str, Any]) -> None:
@@ -1315,6 +1399,7 @@ class GateReopenAuthority:
             rationale=f"gate_reopen 已批准：{decision['reason']}"[:2000],
             actor_ref=decision["actor_ref"],
             idempotency_key=f"gate-reopen:{decision['id']}",
+            **({"policy_automation": True} if decision.get("decided_by") == "redraft_policy" else {}),
         )
 
 

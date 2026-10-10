@@ -66,7 +66,17 @@ def load_fund_xlsx_template_style() -> dict[str, Any]:
         style = json.loads(payload)
     except (UnicodeError, json.JSONDecodeError) as exc:
         raise FundXlsxTemplateError("fund XLSX template style is invalid JSON") from exc
-    _need(isinstance(style, dict) and set(style) == {
+    return validate_fund_xlsx_template_style(style)
+
+
+def validate_fund_xlsx_template_style(style: Mapping[str, Any]) -> dict[str, Any]:
+    """Validate a packaged or registry-selected versioned style contract.
+
+    Recovered from the 2026-09-13 registry candidate (``8e66ee01``): the same
+    closed shape the packaged AMZN-source contract has, so a template an
+    owner registers can only carry what the renderer knows how to apply.
+    """
+    _need(isinstance(style, Mapping) and set(style) == {
         "schema_version", "template_ref", "source_proof", "sheet_order",
         "model_grid", "valuation_grid", "styles", "number_formats",
     }, "fund XLSX template style has an invalid closed shape")
@@ -86,7 +96,15 @@ def load_fund_xlsx_template_style() -> dict[str, Any]:
           "fund XLSX template style vocabulary differs")
     _need(set(style["number_formats"]) == _NUMBER_KINDS,
           "fund XLSX template number formats differ")
-    return style
+    _need(isinstance(style.get("template_ref"), str)
+          and style["template_ref"].startswith("fund-xlsx-template-style:"),
+          "fund XLSX template style reference differs")
+    return json.loads(json.dumps(dict(style)))
+
+
+def style_contract_hash(style: Mapping[str, Any]) -> str:
+    """The canonical hash a plan binds for a registry-selected style."""
+    return _canonical_hash(validate_fund_xlsx_template_style(style))
 
 
 def _text_list(values: Sequence[str], name: str) -> list[str]:
@@ -161,6 +179,7 @@ def build_fund_xlsx_template_plan(
     hidden_periods: Sequence[str] = (),
     row_styles: Mapping[str, Sequence[Mapping[str, Any]]] | None = None,
     cell_styles: Mapping[str, Sequence[Mapping[str, Any]]] | None = None,
+    style_contract: Mapping[str, Any] | None = None,
 ) -> dict[str, Any]:
     """Build a closed application plan around company-specific rows and periods.
 
@@ -211,10 +230,17 @@ def build_fund_xlsx_template_plan(
             first_quarter + index for index, label in enumerate(quarterly) if label in hidden
         ),
     }
+    # ``style_contract=None`` is the packaged AMZN-source contract, bound by
+    # its resource bytes exactly as before the registry existed; a selected
+    # registry style is bound by its canonical hash.
+    style = (load_fund_xlsx_template_style() if style_contract is None
+             else validate_fund_xlsx_template_style(style_contract))
+    style_hash = (STYLE_RESOURCE_SHA256 if style_contract is None
+                  else _canonical_hash(style))
     plan = {
         "schema_version": PLAN_SCHEMA_VERSION,
-        "template_ref": "fund-xlsx-template-style:amzn-source:0.1",
-        "style_resource_sha256": STYLE_RESOURCE_SHA256,
+        "template_ref": style["template_ref"],
+        "style_resource_sha256": style_hash,
         "sheet_names": dict(sheet_names),
         "unit_labels": dict(unit_labels),
         "columns": columns,
@@ -249,21 +275,26 @@ def _apply_style(target: Any, style: Mapping[str, Any], *,
         })
 
 
-def apply_fund_xlsx_template(workbook: Any, plan: Mapping[str, Any]) -> None:
+def apply_fund_xlsx_template(workbook: Any, plan: Mapping[str, Any], *,
+                             style_contract: Mapping[str, Any] | None = None) -> None:
     """Apply reviewed styles/headers without changing financial values or formulas."""
 
     _need(isinstance(plan, Mapping) and set(plan) == {
         "schema_version", "template_ref", "style_resource_sha256", "sheet_names",
         "unit_labels", "columns", "row_styles", "cell_styles", "content_hash",
-    } and plan["schema_version"] == PLAN_SCHEMA_VERSION
-          and plan["template_ref"] == "fund-xlsx-template-style:amzn-source:0.1"
-          and plan["style_resource_sha256"] == STYLE_RESOURCE_SHA256,
+    } and plan["schema_version"] == PLAN_SCHEMA_VERSION,
           "fund XLSX template application plan differs")
     unsigned = dict(plan)
     asserted_hash = unsigned.pop("content_hash")
     _need(asserted_hash == _canonical_hash(unsigned),
           "fund XLSX template application plan hash differs")
-    style = load_fund_xlsx_template_style()
+    style = (load_fund_xlsx_template_style() if style_contract is None
+             else validate_fund_xlsx_template_style(style_contract))
+    expected_style_hash = (STYLE_RESOURCE_SHA256 if style_contract is None
+                           else _canonical_hash(style))
+    _need(plan["template_ref"] == style["template_ref"]
+          and plan["style_resource_sha256"] == expected_style_hash,
+          "fund XLSX template application plan differs from its style")
     try:
         from openpyxl.styles import Alignment, Border, Font, PatternFill, Side
         from openpyxl.utils import get_column_letter
@@ -398,4 +429,6 @@ __all__ = [
     "apply_fund_xlsx_template",
     "build_fund_xlsx_template_plan",
     "load_fund_xlsx_template_style",
+    "style_contract_hash",
+    "validate_fund_xlsx_template_style",
 ]

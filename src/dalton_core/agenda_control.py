@@ -56,12 +56,29 @@ from .writer_protocol import RemoteError
 from .writer_server import load_principals
 
 
+# Batch ad (2026-10-08, ADR-0016 addendum): the v2 workbench is the cockpit at
+# "/" (and its administrator page at "/admin"); the previous cockpit page moved
+# to "/legacy" with every /v1/cockpit/* route unchanged, and the ADR-0006
+# operator review page that used to live at "/legacy" moved to "/legacy/review".
 _HTML_PATH = Path(__file__).with_name("cockpit_control.html")
 _LEGACY_HTML_PATH = Path(__file__).with_name("cockpit_control_legacy.html")
+_WEEKLY_BRIEF_HTML_PATH = Path(__file__).with_name("cockpit_weekly_brief.html")
+# Browsers ask for /favicon.ico on their own even when the page declares an
+# inline icon; answering with the same tiny SVG keeps the console free of 404s.
+_FAVICON_SVG = (
+    b"<svg xmlns='http://www.w3.org/2000/svg' viewBox='0 0 64 64'>"
+    b"<rect width='64' height='64' rx='16' fill='#18a999'/>"
+    b"<text x='32' y='43' text-anchor='middle' font-family='Arial' font-size='34' "
+    b"font-weight='700' fill='white'>D</text></svg>"
+)
 MAX_BODY_BYTES = 16384
+#: 2026-10-07: the one body that carries a file -- an owner's fund workbook
+#: template, base64 in JSON (cockpit_fund_templates.MAX_UPLOAD_BODY_BYTES).
+TEMPLATE_UPLOAD_PATH = "/v1/cockpit/fund_template_register"
+MAX_TEMPLATE_UPLOAD_BODY_BYTES = 16 * 1024 * 1024 * 4 // 3 + 64 * 1024
 SESSION_TTL_SECONDS = 3600
 AUTOMATION_SUBJECT = "automation:timeout"
-# ADR-0009: the Perception/Agenda plane is retired.  ``/legacy`` keeps serving
+# ADR-0009: the Perception/Agenda plane is retired.  ``/legacy/review`` keeps serving
 # the delivered decisions -- they are history and history is not deleted -- but
 # the view says so rather than presenting itself as a live queue that someone
 # is still filling.
@@ -114,6 +131,25 @@ def _parse_time(value: Any, name: str) -> datetime:
     return parsed.astimezone(timezone.utc)
 
 
+class AdminRoleRequired(PermissionError):
+    """A signed-in analyst asked for something only an administrator may do."""
+
+
+#: The cockpit writes only 管理员设置 sends (model routing, budgets, run
+#: levers).  An analyst login is refused these even when it knows the route.
+ADMIN_ONLY_COCKPIT_ACTIONS = frozenset({
+    "model_select", "model_budget", "research_budget", "model_allow", "model_metadata",
+    "model_notice_ack", "lever",
+})
+
+
+def is_admin_path(path: str) -> bool:
+    """``/admin``, ``/v2/admin`` and every administrator read or write."""
+
+    return (path in {"/admin", "/admin/", "/v2/admin", "/v2/admin/"}
+            or path.startswith(("/v2/admin/", "/v2/data/admin/", "/v2/static/admin/")))
+
+
 @dataclass(frozen=True, slots=True)
 class AgendaControlConfig:
     host: str
@@ -129,6 +165,13 @@ class AgendaControlConfig:
     research_review: ResearchReviewControlConfig | None = None
     intent_composer: IntentComposerConfig | None = None
     cockpit: CockpitConfig | None = None
+    # 2026-10-09 (UX review G02 / MUSE §8 / 4.15): who may open 管理员设置.
+    # ``None`` (the key absent) means every allowed login -- one owner today,
+    # and a new workspace works out of the box.  When set, it is a non-empty
+    # subset of ``allowed_tailscale_logins``; any other login gets 403 on
+    # /admin, /v2/admin, /v2/data/admin/* and the administrator-only cockpit
+    # writes, and the analyst shell's manifest does not list the page.
+    admin_logins: tuple[str, ...] | None = None
 
     @property
     def public_url(self) -> str:
@@ -141,7 +184,7 @@ class AgendaControlConfig:
             "writer_socket", "token_config", "endpoint_ref",
             "feedback_timeout_seconds", "sweep_interval_seconds",
         }
-        optional = {"research_review", "intent_composer", "cockpit"}
+        optional = {"research_review", "intent_composer", "cockpit", "admin_logins"}
         if set(raw) - expected - optional or not expected.issubset(raw):
             raise AgendaControlError("Agenda control config has an invalid closed shape")
         host = _string(raw["host"], "host")
@@ -157,6 +200,17 @@ class AgendaControlConfig:
             or len(set(logins)) != len(logins)
         ):
             raise AgendaControlError("allowed_tailscale_logins must be unique strings")
+        admin_logins = raw.get("admin_logins")
+        if admin_logins is not None:
+            if (
+                not isinstance(admin_logins, list) or not admin_logins
+                or any(not isinstance(item, str) or not item.strip() for item in admin_logins)
+                or len(set(admin_logins)) != len(admin_logins)
+            ):
+                raise AgendaControlError("admin_logins must be a non-empty list of unique strings")
+            admin_logins = [item.strip() for item in admin_logins]
+            if not set(admin_logins) <= {item.strip() for item in logins}:
+                raise AgendaControlError("admin_logins must be a subset of allowed_tailscale_logins")
         review_config = None
         review_raw = raw.get("research_review")
         if review_raw is not None:
@@ -202,6 +256,7 @@ class AgendaControlConfig:
             research_review=review_config,
             intent_composer=intent_config,
             cockpit=cockpit_config,
+            admin_logins=None if admin_logins is None else tuple(admin_logins),
         )
 
     @classmethod
@@ -699,6 +754,21 @@ class AgendaControlApplication:
             return None
         return value
 
+    def is_admin_login(self, login: str | None) -> bool:
+        """May ``login`` open 管理员设置?  Default: every allowed login."""
+
+        config = self.config
+        if config is None:  # narrow unit composition: no HTTP surface, no roles
+            return True
+        if self.allowed_login(login) is None:
+            return False
+        admins = getattr(config, "admin_logins", None)
+        return admins is None or login in admins
+
+    def require_admin(self, login: str | None) -> None:
+        if not self.is_admin_login(login):
+            raise AdminRoleRequired("管理员设置只对管理员开放；请联系管理员处理。")
+
     def session(self, login: str, cookie_header: str | None) -> tuple[str, _Session, bool]:
         session_id = None
         if cookie_header:
@@ -807,6 +877,8 @@ class AgendaControlApplication:
             raise CockpitError("the cockpit is not configured on this host")
         if not isinstance(csrf, str) or not secrets.compare_digest(csrf, session.csrf):
             raise PermissionError("invalid CSRF token")
+        if action in ADMIN_ONLY_COCKPIT_ACTIONS:
+            self.require_admin(login)
         try:
             value = json.loads(body.decode("utf-8"))
         except (UnicodeDecodeError, json.JSONDecodeError) as exc:
@@ -822,12 +894,18 @@ class AgendaControlApplication:
         invalidate = getattr(plane, "invalidate_overview", None)
         if callable(invalidate):
             invalidate()
+        if action == "workspace_lifecycle":
+            return plane.workspace_lifecycle(login, value)
         if action == "workspace_create":
             return plane.create_workspace(login, value)
         if action == "workspace_rename":
             return plane.rename_workspace(login, value)
         if action == "ask":
             return plane.ask(login, value)
+        # Batch G: 「用新材料续答」 -- resume one answer once its MaterialRequest
+        # resolved; the plane refuses a second resume of the same request.
+        if action == "ask_resume":
+            return plane.resume_ask(login, value)
         if action == "goal":
             return plane.draft(login, "goal", value)
         if action == "steer":
@@ -856,12 +934,52 @@ class AgendaControlApplication:
             return plane.declare_model_metadata(login, value)
         if action == "model_notice_ack":
             return plane.acknowledge_model_notice(login, value)
+        # 2026-10-06 (vision-gap #11 / #12): the owner's levers and the
+        # coverage-list draft.  All of them go out through the writer as the
+        # owner's principal and each one leaves a receipt.
+        if action in {"lever", "stop_line", "prioritize", "coverage_draft"}:
+            from . import cockpit_owner_levers as levers
+            return {"lever": levers.apply_lever, "stop_line": levers.stop_line,
+                    "prioritize": levers.prioritize,
+                    "coverage_draft": levers.coverage_draft}[action](plane, login, value)
+        # ADR-0012: move a probability or retire an adopted scenario.
+        # 2026-10-07 (vision-gap #4): register a fund Excel template, choose
+        # which template a company / industry / the workspace exports with.
+        if action in {"fund_template_register", "fund_template_select"}:
+            from . import cockpit_fund_templates as templates
+            return {"fund_template_register": templates.register,
+                    "fund_template_select": templates.select}[action](plane, login, value)
+        if action == "scenario_revise":
+            from .cockpit_scenarios import revise as revise_scenario
+            return revise_scenario(plane, login, value)
+        # 2026-10-07 (BUG-02): 「重试语言质检」 on a draft product, through
+        # the writer as the owner; the retry record is the receipt.
+        if action == "language_retry":
+            return plane.retry_language_review(login, value)
+        # 2026-10-09: a held research task's recovery doors (放行重新进入 /
+        # 再买一次 / 撤回) and the owner's acknowledgement of a card that has
+        # nothing to press.  Both through the writer as the owner.
+        if action == "owner_door":
+            from .cockpit_owner_doors import owner_door
+            return owner_door(plane, login, value)
+        if action == "needs_human_ack":
+            return plane.acknowledge_needs_human(login, value)
+        # ADR-0013: publish the next Conviction v2 policy version.
+        if action == "conviction_policy":
+            from .cockpit_conviction import publish_policy
+            return publish_policy(plane, login, value)
+        # 2026-09-30 (d2): the weekly brief schedule, destination optional.
+        if action == "weekly_brief_plan":
+            from .cockpit_weekly_brief import publish_weekly_brief_plan
+            return publish_weekly_brief_plan(plane, login, value)
         raise CockpitError("unknown cockpit action")
 
     def cockpit_view(self, path: str, login: str, query: Mapping[str, str]) -> dict[str, Any]:
         if self.cockpit_plane is None:
             return {"enabled": False, "reason": "the cockpit is not configured on this host"}
         plane = self.cockpit_plane
+        if path == "/v1/cockpit/workspace_research":
+            return plane.workspace_research(login, str(query.get("slug", "")))
         if path == "/v1/cockpit/workspaces":
             return plane.workspaces(login)
         if path == "/v1/cockpit/overview":
@@ -871,8 +989,9 @@ class AgendaControlApplication:
         if path == "/v1/cockpit/ui-texts":
             return {**plane.ui_texts(query.get("keys", "")), "enabled": True}
         if path == "/v1/cockpit/log":
-            limit = query.get("limit", "150")
-            return {**plane.log(since=query.get("since") or None, limit=int(limit) if limit.isdigit() else 150), "enabled": True}
+            limit = _int_param(query, "limit", default=150, minimum=1, maximum=500)
+            return {**plane.log(since=query.get("since") or None, limit=limit),
+                    "limit": limit, "enabled": True}
         if path == "/v1/cockpit/approvals":
             return {**plane.approvals(), "enabled": True}
         # D4: the same checkpoints the approvals page shows, plus the ones that
@@ -884,28 +1003,36 @@ class AgendaControlApplication:
         if path == "/v1/cockpit/decision-status":
             return {**plane.decision_status(query), "enabled": True}
         if path == "/v1/cockpit/job":
-            return {**plane.job(login, query.get("id", "")), "enabled": True}
+            if not query.get("id"):
+                raise CockpitError("缺少参数 id：要查询哪一项后台任务？")
+            return {**plane.job(login, query["id"]), "enabled": True}
         if path == "/v1/cockpit/deliverable":
             return {**plane.document(query.get("ref", "")), "enabled": True}
         # P12b: the Ledger's conclusions read through the Claim index, with
         # the three filters the index makes answerable. "canonical" defaults
         # to on, which is what the index is for.
         if path == "/v1/cockpit/claims":
-            limit = query.get("limit", "")
+            limit = _int_param(query, "limit", default=MAX_CLAIMS_IN_VIEW, minimum=1,
+                               maximum=MAX_CLAIMS_IN_VIEW)
             return {**plane.claims(
                 company_ref=query.get("company") or None,
                 index_aspect=query.get("aspect") or None,
                 importance=query.get("importance") or None,
                 canonical_only=query.get("canonical", "1") not in {"0", "false", "no"},
-                limit=int(limit) if limit.isdigit() else MAX_CLAIMS_IN_VIEW,
+                limit=limit,
                 cursor=query.get("cursor") or None,
-            ), "enabled": True}
+            ), "limit": limit, "enabled": True}
         # P13-M2: one company's forecast model, printed by the lane's own
         # renderer rather than re-laid-out here.
         if path == "/v1/cockpit/model":
             return {**plane.company_model(query.get("company", "")), "enabled": True}
         if path == "/v1/cockpit/export":
-            return {**plane.export_research(query.get("company", ""), query.get("format", "")), "enabled": True}
+            return {**plane.export_research(query.get("company", ""), query.get("format", ""),
+                                            template=query.get("template") or None),
+                    "enabled": True}
+        if path == "/v1/cockpit/fund-templates":
+            from .cockpit_fund_templates import templates_view
+            return templates_view(plane)
         if path == "/v1/cockpit/research":
             return {**plane.research_library(query.get("company", "")), "enabled": True}
         # INT2 / P14a: what every connector can actually hand over, at what
@@ -917,6 +1044,10 @@ class AgendaControlApplication:
         # Dalton has not been let at, and what changed underneath us.
         if path == "/v1/cockpit/models":
             return {**plane.models(), "enabled": True}
+        # 2026-10-08: the drafting stages an independent verifier checks, and
+        # whether today's chains let it, in every environment.
+        if path == "/v1/cockpit/verifier_independence":
+            return {**plane.verifier_independence(), "enabled": True}
         # 2026-09-15: the owner asked to SEE what the system is doing, in the
         # style of a harness trajectory view -- the steps, not a lane table.
         if path == "/v1/cockpit/trajectory":
@@ -925,17 +1056,35 @@ class AgendaControlApplication:
         if path == "/v1/cockpit/ops":
             # P17d 运维待办: what is parked on which dependency. Read-only and
             # derived from the append-only lane failure ledger; no authority,
-            # no new grant, nothing to press.
-            return {**plane.ops_backlog(), "enabled": True}
+            # no new grant, nothing to press.  P1-7: stopped and historical
+            # attempts come a page at a time; the page asks for the next one.
+            paging = {name: _int_param(query, name, default=default,
+                                       minimum=minimum, maximum=maximum)
+                      for name, default, minimum, maximum in OPS_PAGE_PARAMS
+                      if query.get(name) not in (None, "")}
+            return {**plane.ops_backlog(**paging), "enabled": True}
         if path == "/v1/cockpit/reflection":
             return {**plane.cycle_reflection(), "enabled": True}
+        if path == "/v1/cockpit/levers":
+            from .cockpit_owner_levers import levers_view
+            return levers_view(plane)
+        if path == "/v1/cockpit/conviction-policy":
+            from .cockpit_conviction import policy_view
+            return policy_view(plane, query)
+        if path == "/v1/cockpit/weekly-brief":
+            from .cockpit_weekly_brief import weekly_brief_view
+            return weekly_brief_view(plane)
+        if path == "/v1/cockpit/weekly-brief-document":
+            from .cockpit_weekly_brief import weekly_brief_document
+            return weekly_brief_document(plane, query)
         if path == "/v1/cockpit/history":
-            kind = query.get("kind", "ask")
-            if kind not in {"ask", "goal", "steer"}:
-                raise CockpitError("unknown history kind")
+            kind = query.get("kind") or "ask"
+            if kind not in {"ask", "goal", "steer", "coverage"}:
+                raise CockpitError(
+                    f"参数 kind 只能是 ask、goal、steer 或 coverage，收到的是「{str(kind)[:20]}」")
             return {"kind": kind, "items": plane.history(login, kind), "drafts": plane.drafts(login, None if kind == "ask" else kind),
                     "enabled": True}
-        raise CockpitError("unknown cockpit view")
+        raise CockpitError("没有这个页面：请从导航重新进入")
 
     def post_intent_confirm(
         self, login: str, session: _Session, csrf: str | None, body: bytes
@@ -995,6 +1144,36 @@ class AgendaControlApplication:
         )
 
 
+# (query name, default, minimum, maximum) for the ops page's two pagers.
+OPS_PAGE_PARAMS: tuple[tuple[str, int, int, int], ...] = (
+    ("terminal_offset", 0, 0, 10**9), ("terminal_limit", 50, 1, 500),
+    ("historical_offset", 0, 0, 10**9), ("historical_limit", 50, 1, 500),
+)
+
+
+def _int_param(query: Mapping[str, str], name: str, *, default: int,
+               minimum: int, maximum: int) -> int:
+    """One integer query parameter, read the same way on every cockpit route.
+
+    P2-9: ``log?limit=abc`` silently used 150, ``claims?limit=999999`` silently
+    became 300, and ``history?kind=zzz`` was a 400 in English.  Now: absent or
+    empty means the default; anything that is not a whole number, or is below
+    the minimum, is a 400 that says so in Chinese; above the maximum is capped
+    (and the route reports the limit it applied).
+    """
+
+    raw = query.get(name)
+    if raw is None or raw == "":
+        return default
+    text = str(raw).strip()
+    if not re.fullmatch(r"\d{1,12}", text):
+        raise CockpitError(f"参数 {name} 必须是不小于 {minimum} 的整数，收到的是「{text[:20]}」")
+    value = int(text)
+    if value < minimum:
+        raise CockpitError(f"参数 {name} 必须是不小于 {minimum} 的整数，收到的是「{text[:20]}」")
+    return min(value, maximum)
+
+
 def _cockpit_error_body(error: str, exc: Exception) -> bytes:
     """One refusal, written once, addressed to whoever it was written for.
 
@@ -1017,12 +1196,47 @@ def _cockpit_error_body(error: str, exc: Exception) -> bytes:
         for character in message
     )
     payload: dict[str, Any] = {"error": error, "message": message}
-    if owner_facing:
-        payload["display_message"] = message
+    # P2-9: an English refusal still gets a sentence the owner can read --
+    # the page otherwise guessed from English keywords and, for most of them,
+    # showed the English.  The English stays in ``message`` for 技术详情.
+    payload["display_message"] = message if owner_facing else _english_refusal(error, message)
     return json.dumps(payload, ensure_ascii=False).encode()
 
 
+# The English refusals the cockpit routes still raise, in the owner's words.
+_ENGLISH_REFUSALS: dict[str, str] = {
+    "job not found": "找不到这项后台任务，它可能已经过期；请重新发起一次。",
+    "unknown history kind": "没有这类历史记录。",
+    "unknown cockpit view": "没有这个页面：请从导航重新进入。",
+    "unknown cockpit action": "不支持这个操作。",
+    "decision must be approve or reject": "这项决定只能是「批准」或「拒绝」。",
+    "decision must be admit or reject": "这项决定只能是「接受」或「拒绝」。",
+    "request body is invalid": "请求内容无法解析，没有执行。",
+    "request body must be an object": "请求内容格式不对，没有执行。",
+    # 2026-10-08: a fresh workspace -- nothing to read yet, not a bad request.
+    "no research goal has been published yet": "还没有发布研究任务：先在「研究目标」里发布一个任务，这里才会有内容。",
+}
+
+
+def _english_refusal(error: str, message: str) -> str:
+    known = _ENGLISH_REFUSALS.get(message.strip().rstrip(".").casefold())
+    if known is not None:
+        return known
+    from .cockpit_plane import _reason_text
+
+    translated = _reason_text(message)
+    if translated is not None:
+        return translated + "。"
+    if error == "conflict":
+        return "这项操作与当前状态冲突，没有执行；请刷新后再试。"
+    return "请求没有被接受：参数不正确或已经过期，没有执行。"
+
+
 def _handler(application: AgendaControlApplication) -> type[BaseHTTPRequestHandler]:
+    # ADR-0016: the analyst workbench; since batch ad it is "/" (alias /v2).
+    from .cockpit_v2.routes import V2_ALIASES, V2NotFound, register_v2_routes
+    v2_router = register_v2_routes(application)
+
     class Handler(BaseHTTPRequestHandler):
         server_version = "DaltonCockpit/0.4"
 
@@ -1079,6 +1293,12 @@ def _handler(application: AgendaControlApplication) -> type[BaseHTTPRequestHandl
                     file=sys.stderr, flush=True,
                 )
 
+        def _send_admin_only(self) -> None:
+            self._send(HTTPStatus.FORBIDDEN, "application/json; charset=utf-8", json.dumps({
+                "error": "admin_only",
+                "display_message": "管理员设置只对管理员开放；请联系管理员处理。",
+            }, ensure_ascii=False).encode())
+
         def _context(self) -> tuple[str, str, _Session, bool] | None:
             if not self._host_ok():
                 self._send(HTTPStatus.MISDIRECTED_REQUEST, "application/json", b'{"error":"invalid_host"}')
@@ -1096,13 +1316,47 @@ def _handler(application: AgendaControlApplication) -> type[BaseHTTPRequestHandl
                 return
             login, session_id, session, created = context
             path = urlparse(self.path).path
+            if is_admin_path(path) and not application.is_admin_login(login):
+                self._send_admin_only()
+                return
             try:
-                if path == "/":
+                if path == "/legacy":
+                    # The previous cockpit, kept for what v2 has not taken over.
                     body = _HTML_PATH.read_bytes()
                     content_type = "text/html; charset=utf-8"
-                elif path == "/legacy":
+                elif path == "/legacy/review":
+                    # ADR-0006/0009: the retired review planes, read-only history.
                     body = _LEGACY_HTML_PATH.read_bytes()
                     content_type = "text/html; charset=utf-8"
+                elif path == "/weekly-brief":
+                    body = _WEEKLY_BRIEF_HTML_PATH.read_bytes()
+                    content_type = "text/html; charset=utf-8"
+                elif path == "/favicon.ico":
+                    body = _FAVICON_SVG
+                    content_type = "image/svg+xml"
+                elif path == "/" or path == "/admin" or path in V2_ALIASES \
+                        or path == "/v2" or path.startswith("/v2/"):
+                    # "/" and "/admin" are the v2 shell and administrator page,
+                    # served identically to /v2 and /v2/admin (no redirect, so
+                    # hash routes and every /v2/static|assets|data URL stay put).
+                    query = {k: v[-1] for k, v in parse_qs(urlparse(self.path).query).items()}
+                    try:
+                        answer = v2_router.get(V2_ALIASES.get(path, path), login, query)
+                    except V2NotFound:
+                        self._send(HTTPStatus.NOT_FOUND, "application/json", b'{"error":"not_found"}')
+                        return
+                    except CockpitError as exc:
+                        self._send(HTTPStatus.BAD_REQUEST, "application/json; charset=utf-8",
+                                   _cockpit_error_body("cockpit", exc))
+                        return
+                    content_type, body = answer.content_type, answer.body
+                    if answer.json_value is not None:
+                        value = {**answer.json_value, "csrf_token": session.csrf}
+                        body = json.dumps(value, ensure_ascii=False, separators=(",", ":")).encode()
+                    elif answer.status != HTTPStatus.OK:
+                        # An extension's own refusal (a raw GET) keeps its status.
+                        self._send(answer.status, content_type, body)
+                        return
                 elif path.startswith("/v1/cockpit/"):
                     query = {k: v[-1] for k, v in parse_qs(urlparse(self.path).query).items()}
                     try:
@@ -1200,6 +1454,9 @@ def _handler(application: AgendaControlApplication) -> type[BaseHTTPRequestHandl
                 return
             login, session_id, session, created = context
             path = urlparse(self.path).path
+            if is_admin_path(path) and not application.is_admin_login(login):
+                self._send_admin_only()
+                return
             actions = {
                 "/v1/agenda/feedback": application.post,
                 "/v1/research-review/decision": application.post_review,
@@ -1216,6 +1473,10 @@ def _handler(application: AgendaControlApplication) -> type[BaseHTTPRequestHandl
             if path.startswith("/v1/cockpit/"):
                 name = path.rsplit("/", 1)[1]
                 actions[path] = lambda *args, _name=name: application.post_cockpit(_name, *args)
+            # ADR-0016: a v2 write registered by an extension (the router
+            # checks the CSRF token before its handler runs).
+            if path.startswith("/v2/") and v2_router.handles_post(path):
+                actions[path] = lambda *args, _path=path: v2_router.post(_path, *args)
             action = actions.get(path)
             if action is None:
                 self._send(HTTPStatus.NOT_FOUND, "application/json", b'{"error":"not_found"}')
@@ -1224,13 +1485,18 @@ def _handler(application: AgendaControlApplication) -> type[BaseHTTPRequestHandl
                 self._send(HTTPStatus.UNSUPPORTED_MEDIA_TYPE, "application/json", b'{"error":"content_type"}')
                 return
             length = self.headers.get("Content-Length")
-            if not isinstance(length, str) or not length.isdigit() or int(length) > MAX_BODY_BYTES:
+            limit = (MAX_TEMPLATE_UPLOAD_BODY_BYTES if path == TEMPLATE_UPLOAD_PATH
+                     else MAX_BODY_BYTES)
+            if not isinstance(length, str) or not length.isdigit() or int(length) > limit:
                 self._send(HTTPStatus.REQUEST_ENTITY_TOO_LARGE, "application/json", b'{"error":"body_size"}')
                 return
             try:
                 result = action(
                     login, session, self.headers.get("X-Dalton-CSRF"), self.rfile.read(int(length))
                 )
+            except AdminRoleRequired:
+                self._send_admin_only()
+                return
             except PermissionError:
                 self._send(HTTPStatus.FORBIDDEN, "application/json", b'{"error":"csrf"}')
                 return
@@ -1246,7 +1512,10 @@ def _handler(application: AgendaControlApplication) -> type[BaseHTTPRequestHandl
                 AgendaControlError, HumanIntentError,
                 ResearchReviewControlError, ResearchReviewError,
             ):
-                self._send(HTTPStatus.BAD_REQUEST, "application/json", b'{"error":"invalid_request"}')
+                self._send(HTTPStatus.BAD_REQUEST, "application/json; charset=utf-8",
+                           json.dumps({"error": "invalid_request",
+                                       "display_message": "请求内容无效，没有执行。"},
+                                      ensure_ascii=False).encode())
                 return
             body = json.dumps(result, ensure_ascii=False, separators=(",", ":")).encode()
             self._send(
@@ -1280,9 +1549,23 @@ def _research_task_grant(config: AgendaControlConfig) -> Any:
     )
 
 
+#: 2026-09-30 (P1-1): the GIL switch interval of the serving process.
+#:
+#: The overview rebuild runs on a background thread and is mostly Python.
+#: Every SQLite step and file read on a request thread releases the GIL, and
+#: getting it back waits up to one switch interval behind that thread.  At
+#: CPython's default 5 ms, a model page that makes ~1,500 such calls went from
+#: 0.2 s to 40 s next to one busy thread (offline, legacy data, 2026-09-30);
+#: at 1 ms it takes ~2 s.  A thread running alone is unaffected (the interval
+#: only matters while another thread is waiting), and one millisecond is still
+#: far above the cost of a switch.
+SERVE_GIL_SWITCH_INTERVAL_SECONDS = 0.001
+
+
 def serve(config: AgendaControlConfig) -> None:
     if config.host not in {"127.0.0.1", "::1"}:
         raise AgendaControlError("Agenda control must bind loopback")
+    sys.setswitchinterval(SERVE_GIL_SWITCH_INTERVAL_SECONDS)
     plane = AgendaControlPlane(
         config, research_task_grant=_research_task_grant(config),
     )
@@ -1405,6 +1688,14 @@ def serve(config: AgendaControlConfig) -> None:
 
 
 def main(argv: Iterable[str] | None = None) -> int:
+    # P3 (2026-09-30): every stderr line of this daemon carries its time.
+    from .stderr_timestamps import timestamped_stderr
+
+    with timestamped_stderr():
+        return _main(argv)
+
+
+def _main(argv: Iterable[str] | None = None) -> int:
     parser = argparse.ArgumentParser(description="Serve the owner-only Dalton Cockpit")
     parser.add_argument("--config", type=Path, required=True)
     args = parser.parse_args(list(argv) if argv is not None else None)
@@ -1417,6 +1708,7 @@ if __name__ == "__main__":  # pragma: no cover
 
 
 __all__ = [
-    "AgendaControlApplication", "AgendaControlConfig", "AgendaControlError",
-    "AgendaControlPlane", "CockpitIntentDispatcher", "serve",
+    "ADMIN_ONLY_COCKPIT_ACTIONS", "AdminRoleRequired", "AgendaControlApplication",
+    "AgendaControlConfig", "AgendaControlError", "AgendaControlPlane",
+    "CockpitIntentDispatcher", "is_admin_path", "serve",
 ]

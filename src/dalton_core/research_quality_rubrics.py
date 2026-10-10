@@ -1035,10 +1035,161 @@ INDUSTRY_FRAMEWORK = Rubric(
 )
 
 
+# --------------------------------------------------------------------------
+# initial_screen under the STRL contract (batch H)
+#
+# The 2026-10-09 diagnosis set the acceptance bar by a human analyst's STRL
+# screen: a stance and a watch price (or an explicit reason there is none),
+# numbers everywhere and each one sourced, our forecast against consensus,
+# valuation as an argued multiple, several kinds of source including the
+# latest call and release, few and bound gaps, no fact told three times.  The
+# review's later batches added the dimensions a regex can carry: issuer
+# attribution, actual-vs-estimate labelling, one-off normalisation, cash
+# bridge consistency, the reasoning lint, and cross-product consistency.
+# A new ref rather than version 3 of ``rubric:initial-screen``: the legacy
+# eight-section screens keep being graded by the standard they were written
+# to, and every score already written binds that hash.
+# --------------------------------------------------------------------------
+
+STRL_SECTIONS: tuple[str, ...] = (
+    "结论与观点", "商业模式与经济性", "行业结构与竞争", "盈利预测 vs consensus",
+    "估值与观察价", "交易角度", "风险与证伪", "跟踪指标", "附录：我们不知道什么",
+)
+#: Thresholds of the deterministic checks, frozen into the rubric's hash.
+STRL_THRESHOLDS: Mapping[str, Any] = MappingProxyType({
+    "sourced_quantitative_statements_total": 15,
+    "sourced_quantitative_statements_per_core_section": 3,
+    "core_sections": ("商业模式与经济性", "盈利预测 vs consensus", "估值与观察价"),
+    "source_kinds_min": 4,
+    "material_missing_max": 2,
+    "fact_sections_max": 2,
+})
+
+
+def _det(criterion_id: str, question: str, evidence: str, zero: str, two: str, four: str,
+         checks: tuple[str, ...]) -> Criterion:
+    return Criterion(criterion_id=criterion_id, question=question, evidence_required=evidence,
+                     anchors=_anchors(zero, two, four), layer="deterministic", checks=checks)
+
+
+INITIAL_SCREEN_STRL = Rubric(
+    rubric_ref="rubric:initial-screen-strl",
+    version=1,
+    title="Initial Screen（STRL 合约）质量评分表",
+    applies_to="mission_deliverable:initial_screen@initial-screen-contract:strl:1",
+    intent=(
+        "以人工分析师 STRL 初筛为基准：先表态、给观察价；数字处处有出处；我们的预测对比一致预期并说明"
+        "差异来自哪条假设；估值是论证过的倍数乘 EPS；来源多样且读了最新纪要与发布稿；缺口少且每条挂"
+        "材料请求；同一事实不在三节里重复；推理不犯已知的九类错误。"
+    ),
+    criteria=(
+        _det("view_and_watch_price", "是否在封闭词表内表态，并给出观察价或明确写出无法给出的原因？",
+             "结论节首段的立场词（看多/看空/中性/观察）与观察价数字或「观察价：暂无法给出（原因）」",
+             "没有立场或没有观察价、也没有原因", "有立场和观察价，但观察价没有算式或原因含糊",
+             "立场明确，观察价 = 倍数 × EPS 有算式；或写明无法给出的原因并列一致预期与卖方目标价",
+             ("stance_and_watch_price",)),
+        _det("quantitative_density", "带出处的量化陈述是否足够，且核心三节各自有数？",
+             "含已溯源数字的句子数：全文 ≥15，商业模式/盈利预测/估值三节各 ≥3",
+             "全文不足 5 句带数", "全文达标但核心节有一节不足 3 句", "全文 ≥15 且三节各 ≥3",
+             ("sourced_quantitative_statements",)),
+        _det("ours_vs_consensus", "是否给出至少一个前瞻年度我们 vs 一致预期的差异 %？",
+             "盈利预测节中同时含「我们」、一致预期与百分比差异的句子，且差异有声明算式",
+             "没有对比一致预期", "有对比但没有差异 % 或没有算式", "FY+1、FY+2 收入与 EPS 都有差异 % 与算式",
+             ("ours_vs_consensus",)),
+        _det("valuation_six_elements", "估值是否具备六要素：倍数、EPS、观察价、现价、隐含空间、倍数理由？",
+             "估值节中的六要素；估值链不可得时的显式原因与参照", "六要素缺三项以上",
+             "缺一到两项", "六要素齐全，倍数理由覆盖历史分位、同业与业务属性",
+             ("valuation_six_elements",)),
+        _det("source_breadth", "来源是否多样（≥4 类），并引用了最新的电话会纪要与发布稿？",
+             "各节 source_refs 的来源类别；材料包输入中最新纪要与发布稿是否被引用",
+             "只有 1–2 类来源", "≥4 类来源但没有引用最新纪要或发布稿", "≥4 类来源且最新纪要、发布稿都被引用",
+             ("source_kind_diversity", "latest_transcript_and_release_cited")),
+        _det("gaps_bound", "「材料缺少」是否不超过 2 处且每处挂材料请求，缺口是否分类？",
+             "正文中「材料缺少」的次数与绑定；gap_items 的 company_not_disclosed / not_acquired 分类",
+             "缺口是主旋律或无请求绑定", "≤2 处但有未绑定或未分类", "≤2 处，全部绑定请求并写已尝试，缺口分类正确",
+             ("material_missing_bound", "gap_classification")),
+        _det("no_restatement", "同一事实是否只出现在不超过两节？",
+             "同一数字（同期间）在多少节正文中出现", "多个事实在三节以上重复", "个别事实出现在三节",
+             "每个事实最多两节", ("fact_repetition",)),
+        _det("substance_and_hygiene", "九节是否都有实质内容，数字是否有元数据、无占位符、按量级显示？",
+             "章节实质检查、未溯源数字、引用残迹、间接占位符、数字元数据与显示取整",
+             "有空节/只有缺口的节或未溯源数字", "实质完整但有占位符或机器精度数字",
+             "全部实质完整，数字带指标/期间/单位/来源并按量级显示",
+             ("required_sections_present", "numbers_without_refs", "residual_citation_artefacts",
+              "indirect_placeholders", "number_display_rounding", "number_metadata")),
+        _det("reasoning_lint", "是否避开九类已知推理错误？",
+             "研究推理 lint 的确定性命中", "多处命中", "一处命中", "无命中",
+             ("reasoning_lint",)),
+        _det("issuer_attribution", "所引材料是否都归属本公司（同业/行业材料明示为同业/行业）？",
+             "source_refs 的 company_ref 与主体一致", "引用了其他公司的材料当作本公司事实",
+             "有未标明归属的外部材料", "全部归属正确", ("issuer_attribution",)),
+        _det("actual_vs_estimate", "前瞻数字是否都标明是我们的估计、一致预期、指引还是卖方预测？",
+             "含前瞻年度（E/FY+1/FY+2）数字的句子是否带来源标签", "多处前瞻数字无标签",
+             "个别无标签", "全部有标签", ("actual_vs_estimate_labelling",)),
+        _det("one_off_normalisation", "提到一次性项目时是否说明正常化口径？",
+             "含一次性/重组/减值字样的节是否同时写调整后/剔除口径", "混用", "部分说明", "全部说明",
+             ("one_off_normalisation",)),
+        _det("cash_bridge_consistency", "现金流陈述是否与利润口径一致并有出处？",
+             "自由现金流/现金转化率句子的数字出处与算式", "现金数字无出处", "有出处无算式",
+             "有出处且转化率有算式", ("cash_bridge_consistency",)),
+        _det("cross_product_consistency", "立场与观察价是否与本所其他产品（论点、争议图、备忘录）一致？",
+             "跨产物一致性记录（batch an 落地前为占位，结果按 not_applicable_yet 发布）",
+             "与本所当前论点方向相反且未说明", "有差异但已说明", "一致或差异有记录",
+             ("cross_product_consistency",)),
+        Criterion(
+            criterion_id="judgement_quality",
+            question="核心判断是否识别关键 driver、说明差异来自哪条假设，并给出可检验的证伪条件？",
+            evidence_required="结论、盈利预测与风险节中的 driver、假设与证伪条件",
+            anchors=_anchors("只有复述，没有判断", "有判断但假设或证伪条件不完整",
+                             "driver 具名、差异的假设可检验、证伪条件可观察"),
+            layer="judge",
+        ),
+    ),
+    grading_notes=(
+        "观点、观察价与交易角度都是本合约要求的内容，不因「给出了观点」扣分（owner 决定 2026-10-09）。",
+        "估值链不可得时写「观察价：暂无法给出（原因）」并列一致预期与卖方目标价，有显式原因即为合格。",
+        "确定性检查的结果直接给出；评审只评 judge 层的标准。",
+        "确定性阈值：全文带出处量化陈述 ≥15，商业模式/盈利预测/估值各 ≥3；来源类别 ≥4；"
+        "「材料缺少」≤2 且每处挂请求；同一事实 ≤2 节。",
+    ),
+)
+
+def _product_rubric(name: str, title: str, question: str, evidence: str) -> Rubric:
+    return Rubric(
+        rubric_ref="rubric:" + name.replace("_", "-"), version=1,
+        title=title, applies_to=name, intent=question,
+        criteria=(
+            _det("substance", "正文是否回答产品要解决的问题？", "必需章节中的实质回答与明确缺口",
+                 "空白或占位正文", "部分章节未形成实质回答", "必需章节有实质回答", ("required_sections_present",)),
+            _det("number_provenance", "每个数字是否有对应来源？", "正文数字与同节来源数字",
+                 "存在无来源数字", "来源不完整", "数字全部有来源", ("numbers_without_refs",)),
+            _det("reasoning_lint", "是否避开九类已知推理错误？", "正文中的推理和所引用资料",
+                 "命中推理错误", "存在未澄清的推理", "没有命中已知推理错误", ("reasoning_lint",)),
+            Criterion(criterion_id="decision_usefulness", question=question,
+                      evidence_required=evidence, layer="judge",
+                      anchors=_anchors("只复述材料或结论没有依据", "回答问题但尚缺具体检验条件",
+                                       "结论、相反证据与下一次检验条件相互对应")),
+        ),
+        grading_notes=("缺少资料必须写明缺口及下一步，不能用无来源数字补齐。",
+                       "确定性检查不等于人工或独立模型质量评分；未执行的评分不显示为通过。"),
+    )
+
+
+DEBATE_MAP = _product_rubric("debate_map", "核心争议质量标准",
+    "多方、空方与本所观点是否回答同一个问题，并明确哪些证据会改变判断？",
+    "双方依据、本所判断、分歧来源与可量化的后续验证")
+INVESTMENT_MEMO = _product_rubric("investment_memo", "投资备忘录质量标准",
+    "投资建议是否由业务机制、盈利假设、估值与风险收益共同支持？",
+    "建议方向与期限、关键经营假设、估值链、反向观点和证伪条件")
+EVENT_JUDGEMENT = _product_rubric("event_judgement", "事件判断质量标准",
+    "是否分清新事实、市场反应与论点变化，并给出匹配证据的判断？",
+    "原始事件日、信息可得日、市场对照、论点方向与下一次检验")
+
 RUBRICS: Mapping[str, Rubric] = MappingProxyType({
     rubric.rubric_ref: rubric
     for rubric in (INITIAL_SCREEN, ASK_ANSWER, COMPANY_DOSSIER, WEEKLY_BRIEF,
-                   CONVICTION_CALL, INDUSTRY_FRAMEWORK)
+                   CONVICTION_CALL, INDUSTRY_FRAMEWORK, INITIAL_SCREEN_STRL,
+                   DEBATE_MAP, INVESTMENT_MEMO, EVENT_JUDGEMENT)
 })
 # The short names the CLI and the golden set use, so nobody has to type
 # "rubric:initial-screen" twice.
@@ -1049,6 +1200,10 @@ RUBRIC_ALIASES: Mapping[str, str] = MappingProxyType({
     "weekly_brief": WEEKLY_BRIEF.rubric_ref,
     "conviction_call": CONVICTION_CALL.rubric_ref,
     "industry_framework": INDUSTRY_FRAMEWORK.rubric_ref,
+    "initial_screen_strl": INITIAL_SCREEN_STRL.rubric_ref,
+    "debate_map": DEBATE_MAP.rubric_ref,
+    "investment_memo": INVESTMENT_MEMO.rubric_ref,
+    "event_judgement": EVENT_JUDGEMENT.rubric_ref,
 })
 # Spellings that resolve but are not the name.  The refs are hyphenated and the
 # short names are not, so the hyphenated form of this one is the mistake a
@@ -1094,6 +1249,9 @@ __all__ = [
     "INDUSTRY_FRAMEWORK",
     "INITIAL_SCREEN",
     "INITIAL_SCREEN_V1",
+    "INITIAL_SCREEN_STRL",
+    "STRL_SECTIONS",
+    "STRL_THRESHOLDS",
     "PASSING_SCORE",
     "RUBRICS",
     "RUBRIC_ALIASES",

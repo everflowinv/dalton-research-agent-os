@@ -93,6 +93,8 @@ def decision(action="no_change", word="NO_CHANGE", **extra):
         "because": "The move was sector-wide and no company news accompanied it.",
         "citations": [],
     }
+    if action == "revise_thesis":
+        body.update(proposed_statement="Demand growth remains possible with weaker evidence.", proposed_confidence="low")
     body.update(extra)
     return body
 
@@ -129,7 +131,7 @@ class JudgementHarness(P14aHarness):
         self.event = record_event(
             self.events, company_ref=ACN, kind="price_move",
             occurred_at="2026-09-02T00:00:00+00:00",
-            source_refs=["market-price-series-version:1"],
+            source_refs=["market-price-series-version:1"] + (["doc-passage:contract-win:0-100:aaaaaaaaaaaa"] if getattr(self, "forecast_evidence", False) else []),
             payload={"as_of": "2026-09-02", "close": "104", "previous_close": "100",
                      "return_percent": "4.0000", "direction": "up",
                      "basket_return_percent": "0.0000",
@@ -689,15 +691,14 @@ class EffectTests(JudgementHarness):
         self.assertEqual(effect["status"], "queued")
         self.assertIn("Wave 2", effect["reason"])
 
-    def test_a_thesis_revision_without_the_grant_is_queued_naming_adr_0007(self):
-        _judged, effect = self.effect(decision(
-            action="revise_thesis", word="THESIS_WEAKENED",
-            citations=[self.event["id"]]))
-        self.assertEqual(effect["status"], "queued")
-        self.assertIn("ADR-0007", effect["reason"])
+    def test_a_thesis_revision_without_a_named_thesis_is_refused(self):
+        with self.assertRaisesRegex(EventJudgementValidationError, "name the current thesis"):
+            validate_judge_output(decision(action="revise_thesis", word="THESIS_WEAKENED",
+                                          citations=[self.event["id"]]), self.context())
 
 
 class ForecastEffectTests(JudgementHarness):
+    forecast_evidence = True
     def setUp(self):
         super().setUp()
         from tests.test_model_forecast_driver import model as forecast_body
@@ -881,7 +882,7 @@ class ThesisCandidateTests(JudgementHarness):
                 judgement_ref="event-judgement:x", thesis=self.thesis(),
                 company_ref=ACN, decision="THESIS_WEAKENED", because="b",
                 evidence_refs=[], falsifier_ref=None, proposed_statement=None,
-                proposed_confidence=None, mission=self.mission, actor_ref=AUTOMATION,
+                proposed_confidence="low", mission=self.mission, actor_ref=AUTOMATION,
             )
 
     def test_a_sixth_decision_word_is_refused_by_contract(self):
@@ -890,7 +891,7 @@ class ThesisCandidateTests(JudgementHarness):
                 judgement_ref="event-judgement:x", thesis=self.thesis(),
                 company_ref=ACN, decision="THESIS_MOSTLY_FINE", because="b",
                 evidence_refs=[self.event["id"]], falsifier_ref=None,
-                proposed_statement=None, proposed_confidence=None,
+                proposed_statement=None, proposed_confidence="low",
                 mission=self.mission, actor_ref=AUTOMATION,
             )
 
@@ -1226,7 +1227,7 @@ class ReflectionLedgerTests(JudgementHarness):
                     "thesis_ref": "thesis:acn", "falsifier_refs": []},
             company_ref=ACN, decision="THESIS_WEAKENED", because="b",
             evidence_refs=[self.event["id"]], falsifier_ref=None,
-            proposed_statement=None, proposed_confidence=None,
+            proposed_statement=None, proposed_confidence="low",
             mission=self.mission, actor_ref=AUTOMATION,
             reflection_ref=recorded["id"],
         )
@@ -1287,6 +1288,7 @@ class ReferenceAndFailClosedTests(JudgementHarness):
 
 
 class RevisionIdempotencyTests(JudgementHarness):
+    forecast_evidence = True
     """S1: an effect that runs before the judgement row must be replayable."""
 
     def setUp(self):

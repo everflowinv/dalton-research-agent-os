@@ -40,6 +40,7 @@ from dalton_core.research_cycle_reflection import (
     narrative,
     policy_suggestions,
     reflection_ref_for,
+    technical_notes,
     work_order_family,
 )
 from dalton_core.research_cycle_reflection_cli import load_tick_summaries, main
@@ -373,31 +374,66 @@ class NarrativeTests(unittest.TestCase):
 
     def test_the_prose_names_the_largest_pool_and_the_table_carries_the_numbers(self):
         rendered = narrative(self.metrics, self.window)
-        self.assertIn("document-extraction", rendered["prose"])
+        # Named for the owner; the family id stays in the table (技术详情).
+        self.assertIn("「文档数据抽取」", rendered["prose"])
+        self.assertNotIn("document-extraction", rendered["prose"])
         self.assertIn("2026-W36", rendered["prose"])
         self.assertEqual(rendered["table"][0]["pool"], "document-extraction")
+        self.assertEqual(rendered["table"][0]["pool_label"], "文档数据抽取")
         self.assertEqual(rendered["table"][0]["cost_usd"], 1.0)
 
     def test_every_sentence_is_a_rendering_of_a_number_in_the_record(self):
         rendered = narrative(self.metrics, self.window)
-        self.assertIn("新登记 2 条", rendered["prose"])
-        self.assertIn("被回答 1 条", rendered["prose"])
-        self.assertIn("退役 1 条", rendered["prose"])
-        self.assertIn(
-            "4 次调度中，3 次所有流程都处于空闲状态。空闲比例为 75%。",
-            rendered["prose"],
-        )
+        self.assertIn("本周新增 2 个", rendered["prose"])
+        self.assertIn("回答了 1 个", rendered["prose"])
+        self.assertIn("1 条早期结论经复核后撤下", rendered["prose"])
+        self.assertIn("后台共运行 4 轮，其中 3 轮没有工作可做（75%）。", rendered["prose"])
 
     def test_an_unavailable_metric_is_said_out_loud_rather_than_skipped(self):
         metrics = compute_metrics(
             self.core, window=self.window, budget=MISSION["budget"], now=NOW,
         )
         rendered = narrative(metrics, self.window)
-        self.assertIn("闲置率不可算", rendered["prose"])
+        self.assertIn("后台空闲比例暂时无法统计", rendered["prose"])
+        # Why, in file and table names, is for 技术详情.
+        self.assertTrue(any("heartbeat.json" in note for note in technical_notes(metrics)))
+        self.assertNotIn("heartbeat", rendered["prose"])
 
     def test_a_partial_feedback_count_says_which_half_it_counted(self):
         rendered = narrative(self.metrics, self.window)
-        self.assertIn("weekly_brief_feedback", rendered["prose"])
+        self.assertIn("只统计到两处反馈记录中的一处", rendered["prose"])
+        self.assertTrue(any("weekly_brief_feedback" in note
+                            for note in technical_notes(self.metrics)))
+
+    def test_a_record_written_in_the_old_words_is_shown_in_the_new_ones(self):
+        from dalton_core.research_cycle_reflection import owner_view
+
+        body = build_reflection(self.core, mission=MISSION, now=NOW, tick_summaries=TICKS)
+        body["narrative"]["prose"] = "占 mission 这一周预算上限……没有已注册 lane 认领它"
+        body["policy_suggestions"] = ["C2 的 budget_pool 应当被写进 work order 的 id"]
+        shown = owner_view(body)
+        self.assertEqual(shown["prose"], narrative(body["metrics"], body["window"])["prose"])
+        self.assertNotIn("mission", shown["prose"])
+        self.assertFalse(any("budget_pool" in item for item in shown["policy_suggestions"]))
+        self.assertTrue(any("budget_pool" in item for item in shown["technical_notes"]))
+        self.assertIsNone(owner_view({"iso_week": "2026-W36"}))
+
+    def test_the_owner_reads_no_internal_names_or_paths(self):
+        # 2026-10-08 inspection DEFECT-06/07.
+        metrics = compute_metrics(
+            self.core, window=self.window, budget=MISSION["budget"], now=NOW,
+        )
+        for values in (self.metrics, metrics):
+            text = "\n".join([
+                narrative(values, self.window)["prose"],
+                *(c["question"] + c["because"] for c in backlog_candidates(values, self.window)),
+                *policy_suggestions(values),
+            ])
+            for word in ("mission", "lane", "Claim", "inquiry", "BoundedPlannerLoop",
+                         "ProbeTemplate", "ad-hoc", "run_once", "heartbeat", "tick",
+                         "stage", "entered", "Ledger", "policy", "budget_pool", "UI"):
+                with self.subTest(word=word):
+                    self.assertNotIn(word, text)
 
 
 class CandidateTests(unittest.TestCase):
@@ -419,12 +455,12 @@ class CandidateTests(unittest.TestCase):
 
     def test_undispatched_inquiries_and_a_stale_checkpoint_each_raise_one(self):
         questions = " ".join(item["question"] for item in backlog_candidates(self.metrics, self.window))
-        self.assertIn("inquiry", questions)
-        self.assertIn("initial_screen", questions)
+        self.assertIn("待核实问题都还没有安排专项研究", questions)
+        self.assertIn("「初步筛选」阶段已经等待审批", questions)
 
     def test_a_half_idle_week_asks_whether_the_lanes_had_nothing_or_could_not_choose(self):
         questions = " ".join(item["question"] for item in backlog_candidates(self.metrics, self.window))
-        self.assertIn("无事可做", questions)
+        self.assertIn("没有工作可做", questions)
 
     def test_the_list_is_bounded(self):
         self.assertLessEqual(len(backlog_candidates(self.metrics, self.window)),
@@ -436,7 +472,10 @@ class CandidateTests(unittest.TestCase):
         for item in suggestions:
             with self.subTest(suggestion=item[:30]):
                 self.assertIsInstance(item, str)
-        self.assertTrue(any("budget_pool" in item for item in suggestions))
+        self.assertTrue(any("预算不是限制因素" in item for item in suggestions))
+        # The engineering ones are notes for whoever builds the system.
+        self.assertTrue(any("budget_pool" in item for item in technical_notes(self.metrics)))
+        self.assertFalse(any("budget_pool" in item for item in suggestions))
 
 
 class AuthorityTests(unittest.TestCase):
@@ -677,9 +716,10 @@ class FreezeTests(unittest.TestCase):
         core = two_week_core()
         self.addCleanup(core.close)
         body = build_reflection(core, mission=MISSION, now=NOW, tick_summaries=TICKS)
-        self.assertIn("不写 Ledger", body["authority_note"])
-        self.assertIn("不改 policy", body["authority_note"])
-        self.assertIn("不登记问题", body["authority_note"])
+        self.assertIn("只做统计", body["authority_note"])
+        self.assertIn("不会修改任何研究结论、设置或问题清单", body["authority_note"])
+        self.assertIn("确认后才会执行", body["authority_note"])
+        self.assertTrue(body["technical_notes"])
 
     def test_the_inputs_hash_covers_the_metrics_and_the_window(self):
         core = two_week_core()

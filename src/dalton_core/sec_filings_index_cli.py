@@ -248,7 +248,10 @@ def main(argv: list[str] | None = None) -> int:
         print("--as-of must be YYYY-MM-DD", file=sys.stderr)
         return 1
     governance = load_connector_governance(args.governance)
-    plan = load_discovery_plan(args.discovery_plan)
+    # The spec set is code-owned (``sec_plan_specs``): the child runs the same
+    # rendered plan the coordinator and launcher do.
+    from .alphaengine_query_forms import load_effective_discovery_plan
+    plan = load_effective_discovery_plan(args.discovery_plan)
     summary = run_discovery(
         state_dir=args.state_dir,
         governance=governance,

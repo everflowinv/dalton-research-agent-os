@@ -104,9 +104,14 @@ class CoordinatorTests(unittest.TestCase):
         self.assertEqual(
             set(signature),
             {"documents", "reviews_open", "claims", "figures", "metrics",
-             "mission_versions", "dossier_feedback", "document_versions", "document_research_feedback"})
+             "mission_versions", "dossier_feedback", "document_versions", "document_research_feedback",
+             "document_research_settlement", "reflection_requests", "followup_decisions",
+             "backlog_versions", "backlog_events"})
         self.assertTrue(all(isinstance(v, int) for key, v in signature.items()
-                            if key not in {"dossier_feedback", "document_versions", "document_research_feedback"}))
+                            if key not in {"dossier_feedback", "document_versions", "document_research_feedback",
+                                           "document_research_settlement", "reflection_requests", "followup_decisions",
+             "backlog_versions", "backlog_events"}))
+        self.assertEqual(len(signature["document_research_settlement"]), 64)
         self.assertEqual(len(signature["dossier_feedback"]), 64)
         self.assertEqual(len(signature["document_versions"]), 64)
 

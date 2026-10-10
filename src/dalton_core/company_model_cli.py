@@ -914,6 +914,20 @@ def run_model_spec(
             # asked for already does. Both are "nothing to decide".
             summary.update({"status": "idle", "spec_status": "nothing_to_decide"})
             return summary
+        from .sec_filing_units import prepare_model_unit_inputs
+        unit_inputs = prepare_model_unit_inputs(missions, state_dir, chosen)
+        if unit_inputs["unresolved"]:
+            summary.update({"status": "succeeded", "spec_status": "refused",
+                            "company_ref": chosen, "state_hash": state["state_hash"],
+                            "unit_material_gaps": unit_inputs["unresolved"],
+                            "failure_reason": "已申报数字仍含未解析的原始单位标识；已请求对应 SEC 原文，补齐精确 XML 单位证明后再起草；本次不调用模型。"})
+            return summary
+        if unit_inputs["refreshed"]:
+            state = build_company_model_state(
+                missions, chosen, ticker=next((member.get("ticker") for member in mission["universe"] if member["company_ref"] == chosen), None),
+                industry_classification=filed_classifications(store).get(chosen),
+                numeric_context_policy=numeric_policy, prompt_byte_limit=prompt_byte_limit,
+                financial_note_context=note_context.projection(chosen))
         if config_path is not None and raw_model_config is None:
             # Preserve the no-work fast path above. A selected paid run still
             # requires the configured file and surfaces its absence exactly.
@@ -1081,6 +1095,9 @@ def run_model_spec(
                 "pre_persistence_validation": "refused",
             })
             return summary
+        if state.get("model_redraft_context"):
+            from .research_followup_automation import FollowupAutomationAuthority
+            summary["redraft_input_binding"] = FollowupAutomationAuthority(store).bind_spec(stored, state)
         financial_structure = financial_validation["financial_structure"]
         financial_replay = financial_validation["financial_replay"]
         summary["pre_persistence_validation"] = (

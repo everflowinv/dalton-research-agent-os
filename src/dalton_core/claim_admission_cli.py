@@ -39,6 +39,8 @@ from the spool, so its answer is what admission would do today:
 a reinstatement can still undo it.  ``--from-replay`` recomputes the
 selection and refuses to act unless it hashes to ``--expect-selection``, the
 hash the dry run printed: what is retired is exactly what was reviewed.
+A named list (``--claim-version-ref``) is held to ``--expect-selection`` as
+well when it is given (the hash of the refs not yet retired).
 """
 
 from __future__ import annotations
@@ -276,6 +278,14 @@ def retire(state: Path, *, claim_version_refs: Iterable[str] = (),
             connection.close()
         targets = [item for item in targets if item[0] not in retired]
         digest = selection_hash(item[0] for item in targets)
+        # 2026-09-29: a named list is held to its reviewed hash too, when one
+        # is given -- before, --expect-selection was read only with
+        # --from-replay and silently ignored here.  A Claim of the list already
+        # retired (by the backfill, or a half-finished earlier apply) changes
+        # the hash, so the owner re-reads the dry run before acting again.
+        if expect_selection is not None and expect_selection != digest:
+            raise SystemExit(
+                f"the selection changed since it was reviewed: {digest} != {expect_selection}")
     preview = [{"claim_version_ref": ref, "statement": statement, "checks": names}
                for ref, _hash, statement, names in targets]
     if not apply:

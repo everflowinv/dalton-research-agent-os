@@ -31,6 +31,8 @@ FIELD_LABELS = {
     'operating_income_share': '营业利润占比',
     'quarterly_growth': '季度环比增速',
     'share_of_line': '占对应科目的比例',
+    'rnd': '研发费用', 'sga': '销售、一般及管理费用', 'nci': '少数股东损益',
+    'other_income': '其他收益',
 }
 CONCEPT_LABELS = {
     'us-gaap:NetCashProvidedByUsedInOperatingActivities': '经营活动产生的现金流量净额',
@@ -68,6 +70,14 @@ ROLE_LABELS = {
     'asset-sale-result': '资产出售损益',
     'cost-of-revenue': '营业成本',
     'net-income': '净利润',
+    'cost-of-services': '服务成本',
+    'business-optimization': '业务优化费用',
+    'total-operating-expenses': '经营费用合计',
+    'loss-on-sale': '业务出售损失',
+    'fx-loss': '汇兑损失',
+    'gain-on-disposition': '业务处置收益',
+    'g-and-a': '一般及管理费用',
+    'd-and-a': '折旧与摊销',
 }
 CHECK_LABELS = {
     'direction_consistency': '收入、成本与利润的变动方向',
@@ -88,11 +98,165 @@ REASON_LABELS = {
     'this output rests on no solved quantity': '这项结果不依赖数值求解，无需检查求解范围。',
 }
 
+# 2026-10-08 (DEFECT-02): a statement line's name is structured metadata, not
+# prose.  The model table printed 「正文正在检查文字表达，完成后会显示。」 in the
+# label column whenever a filer's English line name had no reviewed
+# translation.  Line names are shown from this table (the filer's usual
+# English line names, by meaning), else the concept's Chinese account name,
+# else the line's own role, else the name as filed -- never the prose gate.
+LINE_LABELS = {
+    'revenue': '营业收入', 'revenues': '营业收入', 'total revenues': '营业收入',
+    'net revenues': '营业收入', 'total net sales': '营业收入', 'net sales': '营业收入',
+    'cost of revenue': '营业成本', 'cost of revenues': '营业成本',
+    'cost of sales': '营业成本', 'cost of services': '服务成本', 'costs of services': '服务成本',
+    'cost of revenues excl. d&a': '营业成本（不含折旧摊销）',
+    'cost of revenue excl. d&a': '营业成本（不含折旧摊销）',
+    'gross profit': '毛利润', 'gross margin': '毛利润',
+    'research and development': '研发费用', 'research and development expense': '研发费用',
+    'technology and development': '技术与开发费用', 'technology and infrastructure': '技术与基础设施费用',
+    'sales and marketing': '销售与营销费用', 'marketing and sales': '销售与营销费用',
+    'marketing': '营销费用', 'fulfillment': '履约费用',
+    'general and administrative': '一般及管理费用', 'general and administrative costs': '一般及管理费用',
+    'general and administrative expense': '一般及管理费用',
+    'sg&a': '销售、一般及管理费用', 'selling, general and administrative': '销售、一般及管理费用',
+    'selling, general and administrative expense': '销售、一般及管理费用',
+    'business optimization costs': '业务优化费用', 'restructuring costs': '重组费用',
+    'restructuring charges': '重组费用',
+    'depreciation and amortization': '折旧与摊销',
+    'total operating expenses': '经营费用合计', 'total costs and expenses': '成本与费用合计',
+    'operating income': '营业利润', 'income from operations': '营业利润',
+    'operating income (loss)': '营业利润',
+    'interest income': '利息收入', 'interest expense': '利息费用',
+    'other income (expense), net': '其他收益（费用）净额', 'other income, net': '其他收益净额',
+    'other income (expense)': '其他收益（费用）',
+    'interest and other income (expense), net': '利息及其他收益（费用）净额',
+    'interest and other income (loss), net': '利息及其他收益（损失）净额',
+    'foreign exchange loss': '汇兑损失', 'foreign exchange gain (loss)': '汇兑损益',
+    'loss on sale of business': '业务出售损失', 'gain on disposition of businesses': '业务处置收益',
+    'income before income taxes': '税前利润', 'income before provision for income taxes': '税前利润',
+    'income tax expense': '所得税费用', 'provision for income taxes': '所得税费用',
+    'provision (benefit) for income taxes': '所得税费用', 'income taxes': '所得税费用',
+    'net income': '净利润', 'net income (loss)': '净利润',
+    'net income attributable to nci': '少数股东损益', 'nci – other': '其他少数股东损益',
+    'nci - other': '其他少数股东损益',
+    'diluted weighted-average shares': '摊薄加权平均股数',
+    'diluted weighted average shares': '摊薄加权平均股数',
+    'diluted eps': '摊薄每股收益', 'diluted earnings per share': '摊薄每股收益',
+    'basic eps': '基本每股收益',
+    'operating cash flow': '经营现金流', 'net cash provided by operating activities': '经营现金流',
+    'capital expenditure': '资本开支', 'capital expenditures': '资本开支',
+    'purchases of property and equipment': '资本开支', 'free cash flow': '自由现金流',
+}
+
+
+def statement_line_label(row: Mapping[str, Any],
+                         reviewed: Callable[[str], str | None] | None = None) -> str:
+    """The Chinese name of one model line (driver or result); never gated.
+
+    ``reviewed`` returns a reviewed translation (or native Chinese) for a
+    label, else ``None``.  Order: reviewed text, the line-name table, the
+    filed concept's Chinese account name, the line's role from its ref, the
+    name as filed.
+    """
+
+    raw = str(row.get('label') or row.get('ref') or '')
+    if reviewed is not None:
+        shown = reviewed(raw)
+        if shown:
+            return shown
+    native = native_chinese_model_text(raw)
+    if native is not None:
+        return native
+    key = re.sub(r'\s+', ' ', raw.strip().casefold())
+    if key in LINE_LABELS:
+        return LINE_LABELS[key]
+    concept = str(row.get('concept') or '')
+    ref = str(row.get('ref') or '')
+    if not concept and ref.startswith('concept:'):
+        concept = ref.split(':', 1)[1]
+    name = concept_account_label(concept)
+    if name:
+        return name
+    if ref.startswith(('result:', 'row:', 'driver:')):
+        parts = ref.split(':')
+        if len(parts) > 2 and parts[2] in ROLE_LABELS:
+            return ROLE_LABELS[parts[2]]
+        if parts[1] in FIELD_LABELS and len(parts) == 2:
+            return FIELD_LABELS[parts[1]]
+    return raw
+
+
+def concept_account_label(concept: Any) -> str | None:
+    """A filed XBRL concept's Chinese account name, or ``None`` if unknown."""
+
+    text = str(concept or '').strip()
+    if not text:
+        return None
+    if text in CONCEPT_LABELS:
+        return CONCEPT_LABELS[text]
+    from .quantitative_claim_promotion import CONCEPT_METRICS
+    if text in CONCEPT_METRICS:
+        return CONCEPT_METRICS[text][1]
+    return XBRL_ACCOUNT_LABELS.get(text)
+
+
+# Filed concepts outside the promotion table that the cockpit shows by name
+# (sources, model lines).  Unknown concepts keep their id under 技术详情.
+XBRL_ACCOUNT_LABELS = {
+    'us-gaap:CostOfGoodsAndServicesSold': '营业成本',
+    'us-gaap:SellingAndMarketingExpense': '销售与营销费用',
+    'us-gaap:GeneralAndAdministrativeExpense': '一般及管理费用',
+    'us-gaap:RestructuringSettlementAndImpairmentProvisions': '重组、和解及减值费用',
+    'us-gaap:RestructuringCharges': '重组费用',
+    'us-gaap:CostsAndExpenses': '成本与费用合计',
+    'us-gaap:OperatingExpenses': '经营费用合计',
+    'us-gaap:InvestmentIncomeInterest': '利息收入',
+    'us-gaap:InterestIncomeOperating': '利息收入',
+    'us-gaap:InterestExpense': '利息费用',
+    'us-gaap:InterestExpenseNonoperating': '利息费用',
+    'us-gaap:OtherNonoperatingIncomeExpense': '其他营业外收益（费用）',
+    'us-gaap:NonoperatingIncomeExpense': '营业外收益（费用）净额',
+    'us-gaap:NonoperatingGainsLosses': '营业外损益',
+    'us-gaap:OtherOperatingIncomeExpenseNet': '其他经营收益净额',
+    'us-gaap:IncomeLossFromContinuingOperationsBeforeIncomeTaxesExtraordinaryItemsNoncontrollingInterest': '税前利润',
+    'us-gaap:IncomeTaxExpenseBenefit': '所得税费用',
+    'us-gaap:NetIncomeLossAttributableToNoncontrollingInterest': '少数股东损益',
+    'us-gaap:NoncontrollingInterestInNetIncomeLossOtherNoncontrollingInterestsNonredeemable': '其他少数股东损益',
+    'us-gaap:NoncontrollingInterestInNetIncomeLossOtherNoncontrollingInterestsRedeemable': '可赎回少数股东损益',
+    'us-gaap:DepreciationAndAmortization': '折旧与摊销',
+    'us-gaap:DepreciationDepletionAndAmortization': '折旧、损耗与摊销',
+    'us-gaap:GainLossOnSaleOfBusiness': '业务出售损益',
+    'us-gaap:ForeignCurrencyTransactionGainLossBeforeTax': '汇兑损益',
+    'us-gaap:WeightedAverageNumberOfDilutedSharesOutstanding': '摊薄加权平均股数',
+    'us-gaap:WeightedAverageNumberOfSharesOutstandingBasic': '基本加权平均股数',
+    'us-gaap:PaymentsToAcquireProductiveAssets': '购置生产性资产支付的现金',
+    'us-gaap:PaymentsOfDividendsCommonStock': '支付普通股股利',
+    'us-gaap:PaymentsOfDividends': '支付股利',
+    'us-gaap:LongTermDebt': '长期债务',
+    'us-gaap:LongTermDebtNoncurrent': '长期债务（非流动）',
+    'us-gaap:CashAndCashEquivalentsAtCarryingValue': '现金及现金等价物',
+    'us-gaap:Assets': '总资产', 'us-gaap:Liabilities': '总负债',
+    'us-gaap:StockholdersEquity': '股东权益',
+    'us-gaap:OperatingIncomeLoss': '营业利润',
+    'us-gaap:ShareBasedCompensation': '股份支付费用',
+    'us-gaap:AllocatedShareBasedCompensationExpense': '股份支付费用',
+    'us-gaap:RevenueRemainingPerformanceObligation': '剩余履约义务',
+    'us-gaap:ContractWithCustomerLiability': '合同负债',
+    'us-gaap:AccountsReceivableNetCurrent': '应收账款净额',
+    'us-gaap:Goodwill': '商誉',
+    'dei:EntityCommonStockSharesOutstanding': '已发行普通股股数',
+}
+
+
 def field_label(value: Any, translate: Callable[[str], str] | None = None) -> str:
     raw = str(value or '')
     key = raw.strip().casefold().replace(' ', '_')
     if raw in FIELD_LABELS or key in FIELD_LABELS:
         return FIELD_LABELS.get(raw, FIELD_LABELS.get(key, raw))
+    if raw in ROLE_LABELS:
+        return ROLE_LABELS[raw]
+    if key.replace('-', '_') in FIELD_LABELS:
+        return FIELD_LABELS[key.replace('-', '_')]
     if raw.startswith(('result:', 'row:', 'driver:')):
         key = raw.split(':', 2)[1]
         return FIELD_LABELS.get(key, '模型项目（标识见技术详情）')
@@ -114,6 +278,14 @@ def model_metadata_text(value: Any) -> str:
                       f'{field_label(match.group(2))}结构，保持不变',
         text,
     )
+    text = re.sub(
+        r'the average share of revenue over the (\d+) quarters filed between '
+        r'(\d{4}-\d{2}-\d{2}) and (\d{4}-\d{2}-\d{2}) \((-?[\d.]+%)\), '
+        r'carried forward against revenue by the cash-flow companion',
+        lambda match: f'沿用 {match.group(2)} 至 {match.group(3)} 已披露 {match.group(1)} '
+                      f'个季度占营业收入的平均比例（{match.group(4)}），按营业收入外推',
+        text,
+    )
     fixed_notes = {
         'the specification names no filed counterpart for this line':
             '尚未关联这项指标的历史披露数据',
@@ -127,8 +299,6 @@ def model_metadata_text(value: Any) -> str:
             '现有财务报表中没有这项披露数据',
         'this concept appears in more than one statement':
             '这项披露数据同时出现在多张报表中，暂不用于预测计算',
-        '本行为稀释每股收益（Diluted EPS）科目，为单独标注的小值指标。':
-            '摊薄每股收益',
         'Total costs and expenses（成本与费用合计）': '成本与费用合计',
         'Costs of services excluding D&A and restructuring（服务成本，不含折旧摊销及重组费用）':
             '服务成本（不含折旧摊销及重组费用）',
@@ -143,6 +313,10 @@ def model_metadata_text(value: Any) -> str:
     }
     for source, replacement in fixed_notes.items():
         text = text.replace(source, replacement)
+    # Batch am: any 「本行为X（Y）科目…」 sentence a translator made of a label.
+    from .financial_display import strip_label_filler
+
+    text = strip_label_filler(text)
     text = re.sub(
         r"(\d+) specification rows split this filed line; the total is forecast and the split is not filed",
         lambda match: f"模型将该科目拆成{match.group(1)}项；预测按合计数计算，尚无各分项的披露数据",
@@ -191,11 +365,16 @@ def native_chinese_model_text(value: Any) -> str | None:
 
 
 def readiness_labels(record: Mapping[str, Any], readiness: Mapping[str, Any],
-                     translate: Callable[[str], str]) -> dict[str, Any]:
+                     translate: Callable[[str], str], *,
+                     line_label: Callable[[Mapping[str, Any]], str] | None = None,
+                     ) -> dict[str, Any]:
     labels = {}
     for name in ('drivers', 'results'):
         for row in record.get(name) or []:
             ref = str(row['ref'])
+            if line_label is not None:
+                labels[ref] = line_label(row)
+                continue
             raw_label = row.get('label') or ref
             registered = field_label(raw_label)
             shown = registered if registered != str(raw_label) else field_label(raw_label, translate)
@@ -243,7 +422,9 @@ def present_invariants(values: dict[str, dict[str, Any]]) -> dict[str, dict[str,
 # back, until when, and why.  Read-only; the page has no button here, because a
 # cooldown is not a setting -- it expires, or the owner changes the chain.
 COOLDOWN_REASON_LABELS = {
+    'provider_billing': '供应商账户余额不足（HTTP 402），充值后自动恢复',
     'provider_rate_limited': '连续限流（HTTP 429）',
+    'provider_unavailable': '供应商或网关不出结果（空回复，常见于 CLI 用量上限）',
     'provider_failure_streak': '连续多次供应商失败',
     'probe_failed': '冷却到期后的探测调用又失败',
 }
@@ -290,6 +471,14 @@ def cooldown_note(cooldown: Mapping[str, Any] | None) -> str | None:
     if not isinstance(cooldown, Mapping) or not cooldown:
         return None
     reason = COOLDOWN_REASON_LABELS.get(str(cooldown.get('reason')), '供应商连续失败')
+    code = cooldown.get('failure_code')
+    if (isinstance(code, str) and code
+            and cooldown.get('reason') not in {'provider_billing', 'provider_rate_limited'}):
+        # 2026-10-07: "the probe failed again" fourteen times said nothing
+        # about *what* failed; the broker's code, in Chinese, is the half of
+        # the reason that tells the owner what to do.
+        from .model_profile_health import failure_code_label
+        reason = f'{reason}（{failure_code_label(code)}）'
     clock = _cooldown_clock(cooldown.get('until'))
     streak = cooldown.get('streak')
     repeat = ('' if not isinstance(streak, int) or streak < 2
@@ -334,3 +523,35 @@ def purpose_cooldown_note(chain: Any, index: Mapping[str, Mapping[str, Any]],
                 '冷却结束后会自动恢复，也可以在这一行改选其他模型。')
     following = (display_name(remaining[0]) if display_name else remaining[0])
     return f'{shown} 正在供应商冷却中，这一环暂时由 {following} 承接。'
+
+
+def cooldown_view(cooldown: Mapping[str, Any] | None,
+                  display_name: Callable[[str], str] | None = None) -> dict[str, Any] | None:
+    """One cooled profile as the model page marks it wherever it appears.
+
+    The same fields for every chain, the picker and the routing card, so the
+    page can put one badge on one model id without knowing which chain it is
+    drawing: since when, until when, why (reason and the broker's code in
+    Chinese) and the line already used under the stage.
+    """
+
+    if not isinstance(cooldown, Mapping) or not cooldown.get('profile_id'):
+        return None
+    from .model_profile_health import failure_code_label
+
+    profile_id = str(cooldown['profile_id'])
+    return {
+        'profile_id': profile_id,
+        'display_name': display_name(profile_id) if display_name else profile_id,
+        'reason': cooldown.get('reason'),
+        'reason_label': COOLDOWN_REASON_LABELS.get(str(cooldown.get('reason')), '供应商连续失败'),
+        'failure_code': cooldown.get('failure_code'),
+        'failure_code_label': failure_code_label(cooldown.get('failure_code')),
+        'started_at': cooldown.get('started_at'),
+        'until': cooldown.get('until'),
+        'until_label': _cooldown_clock(cooldown.get('until')),
+        'streak': cooldown.get('streak'),
+        'badge': '冷却中' + (f'，至 {_cooldown_clock(cooldown.get("until"))}'
+                            if _cooldown_clock(cooldown.get('until')) else ''),
+        'note': cooldown_note(cooldown),
+    }

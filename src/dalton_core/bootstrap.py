@@ -66,16 +66,26 @@ SCHEMA_DATABASES: tuple[tuple[str, str | None], ...] = (
     ("claim_review_schema.sql", None),
     # 2026-09-25: retired industry-level Claims kept as industry evidence.
     ("claim_industry_reattribution_schema.sql", None),
+    # 2026-10-09 (ADR-0017): products whose current version cites a Claim
+    # retired as another issuer's, for the next batched redraft.
+    ("product_rewrite_flags_schema.sql", None),
+    # 2026-10-09 (batch an): cross-product conflicts, their resolution
+    # events and the company-ref alias table.
+    ("product_consistency_schema.sql", None),
     # 2026-09-24: independent support verdicts on qualitative statements.
     ("claim_support_schema.sql", None),
     ("company_dossier_schema.sql", None),
     ("connector_schema.sql", None),
     ("consensus_estimate_schema.sql", None),
     ("conviction_call_schema.sql", None),
+    # ADR-0013: the owner-published Conviction v2 policy versions.
+    ("conviction_policy_schema.sql", None),
     ("coverage_mission_schema.sql", None),
     ("document_read_completion_schema.sql", None),
     # C2-1: the windows the extraction lane has proved it cannot read.
     ("document_extraction_window_schema.sql", None),
+    # 2026-09-29: a document read and admitted, remembered past its review.
+    ("document_admission_schema.sql", None),
     ("credential_authority_schema.sql", None),
     ("debate_map_schema.sql", None),
     ("deep_insight_gate_schema.sql", None),
@@ -100,6 +110,7 @@ SCHEMA_DATABASES: tuple[tuple[str, str | None], ...] = (
     ("quantitative_claim_promotion_schema.sql", None),
     ("research_constitution_schema.sql", None),
     ("research_cycle_reflection_schema.sql", None),
+    ("research_followup_automation_schema.sql", None),
     ("research_doctrine_schema.sql", None),
     ("research_event_schema.sql", None),
     ("research_plan_schema.sql", None),
@@ -112,16 +123,38 @@ SCHEMA_DATABASES: tuple[tuple[str, str | None], ...] = (
     ("thesis_impact_schema.sql", None),
     ("thesis_revision_schema.sql", None),
     ("tracking_cadence_schema.sql", None),
+    # ADR-0012: structured scenario sets, versions, decisions, observations.
+    ("company_scenario_schema.sql", None),
+    # ADR-0014: income bridges, per-share series, return bridges, source tags.
+    ("return_attribution_schema.sql", None),
+    # ADR-0015: earnings-release reads and the preliminary actuals they produced.
+    ("earnings_release_schema.sql", None),
+    # Batch B (2026-10-09): release outlooks, consensus period relabels and
+    # broker estimate-table figures -- all append-only.
+    ("earnings_release_outlook_schema.sql", None),
+    ("financial_period_schema.sql", None),
+    ("street_estimate_tables_schema.sql", None),
+    # 2026-10-06: the owner's lever receipts (pause, stop, emergency stop, ...).
+    ("owner_lever_schema.sql", None),
+    # 2026-10-09: the owner's acknowledgements of 待我处理 cards.
+    ("needs_human_ack_schema.sql", None),
+    # 2026-10-07: the fund Excel template book and the owner's choices; the
+    # built-in template row is seeded by FundXlsxTemplateRegistry on first use.
+    ("fund_xlsx_template_registry_schema.sql", None),
     ("transcript_correction_schema.sql", None),
     ("transcript_polish_schema.sql", None),
     ("valuation_snapshot_schema.sql", None),
     ("weekly_brief_schema.sql", None),
+    ("weekly_brief_progress_schema.sql", None),
     ("zero_base_review_schema.sql", None),
     ("scheduler_schema.sql", "scheduler.sqlite"),
     ("model_router_schema.sql", "model-router.sqlite"),
     ("dashboard_schema.sql", "dashboard-projection.sqlite"),
     ("capability_catalog_schema.sql", "catalog.sqlite"),
     ("document_index_schema.sql", "document-index.sqlite"),
+    # Batch E: the material acquisition service's tables beside the
+    # MaterialRequest ledger (which creates its own on first write).
+    ("material_acquisition_schema.sql", "material-requests.sqlite"),
     ("human_intent_schema.sql", "human-intent.sqlite"),
     ("openclaw_exporter_schema.sql", "openclaw-exporter.sqlite"),
     ("research_coordinator_schema.sql", "research-coordinator.sqlite"),

@@ -143,9 +143,22 @@ def build_preview_context(
         gaps.append(f"{GAP_MARKER}：consensus {consensus['reason']}")
     if not guidance["available"]:
         gaps.append(f"{GAP_MARKER}：guidance {guidance['reason']}")
+    from .product_consistency import upstream_bindings
+
+    # Batch an: the exact upstream versions this preview's gap statements
+    # rest on -- our model version and every consensus version the street
+    # rows came from -- so a newer model makes the preview stale, not current.
+    bindings = upstream_bindings(
+        [{"ref": (model_version or {}).get("id"), "role": "model",
+          "content_hash": (model_version or {}).get("content_hash")}]
+        + [{"ref": ref, "role": "consensus"} for ref in consensus.get("refs") or ()
+           if isinstance(ref, str)]
+        + [{"ref": ref, "role": "consensus"} for row in consensus.get("rows") or ()
+           for ref in (row.get("refs") or ()) if isinstance(ref, str)])
     return {
         "schema_version": "0.1",
         "window": "preview",
+        "upstream_bindings": bindings,
         "occurrence": dict(occurrence),
         "company_ref": occurrence["company_ref"],
         "mission_ref": mission["id"],
@@ -296,6 +309,8 @@ def _signal_rows(
                 f"{name} names a thesis that was not shown: {row['thesis_ref']}"
             )
         refs = _ref_list(item["refs"], f"{name}[].refs")
+        if not refs:
+            raise EarningsSeasonValidationError(f"{name} observation has no source citation")
         stray = sorted(set(refs) - permitted)
         if stray:
             raise EarningsSeasonValidationError(
@@ -428,6 +443,12 @@ def document_summary(context: Mapping[str, Any]) -> str:
         f"（{occurrence.get('date_confidence')}）",
         f"期间 {context.get('period_end') or '未知'}",
     ]
+    bound = [item["ref"] for item in context.get("upstream_bindings") or ()
+             if isinstance(item, Mapping) and item.get("ref")]
+    if bound:
+        # Batch an: read back by product_consistency (the deliverable's
+        # sections are a closed shape, so the binding rides in the summary).
+        parts.append("上游版本 " + " ".join(f"[{ref}]" for ref in bound))
     if context.get("model_version_ref"):
         parts.append(f"我们的模型 [{context['model_version_ref']}]")
     for row in context.get("forecast") or ():
@@ -659,7 +680,7 @@ def publish_preview(
         "numbers": list(context.get("numbers") or ()),
         "gaps": list(context.get("gaps") or ()),
     }
-    return deliverables.publish(
+    result = deliverables.publish(
         kind=PREVIEW_KIND,
         subject_ref=occurrence["company_ref"],
         mission=mission,
@@ -674,6 +695,9 @@ def publish_preview(
         actor_ref=actor_ref,
         idempotency_key=idempotency_key_for("preview", occurrence),
     )
+    from .research_lifecycle import PreviewObservationAuthority
+    PreviewObservationAuthority(deliverables.store).record(result, context, draft)
+    return result
 
 
 __all__ = [

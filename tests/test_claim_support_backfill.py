@@ -246,7 +246,7 @@ class AuthorityTests(BackfillHarness):
         challenge = self.authority.challenge(
             claim_version_ref=claim["ref"], claim_version_hash=claim["hash"],
             reason_code=SUPPORT_REASON, rationale="said so", actor_ref=AUTOMATION)
-        self.assertEqual(challenge["detector_ref"], "claim-verifier:citation-support:v4")
+        self.assertEqual(challenge["detector_ref"], "claim-verifier:citation-support:v5")
         with self.assertRaises(ClaimRetirementConflict):
             self.authority.decide(challenge_ref=challenge["id"], challenge_hash=challenge["content_hash"],
                                   decision="retired", actor_ref=AUTOMATION, rationale="said so")
@@ -271,7 +271,10 @@ class MigrationTests(unittest.TestCase):
         store = DaltonStore(":memory:")
         self.addCleanup(store.close)
         schema = (Path(dalton_core.__file__).parent / "claim_retirement_schema.sql").read_text(encoding="utf-8")
-        old = schema.replace(",\n        'citation_support_rejected'\n    ", "\n    ")
+        # A table from before both later reasons (2026-09-24 support verdicts,
+        # 2026-10-09 issuer misattribution).
+        old = schema.replace(",\n        'citation_support_rejected',\n        'issuer_misattribution'\n    ",
+                             "\n    ")
         self.assertNotIn("citation_support_rejected", old)
         claim = {"id": "claim-version:" + "1" * 64, "claim_ref": "claim:test:1",
                  "subject_ref": EPAM, "normalized_statement": "x"}
@@ -301,6 +304,7 @@ class MigrationTests(unittest.TestCase):
         sql = store.connection.execute(
             "SELECT sql FROM sqlite_master WHERE name='claim_retirement_challenges'").fetchone()[0]
         self.assertIn(SUPPORT_REASON, sql)
+        self.assertIn("issuer_misattribution", sql)
         self.assertEqual(store.connection.execute(
             "SELECT challenge_id FROM claim_retirement_challenges").fetchall()[0][0], "challenge:1")
         self.assertEqual(store.connection.execute("PRAGMA foreign_key_check").fetchall(), [])
@@ -380,7 +384,7 @@ class SupportRereviewTests(BackfillHarness):
         record = self.authority.reinstatements()[0]
         self.assertEqual((record["reason_code"], record["rule_ref"], record["actor_ref"]),
                          ("citation_support_upheld_under_current_rule",
-                          "claim-rereview:citation-support:v4", AUTOMATION))
+                          "claim-rereview:citation-support:v5", AUTOMATION))
         # Once per contract: nothing is asked or written again.
         again = self.backfill().run_once(max_items=10)
         self.assertEqual((again["rereview"]["candidates"], again["rereview"]["asked"],

@@ -13,7 +13,7 @@ const REQUIRED_REQUEST_KEYS = new Set([
   "maxTokens",
   "timeoutMs",
 ]);
-const OPTIONAL_REQUEST_KEYS = new Set(["replayOnly", "requiredControls", "queueWaitMs"]);
+const OPTIONAL_REQUEST_KEYS = new Set(["replayOnly", "requiredControls", "queueWaitMs", "controls"]);
 const REQUEST_KEYS = new Set([...REQUIRED_REQUEST_KEYS, ...OPTIONAL_REQUEST_KEYS]);
 const REQUIRED_CONTROL_KEYS = new Set([
   "maxInputTokens",
@@ -26,6 +26,7 @@ const OPTIONAL_CONTROL_KEYS = new Set(["thinkingLevel"]);
 const CONTROL_KEYS = new Set([...REQUIRED_CONTROL_KEYS, ...OPTIONAL_CONTROL_KEYS]);
 const STRUCTURED_OUTPUT_KEYS = new Set(["schemaName", "schemaHash", "jsonSchema"]);
 const THINKING_LEVELS = new Set(["low"]);
+const GENERAL_THINKING_LEVELS = new Set(["off", "minimal", "low", "medium", "high"]);
 
 export class ProtocolError extends Error {
   constructor(code, message) {
@@ -244,6 +245,15 @@ export function validateRequest(input, maxFrameBytes) {
     throw new ProtocolError("INVALID_REQUEST", "queueWaitMs must be a non-negative safe integer");
   }
   const maxTokens = positiveInteger(input.maxTokens, "maxTokens");
+  if (input.controls !== undefined) {
+    exactRequestObject(input.controls, new Set(["thinkingLevel"]), "controls");
+    if (!GENERAL_THINKING_LEVELS.has(input.controls.thinkingLevel)) {
+      throw new ProtocolError("INVALID_REQUEST", "controls.thinkingLevel is unsupported");
+    }
+    if (input.requiredControls !== undefined && input.controls.thinkingLevel !== "low") {
+      throw new ProtocolError("INVALID_REQUEST", "independent verifier thinking controls must be low");
+    }
+  }
   const request = Object.freeze({
     schemaVersion: PROTOCOL_VERSION,
     invocationId: requiredString(input.invocationId, "invocationId", /^invocation:[A-Za-z0-9._-]+$/),
@@ -253,6 +263,7 @@ export function validateRequest(input, maxFrameBytes) {
     prompt: requiredString(input.prompt, "prompt"),
     maxTokens,
     timeoutMs: positiveInteger(input.timeoutMs, "timeoutMs"),
+    ...(input.controls === undefined ? {} : { controls: Object.freeze({ ...input.controls }) }),
     ...(input.requiredControls === undefined ? {} : {
       requiredControls: validateRequiredControls(input.requiredControls, maxTokens),
     }),

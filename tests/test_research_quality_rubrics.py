@@ -30,6 +30,9 @@ from dalton_core.research_quality_rubrics import (
 from dalton_core.research_quality_score import CHECKS
 
 PINNED = {
+    "rubric:debate-map": "a2ca99437b77f1986f3c60eb9905b04050457353aa0c4889bb20896840b82632",
+    "rubric:investment-memo": "ed28761aefa16ec3cb0770b74c07f5d3f667929c12a2cbd3c50ed2551c6c4542",
+    "rubric:event-judgement": "38b05b2c8af889f55720bda031461372343ffe8487b6dca543508216ed157c87",
     "rubric:initial-screen": "f5645dc5bc0513a6dfdfefe573979b6c150b7f60c6206dca23826aad4ec36f0c",
     "rubric:ask-answer": "7fe91c6057b145c7d7f23e5697a6e097c487a9905dfce0c5fa1ae4e6e9146e37",
     "rubric:company-dossier": "0b1718d165bad133ce66fc5ca2cfb5ac3d5fb5d67dc61ff30d8bc54f8519ee51",
@@ -46,6 +49,9 @@ PINNED = {
     # the failure this test exists to catch, and it is invisible in a diff
     # that only adds a line.
     "rubric:industry-framework": "79e410374685daca3363cefb0e76e5f2bfb0b72fd9db01877e3b96463dad4267",
+    # Batch H (2026-10-09): the STRL-contract screen gets its own ref, so the
+    # six above did not move; legacy screens keep their standard.
+    "rubric:initial-screen-strl": "5a558aabad9699bf35b09fad299e92b7f22b08df7dcd7beea8d5efea312db7b0",
 }
 
 
@@ -77,7 +83,7 @@ class FrozenRubricTests(unittest.TestCase):
         self.assertIs(rubric("weekly-brief"), WEEKLY_BRIEF)
         self.assertIs(rubric("rubric:weekly-brief"), WEEKLY_BRIEF)
         with self.assertRaises(UnknownRubric):
-            rubric("investment_memo")
+            rubric("not_a_product")
 
     def test_the_weekly_brief_rubric_exists_because_evaluation_was_not_deferred(self):
         # Q1 left it out, reading the owner's deferral as covering the whole

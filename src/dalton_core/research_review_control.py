@@ -35,6 +35,79 @@ _MANIFEST_FILENAME = "source-manifest.json"
 _MAX_REVIEW_FILE_BYTES = 2_000_000
 
 
+_SOURCE_TYPE_LABELS = {
+    "official_filing": "公司申报文件", "authenticated_transcript": "业绩电话会纪要",
+    "public_web": "公开网页", "sell_side_research": "卖方研报", "expert_call": "专家访谈",
+    "market_data": "市场数据", "company_ir": "公司投资者关系资料",
+}
+_BASIS_LABELS = {
+    "company-filed-document": "公司申报文件", "earnings-call-transcript": "业绩电话会",
+    "broker-research": "券商研报", "fund-internal": "本基金内部研究",
+}
+_METRIC_LABELS = {
+    "revenue": "营业收入", "net-income": "净利润", "operating-income": "营业利润",
+    "gross-profit": "毛利", "cost-of-revenue": "营业成本", "diluted-eps": "摊薄每股收益",
+    "eps": "每股收益", "operating-cash-flow": "经营活动现金流", "capex": "资本开支",
+    "free-cash-flow": "自由现金流", "share-repurchase": "股份回购",
+    "research-and-development-expense": "研发费用",
+}
+
+
+def _subject_label(ref: Any) -> str:
+    text = str(ref or "")
+    if text.startswith("company:ticker:"):
+        return text.rsplit(":", 1)[-1].upper()
+    from .research_html_export import _COMPARISON_TICKER_SUBJECTS
+
+    slug = text.replace(":", "-")
+    for ticker, subject in _COMPARISON_TICKER_SUBJECTS.items():
+        if subject == slug:
+            return ticker
+    return "公司（标识见技术详情）"
+
+
+def candidate_display(item: Mapping[str, Any]) -> dict[str, Any]:
+    """Labels for one staged candidate: company, metric, source, amount."""
+
+    from .cockpit_plane import (COMPANY_NAMES, SOURCE_LABELS, claim_period_display_label,
+                                claim_statement_display)
+    from .financial_display import statement_display
+    from .numeric_display import format_typed_value
+
+    subject = _subject_label(item.get("subject_ref"))
+    name = COMPANY_NAMES.get(subject)
+    metric = str(item.get("metric_or_aspect") or "")
+    if metric.startswith("metric:"):
+        key = metric.split(":", 1)[1]
+        metric_label = _METRIC_LABELS.get(key, key.replace("-", " "))
+    else:
+        metric_label = metric
+    value = None
+    if item.get("value") is not None:
+        try:
+            value = format_typed_value(
+                item["value"], unit=str(item.get("unit") or ""), scale=item.get("scale"),
+                currency=item.get("currency"), metric=metric.split(":", 1)[-1])
+        except ValueError:
+            value = None
+    promotion = item.get("promotion") or {}
+    return {
+        "subject": f"{subject} · {name}" if name and name != subject else subject,
+        "metric": metric_label,
+        "period": claim_period_display_label(item.get("period")) or item.get("period"),
+        "source": " · ".join(part for part in (
+            _SOURCE_TYPE_LABELS.get(str(item.get("source_type") or ""), "其他来源"),
+            SOURCE_LABELS.get(str(item.get("source_ref") or ""), "")) if part),
+        "value": value,
+        "statement": (claim_statement_display(item.get("normalized_statement"))
+                      or statement_display(item.get("normalized_statement"))),
+        "basis": _BASIS_LABELS.get(str(item.get("basis") or ""), item.get("basis")),
+        "promotion": (None if not promotion else
+                      "已由规则自动入库" if promotion.get("authority") == "policy"
+                      else "已由人工审阅入库"),
+    }
+
+
 class ResearchReviewControlError(RuntimeError):
     pass
 
@@ -189,6 +262,7 @@ class ResearchReviewControlPlane:
             "source_envelope_ref": evidence["source_envelope_ref"],
             "artifact_refs": evidence["artifact_refs"],
             "decision": item["decision"],
+            "terminal": item.get("terminal"),
             "commit_state": item.get("commit_state"),
             "commit_error_code": item.get("commit_error_code"),
             "promotion": promotion,
@@ -235,6 +309,11 @@ class ResearchReviewControlPlane:
             )
             for item in staged
         ]
+        # 2026-10-08 (section 四): what the /legacy/review page shows; the refs and
+        # hashes above stay exactly as bound (the decision posts them back)
+        # and the page keeps them under 技术详情.
+        for item in items:
+            item["display"] = candidate_display(item)
         return {"as_of": _now(), "reviewer_ref": reviewer, "items": items}
 
     def _candidate(
@@ -750,13 +829,18 @@ class ResearchReviewControlPlane:
             )
         except Exception as exc:
             raise ResearchReviewControlError("document review queue is unavailable") from exc
-        return {
+        value = {
             "as_of": _now(), "reviewer_ref": _subject_for_login(login),
             "mission_version_ref": result["mission_version_ref"],
             "items": result["reviews"],
             "limit_reached": result["limit_reached"],
             "candidate_limit_reached": result["candidate_limit_reached"],
         }
+        # A workspace with no published mission has an empty queue, said so.
+        if result.get("empty_reason"):
+            value["empty_reason"] = result["empty_reason"]
+            value["empty_label"] = result.get("empty_label") or "还没有发布研究任务"
+        return value
 
     def document_extraction(self, login: str, value: Mapping[str, Any], *, generate=False) -> dict[str, Any]:
         expected = {"review_id", "review_hash", "offset"}

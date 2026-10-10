@@ -106,7 +106,7 @@ class FinalSurfaceProductsTests(unittest.TestCase):
         weekly = next(row for row in products if row["kind"] == "surface_weekly_brief")
         self.assertEqual(weekly['subject_ref'], MISSION['mission_ref'])
         self.assertEqual(weekly["sections"], [
-            {"title": "每周研究简报", "body": exact, "gaps": []}])
+            {"title": "每周研究简报", "body": exact, "gaps": [], "localization_role":"narrative"}])
 
     def test_latest_model_notes_preserve_exact_fields_and_company(self):
         self.db.execute('CREATE TABLE forecast_model_versions '
@@ -140,9 +140,11 @@ class FinalSurfaceProductsTests(unittest.TestCase):
         # displayText, not gated prose; sent for translation they came back as
         # the same English tokens, one section each (the mixed-language,
         # repetitive reflection localizations of 2026-09-24).
-        self.assertEqual([row["body"] for row in product["sections"]],
-                         ["Exact title","Exact prose","Exact suggestion","Exact authority",
-                          "Exact question","Exact because"])
+        self.assertEqual([row["body"] for row in product["sections"][:-1]],
+                         ["Exact prose","Exact suggestion","Exact authority","Exact question","Exact because"])
+        self.assertEqual(product['sections'][-1]['title'],'研究投入指标表')
+        # A historical row without a call count cannot assert zero calls.
+        self.assertIn('| agenda | research_plan | — | 1 |',product['sections'][-1]['body'])
 
     def test_pending_zero_base_review_discovers_titles_sections_and_authority(self):
         self.db.executescript("""

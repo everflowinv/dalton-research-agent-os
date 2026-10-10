@@ -1,5 +1,5 @@
 #!/usr/bin/env python3
-"""Build, but never publish, the next SEC discovery plan with an 8-K spec."""
+"""Build, but never publish, the next SEC discovery plan with an 8-K or 10-Q spec."""
 
 from __future__ import annotations
 
@@ -50,10 +50,10 @@ def build_candidate_plan(
     active = validate_discovery_plan(active_plan)
     if active["source_ref"] != SEC_SOURCE_REF:
         raise ValueError("active plan is not the SEC filings discovery plan")
-    if spec.get("form") != "8-K":
-        raise ValueError("this proposal builder only adds form 8-K")
-    if any(row["form"].upper() == "8-K" for row in active["specs"]):
-        raise ValueError("active SEC discovery plan already contains an 8-K spec")
+    if spec.get("form") not in {"8-K", "10-Q"}:
+        raise ValueError("this proposal builder only adds form 8-K or 10-Q")
+    if any(row["form"].upper() == spec["form"] for row in active["specs"]):
+        raise ValueError("active SEC discovery plan already contains form " + spec["form"])
     if any(row["spec_ref"] == spec.get("spec_ref") for row in active["specs"]):
         raise ValueError("active SEC discovery plan already contains the proposed spec_ref")
     body = {
@@ -109,7 +109,7 @@ def build_review_bundle(
             or candidate["id"] != _next_plan_id(active["id"])
             or candidate["specs"][:-1] != active["specs"]
             or len(candidate["specs"]) != len(active["specs"]) + 1
-            or candidate["specs"][-1]["form"] != "8-K"):
+            or candidate["specs"][-1]["form"] not in {"8-K", "10-Q"}):
         raise ValueError("candidate changes more than the reviewed 8-K addition")
     covered = {member["company_ref"] for member in mission["universe"]}
     if not set(candidate["companies"]).issubset(covered):
@@ -181,6 +181,7 @@ def verify_mission_authority_on_backup(source_core: Path, mission: Mapping[str, 
 
 def main(argv: list[str] | None = None) -> int:
     parser = argparse.ArgumentParser(description=__doc__)
+    parser.add_argument("--form", choices=("8-K", "10-Q"), default="8-K")
     parser.add_argument("--active-plan", type=Path, required=True)
     parser.add_argument("--source-core", type=Path, required=True)
     parser.add_argument("--governance", type=Path, required=True)
@@ -197,7 +198,8 @@ def main(argv: list[str] | None = None) -> int:
             path in protected or path.is_relative_to(state_root) for path in outputs):
         raise ValueError("proposal outputs must be distinct and outside the source state directory")
     active = load_discovery_plan(args.active_plan)
-    candidate = build_candidate_plan(active, created_at=args.created_at)
+    specification = DEFAULT_SPEC if args.form == "8-K" else {"spec_ref": "quarterly-report-10q", "form": "10-Q", "lookback_days": 1096, "rediscovery_interval_days": 7, "retry_interval_days": 1}
+    candidate = build_candidate_plan(active, created_at=args.created_at, spec=specification)
     mission = read_active_mission(args.source_core, active["mission_ref"])
     verify_mission_authority_on_backup(args.source_core, mission)
     governance = json.loads(args.governance.read_text(encoding="utf-8"))

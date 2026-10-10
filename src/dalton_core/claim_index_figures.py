@@ -38,6 +38,7 @@ import re
 import sqlite3
 from typing import Any, Iterable, Mapping
 
+from .document_numeric_unit_contracts import figure_numeric_contract
 from .document_numeric_claim import (
     NumericCandidateError,
     verify_numeric_candidate,
@@ -250,8 +251,9 @@ class DocumentFigureResolver:
         recheck_error: str | None = None
         try:
             verify_numeric_candidate(
-                _numeric_candidate(held), {held["quote_id"]: held["citation_text"]})
-        except NumericCandidateError as exc:
+                _numeric_candidate(held), {held["quote_id"]: held["citation_text"]},
+                numeric_contract_ref=figure_numeric_contract(held["verified_by"]))
+        except (NumericCandidateError, ValueError) as exc:
             recheck_error = str(exc)
         findings.append(_finding(
             "citation_digits_and_label", ok=recheck_error is None,
@@ -590,9 +592,10 @@ class MissionFigureAuthorityResolver(DocumentFigureResolver):
               "figure is a company-filed document, not an earnings call")
         try:
             verify_numeric_candidate(
-                _numeric_candidate(figure), {figure["quote_id"]: figure["citation_text"]})
+                _numeric_candidate(figure), {figure["quote_id"]: figure["citation_text"]},
+                numeric_contract_ref=figure_numeric_contract(figure["verified_by"]))
             digits = "present"
-        except NumericCandidateError as exc:
+        except (NumericCandidateError, ValueError) as exc:
             digits = str(exc)
         check("citation_digits_and_label", digits, "present", "figure.citation_text",
               "figure's digits and as-reported label are in the bytes it cited")

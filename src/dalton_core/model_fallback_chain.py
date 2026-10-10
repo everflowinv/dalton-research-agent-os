@@ -199,6 +199,11 @@ _PURPOSE_TIERS: dict[str, str] = {
     "event_judgement_verifier": TIER_VERIFIER,
     "thesis_reflection": TIER_BRAIN,
     "thesis_reflection_verifier": TIER_VERIFIER,
+    # 2026-09-30: the screen in front of the judge.  It answers one closed
+    # question per event group ("could this change a view?") and can only
+    # escalate to the brain, never decide -- "apply a stated standard to a lot
+    # of items", the cheap tier's whole description.
+    "event_triage": TIER_CHEAP,
     # 2026-09-17: the three drafting stages whose product is a filed document
     # with a schema -- 公司档案, 争议图, 模型规格.  They read as brain work and
     # they are, but the contract they have to satisfy is what decides the
@@ -221,6 +226,11 @@ _PURPOSE_TIERS: dict[str, str] = {
     "earnings_calibration_verifier": TIER_VERIFIER,
     "conviction_call": TIER_BRAIN,
     "conviction_call_verifier": TIER_VERIFIER,
+    # ADR-0012: turning the dossier's scenario prose into probabilities and
+    # thresholds is judgement, like a conviction call; its contract is checked
+    # deterministically after the call, so it does not need the deliverable
+    # tier's document-shaped models.
+    "scenario_proposal": TIER_BRAIN,
     # W4: asking, from a zero position, whether we would form this view
     # today is the hardest question in the set -- there is no event to
     # anchor it and the whole file argues for the answer we already hold.
@@ -229,6 +239,7 @@ _PURPOSE_TIERS: dict[str, str] = {
     # Reading a rating and a target price off page one of a broker note is
     # "apply a stated standard to a lot of items" -- cheap.
     "street_estimate": TIER_CHEAP,
+    "street_estimate_verifier": TIER_VERIFIER,
     # Publication setup validates preserved purpose overrides before the
     # scheduled worker imports its dynamic builder.  These four therefore
     # belong to the static routing authority as well as build-time guards.
@@ -236,6 +247,14 @@ _PURPOSE_TIERS: dict[str, str] = {
     "research_language_check": TIER_CHEAP,
     "research_language_revision": TIER_BRAIN,
     "research_localization_verifier": TIER_VERIFIER,
+    # Batch C2 (2026-10-09): the STRL Initial Screen.  Its worksheet and its
+    # document ran as ``draft`` until now, so they keep ``draft``'s tier --
+    # moving a live stage to another tier's models is the owner's call on the
+    # model page, not a side effect of giving it its own budget.  Its
+    # verifier was registered as a purpose with no tier, which a policy that
+    # declares chains refuses at route time ("has no model tier").
+    "initial_screen": TIER_BRAIN,
+    "initial_screen_verifier": TIER_VERIFIER,
 }
 
 # A link may be skipped for these and only these, and each one means "the
@@ -302,7 +321,16 @@ _FAILURE_CODES: tuple[tuple[tuple[str, ...], str], ...] = (
     # and the broker wraps it as an invalid host result. The host did not
     # answer; this must precede the INVALID catch-all below or it lands in
     # contract_violation and halts the whole chain on a quota wall.
-    (("INVALID_HOST_RESULT", "HOST_COMPLETION_FAILED"), "provider_failure"),
+    # 2026-09-30: the broker now names the two empty-completion shapes it
+    # used to fold into INVALID_HOST_RESULT (see HOST_FRAME_FAILURE_CODES).
+    (("INVALID_HOST_RESULT", "HOST_COMPLETION_FAILED", "HOST_EMPTY_COMPLETION",
+      "HOST_OUTPUT_LIMIT_REACHED"), "provider_failure"),
+    # 2026-10-07: HTTP 402 (DeepSeek "Insufficient Balance") once the host
+    # bridge forwards it.  The provider refused to start; the next link may
+    # well have credit, and the profile cools (``model_profile_health``).
+    # Before the AUTH/INVALID catch-all so it never halts the chain.
+    (("INSUFFICIENT_BALANCE", "PAYMENT_REQUIRED", "INSUFFICIENT_FUNDS",
+      "INSUFFICIENT_CREDIT", "BILLING"), "provider_failure"),
     (("CONTENT_REFUSAL", "CONTENT_FILTER", "REFUSED", "SAFETY", "BLOCKED",
       "MODERATION"), "content_refusal"),
     (("BUDGET",), "budget_refused"),
@@ -377,7 +405,7 @@ def classify_model_failure(failure: Any) -> str:
         if len(digits) == 3:
             status = int(digits)
     if status is not None:
-        if status == 429 or 500 <= status <= 599:
+        if status in {402, 429} or 500 <= status <= 599:
             return "provider_failure"
         if 400 <= status <= 499:
             return "contract_violation"
@@ -989,6 +1017,7 @@ def execute_chain(
                 ),
                 "chain": list(chain),
                 "retired_links": gone,
+                "producer_families": sorted(producer_families),
                 "links": [],
                 "served": None,
             }
@@ -1190,22 +1219,38 @@ def execute_chain(
     }
 
 
-def _link_cost_usd(router: ModelRouter, link: Mapping[str, Any]) -> str | None:
+def _link_cost_usd(
+    router: ModelRouter,
+    link: Mapping[str, Any],
+    costs: dict[str, str | None] | None = None,
+) -> str | None:
     """What the served link's own route decision estimated it would cost.
 
     Read off the decision's candidate snapshot rather than recomputed, so the
     number on the page is the number the budget was admitted against.
+
+    ``costs`` memoizes by decision id: a decision is immutable, and the model
+    page asks for the same few dozen of them once per policy pin -- 544 reads
+    of a ~15 KB decision body on legacy, 2026-09-30.
     """
 
+    decision_id = str(link["decision_id"])
+    if costs is not None and decision_id in costs:
+        return costs[decision_id]
+    cost: str | None = None
     try:
-        decision = router.get_decision(str(link["decision_id"]))
+        decision = router.get_decision(decision_id)
     except Exception:  # noqa: BLE001 - a missing decision is a blank cell
-        return None
-    selected = decision.get("selected_profile_version_ref")
-    for item in decision.get("candidate_snapshot") or []:
-        if item.get("profile_version_ref") == selected:
-            return item.get("estimated_cost_usd")
-    return None
+        decision = None
+    if decision is not None:
+        selected = decision.get("selected_profile_version_ref")
+        for item in decision.get("candidate_snapshot") or []:
+            if item.get("profile_version_ref") == selected:
+                cost = item.get("estimated_cost_usd")
+                break
+    if costs is not None:
+        costs[decision_id] = cost
+    return cost
 
 
 def purpose_selection(
@@ -1214,6 +1259,8 @@ def purpose_selection(
     policy: Mapping[str, Any] | None = None,
     links: Sequence[Mapping[str, Any]] = (),
     last_served: Mapping[str, Mapping[str, Any]] | None = None,
+    held: Mapping[str, Mapping[str, Any]] | None = None,
+    costs: dict[str, str | None] | None = None,
 ) -> list[dict[str, Any]]:
     """P14-M2: one row per calling stage -- tier, effective chain, last served.
 
@@ -1230,7 +1277,7 @@ def purpose_selection(
     twice.
     """
 
-    held = profile_families(router)
+    held = profile_families(router) if held is None else held
     served_by_purpose: dict[str, Mapping[str, Any]] = (
         {} if last_served is None else dict(last_served)
     )
@@ -1272,7 +1319,7 @@ def purpose_selection(
                     "chain_position": served["chain_position"],
                     "decision_id": served["decision_id"],
                     "created_at": served["created_at"],
-                    "estimated_cost_usd": _link_cost_usd(router, served),
+                    "estimated_cost_usd": _link_cost_usd(router, served, costs),
                 }
             ),
         })
@@ -1287,6 +1334,7 @@ def routing_overview(
     work_order_id: str | None = None,
     policy_version_ref: str | None = None,
     link_digest: Mapping[str, Any] | None = None,
+    memo: dict[str, Any] | None = None,
 ) -> dict[str, Any]:
     """What the cockpit or a report shows: tiers, chains, last served, sync.
 
@@ -1297,9 +1345,26 @@ def routing_overview(
     ``link_digest`` lets a caller that builds several overviews against one
     router database -- the model page builds thirteen, one per policy pin --
     read the link ledger once instead of once per overview.
+
+    ``memo`` (2026-09-30) goes one step further for the same caller: an empty
+    dict it keeps per router database and passes to every overview it builds
+    there.  Only the pinned policy differs between those overviews; the
+    catalog, the cooldowns, the catalog-sync status and each served link's
+    decision cost are the same answer, so they are read once and shared.  The
+    shared parts are read-only to callers.  On legacy the page's 17 overviews
+    were ~800 SQLite calls, and every one of them is a GIL hand-off that waits
+    behind the overview rebuild thread when both run in the control process.
     """
 
-    latest = {profile["id"]: profile for profile in router.latest_profiles()}
+    shared: dict[str, Any] = {} if memo is None else memo
+
+    def once(key: str, build: Callable[[], Any]) -> Any:
+        if key not in shared:
+            shared[key] = build()
+        return shared[key]
+
+    latest = once("latest", lambda: {
+        profile["id"]: profile for profile in router.latest_profiles()})
     digest = (
         router.chain_link_digest(
             work_order_id=work_order_id, skipped_limit=SKIPPED_LINKS_PER_TIER)
@@ -1372,17 +1437,19 @@ def routing_overview(
         "purpose_overrides": dict((policy or {}).get("purpose_overrides") or {}),
         "purposes": purpose_selection(
             router, policy=policy,
-            last_served=digest.get("served_by_purpose") or {}),
+            last_served=digest.get("served_by_purpose") or {},
+            held=latest, costs=shared.setdefault("costs", {})),
         # WP-A/A2. Two lists, because they answer two questions: which models
         # routing is refusing to offer *right now*, and what the recent history
         # of that is. Without the first, a chain quietly running on its second
         # link looks exactly like a chain whose first link was never chosen.
         "cooldowns": {
-            "active": [
+            "active": once("cooldowns_active", lambda: [
                 {**item, "message": cooldown_message(item)}
                 for item in _active_cooldowns(router).values()
-            ],
-            "recent": profile_cooldowns(router)[:20],
+            ]),
+            "recent": once("cooldowns_recent",
+                           lambda: profile_cooldowns(router)[:20]),
             "policy": {
                 "failure_threshold": COOLDOWN_FAILURE_THRESHOLD,
                 "failure_window_seconds": COOLDOWN_FAILURE_WINDOW_SECONDS,
@@ -1396,9 +1463,9 @@ def routing_overview(
 
         if checked_at is None:
             raise FallbackChainError("a catalog status needs the moment it was checked")
-        overview["catalog"] = catalog_sync_status(
+        overview["catalog"] = once("catalog", lambda: catalog_sync_status(
             router, openclaw_config, checked_at=checked_at
-        )
+        ))
     return overview
 
 

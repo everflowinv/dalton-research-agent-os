@@ -17,8 +17,11 @@ from dataclasses import dataclass
 from http import HTTPStatus
 from http.server import BaseHTTPRequestHandler, ThreadingHTTPServer
 from pathlib import Path
-from typing import Any, Iterable, Mapping
+from typing import Any, Callable, Iterable, Mapping
 from urllib.parse import parse_qs, unquote, urlparse
+
+
+from .projection_cancellation import check_cancelled, install_cancel_handler
 
 
 SCHEMA_VERSION = "0.2"
@@ -166,13 +169,17 @@ def _closed_row(table: str, row: Mapping[str, Any]) -> tuple[Any, ...]:
 class ProjectionWriter:
     """Trusted builder for a disposable dashboard projection."""
 
-    def __init__(self, path: str | Path) -> None:
+    def __init__(self, path: str | Path, *,
+                 cancel_requested: Callable[[], bool] | None = None) -> None:
+        self._cancel_requested = cancel_requested
+        check_cancelled(cancel_requested)
         self.path = Path(path)
         self.path.parent.mkdir(parents=True, exist_ok=True)
         self.connection = sqlite3.connect(self.path, isolation_level=None)
         os.chmod(self.path, 0o600)
         self.connection.execute("PRAGMA foreign_keys = ON")
         self.connection.executescript(_SCHEMA_PATH.read_text(encoding="utf-8"))
+        install_cancel_handler(self.connection, cancel_requested)
 
     def close(self) -> None:
         self.connection.close()
@@ -184,6 +191,7 @@ class ProjectionWriter:
         self.close()
 
     def replace(self, snapshot: Mapping[str, Any]) -> None:
+        check_cancelled(self._cancel_requested)
         root = _object(snapshot, "snapshot")
         required = {"metadata", *_TABLE_FIELDS.keys()}
         if set(root) != required:
@@ -212,12 +220,14 @@ class ProjectionWriter:
 
         normalized: dict[str, list[tuple[Any, ...]]] = {}
         for table in _TABLE_FIELDS:
+            check_cancelled(self._cancel_requested)
             normalized[table] = [
                 _closed_row(table, row) for row in _rows(root[table], table)
             ]
 
-        self.connection.execute("BEGIN IMMEDIATE")
+        check_cancelled(self._cancel_requested)
         try:
+            self.connection.execute("BEGIN IMMEDIATE")
             for table in reversed(tuple(_TABLE_FIELDS)):
                 self.connection.execute(f"DELETE FROM {table}")
             self.connection.execute("DELETE FROM projection_metadata")
@@ -235,6 +245,7 @@ class ProjectionWriter:
                 ),
             )
             for table, rows in normalized.items():
+                check_cancelled(self._cancel_requested)
                 if not rows:
                     continue
                 fields = _TABLE_FIELDS[table]
@@ -243,9 +254,14 @@ class ProjectionWriter:
                     f"INSERT INTO {table} ({','.join(fields)}) VALUES ({placeholders})",
                     rows,
                 )
+            check_cancelled(self._cancel_requested)
             self.connection.commit()
-        except BaseException:
+        except BaseException as exc:
+            # An armed handler must not interrupt cleanup/rollback itself.
+            self.connection.set_progress_handler(None, 0)
             self.connection.rollback()
+            if isinstance(exc, sqlite3.Error):
+                check_cancelled(self._cancel_requested)
             raise
 
 

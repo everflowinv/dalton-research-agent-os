@@ -203,10 +203,13 @@ class PublicWebFetchLauncher:
             record["completed_at"] = now
         _write_owner_only(path, record)
 
-    def _command(self, *, url_ref: str, requested_by: str, ticket_dir: Path) -> list[str]:
+    def _command(self, *, url_ref: str | None, requested_by: str, ticket_dir: Path,
+                 exhibit_ticket_ref: str | None = None) -> list[str]:
+        target = (["--exhibit-for-ticket", exhibit_ticket_ref] if exhibit_ticket_ref is not None
+                  else ["--url-ref", str(url_ref)])
         command = [
             self.python_executable, "-m", "dalton_core.public_web_fetch_cli",
-            "--url-ref", url_ref,
+            *target,
             "--requested-by", requested_by,
             "--state-dir", str(self.state_dir),
             "--governance", str(self.governance_path),
@@ -234,11 +237,30 @@ class PublicWebFetchLauncher:
             raise FetchLaunchRejected("bounded fetch must name its automation principal")
         return self._launch(document_ref=document_ref, requested_by=caller_ref)
 
-    def _launch(self, *, document_ref: str, requested_by: str) -> dict[str, Any]:
-        if not isinstance(document_ref, str) or (
+    def start_exhibit_redetect(self, *, ticket_ref: str, caller_ref: str) -> dict[str, Any]:
+        """Look again for the Exhibit 99.1 of an 8-K this launcher already fetched.
+
+        2026-10-09 (ADR-0015 follow-up): an earlier detector could not tell
+        which file was the press release (live: Accenture's ``EX-99``
+        ``q4fy26earnings8-kexhibit.htm``).  The child re-reads the filing's
+        own document table under the same governance and mission grant, and
+        writes ``exhibit-redetect.json`` beside the 8-K's ticket.  Same single
+        slot as every fetch; it holds no document row.
+        """
+
+        if not isinstance(caller_ref, str) or _AUTOMATION_RE.fullmatch(caller_ref) is None:
+            raise FetchLaunchRejected("exhibit re-detection must name its automation principal")
+        if not isinstance(ticket_ref, str) or _TICKET_RE.fullmatch(ticket_ref) is None:
+            raise FetchLaunchRejected(f"ticket_ref must be {TICKET_PREFIX}:<hex>")
+        return self._launch(document_ref=None, requested_by=caller_ref,
+                            exhibit_ticket_ref=ticket_ref)
+
+    def _launch(self, *, document_ref: str | None, requested_by: str,
+                exhibit_ticket_ref: str | None = None) -> dict[str, Any]:
+        if exhibit_ticket_ref is None and (not isinstance(document_ref, str) or (
             _URL_REF_RE.fullmatch(document_ref) is None
             and _FILING_REF_RE.fullmatch(document_ref) is None
-        ):
+        )):
             raise FetchLaunchRejected(
                 "document_ref must be public-web-url:sha256:<hash> or sec:filing:<accession>"
             )
@@ -253,15 +275,17 @@ class PublicWebFetchLauncher:
                           else "; live pid identity is unknown and conservatively holds the slot")
                 raise FetchLaunchConflict(f"fetch {ticket_id} is still running{detail}")
             started_at = _wire_time(self.clock())
-            digest = hashlib.sha256(
-                canonical_json({
-                    "document_ref": document_ref, "requested_by": requested_by,
-                    "started_at": started_at, "governance_hash": governance.content_hash,
-                }).encode("utf-8")
-            ).hexdigest()[:24]
+            identity = {
+                "document_ref": document_ref, "requested_by": requested_by,
+                "started_at": started_at, "governance_hash": governance.content_hash,
+            }
+            if exhibit_ticket_ref is not None:
+                identity["exhibit_redetect_of"] = exhibit_ticket_ref
+            digest = hashlib.sha256(canonical_json(identity).encode("utf-8")).hexdigest()[:24]
             ticket_id = f"{TICKET_PREFIX}:{digest}"
             ticket_dir = _secure_dir(self.tickets_dir / digest)
-            command = self._command(url_ref=document_ref, requested_by=requested_by, ticket_dir=ticket_dir)
+            command = self._command(url_ref=document_ref, requested_by=requested_by,
+                                    ticket_dir=ticket_dir, exhibit_ticket_ref=exhibit_ticket_ref)
             log_path = ticket_dir / "run.log"
             log_fd = os.open(str(log_path), os.O_WRONLY | os.O_CREAT | os.O_TRUNC, 0o600)
             try:
@@ -290,6 +314,8 @@ class PublicWebFetchLauncher:
                 "status": "running",
                 "exit_code": None,
                 "completed_at": None,
+                **({"exhibit_redetect_of": exhibit_ticket_ref}
+                   if exhibit_ticket_ref is not None else {}),
             }
             _write_owner_only(self._ticket_path(ticket_id), record)
             self._current = (ticket_id, process)
@@ -527,9 +553,46 @@ class ReadOnlyPublicWebFetchManifestReader:
         return self.locate_completed_manifest_binding(document_ref)["manifest"]
 
     def locate_completed_manifest_binding(self, document_ref: str) -> dict[str, Any]:
-        return PublicWebFetchLauncher.locate_completed_manifest_binding(
-            self, document_ref
-        )
+        """The newest succeeded ticket for ``document_ref``, from one scan.
+
+        2026-10-07: the launcher's version reads every ticket file per call.
+        A runtime build asks once per fetched document, so on legacy (3,933
+        tickets, 49 documents) it opened 192,717 files -- 3.9 s warm and far
+        longer on a cold disk, on the writer's store thread at the time.  This
+        reader is short-lived (one runtime build), so the succeeded tickets
+        are indexed by document once; a document the index has never seen is
+        still looked up the slow way, so a ticket that finished after the
+        index was built is never missed.
+        """
+
+        if not isinstance(document_ref, str) or not document_ref:
+            raise FetchLaunchRejected("document_ref is required")
+        index = getattr(self, "_succeeded_by_document", None)
+        if index is None:
+            index = {}
+            for ticket_path in self.tickets_dir.glob("*/ticket.json"):
+                try:
+                    record = json.loads(ticket_path.read_text(encoding="utf-8"))
+                except (OSError, ValueError):
+                    continue
+                if not isinstance(record, dict) or record.get("status") != "succeeded":
+                    continue
+                ref = record.get("document_ref")
+                if not isinstance(ref, str):
+                    continue
+                key = (str(record.get("started_at", "")), str(record.get("id", "")))
+                if ref not in index or key > index[ref]:
+                    index[ref] = key
+            self._succeeded_by_document = index
+        best = index.get(document_ref)
+        if best is None:
+            return PublicWebFetchLauncher.locate_completed_manifest_binding(
+                self, document_ref
+            )
+        return {
+            "ticket_ref": best[1],
+            "manifest": self.read_completed_manifest(best[1], document_ref),
+        }
 
 
 __all__ = [

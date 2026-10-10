@@ -1,5 +1,7 @@
 # 分析师蓝图的并行开发计划 v1.0
 
+历史技术评审：保留当时结论与局限；当前运行状态见 [项目状态](../PROJECT_STATUS.md)。原始操作证据私有保存。
+
 日期：2026-09-09
 状态：执行中；owner 已认可分法（2026-09-09）
 基线：[能力差距分析与开发蓝图 v1.0](analyst-onboarding-gap-analysis-and-roadmap-v1.0-2026-09-09.md)、PROJECT_STATUS（2026-09-09）、main `490e63f`
@@ -339,7 +341,7 @@ P14 演化层（事件流、thesis revision candidate、预测修订提案、gat
 | F17 | w4-zero-base-review 开放问题 1 | 复盘无独立 verifier，判断 lane 有 | 主 agent 决定：要。复用判断 lane 的 verifier 谓词（verifier 家族 ≠ 生产者家族），校验四问答案每条都引用了在档的 thesis / debate / claim ref、且「下一个验证点」有日期；不通过 = refused 不发布 | 已记录，未派 |
 | F5d | w4-zero-base-review | 改了 `thesis_revision.py`（加同形兄弟表读取）、`cockpit_plane.py`（判断结果面板）、`research_cycle_reflection`（第九个指标，版本 0.1→0.2）、`install.sh`、`bootstrap.py`、`rehearse_deploy.py` | 合并时与 failure-classes、model-selection 在 cockpit / bootstrap / rehearse 同文件；调和后 import 检查 | 已记录 |
 | D8 | w4-zero-base-review 开放问题 2、4 | (2) 复盘是否也发布进 `MissionDeliverableAuthority`（需 `DELIVERABLE_KINDS` 加一个词）；(4) 事后验证窗口沿用 price_divergence 的 10 个交易日 / 6%，季度窗口要改 tracking policy | 主 agent 建议：(2) 要，词 `zero_base_review`，这样 cockpit 的交付列表与验收 rubric 能看到它；(4) 加第二个窗口 60 个交易日 / 15% 作为「慢背离」，写进 tracking policy v2（与 F6 同一次重签） | 待 owner 点头 |
-| R2 | ops-rehearsal-2（交付 `84d9a14`，未合；5,345 项通过） | 加固后的复演对 main `8717de0`（model-selection 合入前）的 live 副本通过：61/61 schema、23 播种 / 10 按门拦下、目录同步幂等（5 登记 / 6 退役）、34 条 tick 零逃逸、156,420 行内容哈希逐字节一致；唯一 DDL 变化是 deliverable kinds 的 CHECK 加四个词。四项加固：前置失败即中止；`bounded_planner.config` 路径不在临时根即拒绝；HOME 指向临时根；`--source-root` 允许 `--live-root` 是副本 | 合并后用 `--source-root` 对当前 main 重跑一次（model-selection、以及待合的 W4 会改 schema / seed / lane 计数）；owner 清单 v2.0 在 `docs/reports/owner-steps-after-deploy-v2.0-2026-09-10.md` | 已记录，待合并 |
+| R2 | ops-rehearsal-2（交付 `84d9a14`，未合；5,345 项通过） | 加固后的复演对 main `8717de0`（model-selection 合入前）的 live 副本通过：61/61 schema、23 播种 / 10 按门拦下、目录同步幂等（5 登记 / 6 退役）、34 条 tick 零逃逸、156,420 行内容哈希逐字节一致；唯一 DDL 变化是 deliverable kinds 的 CHECK 加四个词。四项加固：前置失败即中止；`bounded_planner.config` 路径不在临时根即拒绝；HOME 指向临时根；`--source-root` 允许 `--live-root` 是副本 | 合并后用 `--source-root` 对当前 main 重跑一次（model-selection、以及待合的 W4 会改 schema / seed / lane 计数）；owner 清单 v2.0 原件已私有归档 | 已记录，待合并 |
 | F18 | ops-rehearsal-2 caveat | `sales-notes`、`company-wiki`、`xueqiu`、`x`、`blind` 五个来源没有 `source_plan` 行，`--set-source-status` 报错；清单里给的是手工编辑 | subagent：让 `--set-source-status` 在缺行时按 connector inventory 创建 `source_plan` 行（append-only、写明 `created_by=set-source-status`），而不是要求手工编辑；测试五个来源 | 已记录，未派 |
 | F19 | ops-rehearsal-2 open question | ask-v2 policy 契约仍钉 `enabled: const false`，代码已允许开启 | subagent：契约改为 boolean，默认 false，playbook 里由 owner 显式置 true；测试两态 | 已记录，未派 |
 | D9 | ops-rehearsal-2 open question | AlphaEngine 日配额 live 为 130，W2 实测已用 133 / 130；CTSH / DXC / IBM 各只能清一家券商。抽取 30/10/10 的节奏折算 14,400 次 / 日，超 9,000 上限（推导的边界是 15，满额分配 31） | owner：提高 AlphaEngine 配额，或接受三家公司 consensus 只有一家券商；抽取节奏按推导值 15 下调 | 待 owner（已在最终裁决清单） |

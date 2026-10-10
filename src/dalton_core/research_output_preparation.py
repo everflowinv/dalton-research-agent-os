@@ -24,6 +24,7 @@ from dalton_core.research_localization import (build_prompt, build_verifier_prom
     build_localization, validate_localized_text, source_content_hash, ResearchLocalizationError,
     validate_no_truncated_copies)
 from dalton_core.research_localization_store import publish_attachment, publish_ui_texts, publish_reviewed_attachment, has_reviewed_attachment
+from dalton_core.research_source_projection import publication_source_hash, projection_slice
 from dalton_core.final_text_contract import FINAL_TEXT_RULES_VERSION
 from dalton_core.research_language_review import (run_language_review, parse_stage_output, CHECKER_PURPOSE,
     BRAIN_PURPOSE, CHECKER_MODEL, CHECKER_PROVIDER, ResearchLanguageReviewError,
@@ -39,6 +40,10 @@ from dalton_core.research_publication_worker import EXHAUSTED_STATUS
 
 PIPELINE_VERSION = "localization-with-one-language-review:0.1"
 SEMANTIC_CONTRACT_VERSION = "localization-semantic-verification:0.1"
+from .research_publication_limits import (GovernedPublicationModel, PublicationParked,
+    publication_scope, current_scope, cache_binding, MAX_LANGUAGE_ROUNDS)
+from .research_publication_limits import raise_if_parked
+from .research_publication_repair import local_repair_prompt, expand_local_patch,local_patch_quotes,repair_indices
 
 
 
@@ -91,20 +96,20 @@ def chunks(product, max_chars):
     for section in product['sections']:
         size = len(json.dumps({k: section.get(k) for k in ['title','body','gaps']},ensure_ascii=False))
         if current and total + size > max_chars:
-            yield start, dict(product, sections=current)
+            yield start, projection_slice(product, list(range(start, start + len(current))))
             start += len(current)
             current, total = [], 0
         current.append(section)
         total += size
     if current:
-        yield start, dict(product, sections=current)
+        yield start, projection_slice(product, list(range(start, start + len(current))))
 
 
 def pipeline_identity(product, configs):
     # Changing rules or an actual route configuration creates a new replay identity.
     return hashlib.sha256(json.dumps({"source": source_content_hash(product),
         "pipeline": PIPELINE_VERSION, "rules": FINAL_TEXT_RULES_VERSION,
-        "configs": configs}, sort_keys=True, separators=(",", ":")).encode()).hexdigest()
+        "configs": configs, "cache_binding":cache_binding(product)}, sort_keys=True, separators=(",", ":")).encode()).hexdigest()
 
 
 def style_stage_identity(product, *, draft_config, checker_config, brain_config):
@@ -126,23 +131,17 @@ def _revision_hash(review):
 
 
 def _repair_prompt(*, product, draft_localized, review, failure, attempt):
-    source = {'kind': product.get('kind'), 'version_ref': product.get('version_ref'),
-              'source_hash': source_content_hash(product),
-              'sections': [{key: row.get(key, [] if key == 'gaps' else '')
-                            for key in ('title', 'body', 'gaps')}
-                           for row in product.get('sections') or []]}
-    return '\n'.join((
-        '你是这份研究成品的大脑。此前语言修订未通过确定性校验或独立事实保真核验。',
-        '不要再次调用或模拟语言检查员。重新评估原语言建议并返回全部章节；只改表达，不得新增、删除或改变事实、数字、单位、来源、审批状态、缺口或章节结构。',
-        '逐项修正失败反馈指出的问题：原文没有的比较或判断应删除；比较、因果和否定关系须与原文一致。不要因为初稿或上次修订沿用了某种说法，就保留已被指出的错误。',
-        '只输出 JSON：{"decisions":[{"suggestion_index":0,"decision":"adopt|reject","reason":"理由"}],"sections":[{"index":0,"title":"...","body":"...","gaps":[]}]}',
-        '修订次数：'+str(attempt),
-        '失败反馈：'+json.dumps(failure,ensure_ascii=False,sort_keys=True,separators=(',',':')),
-        '原始展示内容与不可变身份：'+json.dumps(source,ensure_ascii=False,sort_keys=True,separators=(',',':')),
-        '初次中文稿：'+json.dumps(draft_localized,ensure_ascii=False,sort_keys=True,separators=(',',':')),
-        '原语言建议：'+json.dumps(review.get('language_review'),ensure_ascii=False,sort_keys=True,separators=(',',':')),
-        '上次修订：'+json.dumps(review.get('brain_revision'),ensure_ascii=False,sort_keys=True,separators=(',',':')),
-    ))
+    candidate=(review.get('brain_revision') or {}).get('sections') or draft_localized['sections']
+    prompt,_=local_repair_prompt(product,candidate,failure,
+        decisions=(review.get('brain_revision') or {}).get('decisions'))
+    return prompt
+
+
+def _repair_output(call):
+    output=parse_stage_output(call['text'],stage='brain')
+    binding=call.get('local_patch_binding')
+    return output if binding is None else expand_local_patch(output,**binding)
+
 
 def _draft_brain_repair_prompt(product, last_draft, feedback):
     display={key:copy.deepcopy(product[key]) for key in
@@ -265,9 +264,32 @@ class CheckOnlyExhausted(ValueError):
 #: source text, which for these products is already Simplified Chinese, and
 #: review *that* -- checker, suggestions set aside, independent verifier.
 SOURCE_KEPT_FALLBACK = 'check-only-source-kept:0.1'
+#: The fallback of a check-only chunk whose source is *not* Chinese, where
+#: keeping the source is no translation at all: one fresh cheap draft, under
+#: its own stage identity, through the same check-only pipeline.
+FRESH_DRAFT_FALLBACK = 'check-only-fresh-draft:0.1'
+
+
+def _source_kept_unavailable(product):
+    """Why the kept-source rule cannot apply to ``product``, or ``None``."""
+    source_localized = _source_as_localized(product)
+    try:
+        validate_localized_text(product, source_localized)
+        if not _source_is_chinese(source_localized):
+            raise ResearchLocalizationError('the source text is not predominantly Simplified Chinese')
+    except ResearchLocalizationError as exc:
+        return str(exc)
+    return None
 
 
 def run_chunk(task, **kwargs):
+    source_hash = kwargs.pop('artifact_source_hash', None) or publication_source_hash(task[2])
+    tick = kwargs.pop('publication_tick', None)
+    with publication_scope(kwargs['work_dir']/'publication-limits.sqlite3', source_hash, tick=tick):
+        return _run_governed_chunk(task, **kwargs)
+
+
+def _run_governed_chunk(task, **kwargs):
     """Prepare one chunk; see :func:`_run_chunk`.
 
     A ``check_only`` chunk that fails on content falls back once, by a fixed
@@ -275,18 +297,43 @@ def run_chunk(task, **kwargs):
     judgements sat in ``pending`` for good: ACN and CTSH drafts wrote "4 家"
     as "四家", and three IBM drafts rewrote an already-Chinese source until
     the verifier refused both the revision and the unchanged draft.
+
+    2026-10-02: that rule only fits a source already in Chinese.  For any
+    other source it ended the chunk at once -- "check-only fallback
+    unavailable (the source text is not predominantly Simplified Chinese)" --
+    so one cheap draft the verifier did not like left the product
+    ``exhausted`` with nothing published: 77 cycle reflections and 8 NO_CHANGE
+    judgements between 09-25 and 10-02, about a quarter of all reflections.
+    Such a chunk now gets one fresh cheap draft (:data:`FRESH_DRAFT_FALLBACK`)
+    -- still no brain -- and is exhausted only when that fails on content too.
     """
     try:
-        return _run_chunk(task, **kwargs)
+        return _route_redraft(_run_chunk, task, **kwargs)
     except CheckOnlyContentFailure as exc:
-        return _source_kept_chunk(task, trigger=exc, **kwargs)
+        unavailable = _source_kept_unavailable(task[2])
+        if unavailable is None:
+            return _source_kept_chunk(task, trigger=exc, **kwargs)
+        try:
+            return _route_redraft(_run_chunk, task, fresh_draft=True, **kwargs)
+        except CheckOnlyContentFailure as second:
+            raise CheckOnlyExhausted(
+                f'check-only fresh draft failed too ({second}); kept-source fallback '
+                f'unavailable ({unavailable}); first failure: {exc}') from second
+
+
+def _route_redraft(run, task, **kwargs):
+    """Run a chunk; once, from a fresh draft if the cached draft's family is stale."""
+    try:
+        return run(task, **kwargs)
+    except StoredDraftNotIndependent as exc:
+        return run(task, route_redraft=exc.family, **kwargs)
 
 
 def _run_chunk(task, *, mission, draft_config, verifier_config, checker_config,
               brain_config, scheduler_db, work_dir, max_cost, attempts,
               legacy_verifier_config=None, repair_reviewed=False,
               extra_brain_repair=False, redraft_generation=0, spend_gate=None,
-              language_tier=LANGUAGE_TIER_FULL):
+              language_tier=LANGUAGE_TIER_FULL, fresh_draft=False, route_redraft=None):
     """Prepare one chunk.  ``spend_gate(purpose)`` is asked before every paid
     call and raises :class:`PurposeDailyCapReached` to defer the chunk; it is
     asked outside every handler that would record a content failure, so a
@@ -303,14 +350,22 @@ def _run_chunk(task, *, mission, draft_config, verifier_config, checker_config,
     if language_tier not in (LANGUAGE_TIER_FULL, LANGUAGE_TIER_CHECK_ONLY):
         raise ValueError('unknown language tier')
     check_only = language_tier == LANGUAGE_TIER_CHECK_ONLY
+    attempts = min(attempts, 2)
     gate = spend_gate or (lambda purpose: None)
     product_index, start, product = task
     identity = redraft_identity(style_stage_identity(product, draft_config=draft_config,
         checker_config=checker_config,
         brain_config=CHECK_ONLY_REVISER_CONFIG if check_only else brain_config), redraft_generation)
+    if fresh_draft:
+        if not check_only:
+            raise ValueError('a fresh-draft fallback is only for check-only chunks')
+        identity = hashlib.sha256((identity + ':' + FRESH_DRAFT_FALLBACK).encode()).hexdigest()
+    if route_redraft is not None:
+        identity = route_redraft_identity(identity, route_redraft)
     stage_path = work_dir / 'stages' / (identity + '.json')
     resolve = router_family_resolver(draft_config)
-    evidence = read_json(stage_path) if stage_path.exists() else None if redraft_generation \
+    evidence = read_json(stage_path) if stage_path.exists() else None if (
+        redraft_generation or fresh_draft or route_redraft is not None) \
         else _migrate_legacy_style(
         product=product, work_dir=work_dir, draft_config=draft_config,
         checker_config=checker_config, brain_config=brain_config,
@@ -321,12 +376,13 @@ def _run_chunk(task, *, mission, draft_config, verifier_config, checker_config,
     evidence = evidence or {
         'source_hash': source_content_hash(product), 'pipeline_identity': identity,
         'rules_version': FINAL_TEXT_RULES_VERSION, 'pipeline_version': PIPELINE_VERSION}
+    evidence['cache_binding'] = cache_binding(product)
     if check_only:
         evidence['language_tier'] = LANGUAGE_TIER_CHECK_ONLY
     def model(config, output_tokens):
-        return CockpitModel(config, scheduler_db=scheduler_db, max_cost_usd=max_cost,
+        return GovernedPublicationModel(CockpitModel(config, scheduler_db=scheduler_db, max_cost_usd=max_cost,
                             max_input_tokens=120000, max_output_tokens=output_tokens,
-                            timeout_seconds=600)
+                            timeout_seconds=600),stage_id=identity)
     draft = model(draft_config, 10000)
     prompt = build_prompt(product)
     if 'draft_localized' not in evidence and evidence.get('draft_repair_call'):
@@ -403,6 +459,22 @@ def _run_chunk(task, *, mission, draft_config, verifier_config, checker_config,
         or prior_review.get('status') == 'pending_language_review'
     )
     if 'language_review' not in evidence or resume_interrupted_call:
+        # Batch w: before the checker and the Opus revision are bought, make
+        # sure the independent verifier at the end can be asked at all.
+        draft_route = (evidence.get('draft') or {}).get('route_decision_ref')
+        try:
+            verifier_preflight(verifier_config, brain_config, draft_route_ref=draft_route,
+                               check_only=check_only)
+        except VerifierNotIndependent as refused:
+            # The cached draft is the problem only if a draft written by the
+            # chain as it is now would pass; otherwise the refusal stands and
+            # the owner's card says what to change.
+            family = None if route_redraft is not None else drafting_family(draft_config)
+            if family is not None and verifier_preflight(
+                    verifier_config, brain_config, draft_route_ref=None,
+                    check_only=check_only, producer_family=family) is None:
+                raise StoredDraftNotIndependent(str(refused), family=family) from refused
+            raise
         # Asked here, not inside check()/revise(): run_language_review turns an
         # exception from either into a pending review, which is a failure.
         if 'checker_call' not in evidence:
@@ -447,6 +519,7 @@ def _run_chunk(task, *, mission, draft_config, verifier_config, checker_config,
         review = run_language_review(review_product,checker=check,brain=revise,
             checker_identity={'provider':CHECKER_PROVIDER,'model':CHECKER_MODEL},
             numeric_source_product=product)
+        raise_if_parked(review.get('reason'))
         evidence['language_review'] = review
         write_json(stage_path,evidence)
         if review.get('suggestions_markdown'):
@@ -479,7 +552,7 @@ def _run_chunk(task, *, mission, draft_config, verifier_config, checker_config,
         if prior is None:
             review=run_language_review(review_product,
                 checker=lambda _:parse_stage_output(evidence['checker_call']['text'],stage='checker'),
-                brain=lambda _:parse_stage_output(active_brain_call['text'],stage='brain'),
+                brain=lambda _:_repair_output(active_brain_call),
                 checker_identity={'provider':CHECKER_PROVIDER,'model':CHECKER_MODEL},
                 numeric_source_product=product)
             history.append({'stage':'brain_repair','attempt':repairs_used,
@@ -500,8 +573,7 @@ def _run_chunk(task, *, mission, draft_config, verifier_config, checker_config,
                     replayed=run_language_review(review_product,
                         checker=lambda _:parse_stage_output(
                             evidence['checker_call']['text'],stage='checker'),
-                        brain=lambda _:parse_stage_output(
-                            active_brain_call['text'],stage='brain'),
+                        brain=lambda _:_repair_output(active_brain_call),
                         checker_identity={'provider':CHECKER_PROVIDER,'model':CHECKER_MODEL},
                         numeric_source_product=product)
                     revalidated={'stage':'brain_revalidation','attempt':repairs_used,
@@ -513,7 +585,9 @@ def _run_chunk(task, *, mission, draft_config, verifier_config, checker_config,
                     evidence['review_history']=history
                     write_json(stage_path,evidence)
                 review=revalidated['language_review']
-    max_repairs=(3 if extra_brain_repair else 2) if repair_reviewed else 0
+    # First revision plus one local repair are the entire language allowance.
+    # Historic CLI switches cannot authorize a third language round.
+    max_repairs=MAX_LANGUAGE_ROUNDS-1 if repair_reviewed else 0
     if check_only:
         # The one "repair" a check-only chunk has is deterministic: drop the
         # applied suggestions and verify the draft as it was.  Only worth it
@@ -593,9 +667,14 @@ def _run_chunk(task, *, mission, draft_config, verifier_config, checker_config,
                 if not proof['independent']:
                     raise ValueError('semantic verifier model is not independent of both authors')
                 repairable_semantic_rejection=isinstance(verdict,dict)
+                if repairable_semantic_rejection and verdict.get('verdict')!='pass':
+                    try:repair_indices(product,localized['sections'],{'verifier':verdict})
+                    except ValueError:
+                        repairable_semantic_rejection=False
+                        raise
                 build_localization(product,localized,verdict)
             except Exception as exc:
-                if isinstance(exc,(PurposeDailyCapReached,CockpitModelPoolExhausted)):raise
+                if isinstance(exc,(PurposeDailyCapReached,CockpitModelPoolExhausted,PublicationParked)):raise
                 semantic_record={'stage':'semantic','revision_hash':revision,
                     'semantic_identity':semantic_identity,'reason':str(exc),
                     'brain_call':copy.deepcopy(active_brain_call),'language_review':copy.deepcopy(review)}
@@ -651,8 +730,14 @@ def _run_chunk(task, *, mission, draft_config, verifier_config, checker_config,
             write_json(stage_path,evidence)
             failure={'stage':'brain_validation','reason':review.get('reason') or review.get('status')}
             continue
+        repair_review=copy.deepcopy(review)
+        if 'brain_revision' not in repair_review and active_brain_call is not None:
+            repair_review['brain_revision']=_repair_output(active_brain_call)
         repair_prompt=_repair_prompt(product=product,draft_localized=evidence['draft_localized'],
-            review=review,failure=failure,attempt=repairs_used)
+            review=repair_review,failure=failure,attempt=repairs_used)
+        candidate=(repair_review.get('brain_revision') or {}).get('sections') or evidence['draft_localized']['sections']
+        _,indices=local_repair_prompt(product,candidate,failure,
+            decisions=(repair_review.get('brain_revision') or {}).get('decisions'))
         # The router estimates input conservatively from UTF-8 bytes. Keep
         # room for the full source and advice within the unchanged $1 cap.
         repair_output_tokens=12000
@@ -663,13 +748,16 @@ def _run_chunk(task, *, mission, draft_config, verifier_config, checker_config,
         prior_brain_call=copy.deepcopy(active_brain_call)
         repair_call=brain.call(purpose=BRAIN_PURPOSE,request_id='zh-revise-repair-'+repair_id,
             prompt=repair_prompt,mission=mission)
+        repair_call['local_patch_binding']={'candidate':copy.deepcopy(candidate),'indices':indices,
+            'decisions':copy.deepcopy((repair_review.get('brain_revision') or {}).get('decisions') or []),
+            'quotes':local_patch_quotes(candidate,failure,indices)}
         evidence.setdefault('repair_brain_calls',[]).append(copy.deepcopy(repair_call))
         write_json(stage_path,evidence)
         active_brain_call=repair_call
         prior_review=copy.deepcopy(review)
         repaired=run_language_review(review_product,
             checker=lambda _:parse_stage_output(evidence['checker_call']['text'],stage='checker'),
-            brain=lambda _:parse_stage_output(repair_call['text'],stage='brain'),
+            brain=lambda _:_repair_output(repair_call),
             checker_identity={'provider':CHECKER_PROVIDER,'model':CHECKER_MODEL},
             numeric_source_product=product)
         history.append({'stage':'brain_repair','attempt':repairs_used,
@@ -792,9 +880,9 @@ def _source_kept_chunk(task, *, trigger, mission, draft_config, verifier_config,
         'draft': copy.deepcopy(draft_call), 'draft_localized': source_localized}
 
     def model(config, output_tokens):
-        return CockpitModel(config, scheduler_db=scheduler_db, max_cost_usd=max_cost,
+        return GovernedPublicationModel(CockpitModel(config, scheduler_db=scheduler_db, max_cost_usd=max_cost,
                             max_input_tokens=120000, max_output_tokens=output_tokens,
-                            timeout_seconds=600)
+                            timeout_seconds=600),stage_id=identity)
 
     review_product = dict(product, sections=source_localized['sections'])
     if 'checker_call' not in evidence:
@@ -870,6 +958,123 @@ def _source_kept_chunk(task, *, trigger, mission, draft_config, verifier_config,
     return product_index, start, saved
 
 
+class VerifierNotIndependent(ValueError):
+    """The verifier chain cannot be independent of the models that produce."""
+
+
+def drafting_family(draft_config):
+    """The model family the drafting chain would write a fresh draft with now.
+
+    The first live link of ``research_localization``'s current chain, read
+    from the router without writing anything; ``None`` when it cannot be read.
+    """
+    from dalton_core.model_fallback_chain import profile_families, tier_chain, tier_for
+    from dalton_core.model_router import live_links, resolve_chain
+    try:
+        with ModelRouter(draft_config['model_router_db'], read_only=True) as router:
+            held = profile_families(router)
+            policy = router.get_policy(draft_config['routing_policy_ref'])
+            tier = tier_for(DRAFT_PURPOSE)
+            resolved = resolve_chain(policy, tier=tier, purpose=DRAFT_PURPOSE, profiles=held)
+            chain = tuple(resolved['chain']) if resolved is not None else tier_chain(tier)
+    except Exception:  # noqa: BLE001 - unreadable: no redraft decision
+        return None
+    first = next(iter(live_links(chain, held)), None)
+    family = (held.get(first) or {}).get('family') if first is not None else None
+    return family if isinstance(family, str) and family else None
+
+
+class StoredDraftNotIndependent(ValueError):
+    """The cached draft's family blocks the verifier; the current chain would not.
+
+    2026-10-09: the owner moved ``research_localization`` off Gemini on 10-08,
+    yet eight products kept failing the preflight every day, because the
+    stage cache (keyed by the configuration files, not by the router's chain)
+    still held the draft Gemini wrote before the change and the preflight
+    judged that draft.  Raised only when a fresh draft under the current
+    chain would pass; ``run_chunk`` then prepares the chunk again from a new
+    draft (:func:`route_redraft_identity`).
+    """
+
+    def __init__(self, message, *, family):
+        super().__init__(message)
+        self.family = family
+
+
+def route_redraft_identity(identity, family):
+    """The stage identity of a redraft forced by a drafting-chain change.
+
+    A new ``stages/`` file and new request ids (the scheduler replays a
+    completed work order by request id), one per drafting family, so the
+    same chain change never buys a second redraft.
+    """
+    return hashlib.sha256(f'{identity}:route-redraft:{family}'.encode()).hexdigest()
+
+
+def verifier_preflight(verifier_config, brain_config, *, draft_route_ref, check_only,
+                       producer_family=None):
+    """Refuse, for free, the product whose verifier would be refused anyway.
+
+    Live 10-06..10-08: 235 localization-verifier calls were refused because
+    the verifier chain (gemini-3-8-flash, gemini-3-1-pro-preview) is all
+    google-gemini-3 and the draft was written by gemini-3-8-flash-antigravity
+    -- after the checker and the Opus revision had been paid for.  This asks
+    the router, read-only, what the verifier call will ask: is any live link
+    of the verifier chain of a family other than the draft's (and, unless
+    check-only, the revision chain's first live link)?  If none is, the chunk
+    stops here with the same Chinese reason the cockpit would give.  Anything
+    it cannot read is not a reason to stop: the call itself still decides.
+    """
+    from dalton_core.cockpit_model import (VERIFIER_NOT_INDEPENDENT,
+                                           chain_refusal_message, chain_refusal_record)
+    from dalton_core.model_fallback_chain import (live_links, profile_families,
+                                                  served_family, tier_chain, tier_for)
+    from dalton_core.model_router import resolve_chain
+    if producer_family is None and (not isinstance(draft_route_ref, str) or not draft_route_ref):
+        return None
+    try:
+        with ModelRouter(verifier_config['model_router_db'], read_only=True) as router:
+            held = profile_families(router)
+            policy = router.get_policy(verifier_config['routing_policy_ref'])
+            tier = tier_for(VERIFIER_PURPOSE)
+            resolved = resolve_chain(policy, tier=tier, purpose=VERIFIER_PURPOSE, profiles=held)
+            chain = tuple(resolved['chain']) if resolved is not None else tier_chain(tier)
+            # ``producer_family``: judge a draft not yet written -- the one the
+            # current drafting chain would write -- instead of the cached one.
+            families = ({producer_family} if producer_family is not None
+                        else {served_family(router, draft_route_ref)})
+        if not check_only:
+            with ModelRouter(brain_config['model_router_db'], read_only=True) as router:
+                brain_held = profile_families(router)
+                brain_policy = router.get_policy(brain_config['routing_policy_ref'])
+                brain_tier = tier_for(BRAIN_PURPOSE)
+                brain = resolve_chain(brain_policy, tier=brain_tier, purpose=BRAIN_PURPOSE,
+                                      profiles=brain_held)
+                brain_chain = (tuple(brain['chain']) if brain is not None
+                               else tier_chain(brain_tier))
+                first = next(iter(live_links(brain_chain, brain_held)), None)
+                if first is not None and (brain_held.get(first) or {}).get('family'):
+                    families.add(brain_held[first]['family'])
+    except Exception:  # noqa: BLE001 - unreadable: the call decides, as before
+        return None
+    from dalton_core.cockpit_model import verifier_route_capability
+    capability = verifier_route_capability(VERIFIER_PURPOSE)
+    available = live_links(chain, held)
+    # Only a link that can serve the verifier's capability counts: on legacy
+    # 10-08 only the direct-API Gemini profiles carry provider-controlled-verify.
+    capable = [profile for profile in available
+               if capability in ((held.get(profile) or {}).get('capabilities') or ())]
+    if any((held.get(profile) or {}).get('family') not in families for profile in capable):
+        return None
+    record = chain_refusal_record(
+        {'reason': VERIFIER_NOT_INDEPENDENT, 'purpose': VERIFIER_PURPOSE, 'tier': tier,
+         'chain': list(chain), 'producer_families': sorted(families),
+         'retired_links': [profile for profile in chain if profile not in available]},
+        policy=policy, credential_slot_refs=verifier_config.get('credential_slot_refs') or ())
+    raise VerifierNotIndependent(chain_refusal_message(record)
+                                 + '（预检拦下：语言检查和修订没有花钱）')
+
+
 def build(args, data=None):
     data = data if data is not None else read_json(args.input)
     products = data['products']
@@ -885,15 +1090,50 @@ def build(args, data=None):
     # each other is translated faithfully into a document that repeats itself.
     duplicated = {}
     for i, product in enumerate(products):
+        from .research_localization import localization_blockers
+        blockers=localization_blockers(product)
+        if blockers:
+            duplicated[i]='a product with a failed section is not localised: '+json.dumps(blockers,ensure_ascii=False)
+            continue
         try:
             validate_no_truncated_copies(product)
         except ResearchLocalizationError as exc:
             duplicated[i] = str(exc)
-    tasks = [(i,start,part) for i,p in enumerate(products) if i not in duplicated
-             for start,part in chunks(p,args.chunk_chars)]
+    config_set=[read_json(path) for path in (args.model_config,args.checker_config,args.brain_config,args.verifier_config)]
+    reusable={}
+    tasks=[]
+    for i,product in enumerate(products):
+        if i in duplicated: continue
+        missing=[]
+        for index,section in enumerate(product['sections']):
+            key=_section_cache_key(product,section,config_set)
+            path=work_dir/'section-cache'/(key+'.json')
+            if path.exists():
+                cached=read_json(path)
+                digest=cached.pop('content_hash',None)
+                if digest!=hashlib.sha256(json.dumps(cached,ensure_ascii=False,sort_keys=True,separators=(',',':')).encode()).hexdigest():
+                    raise ValueError('publication section cache hash drifted')
+                if cached.get('source_section')!=section: raise ValueError('publication section cache source drifted')
+                saved=cached['review']
+                validate_localized_text(projection_slice(product,[index]),saved['localized'])
+                build_localization(projection_slice(product,[index]),saved['localized'],saved['verifier'])
+                if saved.get('status')!='passed' or not saved.get('independence',{}).get('independent'):
+                    raise ValueError('publication section cache proof incomplete')
+                reusable.setdefault(i,[]).append((index,saved))
+            else: missing.append(index)
+        # Keep document order, with one task per contiguous changed section run.
+        for index in missing:
+            if (tasks and tasks[-1][0]==i and tasks[-1][1]+len(tasks[-1][2]['sections'])==index
+                    and len(json.dumps(tasks[-1][2]['sections']+[product['sections'][index]],ensure_ascii=False))<=args.chunk_chars):
+                first=tasks[-1][1]
+                tasks[-1]=(i,first,projection_slice(product,list(range(first,index+1))))
+            else: tasks.append((i,index,projection_slice(product,[index])))
+    import uuid
+    held_scope = current_scope()
+    tick = held_scope[2] if held_scope else uuid.uuid4().hex
     legacy_verifier_config = (read_json(args.legacy_verifier_config)
         if getattr(args, 'legacy_verifier_config', None) else None)
-    found = {}
+    found = dict(reusable)
     failures = [{'product':i,'section_start':0,'error':error} for i,error in duplicated.items()]
     with concurrent.futures.ThreadPoolExecutor(max_workers=args.workers) as pool:
         futures = {pool.submit(run_chunk,t,mission=data['mission'],draft_config=read_json(args.model_config),
@@ -905,12 +1145,17 @@ def build(args, data=None):
             extra_brain_repair=getattr(args,'extra_brain_repair',False),
             redraft_generation=getattr(args,'redraft_generation',0),
             spend_gate=getattr(args,'spend_gate',None),
-            language_tier=getattr(args,'language_tier',LANGUAGE_TIER_FULL)):t for t in tasks}
+            language_tier=getattr(args,'language_tier',LANGUAGE_TIER_FULL),
+            artifact_source_hash=publication_source_hash(products[t[0]]), publication_tick=tick):t for t in tasks}
         for future in concurrent.futures.as_completed(futures):
             task = futures[future]
             try:
                 i,start,result = future.result()
                 found.setdefault(i,[]).append((start,result))
+            except PublicationParked as exc:
+                failures.append({'product':task[0],'section_start':task[1],'error':str(exc),
+                                 'deferred':True,'parked':True,'reason':exc.reason,
+                                 'retry_after':exc.retry_after})
             except (PurposeDailyCapReached,CockpitModelPoolExhausted) as exc:
                 # Out of today's share, not broken: nothing is published and
                 # nothing counts as an attempt; the next UTC day resumes it.
@@ -936,8 +1181,35 @@ def build(args, data=None):
             'meaning_preserved':all(v['meaning_preserved'] for v in proof_rows),
             'findings':[f for v in proof_rows for f in v['findings']]}
         candidate = build_localization(product,{'sections':rows},verdict)
+        reviews=[saved for _,saved in sorted(found[i],key=lambda x:x[0])]
+        if reusable.get(i) and not all(review.get('full_verification_binding')=={
+                'source_hash':source_content_hash(product),'candidate_hash':candidate['content_hash']} for review in reviews):
+            # Cached unchanged prose is sent only here, with full original
+            # context: a new version can change cross-section meaning. The
+            # drafting/check/revision prompts above contain changed sections.
+            try:
+                _verify_merged_product(product,candidate,reviews,mission=data['mission'],args=args,tick=tick)
+            except PublicationParked as exc:
+                failures.append({'product':i,'section_start':0,'error':str(exc),'deferred':True,
+                                 'parked':True,'reason':exc.reason,'retry_after':exc.retry_after})
+                continue
+            except Exception as exc:
+                failures.append({'product':i,'section_start':0,'error':str(exc)})
+                continue
         target=publish_reviewed_attachment(args.output_directory,product,candidate,
-            [saved for _,saved in sorted(found[i],key=lambda x:x[0])])
+            reviews)
+        for index,section in enumerate(product['sections']):
+            start,saved=next((start,saved) for start,saved in sorted(found[i],key=lambda x:x[0])
+                            if start<=index<start+len(saved['localized']['sections']))
+            part=copy.deepcopy(saved)
+            part['localized']={'sections':[dict(rows[index],index=0)]}
+            if reusable.get(i) or len(reviews)==1:
+                part['full_verification_binding']={'source_hash':source_content_hash(product),
+                                                   'candidate_hash':candidate['content_hash']}
+            cache={'source_section':section,'review':part}
+            cache['content_hash']=hashlib.sha256(json.dumps(cache,ensure_ascii=False,sort_keys=True,separators=(',',':')).encode()).hexdigest()
+            path=work_dir/'section-cache'/(_section_cache_key(product,section,config_set)+'.json')
+            if not path.exists(): write_json(path,cache)
         published.append({'source':product['version_ref'],'file':str(target),
                           'content_hash':candidate['content_hash']})
         if product['kind']=='ui_text' or product['kind'].startswith('surface_'):
@@ -951,9 +1223,47 @@ def build(args, data=None):
             else EXHAUSTED_STATUS if exhausted else 'incomplete',
             'products':len(products),
             'chunks':len(tasks),'published':published,'failures':failures}
+    parked=[failure for failure in failures if failure.get('parked')]
+    if parked:
+        result.update(parked=True,reason=parked[0]['reason'],
+                      retry_after=max((failure.get('retry_after') or 0 for failure in parked),default=0))
     write_json(getattr(args, 'result_output', None) or work_dir/'result.json',result)
     print(json.dumps(result,ensure_ascii=False),flush=True)
     return 0 if not failures else 1
+
+
+def _section_cache_key(product,section,configs):
+    value={'kind':product.get('kind'),'subject_ref':product.get('subject_ref'),
+           'section':section,'configs':configs,'rules':FINAL_TEXT_RULES_VERSION,
+           'contract':SEMANTIC_CONTRACT_VERSION,'convergence':cache_binding(product)['limits_version']}
+    return hashlib.sha256(json.dumps(value,ensure_ascii=False,sort_keys=True,separators=(',',':')).encode()).hexdigest()
+
+
+def _verify_merged_product(product,candidate,reviews,*,mission,args,tick):
+    config=read_json(args.verifier_config)
+    plain={'sections':[{key:row[key] for key in ('index','title','body','gaps')} for row in candidate['sections']]}
+    identity=semantic_stage_identity(pipeline_identity(product,[config]),config,
+        hashlib.sha256(json.dumps(candidate['sections'],sort_keys=True).encode()).hexdigest())
+    path=args.work_dir/'merged-verification'/(identity+'.json')
+    routes=sorted({ref for review in reviews for ref in review['producer_routes']})
+    resolve=router_family_resolver(read_json(args.model_config))
+    if path.exists(): proof=read_json(path)
+    else:
+        with publication_scope(args.work_dir/'publication-limits.sqlite3',publication_source_hash(product),tick=tick):
+            if getattr(args,'spend_gate',None): args.spend_gate(VERIFIER_PURPOSE)
+            model=GovernedPublicationModel(CockpitModel(config,scheduler_db=args.scheduler_db,
+                max_cost_usd=args.max_cost_per_call,max_input_tokens=120000,max_output_tokens=5000,timeout_seconds=600))
+            call=independent_model_call(model,producer_route_decision_refs=routes,purpose=VERIFIER_PURPOSE,
+                request_id='zh-verify-merged-'+identity,prompt=build_verifier_prompt(product,plain),mission=mission)
+            proof={'call':call,'verifier':unwrap_json_object(call['text']),'identity':identity,
+                   'source_hash':source_content_hash(product),'context':'full_source_and_merged_candidate_required'}
+            write_json(path,proof)
+    if proof.get('identity')!=identity or proof.get('source_hash')!=source_content_hash(product):
+        raise ValueError('merged verification cache binding drifted')
+    independence_proof=independence(draft_routes=routes,verifier_route=proof['call']['route_decision_ref'],resolve=resolve)
+    if not independence_proof['independent']: raise ValueError('merged verifier is not independent of cached authors')
+    build_localization(product,plain,proof['verifier'])
+    for review in reviews: review['merged_verification']=proof
 
 
 def prepare_ui_batch(args, mission, product, *, redraft_generation=0):
@@ -971,7 +1281,7 @@ def prepare_ui_batch(args, mission, product, *, redraft_generation=0):
     code = build(ui_args, {'mission': mission, 'products': [product]})
     receipt = read_json(result_path)
     return {'status': 'completed' if code == 0 else _unfinished_status(receipt),
-            'receipt': receipt}
+            'receipt': receipt,**{key:receipt[key] for key in ('parked','reason','retry_after') if key in receipt}}
 
 
 def _unfinished_status(receipt):
@@ -1027,7 +1337,8 @@ def validate_worker_config(cfg):
                         'max_cost_per_call', 'draft_attempts', 'publication_gate'}
     # Optional because every installed config predates them; absent means the
     # module defaults, which are the values these two knobs used to hard-code.
-    optional = {'ui_text_batches_per_run', 'ui_text_max_attempts', WORKER_CONFIG_FIELD}
+    optional = {'ui_text_batches_per_run', 'ui_text_max_attempts', WORKER_CONFIG_FIELD,
+                'stable_window_seconds'}
     if (not isinstance(cfg, dict) or not required <= set(cfg)
             or set(cfg) - required - optional
             or cfg.get('schema_version') != 'research-publication-worker-config:0.1'):
@@ -1039,7 +1350,11 @@ def validate_worker_config(cfg):
     for name, (low, high) in bounds.items():
         if type(cfg[name]) is not int or not low <= cfg[name] <= high:
             raise ValueError('publication worker bounds are invalid')
-    for name in optional - {WORKER_CONFIG_FIELD}:
+    if 'stable_window_seconds' in cfg and (
+            type(cfg['stable_window_seconds']) is not int
+            or not 0 <= cfg['stable_window_seconds'] <= 7 * 24 * 3600):
+        raise ValueError('publication worker stable window is invalid')
+    for name in optional - {WORKER_CONFIG_FIELD, 'stable_window_seconds'}:
         if name in cfg and (type(cfg[name]) is not int or not 1 <= cfg[name] <= 64):
             raise ValueError('publication worker bounds are invalid')
     if WORKER_CONFIG_FIELD in cfg:
@@ -1053,11 +1368,19 @@ _STDOUT_TEXT_LIMIT = 200
 WORKER_STDOUT_SUMMARY_SCHEMA = 'research-publication-worker-stdout-summary:0.1'
 
 
+#: Small count tables kept whole on the stdout line: 74 distinct blocked
+#: sentences said less than "163 attachment_size, 52 numeric_tokens_changed".
+_STDOUT_COUNT_TABLES = frozenset({'blocked_reason_classes'})
+
+
 def _stdout_scalars(value):
     """Scalars kept (long text clipped), collections reduced to their size."""
     summary = {}
     for key, item in value.items():
-        if item is None or isinstance(item, (bool, int, float)):
+        if (key in _STDOUT_COUNT_TABLES and isinstance(item, dict) and len(item) <= 32
+                and all(isinstance(count, int) for count in item.values())):
+            summary[key] = dict(item)
+        elif item is None or isinstance(item, (bool, int, float)):
             summary[key] = item
         elif isinstance(item, str):
             summary[key] = (item if len(item) <= _STDOUT_TEXT_LIMIT
@@ -1119,6 +1442,23 @@ def run_worker(config_path):
             fcntl.flock(lock,fcntl.LOCK_EX|fcntl.LOCK_NB)
         except BlockingIOError:
             print(json.dumps({'status':'already_running'}));return 0
+        from .research_publication_quiesce import QuiesceControl
+        quiesce = QuiesceControl(config_path, root)
+        if quiesce.requested():
+            previous = (read_json(root/'worker-last-run.json')
+                        if (root/'worker-last-run.json').exists() else {})
+            if not isinstance(previous, dict):
+                raise ValueError('publication checkpoint is invalid')
+            result = {**previous, 'schema_version':'research-publication-worker-checkpoint:0.1',
+                      'status':'quiesced','quiesced':True,
+                      'checked_at':quiesce.now(), 'reason':'deployment_quiesce',
+                      'last_pass_checked_at':previous.get('last_pass_checked_at')
+                          or previous.get('checked_at')}
+            write_json(root/'worker-last-run.json',result)
+            quiesce.acknowledge(root/'worker-last-run.json')
+            print(json.dumps(worker_stdout_summary(result,root/'worker-last-run.json'),
+                             ensure_ascii=False),flush=True)
+            return 0
         core=Path(cfg['core_db']).resolve()
         connection=sqlite3.connect(core.as_uri()+'?mode=ro',uri=True)
         connection.row_factory=sqlite3.Row
@@ -1145,26 +1485,47 @@ def run_worker(config_path):
                 gate=ledger_gate(budget_db,cfg.get(WORKER_CONFIG_FIELD))
                 def priority(product):
                     return publication_priority(connection,product)
-                def prepare(product):
+                def prepare(product,redraft_generation=0):
                     if has_reviewed_attachment(args.output_directory,product):
                         return {'status':'completed','existing_reviewed_attachment':True}
                     tiered=with_spend_gate(args,gate,priority(product))
                     tiered.language_tier=language_tier(connection,product)
+                    # An owner's 「重新进行语言质检」: a fresh draft, not a replay.
+                    tiered.redraft_generation=redraft_generation
                     code=build(tiered,{'mission':mission,'products':[product]})
                     receipt=read_json(root/'result.json')
                     return {'status':'completed' if code==0 else _unfinished_status(receipt),
-                            'receipt':receipt}
+                            'receipt':receipt,**{key:receipt[key] for key in ('parked','reason','retry_after') if key in receipt}}
                 from dalton_core.weekly_brief import WeeklyBriefAuthority
                 from dalton_core.industry_research import IndustryResearchAuthority
                 industry=IndustryResearchAuthority.__new__(IndustryResearchAuthority);industry.connection=connection
                 weekly=WeeklyBriefAuthority.__new__(WeeklyBriefAuthority);weekly.connection=connection;weekly.industry_research=industry
+                from dalton_core.research_publication_worker import (
+                    DEFAULT_STABLE_WINDOW_SECONDS)
+                from dalton_core.cockpit_research_library import research_library
+                extra=lambda con,mis,company:final_surface_products(con,mis,company,
+                    weekly_renderer=weekly.render_markdown)
+                def still_current(product,company_ref):
+                    # 2026-10-07: asked right before paying for a product;
+                    # a version replaced since discovery is skipped.
+                    found=list(research_library(connection,mission,company_ref,
+                                                localize=False).get('products')or[])
+                    found.extend(extra(connection,mission,company_ref))
+                    return any(isinstance(item,dict)and item.get('status')=='available'
+                               and item.get('kind')==product.get('kind')
+                               and item.get('subject_ref')==product.get('subject_ref')
+                               and item.get('version_ref')==product.get('version_ref')
+                               for item in found)
                 result=poll_once(connection,mission,state_dir=root/'products',prepare=prepare,
-                    priority=priority,extra_reader=lambda con,mis,company:final_surface_products(con,mis,company,
-                        weekly_renderer=weekly.render_markdown))
+                    stop_requested=quiesce.requested,
+                    priority=priority,extra_reader=extra,still_current=still_current,
+                    stable_window_seconds=int(cfg.get('stable_window_seconds',
+                                                      DEFAULT_STABLE_WINDOW_SECONDS)))
                 from .ui_text_discovery import (
                     DEFAULT_BATCHES_PER_RUN, DEFAULT_MAX_ATTEMPTS, poll_ui_texts)
                 from .research_localization_store import load_ui_texts
                 ui_result=poll_ui_texts(connection,mission,state_dir=root/'ui-text-products',
+                    stop_requested=quiesce.requested,
                     mapping=load_ui_texts(core),
                     # UI text is Claim display backlog: always low priority.
                     prepare=lambda product,redraft_generation=0:prepare_ui_batch(
@@ -1179,16 +1540,22 @@ def run_worker(config_path):
                         args.checker_config,args.brain_config]))
                 result['ui_texts']=ui_result
                 result['pending']+=ui_result['pending']
+                # Both are UI-text batches only: no publication product is
+                # ever "blocked" (a product is pending, exhausted or deferred).
                 result['blocked']=ui_result.get('blocked',0)
                 result['blocked_reasons']=ui_result.get('blocked_reasons',[])
-                result['status']=('healthy' if not result['pending']
-                                  else 'pending')
+                result['blocked_reason_classes']=ui_result.get('blocked_reason_classes',{})
+                result['quiesced'] = bool(result.get('quiesced') or ui_result.get('quiesced')
+                                         or quiesce.requested())
+                result['status']=('quiesced' if result['quiesced'] else
+                                  'healthy' if not result['pending'] else 'pending')
         finally:
             connection.close()
         from datetime import datetime,timezone
         result['schema_version']='research-publication-worker-checkpoint:0.1'
         result['checked_at']=datetime.now(timezone.utc).isoformat()
         write_json(root/'worker-last-run.json',result)
+        quiesce.acknowledge(root/'worker-last-run.json')
         print(json.dumps(worker_stdout_summary(result,root/'worker-last-run.json'),
                          ensure_ascii=False),flush=True)
         # A backlog is not a fault. This returned 1 whenever anything was still
@@ -1196,7 +1563,7 @@ def run_worker(config_path):
         # a worker that was doing exactly what it is supposed to do. A real
         # fault -- an unreadable config, an unusable gate, an exception -- is
         # still non-zero, through the gate branch above or by propagating.
-        return 0 if result['status'] in {'healthy','no_current_mission','pending'} else 1
+        return 0 if result['status'] in {'healthy','no_current_mission','pending','quiesced'} else 1
 
 
 def main():

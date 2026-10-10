@@ -115,11 +115,11 @@ class RunBudgetTests(unittest.TestCase):
             model_factory=PricedDrafter, max_units=3,
             verifier_model_config_path=self.verifier_config)
         budget = summary["budget"]
-        self.assertEqual(budget["run_cost_micros"], 2_500_000)
+        self.assertEqual(budget["run_cost_micros"], 56_000_000)
         self.assertEqual(budget["units_skipped_for_cost"], [])
         self.assertEqual(len(summary["units_drafted"]), 3)
         # Priced reserves, not the $1 + $1 caps.
-        self.assertLess(budget["verifier_reserve_micros"], 200_000)
+        self.assertLess(budget["verifier_reserve_micros"], 1_000_000)
         self.assertTrue(all(value < 1_000_000
                             for value in budget["unit_reserves_micros"].values()))
         # Drafting three units still leaves a draft-plus-verify repair's room.

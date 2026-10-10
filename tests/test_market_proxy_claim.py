@@ -137,16 +137,44 @@ class MarketProxyClaimTests(unittest.TestCase):
         self.assertNotIn("market_proxy", json.dumps(state["statements"]))
         prompt = build_prompt(state)
         self.assertIn(MAPPING["proxy_gap"], prompt)
-        self.assertIn(state["market_proxies"][0]["source_series_version_hash"], prompt)
+        self.assertIn("claim:market-proxy:" + MAPPING["mapping_ref"], prompt)
         self.assertIn("never company actuals", prompt)
+        self.assertNotIn("source_series_version_hash", state["market_proxies"][0])
 
+        # 2026-10-07: a restated value is a new proxy Claim, not a new model
+        # structure. The specification's state hash keeps still, so a monthly
+        # restatement never buys a paid respecification.
         before = state["state_hash"]
-        self.publish(captured="2026-09-02T23:30:00+00:00",
-                     day="2026-09-02", close="105", artifact="3" * 64)
+        self.publish(captured="2026-10-01T23:30:00+00:00",
+                     day="2026-10-01", close="105", artifact="3" * 64)
         refreshed = MarketProxyClaimAuthority(self.store).refresh(MAPPING)
+        self.assertEqual(refreshed["status"], "fresh")
+        self.assertIn("+5.0% vs 100 on 2026-09-01",
+                      self.store.get_claim(refreshed["claim_version_ref"])["claim"]["normalized_statement"])
         after = build_company_model_state(Missions(), TARGET)
-        self.assertNotEqual(after["state_hash"], before)
-        self.assertIn(refreshed["source_series_version_hash"], build_prompt(after))
+        self.assertEqual(after["state_hash"], before)
+
+    def test_restated_at_most_once_per_calendar_month(self):
+        self.publish()
+        authority = MarketProxyClaimAuthority(self.store)
+        self.assertEqual(authority.refresh(MAPPING)["status"], "fresh")
+        self.publish(captured="2026-09-02T23:30:00+00:00",
+                     day="2026-09-02", close="101", artifact="4" * 64)
+        second = authority.refresh(MAPPING)
+        self.assertEqual(second["status"], "current")
+        self.assertEqual(self.store.connection.execute(
+            "SELECT COUNT(*) FROM market_proxy_claim_versions").fetchone()[0], 1)
+
+    def test_daily_proxy_claim_is_not_a_research_event(self):
+        from datetime import datetime, timezone
+        from dalton_core.research_event import claim_event_candidates
+
+        self.publish()
+        MarketProxyClaimAuthority(self.store).refresh(MAPPING)
+        candidates = claim_event_candidates(
+            self.store.connection, company_ref=TARGET,
+            now=datetime(2026, 9, 3, tzinfo=timezone.utc), lookback_days=30)
+        self.assertEqual(candidates, [])
 
 
 class LegacyClaimIndexMigrationTests(unittest.TestCase):

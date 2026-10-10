@@ -112,11 +112,59 @@ ACTIVE_COVERAGE_SPINE: tuple[dict[str, Any], ...] = (
     },
 )
 
+# ADR-0011: the two model stages declare the figures their exit gate counts.
+#
+# Counted, like the active-coverage spine, and never extracted: the industry
+# figures are cells of the industry framework's cross-company comparison (one
+# company's computed revenue, growth and gross margin, four quarters each --
+# the Initial Screen's own window), and the company figure is the filed
+# quarters the company's driver model is solved against.  The readers are
+# ``model_stage_readiness.industry_model_held_metrics`` and
+# ``company_model_held_metrics``, and the gate criterion that applies them is
+# ``stage_metric_base_held``.  There is therefore one answer to "was this stage
+# executed": its gate passed, and the gate includes this list.
+INDUSTRY_MODEL_SPINE: tuple[dict[str, Any], ...] = (
+    {
+        "metric_ref": "metric:revenue",
+        "label": "收入（同业对比）",
+        "unit": "currency",
+        "periods": 4,
+        "prompt": "this company's reported quarterly revenue as computed in the industry "
+                  "framework's cross-company comparison (counted, never read out of a document)",
+    },
+    {
+        "metric_ref": "metric:revenue-yoy-growth",
+        "label": "收入同比增速（同业对比）",
+        "unit": "percent",
+        "periods": 4,
+        "prompt": "year-on-year revenue growth for the same quarters, computed in the "
+                  "comparison from two filed quarters",
+    },
+    {
+        "metric_ref": "metric:gross-margin",
+        "label": "毛利率（同业对比）",
+        "unit": "percent",
+        "periods": 4,
+        "prompt": "gross margin for the same quarters, computed in the comparison; its "
+                  "comparability limits are the comparison's own notes",
+    },
+)
+COMPANY_MODEL_SPINE: tuple[dict[str, Any], ...] = (
+    {
+        "metric_ref": "metric:revenue",
+        "label": "模型内已申报季度收入",
+        "unit": "currency",
+        "periods": 8,
+        "prompt": "filed quarterly revenue the company's driver model is solved against "
+                  "(two years; the model's filing proof reconciles each quarter)",
+    },
+)
+
 STAGE_SPINE: Mapping[str, tuple[dict[str, Any], ...]] = {
     "initial_screen": UNIVERSAL_SPINE,
     "deep_insight_gate": (),
-    "industry_model": (),
-    "company_model": (),
+    "industry_model": INDUSTRY_MODEL_SPINE,
+    "company_model": COMPANY_MODEL_SPINE,
     "investment_memo": (),
     "active_coverage": ACTIVE_COVERAGE_SPINE,
 }
@@ -238,6 +286,8 @@ def extraction_requests(
 
 __all__ = [
     "ACTIVE_COVERAGE_SPINE",
+    "COMPANY_MODEL_SPINE",
+    "INDUSTRY_MODEL_SPINE",
     "METRIC_UNITS",
     "MetricBaseError",
     "STAGE_SPINE",

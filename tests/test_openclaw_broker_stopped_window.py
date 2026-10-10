@@ -203,6 +203,90 @@ class OpenClawBrokerStoppedWindowTests(PreserveExistingTransitionTests):
         self.assertEqual(before, self.config.read_bytes())
         self.assertFalse(self.receipts.exists())
 
+    def _reasoning_host_fixture(self):
+        import shutil
+        from tests.test_openclaw_broker_reasoning_capability_patch import BrokerReasoningCapabilityPatchTests
+        temporary, host = BrokerReasoningCapabilityPatchTests()._root()
+        self.addCleanup(temporary.cleanup)
+        source = self.root / 'reasoning-source'
+        relative = 'integrations/openclaw_host_patches/patch_broker_reasoning_capability.py'
+        helper = source / relative; helper.parent.mkdir(parents=True)
+        shutil.copyfile(Path(__file__).resolve().parents[1] / relative, helper)
+        target = host / 'dist/runtime-llm.runtime-test.mjs'
+        before = target.read_bytes()
+        after = stopped._expected_model_broker_host_patch(helper, before)
+        (self.packet / 'reasoning.before').write_bytes(before)
+        (self.packet / 'reasoning.after').write_bytes(after)
+        row = {'source_commit': 'c' * 40, 'helper_relative_path': relative,
+            'helper_sha256': stopped.sha256_bytes(helper.read_bytes()),
+            'target_relative_path': str(target.relative_to(host)),
+            'before': 'reasoning.before', 'before_sha256': stopped.sha256_bytes(before),
+            'after': 'reasoning.after', 'after_sha256': stopped.sha256_bytes(after),
+            'capability_check': 'repo_helper_check_no_call'}
+        return source, host, target, row
+
+    def test_reasoning_host_patch_closed_transform_real_check_verify_and_rollback(self):
+        source, host, target, row = self._reasoning_host_fixture()
+        receipt = self.root / 'reasoning-host-receipt.json'
+        with patch.object(stopped.subprocess, 'check_output', return_value='c' * 40 + '\n'):
+            stopped.preflight_reviewed_host_patch(packet_root=self.packet, source_root=source, openclaw_root=host, row=row)
+            result = stopped.apply_reviewed_host_patch(packet_root=self.packet, source_root=source,
+                openclaw_root=host, row=row, receipt_path=receipt)
+            self.assertEqual(result['model_calls'], 0)
+            self.assertEqual(stopped.sha256_bytes(target.read_bytes()), row['after_sha256'])
+            self.assertEqual(stopped.verify_reviewed_host_patch(packet_root=self.packet, source_root=source,
+                openclaw_root=host, row=row, receipt_path=receipt)['model_calls'], 0)
+            stopped.rollback_reviewed_host_patch(packet_root=self.packet, source_root=source,
+                openclaw_root=host, row=row, receipt_path=receipt)
+        self.assertEqual(stopped.sha256_bytes(target.read_bytes()), row['before_sha256'])
+
+    def test_reasoning_host_patch_hashed_extra_code_and_changed_contract_refuse_before_write(self):
+        source, host, target, row = self._reasoning_host_fixture()
+        before = target.read_bytes()
+        with patch.object(stopped.subprocess, 'check_output', return_value='c' * 40 + '\n'):
+            candidate = self.packet / row['after']; original = candidate.read_bytes()
+            candidate.write_bytes(original + b'\nextra_code();\n')
+            row['after_sha256'] = stopped.sha256_bytes(candidate.read_bytes())
+            with self.assertRaisesRegex(stopped.BrokerStoppedWindowError, 'exact helper transform'):
+                stopped.preflight_reviewed_host_patch(packet_root=self.packet, source_root=source, openclaw_root=host, row=row)
+            candidate.write_bytes(original); row['after_sha256'] = stopped.sha256_bytes(original)
+            (host / 'dist/model-runtime-binding-test.mjs').write_text('changed')
+            with self.assertRaisesRegex(stopped.BrokerStoppedWindowError, 'binding/dispatch contract'):
+                stopped.preflight_reviewed_host_patch(packet_root=self.packet, source_root=source, openclaw_root=host, row=row)
+        self.assertEqual(target.read_bytes(), before)
+
+    def test_host_patch_unknown_helper_is_not_accepted_even_with_valid_hash(self):
+        from scripts.prepare_successor_config_transition import _validate_model_broker_host_patch, ConfigTransitionError
+        _, _, _, row = self._reasoning_host_fixture()
+        row['helper_relative_path'] = 'integrations/openclaw_host_patches/arbitrary.py'
+        with self.assertRaisesRegex(ConfigTransitionError, 'outside reviewed scope'):
+            _validate_model_broker_host_patch(row, packet_root=self.packet, source_commit='c' * 40)
+
+    def test_reasoning_host_artifact_builder_accepts_only_closed_frozen_source_transform(self):
+        from scripts.prepare_successor_config_transition import build_model_broker_host_patch_artifact, ConfigTransitionError
+        source, _, _, row = self._reasoning_host_fixture()
+        def git(args, **kwargs):
+            return '' if 'status' in args else 'c' * 40 + '\n'
+        with patch.object(stopped.subprocess, 'check_output', side_effect=git):
+            actual = build_model_broker_host_patch_artifact(packet_root=self.packet.resolve(), source_root=source,
+                source_commit='c' * 40, target_relative_path=row['target_relative_path'],
+                before_path=self.packet/row['before'], after_path=self.packet/row['after'],
+                helper_relative_path=row['helper_relative_path'])
+            self.assertEqual(actual, row)
+            after = self.packet/row['after']; after.write_bytes(after.read_bytes()+b'extra();')
+            with self.assertRaisesRegex(ConfigTransitionError, 'exact helper transform'):
+                build_model_broker_host_patch_artifact(packet_root=self.packet.resolve(), source_root=source,
+                    source_commit='c' * 40, target_relative_path=row['target_relative_path'],
+                    before_path=self.packet/row['before'], after_path=after,
+                    helper_relative_path=row['helper_relative_path'])
+
+    def test_endpoint_host_patch_actual_composed_constants_remain_supported(self):
+        from scripts.prepare_successor_config_transition import _expected_model_broker_host_patch
+        from integrations.openclaw_host_patches.patch_provider_output_control_endpoint import ORIGINAL, PATCHED, ORIGINAL_2026_9_5, PATCHED_2026_9_5
+        helper = Path(__file__).resolve().parents[1] / 'integrations/openclaw_host_patches/patch_provider_output_control_endpoint.py'
+        for before, after in ((ORIGINAL, PATCHED), (ORIGINAL_2026_9_5, PATCHED_2026_9_5)):
+            self.assertEqual(_expected_model_broker_host_patch(helper, before.encode()), after.encode())
+
     def test_journal_change_refuses_before_config_or_gateway_mutation(self):
         value = json.loads(self.journal.read_text())
         value["records"][0]["requestHash"] = "b" * 64

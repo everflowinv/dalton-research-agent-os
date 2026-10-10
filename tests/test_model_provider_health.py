@@ -176,6 +176,39 @@ class CooldownArithmeticTests(unittest.TestCase):
         for code in ("PROVIDER_INTERNAL_ERROR", "HTTP_503", "TIMEOUT", "", None):
             self.assertFalse(is_immediate_cooldown_code(code), code)
 
+    def test_an_empty_completion_cools_the_profile_like_a_429(self) -> None:
+        """Live 2026-09-29: the Claude CLI weekly limit, 62 calls in a day.
+
+        The gateway answered "You've hit your weekly limit" in-band, the host
+        returned an empty completion with zero usage, and the broker called it
+        INVALID_HOST_RESULT -- a code that only counts toward the five-in-a-
+        quarter-hour streak, so claude-opus-5 was offered again and again.
+        """
+
+        from dalton_core.model_fallback_chain import classify_model_failure
+        from dalton_core.model_profile_health import (
+            COOLDOWN_REASONS, HOST_FRAME_FAILURE_CODES, cooldown_decision,
+            cooldown_message,
+        )
+
+        self.assertTrue(is_immediate_cooldown_code("HOST_EMPTY_COMPLETION"))
+        # A reasoning model that spent maxTokens is not the provider refusing.
+        self.assertFalse(is_immediate_cooldown_code("HOST_OUTPUT_LIMIT_REACHED"))
+        self.assertFalse(is_immediate_cooldown_code("INVALID_HOST_RESULT"))
+        decided = cooldown_decision(
+            failure_code="HOST_EMPTY_COMPLETION", now=NOW, recent_failures=1,
+            previous_streak=0, on_probation=False)
+        self.assertEqual(decided["reason"], "provider_unavailable")
+        self.assertIn(decided["reason"], COOLDOWN_REASONS)
+        self.assertIn("CLI", cooldown_message({**decided, "profile_id": "profile:x"}))
+        self.assertIsNone(cooldown_decision(
+            failure_code="HOST_OUTPUT_LIMIT_REACHED", now=NOW, recent_failures=1,
+            previous_streak=0, on_probation=False))
+        # Both refinements keep INVALID_HOST_RESULT's fallback class.
+        for code in HOST_FRAME_FAILURE_CODES:
+            self.assertEqual(classify_model_failure({"code": code}),
+                             "provider_failure", code)
+
 
 class _RouterCase(unittest.TestCase):
     def setUp(self) -> None:
@@ -538,12 +571,9 @@ class TransportContractTests(_RouterCase):
         self.assertIn(ANTIGRAVITY, serving)
         self.assertNotIn("profile:deepseek-v4-flash", serving)
 
-    def test_a_tier_save_drops_preferences_but_never_a_contract_pin(self) -> None:
-        # A tier edit means "all of this tier's stages follow the new chain",
-        # which is right for a preference and wrong for a contract: dropping
-        # the checker's pin would send every publication straight back to
-        # "language checker served an unexpected transport or model" on the
-        # next call, silently.
+    def test_a_tier_save_preserves_explicit_preferences_and_contract_pins(self) -> None:
+        # A tier edit changes the shared default. Explicit stage preferences
+        # and transport contract pins keep their exact authorized chains.
         from dalton_core.model_selection import publish_selection, publish_tier_selection
         from dalton_core.research_planner_setup import ensure_planner_policy
 
@@ -566,10 +596,13 @@ class TransportContractTests(_RouterCase):
             chain=["profile:deepseek-v4-flash", "profile:zai-glm-5-3-flash"],
             actor_ref="human:owner", now=NOW,
         )
-        overrides = self.router.get_policy(
-            saved["policy_version_ref"]).get("purpose_overrides") or {}
-        self.assertEqual(overrides[self.CHECKER]["chain"], [ANTIGRAVITY])
-        self.assertNotIn("claim_index", overrides)
+        current = self.router.get_policy(saved["policy_version_ref"])
+        overrides = current.get("purpose_overrides") or {}
+        previous = self.router.get_policy(policy).get("purpose_overrides") or {}
+        self.assertEqual(overrides[self.CHECKER], previous[self.CHECKER])
+        self.assertEqual(overrides["claim_index"], previous["claim_index"])
+        self.assertEqual(current["fallback_chains"]["tiers"]["cheap"],
+                         ["profile:deepseek-v4-flash", "profile:zai-glm-5-3-flash"])
 
     def test_two_callers_cannot_require_two_endpoints_for_one_stage(self) -> None:
         from dalton_core.model_fallback_chain import _PURPOSE_TRANSPORTS

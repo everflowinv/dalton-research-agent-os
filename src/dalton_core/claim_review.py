@@ -32,6 +32,7 @@ import hashlib
 import json
 import re
 import sqlite3
+import time
 from collections.abc import Mapping, Sequence
 from datetime import datetime, timezone
 from pathlib import Path
@@ -42,6 +43,7 @@ from .claim_retirement import (
     REREVIEW_RULE_REF,
     SPAN_RATIONALE_PREFIX,
     SPAN_V2_DETECTOR_REF,
+    ATTRIBUTION_REASONS,
     ClaimRetirementAuthority,
     ClaimRetirementError,
     DETERMINISTIC_REASONS,
@@ -88,6 +90,17 @@ DEFAULT_MAX_RENDERS = 6
 # The re-review of past span retirements (2026-09-24 audit) reads originals
 # too, under its own bound so it never starves the patrol's first look.
 DEFAULT_REREVIEW_DOCUMENTS = 20
+# 2026-10-09: the issuer-attribution audit (``audit_issuer_attribution``)
+# reads this many distinct originals per tick, newest Claims first, under its
+# own bound so the patrol's first look is never starved.
+DEFAULT_ATTRIBUTION_DOCUMENTS = 12
+# 2026-10-10: and within this many seconds of wall clock.  The audit runs on
+# the writer's one store thread inside ``dispatch_claim_review``; on legacy an
+# original took ~7 s to read (render + attribution over every Claim citing
+# it), so 12 of them held the store thread for over a minute, the tick hit
+# the 30 s store budget and the lanes queued behind it timed out unstarted.
+# Starting a new original stops once this is spent; the backlog waits.
+DEFAULT_ATTRIBUTION_SECONDS = 8.0
 WRITE_SCOPE = "claim_challenge"
 #: The state-directory spools an acquired original can be in, in the order the
 #: other readers of acquired bytes already use (``mission_sec_quarters``).
@@ -382,16 +395,20 @@ class ClaimReviewDriver:
         body = self._read(match.group(1))
         if body is None:
             return None
-        from .public_web_extraction_source import render_public_web_text
+        from .public_web_extraction_source import render_public_web_text_candidates
 
         for media in self._web_media_types(match.group(1), body):
             for limits in _WEB_RENDER_LIMITS:
                 try:
-                    text = render_public_web_text(body, raw_media_type=media, **limits)["text"]
+                    # 2026-10-09: an inline-XBRL filing cited before its own
+                    # renderer existed was cited under the legacy rendering.
+                    texts = [item["text"] for item in render_public_web_text_candidates(
+                        body, raw_media_type=media, **limits)]
                 except Exception:  # noqa: BLE001 - "not this rendering", try the next
                     break
-                if hashlib.sha256(text.encode("utf-8")).hexdigest() == content_sha256:
-                    return text
+                for text in texts:
+                    if hashlib.sha256(text.encode("utf-8")).hexdigest() == content_sha256:
+                        return text
         return None
 
     def _document_facts(self, document_ref: Any) -> dict[str, Any]:
@@ -745,6 +762,10 @@ class ClaimReviewDriver:
                 principal=None, roster=roster, citations=citations, texts=texts)
             summary["industry_reattribution"] = self.reattribute_industry_findings(
                 principal=None, citations=citations, texts=texts)
+            summary["issuer_attribution"] = self.audit_issuer_attribution(
+                principal=None, roster=roster, citations=citations, texts=texts)
+            if summary["issuer_attribution"]["would_retire"]:
+                summary["status"] = "held"
             if (summary["rereview"]["would_reinstate"]
                     or summary["reinstatement_recheck"]["would_withdraw"]
                     or summary["industry_reattribution"]["would_reattribute"]):
@@ -810,12 +831,233 @@ class ClaimReviewDriver:
         # company's again and never also the industry's.
         summary["industry_reattribution"] = self.reattribute_industry_findings(
             principal=principal, citations=citations, texts=texts)
+        # 2026-10-09 (P0, ADR-0017): Claims whose cited financial table is
+        # another issuer's are retired, and the products whose current version
+        # rests on retired Claims are marked needs_rewrite for the next batched
+        # redraft once replacement material has arrived -- never redrafted here.
+        summary["issuer_attribution"] = self.audit_issuer_attribution(
+            principal=principal, roster=roster, citations=citations, texts=texts)
+        summary["product_rewrite_flags"] = self.flag_products_for_rewrite(principal=principal)
+        # Batch an: cross-product conflicts written down once each (append-
+        # only, superseded when the products move on) and the CIK aliases.
+        summary["product_consistency"] = self.record_product_consistency(principal=principal)
         if (summary["challenged"] or summary["retired"] or summary["rereview"]["reinstated"]
+                or summary["issuer_attribution"]["retired"]
+                or summary["product_rewrite_flags"].get("flagged")
                 or summary["reinstatement_recheck"]["withdrawn"]
                 or summary["industry_reattribution_recheck"].get("withdrawn")
                 or summary["industry_reattribution"]["reattributed"]):
             summary["status"] = "acted"
         return summary
+
+    # -- issuer attribution audit (2026-10-09, P0) ----------------------------
+
+    def _attribution_audits(self) -> dict[str, dict[str, Any]]:
+        try:
+            return {
+                row["claim_version_ref"]: dict(row)
+                for row in self.connection.execute(
+                    "SELECT * FROM claim_attribution_audits").fetchall()
+            }
+        except sqlite3.Error:
+            return {}
+
+    def _record_attribution_audit(self, claim_version_ref: str, outcome: str) -> None:
+        from .claim_issuer_attribution import RULE_REF
+
+        if self._authorization is None:
+            return  # a read-only driver remembers nothing
+        at = self.clock().astimezone(timezone.utc).isoformat(timespec="microseconds")
+        self._authorization.authorized = True
+        try:
+            self.connection.execute(
+                "INSERT INTO claim_attribution_audits(claim_version_ref,rule_ref,outcome,"
+                "attempts,audited_at) VALUES(?,?,?,1,?) "
+                "ON CONFLICT(claim_version_ref) DO UPDATE SET rule_ref=excluded.rule_ref, "
+                "outcome=excluded.outcome, attempts=claim_attribution_audits.attempts+1, "
+                "audited_at=excluded.audited_at",
+                (claim_version_ref, RULE_REF, outcome, at),
+            )
+            self.connection.commit()
+        except Exception:  # noqa: BLE001 - a marker failure must not lose the pass
+            self.connection.rollback()
+        finally:
+            self._authorization.authorized = False
+
+    def attribution_inputs(
+        self, citation: Mapping[str, Any], roster: Mapping[str, Sequence[str]],
+    ) -> dict[str, Any]:
+        """What ``claim_issuer_attribution.attribute`` reads besides the text."""
+
+        facts = self._document_facts(citation.get("document_ref"))
+        refs = set(self.needles) | set(roster)
+        return {
+            "start": citation.get("start"), "end": citation.get("end"),
+            "issuers": {ref: self._needles_for(ref, roster) for ref in sorted(refs)},
+            "title": facts["title"], "issuer_document": facts["issuer_document"],
+        }
+
+    def audit_issuer_attribution(
+        self,
+        *,
+        principal: str | None,
+        roster: Mapping[str, Sequence[str]] | None = None,
+        citations: Mapping[str, Mapping[str, Any]] | None = None,
+        texts: dict[str, str | None] | None = None,
+        max_documents: int = DEFAULT_ATTRIBUTION_DOCUMENTS,
+        max_renders: int | None = None,
+        max_seconds: float | None = DEFAULT_ATTRIBUTION_SECONDS,
+    ) -> dict[str, Any]:
+        """Retire admitted Claims whose cited financial table is another issuer's.
+
+        The retroactive half of the P0 fix (research artifact quality review,
+        2026-10-09): ws-7d's MSFT Claims cut from the model pages of a Morgan
+        Stanley note on Oracle.  Each Claim not yet audited under the current
+        rule is read against its exact original
+        (``claim_issuer_attribution.attribute``); a ``misattributed`` verdict
+        is challenged with its ``attribution_evidence`` and retired through
+        the authority, which re-runs the rule before it writes.  Append-only;
+        bounded per tick by distinct originals, newest Claims first; without
+        the mission's grant it reports what it would retire and writes no
+        challenge.  ``ambiguous`` is never retired here.
+        """
+
+        from .claim_issuer_attribution import RULE_REF, attribute, misattribution_rationale
+        from .claim_retirement import retired_claim_version_refs
+
+        summary: dict[str, Any] = {
+            "rule_ref": RULE_REF, "audited": 0, "remaining": 0, "documents_read": 0,
+            "would_retire": [], "retired": [], "skipped": [], "outcomes": {},
+        }
+        roster = self._roster_needles() if roster is None else roster
+        citations = self._citations() if citations is None else citations
+        texts = {} if texts is None else texts
+        if max_renders is not None:
+            # A standalone call; inside ``run_once`` the patrol's render
+            # budget for the tick is shared.
+            self._renders_left = max(0, int(max_renders))
+        audits = self._attribution_audits()
+        retired = retired_claim_version_refs(self.connection)
+        rows = self.connection.execute(
+            "SELECT claim_version_id AS ref, claim_json, content_hash AS hash "
+            "FROM claim_versions ORDER BY created_at DESC, claim_version_id"
+        ).fetchall()
+        read_here: set[str] = set()
+        started = time.monotonic()
+        for row in rows:
+            ref = row["ref"]
+            citation = citations.get(ref)
+            if citation is None or ref in retired:
+                continue
+            audit = audits.get(ref)
+            if audit is not None and audit["rule_ref"] == RULE_REF and audit["outcome"] != "unreadable":
+                continue
+            claim = json.loads(row["claim_json"])
+            subject_ref = str(claim.get("subject_ref") or "")
+            if subject_ref.startswith("industry:"):
+                continue
+            digest = citation["digest"]
+            if digest not in texts:
+                out_of_time = (max_seconds is not None and read_here
+                               and time.monotonic() - started >= max_seconds)
+                if out_of_time:
+                    summary["out_of_time"] = True
+                if len(read_here) >= max(1, int(max_documents)) or out_of_time:
+                    summary["remaining"] += 1
+                    continue
+                self._render_deferred = False
+                texts[digest] = self.source_text(digest)
+                if texts[digest] is None and self._render_deferred:
+                    texts.pop(digest, None)
+                    summary["remaining"] += 1
+                    continue
+                read_here.add(digest)
+            text = texts[digest]
+            if text is None:
+                self._record_attribution_audit(ref, "unreadable")
+                summary["outcomes"]["unreadable"] = summary["outcomes"].get("unreadable", 0) + 1
+                continue
+            inputs = self.attribution_inputs(citation, roster)
+            start, end = inputs["start"], inputs["end"]
+            verdict = attribute(
+                text=text, start=start if isinstance(start, int) else -1,
+                end=end if isinstance(end, int) else -1,
+                statement=claim["normalized_statement"], subject_ref=subject_ref,
+                issuers=inputs["issuers"], title=inputs["title"],
+                issuer_document=inputs["issuer_document"])
+            outcome = str(verdict["verdict"])
+            summary["audited"] += 1
+            summary["outcomes"][outcome] = summary["outcomes"].get(outcome, 0) + 1
+            if outcome != "misattributed":
+                self._record_attribution_audit(ref, outcome)
+                continue
+            item = {"claim_version_ref": ref, "subject_ref": subject_ref,
+                    "table_issuer": verdict.get("table_issuer"), "basis": verdict.get("basis"),
+                    "statement": claim["normalized_statement"][:160]}
+            if principal is None:
+                summary["would_retire"].append(item)
+                continue  # unmarked: it is acted on once the grant exists
+            label = subject_ref.rsplit(":", 1)[-1].upper()
+            rationale = misattribution_rationale(verdict, label)
+            evidence = {key: verdict.get(key) for key in (
+                "rule_ref", "verdict", "basis", "table_issuer", "evidence", "primary_issuer",
+                "named_locally", "period") if verdict.get(key) is not None}
+            evidence["document_ref"] = citation.get("document_ref")
+            evidence["source_content_hash"] = digest
+            evidence["source_start"], evidence["source_end"] = start, end
+            try:
+                challenge = self.challenges.challenge(
+                    claim_version_ref=ref, claim_version_hash=row["hash"],
+                    reason_code="issuer_misattribution", rationale=rationale,
+                    actor_ref=principal, evidence=evidence)
+                decision = self.challenges.decide(
+                    challenge_ref=challenge["id"], challenge_hash=challenge["content_hash"],
+                    decision="retired", actor_ref=principal, rationale=rationale,
+                    source_text=text, attribution_inputs=inputs)
+            except ClaimRetirementError as exc:
+                summary["skipped"].append({"claim_version_ref": ref, "reason": str(exc)})
+                self._record_attribution_audit(ref, outcome)
+                continue
+            self._record_attribution_audit(ref, outcome)
+            if decision.get("status") == "duplicate" and decision.get("decision") != "retired":
+                summary["skipped"].append({"claim_version_ref": ref,
+                                           "reason": "a decision for this Claim already stands"})
+                continue
+            summary["retired"].append({**item, "decision_ref": decision.get("id")})
+        summary["documents_read"] = len(read_here)
+        return summary
+
+    def flag_products_for_rewrite(self, *, principal: str | None) -> dict[str, Any]:
+        """Mark products whose current version rests on retired Claims (ADR-0017).
+
+        Under the mission's grant only; the scan itself is skipped while no
+        retirement and no product version has been appended since the last.
+        """
+
+        from .product_rewrite_flags import ProductRewriteFlagAuthority
+
+        if principal is None:
+            return {"flagged": [], "held": "no claim_challenge grant: products are not flagged"}
+        try:
+            authority = ProductRewriteFlagAuthority(self.store)
+            return authority.flag_all(actor_ref=principal)
+        except Exception as exc:  # noqa: BLE001 - a flag failure must not lose the pass
+            return {"flagged": [], "error": f"{type(exc).__name__}: {exc}"}
+
+    def record_product_consistency(self, *, principal: str | None) -> dict[str, Any]:
+        """Batch an: append detected cross-product conflicts and company-ref aliases."""
+
+        from .product_consistency import ProductConsistencyAuthority
+
+        if principal is None:
+            return {"held": "no claim_challenge grant: conflicts are not recorded"}
+        try:
+            authority = ProductConsistencyAuthority(self.store)
+            result = authority.scan(actor_ref=principal)
+            result["aliases"] = len(authority.record_aliases_from_scan(actor_ref=principal)["aliases"])
+            return result
+        except Exception as exc:  # noqa: BLE001 - a consistency failure must not lose the pass
+            return {"error": f"{type(exc).__name__}: {exc}"}
 
     # -- re-check of standing automatic reinstatements (2026-09-25) ---------
 

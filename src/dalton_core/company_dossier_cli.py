@@ -50,7 +50,10 @@ from .company_dossier import (
     DossierStructureUnmapped,
     UnitProvenanceDrift,
     WRITE_SCOPE,
+    batch_d_findings,
     dossier_artefact,
+    failed_substance_sections,
+    gap_classes,
     evidence_scope,
     load_policy,
     new_refs,
@@ -80,8 +83,13 @@ from .company_dossier_draft import (
     legacy_unit_prompt_v04,
     legacy_unit_prompt_v05,
     legacy_unit_prompt_v06,
+    legacy_unit_prompt_v09,
+    legacy_unit_prompt_v10,
     build_verifier_prompt,
     legacy_verifier_prompt_v02,
+    legacy_verifier_prompt_v03,
+    pack_material_rows,
+    pre_batch_d_verifier_prompt_contract_fingerprint,
     draft_hash,
     draft_unit,
     independence,
@@ -160,6 +168,11 @@ def _verifier_contract_pairs(draft_digest, blocks, company, *, current):
     return {current_pair, (
         f"verify-{draft_digest[:24]}-{legacy_verifier_prompt_contract_fingerprint()[:16]}",
         legacy_verifier_prompt_v02(blocks, company=company),
+    ), (
+        # Batch D: verdicts given under the 0.3 prompt (before the reasoning
+        # lint was appended) still replay.
+        f"verify-{draft_digest[:24]}-{pre_batch_d_verifier_prompt_contract_fingerprint()[:16]}",
+        legacy_verifier_prompt_v03(blocks, company=company),
     )}
 
 # The two deterministic checks a draft may not fail. Everything else the rubric
@@ -302,11 +315,11 @@ def table_exists(connection: Any, name: str) -> bool:
 
 
 def screened_companies(missions: Any, mission: Mapping[str, Any]) -> list[str]:
-    """Companies whose Initial Screen has passed, in mission priority order.
+    """Screened companies and exact repairs of existing files, in mission order.
 
-    The dossier is the layer above the screen: a company nobody has screened
-    has no file to deepen, and drafting one would spend model calls on the
-    material the screen exists to assemble.
+    An unscreened company cannot receive a new dossier. An existing formal
+    dossier can enter source-bound repair under the same verified project;
+    this does not register or imply that its Initial Screen passed.
     """
 
     # P14-S: folded across every version of the mission_ref. A gate that
@@ -318,10 +331,12 @@ def screened_companies(missions: Any, mission: Mapping[str, Any]) -> list[str]:
         for company_ref, history in state.items()
         if fold_stage_status(history.get("initial_screen") or ()) == "gate_passed"
     }
+    from .research_followup_product_repair import existing_candidates
+    repairs = set(existing_candidates(getattr(missions, "connection", None), mission))
     return [
         str(member["company_ref"])
         for member in mission.get("universe") or []
-        if member.get("company_ref") in passed
+        if member.get("company_ref") in passed or member.get("company_ref") in repairs
     ]
 
 
@@ -345,12 +360,13 @@ def claim_material(
     )
     from .claim_index_authority import IMPORTANCE_RANK
 
-    rows.sort(key=lambda row: (
-        IMPORTANCE_RANK.get(str(row.get("importance") or ""), 99),
-        # Newest first inside a tier: an old filing and a new one are both
-        # filings, and the new one is the one the file should rest on.
-        str(row.get("as_of") or ""),
-    ), reverse=False)
+    # Newest first inside a tier: an old filing and a new one are both
+    # filings, and the new one is the one the file should rest on.  Batch D
+    # (diagnosis 2026-10-09): this used to sort ``as_of`` ascending with the
+    # tier, so the quota bought the *oldest* Claims of each tier.  Two stable
+    # passes: newest first, then tier ascending.
+    rows.sort(key=lambda row: str(row.get("as_of") or ""), reverse=True)
+    rows.sort(key=lambda row: IMPORTANCE_RANK.get(str(row.get("importance") or ""), 99))
     material = []
     for row in rows[:limit]:
         material.append({
@@ -515,9 +531,38 @@ def _forecast_cell_rows(
                 # importance ladder has no rung for our own opinion.
                 "importance": "filing" if cell["kind"] == "actual" else "other",
             })
-    # Newest first, so the quota buys the quarters nearest the present.
-    rows.sort(key=lambda row: (str(row["period_end"]), row["ref"]), reverse=True)
-    return rows[:limit]
+    return nearest_cells_first(rows)[:limit]
+
+
+def nearest_cells_first(rows: list[dict[str, Any]]) -> list[dict[str, Any]]:
+    """Forecast-model cells, nearest the present first.
+
+    Batch D (diagnosis 2026-10-09): sorting every cell by ``period_end``
+    descending meant the quota bought the *farthest* forecast quarters and the
+    file talked about 2028 while omitting next quarter.  The present is the
+    latest actual: actuals newest-first, estimates nearest-first, interleaved
+    by distance from that anchor (an actual wins a tie).
+    """
+
+    from datetime import date
+
+    actual_ends = [str(row["period_end"]) for row in rows
+                   if row.get("importance") == "filing"]
+    anchor_text = max(actual_ends) if actual_ends else min(
+        (str(row["period_end"]) for row in rows), default="")
+
+    def day(value: str) -> int:
+        try:
+            return date.fromisoformat(value[:10]).toordinal()
+        except ValueError:
+            return 0
+
+    anchor = day(anchor_text) if anchor_text else 0
+    return sorted(rows, key=lambda row: (
+        abs(day(str(row["period_end"])) - anchor),
+        0 if row.get("importance") == "filing" else 1,
+        str(row["ref"]),
+    ))
 
 
 def market_view_material(
@@ -590,8 +635,38 @@ def guidance_material(
     return guides, actuals
 
 
+#: The material pack rows a dossier part may cite (batch D), at most this many.
+MAX_PACK_ROWS = MAX_NUMBER_ROWS // 2
+
+
+def dossier_pack_rows(state_dir: Path, company_ref: str,
+                      summary: dict[str, Any]) -> list[dict[str, Any]]:
+    """The pack's citable rows, recording in ``summary`` what happened."""
+
+    from .product_contract import MaterialPackUnavailable, build_pack
+
+    try:
+        pack = build_pack(state_dir, company_ref, "dossier")
+    except MaterialPackUnavailable as exc:
+        summary["material_pack"] = {"status": "unavailable", "reason": str(exc)[:300]}
+        return []
+    except Exception as exc:  # noqa: BLE001 - the pack is an input, not the run
+        summary["material_pack"] = {"status": "error",
+                                    "reason": f"{type(exc).__name__}: {exc}"[:300]}
+        return []
+    rows = pack_material_rows(pack, limit=MAX_PACK_ROWS)
+    summary["material_pack"] = {
+        "status": "used", "content_hash": pack.get("content_hash"),
+        "recipe_version": pack.get("recipe_version"),
+        "sufficiency": (pack.get("sufficiency") or {}).get("status"),
+        "rows": len(rows),
+    }
+    return rows
+
+
 def unresolved_refs(
-    connection: Any, record: Mapping[str, Any], *, forecast_cells: set[str]
+    connection: Any, record: Mapping[str, Any], *, forecast_cells: set[str],
+    pack_refs: set[str] | None = None,
 ) -> list[dict[str, str]]:
     """Every ref the draft cites, checked against the authority that owns it.
 
@@ -624,6 +699,10 @@ def unresolved_refs(
         elif kind == "forecast_cell":
             if ref not in forecast_cells:
                 missing.append({"ref": ref, "reason": "no such forecast cell"})
+        elif pack_refs is not None and ref in pack_refs:
+            # Batch D: a row of the material pack this run drafted from. The
+            # pack is the frozen input; its passage refs carry their own hash.
+            continue
         elif ref.startswith("statement-line:"):
             row = connection.execute(
                 "SELECT 1 FROM coverage_mission_statement_lines WHERE line_id=?",
@@ -1405,6 +1484,7 @@ def validate_formal_unit_provenance(
                             if is_current and current_blocks else {
                                 (f"verify-{item['verified_draft_hash'][:24]}-{verifier_prompt_contract_fingerprint()[:16]}", None),
                                 (f"verify-{item['verified_draft_hash'][:24]}-{legacy_verifier_prompt_contract_fingerprint()[:16]}", None),
+                                (f"verify-{item['verified_draft_hash'][:24]}-{pre_batch_d_verifier_prompt_contract_fingerprint()[:16]}", None),
                             })
                         if is_current and current_blocks and (claimed["request_id"], work.get("question")) not in allowed_pairs:
                             raise UnitProvenanceDrift(
@@ -1494,7 +1574,8 @@ def validate_formal_unit_provenance(
                                         market_view_available=prompt_args[
                                             "market_view_available"],
                                         profile=producer_input["parse_input"]["profile"],
-                                        classification=prompt_args["classification"])
+                                        classification=prompt_args["classification"],
+                                        _historical_context_rule="Label older quantitative evidence" in work.get("question", ""))
                                 except Exception as exc:
                                     # A findings repair is only ever made of a
                                     # reply that *was* accepted; one that no
@@ -1554,7 +1635,8 @@ def validate_formal_unit_provenance(
                                         market_view_available=prompt_args[
                                             "market_view_available"],
                                         profile=producer_input["parse_input"]["profile"],
-                                        classification=prompt_args["classification"])
+                                        classification=prompt_args["classification"],
+                                        _historical_context_rule="Label older quantitative evidence" in work.get("question", ""))
                                 except DossierDraftRefused as exc:
                                     parse_error = exc
                                 except Exception as exc:
@@ -1619,7 +1701,8 @@ def validate_formal_unit_provenance(
                             # template would reproduce yesterday's bytes, which is a
                             # statement about our own source tree rather than about
                             # the model authority.
-                            expected_prompts = [build_unit_prompt(**prompt_args),
+                            expected_prompts = [build_unit_prompt(**prompt_args), legacy_unit_prompt_v10(**prompt_args),
+                                                legacy_unit_prompt_v09(**prompt_args),
                                                 legacy_unit_prompt_v05(**prompt_args),
                                                 legacy_unit_prompt_v04(**prompt_args),
                                                 legacy_unit_prompt_v03(**prompt_args)]
@@ -1645,7 +1728,8 @@ def validate_formal_unit_provenance(
                                 structure=parse_input["structure"], material=parse_input["material"],
                                 market_view_available=parse_input["market_view_available"],
                                 profile=parse_input["profile"],
-                                classification=parse_input["classification"])
+                                classification=parse_input["classification"],
+                                _historical_context_rule="Label older quantitative evidence" in work.get("question", ""))
                         except Exception as exc:
                             raise UnitProvenanceDrift(
                                 f"unit_provenance.{unit}.producer output is invalid",
@@ -1724,6 +1808,13 @@ def dossier_company_source_fingerprint(
             (company_ref,),
         ).fetchone()
         dossier = None if row is None else dict(row)
+    repair_inputs = {}
+    from .research_followup_automation import groups as followup_groups
+    if dossier is not None and any(g["company_ref"] == company_ref and g["route"] == "dossier_repair"
+                                  for g in followup_groups(connection)):
+        from .research_followup_product_repair import context, record
+        repair_inputs["existing_artefact_followup_context"] = context(
+            connection, "dossier", company_ref, record(connection, "dossier", dossier["version_id"]))
     return dossier_input_fingerprint({
         "schema_version": "0.1",
         "company_ref": company_ref,
@@ -1732,6 +1823,7 @@ def dossier_company_source_fingerprint(
         "document_figures": figures,
         "forecast_head": forecast,
         "dossier_head": dossier,
+        **repair_inputs,
     })
 
 
@@ -1836,6 +1928,7 @@ def run_dossier(
         "findings_repair": [],
         "findings_repair_rounds": 0,
     }
+    pack_rows: list[dict[str, Any]] = []
     store = DaltonStore(str(state_dir / "core.sqlite"))
     try:
         missions = CoverageMissionAuthority(store)
@@ -1916,12 +2009,52 @@ def run_dossier(
         for candidate in candidates:
             examined = candidate
             prior = authority.latest(candidate)
+            from .research_followup_product_repair import context as repair_context, pending_units, prior_body as repair_prior_body, unread_repair_units
+            followup_context = repair_context(store.connection, "dossier", candidate, prior, mission=mission)
+
             from .company_research_view import prepare_company_claim_query
             candidate_claim_context = prepare_company_claim_query(store, candidate)
             plan = plan_units(store=store, company_ref=candidate,
                               constitution=constitution, policy=policy, prior=prior,
                               claim_context=candidate_claim_context)
-            if stale_units(plan, limit=max_units, revise=revise_units):
+            # The capped pack is part of the actual input before threshold
+            # selection, not a late attachment after choosing paid units.
+            pack_rows = dossier_pack_rows(state_dir, candidate, summary)
+            for entry in plan.values():
+                if entry.get("material"):
+                    seen = {row["ref"] for row in entry["material"]}
+                    entry["material"] = list(entry["material"]) + [row for row in pack_rows if row["ref"] not in seen]
+            guides, actuals = guidance_material(store, candidate, claim_context=candidate_claim_context)
+            candidate_profile = build_profile(company_ref=candidate, guides=guides, actuals=actuals)
+            candidate_company = {"company_ref": candidate, "ticker": next(
+                (x.get("ticker") for x in mission["universe"] if x.get("company_ref") == candidate), None)}
+            prior_sections_for_gate = {x["aspect"]: x for x in (prior or {}).get("sections", [])}
+            gate_inputs = {}
+            for unit, entry in plan.items():
+                if entry["status"] != "ready":
+                    continue
+                tagged = material_rows([r for r in entry["material"] if "kind" not in r],
+                                       [r for r in entry["material"] if "kind" in r])
+                gate_inputs[unit] = build_dossier_input(
+                    unit=unit, structure=entry["structure"], material=tagged,
+                    company=candidate_company, mission=mission, constitution=constitution, policy=policy,
+                    prior_body=repair_prior_body("" if unit not in prior_sections_for_gate else section_body(prior_sections_for_gate[unit]), followup_context),
+                    profile=candidate_profile if unit == "guidance_style" else None,
+                    profile_table=render_profile_table(candidate_profile) if unit == "guidance_style" else "",
+                    market_view_available=any(x["slot_id"] == "market_view" for x in entry["structure"]),
+                    classification=((prior or {}).get("industry_classification") or {}).get("classification"))
+            effective_revise = tuple(sorted(set(revise_units) | set(unread_repair_units(
+                state_dir, "dossier", candidate, [candidate], pending_units(store.connection, followup_context), gate_inputs))))
+            from .redraft_policy import apply_unit_gates
+            old_bindings = (prior or {}).get("bindings") or {}
+            changed = bool(prior) and any(old_bindings.get(k) != value for k, value in {
+                "constitution_version": {"ref": constitution["id"], "hash": constitution["content_hash"]},
+                "playbook_version": mission["bindings"]["playbook_version"],
+                "policy_hash": policy_hash(policy)}.items())
+            apply_unit_gates(state_dir, store.connection, product="dossier", target=candidate,
+                company_refs=[candidate], prior=prior, plan=plan, inputs=gate_inputs,
+                revise=effective_revise, binding_changed=changed)
+            if stale_units(plan, limit=max_units, revise=effective_revise):
                 chosen = candidate
                 chosen_claim_context = candidate_claim_context
                 break
@@ -1929,7 +2062,8 @@ def run_dossier(
             return {
                 unit: {"status": entry["status"], "reason": entry["reason"],
                        "new_refs": entry["new_refs"], "stale": entry["stale"],
-                       "slots": len(entry["structure"])}
+                       "slots": len(entry["structure"]),
+                       "redraft_policy": entry.get("redraft_policy")}
                 for unit, entry in entries.items()
             }
 
@@ -1944,7 +2078,11 @@ def run_dossier(
             return summary
         summary["company_ref"] = chosen
         summary["units_planned"] = planned(plan)
-        wanted = stale_units(plan, limit=max_units, revise=revise_units)
+        wanted = stale_units(plan, limit=max_units, revise=effective_revise)
+        # Batch D: the shared material pack (batch C) is the dossier's input
+        # beside its Claims. Its P/N/O rows are cited like any other figure
+        # row; when the sibling module is not installed the dossier drafts as
+        # before and says so.
         if dry_run:
             summary.update({"status": "succeeded", "dossier_status": "dry_run",
                             "units_drafted": wanted})
@@ -1994,6 +2132,13 @@ def run_dossier(
                 "max_output_tokens": MAX_OUTPUT_TOKENS, "max_cost_usd": MAX_COST_USD,
                 "timeout_seconds": TIMEOUT_SECONDS})
         verifier_cap = int(float(verifier_budget["max_cost_usd"]) * 1_000_000)
+        # Reconcile the unit count (including the CLI override) and the
+        # separate verifier's effective cap before any paid call. Old stored
+        # run budgets cannot underfund the required draft/verifier pair.
+        run_budget = resolve_run_budget(config, "dossier", max_units=max_units,
+            defaults={"max_cost_usd": MAX_RUN_COST_USD, "max_units": max_units},
+            call_budgets={"dossier": producer_budget, "dossier_verifier": verifier_budget})
+        run_cost_micros = int(float(run_budget["max_cost_usd"]) * 1_000_000)
         # The verifier's prompt is every drafted block with its evidence; it
         # is priced at the call's own input bound, which it cannot exceed.
         verifier_reserve = verifier_cap
@@ -2039,6 +2184,8 @@ def run_dossier(
         # a differently-assembled one.  A repair whose inputs were rebuilt
         # would not be the call the formal provenance replay can check.
         unit_inputs: dict[str, dict[str, Any]] = {}
+        input_snapshots: dict[str, dict[str, Any]] = {}
+        followup_receipts = {}
         spent = 0
         run_bound_blocked = False
         attempted_outcomes: list[str] = []
@@ -2058,6 +2205,7 @@ def run_dossier(
                 "classification", held_classification)
             prior_body = "" if held is None else section_body(
                 held, drop_refs=entry.get("retired_refs") or ())
+            prior_body = repair_prior_body(prior_body, followup_context)
             unit_profile_table = profile_table if unit == "guidance_style" else ""
             market_view_available = any(
                 slot["slot_id"] == "market_view" for slot in entry["structure"])
@@ -2070,6 +2218,11 @@ def run_dossier(
                 market_view_available=market_view_available,
                 classification=actual_classification,
             )
+            from . import research_product_consumption as consumption
+            input_snapshots[unit] = consumption.snapshot(state_dir, store.connection,
+                consumption.scope("dossier", chosen, unit, [chosen]),
+                material=frozen_input["parse_input"]["material"], input_data=frozen_input)
+            input_snapshots[unit]["baseline_at"] = (entry.get("redraft_policy") or {}).get("baseline_at")
             unit_prompt = build_unit_prompt(
                 unit=unit, structure=entry["structure"], material=material,
                 company=company, prior_body=prior_body, profile_table=unit_profile_table,
@@ -2288,6 +2441,20 @@ def run_dossier(
                 changed = True
             return changed
 
+        def consume_inputs(result: str) -> None:
+            verifier_ref = (verdict.get("model") or {}).get("route_decision_ref")
+            for unit in blocks:
+                producer = drafted_producers.get(unit) or {}
+                producer_ref = producer.get("route_decision_ref")
+                if not producer_ref or not verifier_ref:
+                    continue
+                receipt = consumption.record(state_dir,
+                    consumption.scope("dossier", chosen, unit, [chosen]), input_snapshots[unit],
+                    result=result, producer_refs=[producer_ref], verifier_ref=verifier_ref,
+                    independent=check["independent"], verified=True)
+                summary.setdefault("input_consumption", {})[unit] = receipt["content_hash"]
+                followup_receipts[unit] = receipt
+
         while True:
             verdict = verify(
                 verifier, blocks, company=company, mission=mission,
@@ -2396,6 +2563,15 @@ def run_dossier(
                 if fresh:
                     summary["retired_withdrawals"] = [row["ref"] for row in fresh]
             if not fresh:
+                candidate_record = assemble(company_ref=chosen, blocks=blocks, plan=plan, prior=prior,
+                    profile=profile, constitution=constitution, policy=policy, mission=mission,
+                    actor_ref=actor_ref, change_reason=change_reason, drafted_at=_now(), evidence_refs=[])
+                candidate_gate = rubric_gate(store.connection, candidate_record, prior=prior)
+                candidate_findings = output_rubric_findings(candidate_record, constitution=constitution,
+                    policy=policy, prior=prior) + batch_d_findings(candidate_record, units=sorted(blocks))
+                if (not [x for x in candidate_gate["failed"] if x != "new_version_cites_new_refs"]
+                        and not [x for x in candidate_findings if x.get("code") != "no_new_evidence"]):
+                    consume_inputs("verified_no_new_evidence")
                 summary.update({"status": "succeeded", "dossier_status": "no_new_evidence",
                                 "failure_reason": ("this draft cites nothing the current "
                                                    "version does not")})
@@ -2409,7 +2585,9 @@ def run_dossier(
             )
             forecast_cells = {row["ref"] for row in number_material(store, chosen)
                               if row["kind"] == "forecast_cell"}
-            missing = unresolved_refs(store.connection, record, forecast_cells=forecast_cells)
+            pack_refs = {row["ref"] for row in pack_rows}
+            missing = unresolved_refs(store.connection, record, forecast_cells=forecast_cells,
+                                      pack_refs=pack_refs)
             if missing:
                 # A ref that stopped resolving is a defect in whichever part cites
                 # it. In a part drafted just now that is a bad draft and the run is
@@ -2440,7 +2618,7 @@ def run_dossier(
                     drafted_at=stamped, evidence_refs=fresh, drop_units=dropped,
                 )
                 still = unresolved_refs(store.connection, record,
-                                        forecast_cells=forecast_cells)
+                                        forecast_cells=forecast_cells, pack_refs=pack_refs)
                 if still:
                     summary.update({
                         "status": "succeeded", "dossier_status": "unresolvable_refs",
@@ -2486,7 +2664,11 @@ def run_dossier(
                 record, constitution=constitution, policy=policy, prior=prior,
                 withdrawn_refs=[row["ref"] for row in retired_withdrawals(
                     store.connection, record, prior)])
+            # Batch D: the reasoning lint and the substance rule over the
+            # parts drafted on this run -- repairable once, like the rubric.
+            findings = list(findings) + batch_d_findings(record, units=sorted(blocks))
             summary["output_rubric_findings"] = findings
+            summary["gap_classes"] = gap_classes(record, units=sorted(blocks))
             if findings:
                 # Live 2026-09-17 (CTSH), 27 runs: three ``investment_conclusion``
                 # findings against one freshly drafted section, and the run was
@@ -2535,9 +2717,22 @@ def run_dossier(
                 summary["carry_forward_drift"] = drift
             else:
                 published = authority.publish(record)
+            consume_inputs("published")
+            from .research_followup_product_repair import complete as complete_followup
+            from .research_followup_automation import FollowupAutomationAuthority
+            summary["automatic_followup_results"] = complete_followup(FollowupAutomationAuthority(store),
+                product="dossier", published=published, prior=prior, items=followup_context,
+                inputs=unit_inputs, receipts=followup_receipts)
+            # Batch ap 1: a file with an empty, heading-only or gap-only part
+            from .research_followup import ResearchFollowupAuthority
+            summary["review_requests"] = ResearchFollowupAuthority(store).capture_existing([published["id"]])
+            # is never "published" (complete), only partial.
+            failed_parts = failed_substance_sections(published)
+            summary["failed_sections"] = failed_parts
             summary.update({
                 "status": "succeeded",
-                "dossier_status": (("partial_published" if not gate["summary"]["passed"]
+                "dossier_status": (("partial_published"
+                                    if not gate["summary"]["passed"] or failed_parts
                                     else "published") if published["status"] == "fresh"
                                    else "duplicate"),
                 "version_ref": published["id"],

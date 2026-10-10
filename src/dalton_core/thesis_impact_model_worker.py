@@ -1152,6 +1152,7 @@ class ThesisImpactModelWorker:
                     phase=phase,
                     route_decision_ref=routed["id"],
                     reserved_micros=self._budget_reserved_micros(work),
+                    purpose=work.metadata.get("purpose"), thinking_level=routed.get("thinking_level"),
                 )
             except ThesisImpactDayBudgetExceeded as exc:
                 rejection = exc.rejection

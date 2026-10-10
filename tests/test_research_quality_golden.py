@@ -138,7 +138,10 @@ class DeterministicGoldenTests(unittest.TestCase):
 
     def test_one_live_screen_is_clean_which_is_why_it_is_the_baseline(self):
         case = next(item for item in cases("initial_screen") if item["case_ref"] == "live-dxc-v1")
-        self.assertTrue(run_deterministic(case["artefact"], get_rubric("initial_screen"))["passed"])
+        result = run_deterministic(case["artefact"], get_rubric("initial_screen"))
+        # Batch ap 1: clean on every check except substance -- its Key
+        # Information and S6 are gap-only, which the old check let through.
+        self.assertEqual(result["failed_checks"], ["required_sections_present"])
 
     def test_each_broken_variant_is_caught_by_the_check_it_was_built_for(self):
         built_for = {

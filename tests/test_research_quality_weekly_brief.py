@@ -417,8 +417,14 @@ class GoldenSetTests(unittest.TestCase):
                 sections = next(item for item in result["checks"]
                                 if item["check"] == "required_sections_present")
                 self.assertEqual(sections["status"], "fail")
-                self.assertEqual(sections["findings"],
-                                 [{"code": "missing_section", "title": "预测对账"}])
+                self.assertEqual(sections["findings"][0],
+                                 {"code": "missing_section", "title": "预测对账"})
+                # Batch ap 1: w35's 对现有观点的影响 says only "尚无正式当前
+                # ThesisVersion" four times -- gap-only, which now fails too.
+                expected_extra = ([("gap_only", "对现有观点的影响")]
+                                  if case["case_ref"] == "live-w35-baseline" else [])
+                self.assertEqual([(f["code"], f["title"]) for f in sections["findings"][1:]],
+                                 expected_extra)
 
     def test_the_live_issues_carry_no_unsourced_figure(self):
         # Same reading as Q1's on the Initial Screens: the number discipline is

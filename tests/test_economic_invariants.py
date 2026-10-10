@@ -259,7 +259,7 @@ class DirectionPremiseTests(unittest.TestCase):
 
     def test_the_premise_change_is_a_new_validator_contract(self):
         self.assertEqual(ei.FORECAST_INVARIANT_CONTRACT_REF,
-                         "forecast-economic-invariants:9")
+                         "forecast-economic-invariants:11")
         self.assertIn("direction_premise", ei.FORECAST_INVARIANT_CONTRACT)
 
 
@@ -636,7 +636,7 @@ from tests.test_model_forecast_driver import (  # noqa: E402
 )
 
 
-CLAIM_REF = {"kind": "claim", "ref": "claim-version:x", "concept": None,
+CLAIM_REF = {"kind": "figure", "ref": "guidance:synthetic-invariant-assumption", "concept": None,
              "period_end": None, "accession": None}
 
 
@@ -867,7 +867,16 @@ class SensitivityGateTests(unittest.TestCase):
         self.addCleanup(self.store.close)
         self.authority = SensitivityProjectionAuthority(self.store)
         self.verdicts = EconomicInvariantAuthority(self.store)
-        self.body = build_projection(sensitivity_model())
+        # Keep the direction/domain fixture within the magnitude gate over
+        # the new eight-quarter horizon; its cost-ratio range stays identical.
+        from tests.test_forecast_sensitivity import ledger, SERIES, REVENUE, REVENUES
+        revenue = [Decimal("1000000000")]
+        for growth in ("0.05", "-0.03", "0.025", "0.05", "-0.03", "0.025", "0.05"):
+            revenue.append(revenue[-1] * (1 + Decimal(growth)))
+        series = {concept: tuple(str(Decimal(value) / Decimal(old_revenue) * new_revenue)
+                                 for value, old_revenue, new_revenue in zip(values, REVENUES, revenue))
+                  for concept, values in SERIES.items()}
+        self.body = build_projection(sensitivity_model(missions=ledger(series)))
 
     def projections(self):
         return self.store.connection.execute(
@@ -1159,30 +1168,30 @@ class UnallocatedSegmentResidualTests(unittest.TestCase):
     def verdict(self, rows):
         return ei._segment_sum(ei.segment_groups(rows))
 
-    def test_googl_costs_without_other_bets_or_alphabet_level_are_not_a_failure(self):
+    def test_declared_missing_cost_members_are_a_failure(self):
         # Services 42,501 + Cloud 8,674 = 51,175 against 55,067: Other Bets
         # and Alphabet-level activities are the rest, and neither is a member.
         verdict = self.verdict(_googl_q1_2024())
-        self.assertEqual(verdict.status, ei.NOT_APPLICABLE)
-        self.assertEqual(verdict.findings, ())
-        self.assertIn("us-gaap:AllOtherSegmentsMember", verdict.reason)
-        self.assertIn("not checkable", verdict.reason)
+        self.assertEqual(verdict.status, ei.FAIL)
+        self.assertGreaterEqual(len(verdict.findings), 1)
+        self.assertTrue(any("us-gaap:AllOtherSegmentsMember" in finding for finding in verdict.findings))
+        self.assertTrue(any("difference" in finding for finding in verdict.findings))
 
-    def test_a_corporate_non_segment_amount_alone_marks_segments_partial(self):
+    def test_a_corporate_non_segment_amount_without_segment_income_fails(self):
         # The 2026 filings no longer break revenue out by segment, so the only
         # declaration left for a costs quarter is the corporate operating loss.
         verdict = self.verdict(_googl_q1_2024(all_other=False, geography=False))
-        self.assertEqual(verdict.status, ei.NOT_APPLICABLE)
-        self.assertIn("us-gaap:CorporateNonSegmentMember", verdict.reason)
+        self.assertEqual(verdict.status, ei.FAIL)
+        self.assertTrue(any("missing operating income members" in finding for finding in verdict.findings))
 
-    def test_geography_that_agrees_with_the_partial_segments_is_the_same_scope(self):
+    def test_geography_with_the_same_partial_sum_is_not_inferred_to_be_the_same_scope(self):
         # Four regions add to 80,467, the three segments to 80,467 too; the
         # 72 of hedging gains is Alphabet-level in both tables.
         groups = ei.segment_groups(_googl_q1_2024())
         geography = [g for g in groups if g["axis"] == _GEOGRAPHY]
         self.assertEqual(len(geography), 1)
         self.assertNotIn("undeclared_members", geography[0])
-        self.assertEqual(self.verdict(_googl_q1_2024()).status, ei.NOT_APPLICABLE)
+        self.assertEqual(self.verdict(_googl_q1_2024()).status, ei.FAIL)
 
     def test_geography_that_disagrees_with_the_segments_still_fails(self):
         rows = _googl_q1_2024()
@@ -1191,8 +1200,8 @@ class UnallocatedSegmentResidualTests(unittest.TestCase):
                 row["value"] = "23000000000"
         verdict = self.verdict(rows)
         self.assertEqual(verdict.status, ei.FAIL)
-        self.assertEqual(len(verdict.findings), 1)
-        self.assertIn(_GEOGRAPHY, verdict.findings[0])
+        self.assertEqual(len(verdict.findings), 3)
+        self.assertTrue(any(_GEOGRAPHY in finding for finding in verdict.findings))
 
     def test_without_any_declaration_a_short_breakdown_still_fails(self):
         rows = _googl_q1_2024(corporate=False, all_other=False, geography=False)
@@ -1207,7 +1216,7 @@ class UnallocatedSegmentResidualTests(unittest.TestCase):
                 if row["dimension_axis"] != _SEGMENTS or row["concept"] != _REVENUE]
         verdict = self.verdict(rows)
         self.assertEqual(verdict.status, ei.FAIL)
-        self.assertIn(_GEOGRAPHY, verdict.findings[0])
+        self.assertTrue(any(_GEOGRAPHY in finding for finding in verdict.findings))
 
     def test_a_gap_equal_to_a_declared_reconciling_item_is_reconciled(self):
         rows = [
@@ -1254,16 +1263,16 @@ class UnallocatedSegmentResidualTests(unittest.TestCase):
         verdict = self.verdict(rows)
         self.assertEqual(verdict.status, ei.FAIL)
 
-    def test_a_group_that_adds_up_still_passes_beside_an_excused_one(self):
+    def test_a_complete_group_cannot_excuse_an_incomplete_one(self):
         rows = _googl_q1_2024(geography=False) + [
             _row("us-gaap:Revenues", "100"),
             _row("us-gaap:Revenues", "60", _GEOGRAPHY, "x:NorthMember"),
             _row("us-gaap:Revenues", "40", _GEOGRAPHY, "x:SouthMember"),
         ]
         verdict = self.verdict(rows)
-        self.assertEqual(verdict.status, ei.PASS)
-        self.assertEqual(verdict.checked, 1)
-        self.assertIn("not checkable", verdict.reason)
+        self.assertEqual(verdict.status, ei.FAIL)
+        self.assertEqual(verdict.checked, 3)
+        self.assertTrue(any("difference" in finding for finding in verdict.findings))
 
     def test_undeclared_breakdowns_are_byte_for_byte_what_they_were(self):
         rows = _googl_q1_2024(corporate=False, all_other=False, geography=False)
@@ -1273,9 +1282,9 @@ class UnallocatedSegmentResidualTests(unittest.TestCase):
 
     def test_the_contract_version_moved(self):
         self.assertEqual(ei.FORECAST_INVARIANT_CONTRACT_REF,
-                         "forecast-economic-invariants:9")
+                         "forecast-economic-invariants:11")
         contract = ei.FORECAST_INVARIANT_CONTRACT["segment_sum"]
         self.assertEqual(contract["unallocated_residual"],
-                         "declared-reconciling-item-or-declared-incomplete-members:v1")
+                         "declared-reconciling-items-or-fail-with-gap-and-missing-members:v2")
         self.assertIn("us-gaap:CorporateNonSegmentMember",
                       contract["reconciling_members"])

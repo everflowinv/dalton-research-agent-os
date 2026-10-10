@@ -109,7 +109,7 @@ class ControlledLaneReentryTests(ControlledFailureRedriveTests):
             def __init__(self, rows):
                 self.rows = rows
 
-            def execute(self, _sql):
+            def execute(self, _sql, _params=()):
                 return self
 
             def fetchall(self):

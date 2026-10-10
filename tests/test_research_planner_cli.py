@@ -161,8 +161,13 @@ class PlannerChildTests(unittest.TestCase):
         mission = self.publish_mission()
         first = self.plan()
         from dalton_core.store import content_hash
-        plan = {"mission_version_ref": mission["id"], "state_hash": first["state_hash"],
-                "assessment": "steady", "directives": [], "inquiries": []}
+        # A formal accepted plan has the complete wire shape. A legacy partial
+        # fixture is deliberately unverified by the source-feedback reader and
+        # therefore changes the state rather than proving an unchanged world.
+        plan = {"schema_version": "0.1", "task_ref": "task:research-plan-directives:0.1",
+                "created_at": first["created_at"], "mission_version_ref": mission["id"],
+                "state_hash": first["state_hash"], "assessment": "steady",
+                "directives": [], "inquiries": [], "sufficiency": []}
         self.missions.record_research_plan(
             {**plan, "content_hash": content_hash(plan)},
             decided_by=mission["autonomy"]["automation_principal"])
@@ -170,7 +175,10 @@ class PlannerChildTests(unittest.TestCase):
         # before anything is opened, which is the property under test.
         config = self.root / "never-read.json"
         config.write_text("{}", encoding="utf-8")
-        again = self.plan(dry_run=False, model_config_path=config)
+        with patch("dalton_core.research_planner_cli.effective_planner_model_config",
+                   side_effect=AssertionError("an unchanged plan must not open model configuration")):
+            again = self.plan(dry_run=False, model_config_path=config)
+        self.assertEqual(again["state_hash"], first["state_hash"])
         self.assertEqual(again["plan_status"], "unchanged")
         self.assertTrue(again["replayed"])
         self.assertEqual(again["cost_micros"], 0)

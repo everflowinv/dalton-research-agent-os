@@ -99,6 +99,13 @@ class LaneSpec:
         v1.0: it is reported by ``pool_status`` and not enforced, because a
         per-lane sub-cap would need per-lane attribution in the day ledger,
         which today exists only for cockpit-shaped calls.
+    ``failure_ledger``
+        F14 (2026-10-07): the lane name this lane's own ``LaneFailureBudget``
+        writes under in the lane failure ledger, for a lane that carries one.
+        ``None`` means the lane has no budget of its own and the writer
+        records its failed outcomes under ``driver_key`` instead
+        (:mod:`lane_failure_observer`), so every registered lane reaches the
+        cockpit's failure panel one way or the other.
     """
 
     operation: str
@@ -113,6 +120,7 @@ class LaneSpec:
     argv_fragment: Callable[[LaunchAgentContext], list[str]] | None = None
     budget_pool: str | None = None
     pool_share: float | None = None
+    failure_ledger: str | None = None
     # Free-form note for the report and for whoever reads the registry next.
     note: str = ""
 
@@ -193,6 +201,15 @@ LANE_MODULES: tuple[str, ...] = (
     "dalton_core.mission_hkex_lane",
     "dalton_core.mission_zero_base_lane",
     "dalton_core.valuation_snapshot_lane",
+    # ADR-0012: structured scenarios -- propose (model) and observe (no model).
+    "dalton_core.mission_scenario_lane",
+    "dalton_core.mission_owner_delivery_lane",
+    # ADR-0014: income bridges, per-share series, return attribution (no model).
+    "dalton_core.mission_return_attribution_lane",
+    # Batch A (证据底座): the passage-level full-text evidence index (no model).
+    "dalton_core.document_index_lane",
+    # Batch E: the material acquisition service over the MaterialRequest ledger (no model).
+    "dalton_core.material_acquisition_lane",
 )
 
 # The keys the controller tick's summary already uses for things that are not
@@ -306,6 +323,25 @@ def tick_lanes() -> tuple[LaneSpec, ...]:
     return tuple(spec for spec in registered_lanes() if spec.driver_key is not None)
 
 
+def failure_ledger_coverage() -> dict[str, dict[str, str]]:
+    """F14: every driven lane, and how its failures reach the failure ledger.
+
+    ``own`` -- the lane's ``LaneFailureBudget`` writes under ``ledger_lane``;
+    ``observed`` -- the writer records the lane's failed outcomes for it under
+    its ``driver_key``.  There is no third answer: a lane that is in neither
+    column is a lane whose failures the cockpit cannot see.
+    """
+
+    coverage: dict[str, dict[str, str]] = {}
+    for spec in tick_lanes():
+        key = str(spec.driver_key)
+        if spec.failure_ledger:
+            coverage[key] = {"mode": "own", "ledger_lane": spec.failure_ledger}
+        else:
+            coverage[key] = {"mode": "observed", "ledger_lane": key}
+    return coverage
+
+
 def lane_for_operation(operation: str) -> LaneSpec | None:
     load_lanes()
     return _LANES.get(operation)
@@ -368,6 +404,45 @@ def lane_argv(context: LaunchAgentContext) -> list[str]:
     return argv
 
 
+def _flag_groups(tokens: list[str]) -> list[tuple[str, list[str]]]:
+    """Split an argv into ``(--flag, [values...])`` groups, in order."""
+
+    groups: list[tuple[str, list[str]]] = []
+    for token in tokens:
+        if token.startswith("--"):
+            groups.append((token.partition("=")[0], [token]))
+        elif groups:
+            groups[-1][1].append(token)
+    return groups
+
+
+def derived_lane_argv(argv: list[str], context: LaunchAgentContext) -> list[str]:
+    """The lane arguments code derives for this Core that ``argv`` lacks.
+
+    Batch t (2026-10-07): ``deploy.sh`` switches a release by repointing the
+    LaunchAgents at the new venv and restarting them; it does not re-render
+    their arguments, which only ``install.sh`` / workspace setup do.  So a
+    lane added in a release was registered in code and absent from every
+    writer -- ``owner_delivery`` reported "no owner delivery lane on this
+    writer" in all three environments after batch s.  The writer therefore
+    asks the registry at startup, with the same :func:`lane_argv` call the
+    render makes, and appends every lane flag its own arguments do not
+    already carry.  A flag the plist does carry wins (it was rendered from
+    the same code, or an operator put it there on purpose); a flag nobody
+    rendered is added.  Whether a lane runs stays decided by what is on disk
+    in this state directory, exactly as at render time -- this only stops a
+    stale plist from deciding it.
+    """
+
+    present = {token.partition("=")[0] for token in argv if token.startswith("--")}
+    extra: list[str] = []
+    for flag, tokens in _flag_groups(lane_argv(context)):
+        if flag in present:
+            continue
+        extra.extend(tokens)
+    return extra
+
+
 def add_lane_arguments(parser: Any) -> None:
     """Let every lane add its own writer command-line arguments."""
 
@@ -402,7 +477,9 @@ __all__ = [
     "LaunchAgentContext",
     "add_lane_arguments",
     "build_lane_launchers",
+    "derived_lane_argv",
     "core_discovery_operations",
+    "failure_ledger_coverage",
     "lane_argv",
     "lane_for_operation",
     "lane_init_kwargs",

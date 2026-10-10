@@ -89,6 +89,57 @@ class CompanyCikTests(unittest.TestCase):
         self.assertEqual([row["accession"] for row in found], ["0000123456-26-000001"])
 
 
+class CanonicalCompanyRefTests(unittest.TestCase):
+    """Batch u: DXC's nine-digit legacy ref stays; new refs are ten digits."""
+
+    LEGACY_DXC = "company:sec-cik:001688568"
+    DXC = "company:sec-cik:0001688568"
+
+    def test_minting_always_pads_to_ten_digits(self) -> None:
+        from dalton_core.coverage_list_change import company_ref_for
+        from dalton_core.mission_company_cik import sec_cik_company_ref
+
+        for cik in ("1688568", "001688568", "0001688568", 1688568, "CIK001688568",
+                    self.LEGACY_DXC):
+            self.assertEqual(sec_cik_company_ref(cik), self.DXC, cik)
+        self.assertEqual(company_ref_for("DXC", "1688568", "sec-cik"), self.DXC)
+        with self.assertRaises(ValueError):
+            sec_cik_company_ref("12345678901")
+
+    def test_lookups_accept_either_spelling(self) -> None:
+        from dalton_core.mission_company_cik import (
+            canonical_company_ref, company_ref_variants, is_canonical_company_ref,
+            resolve_company_ref, same_company_ref)
+
+        self.assertTrue(same_company_ref(self.LEGACY_DXC, self.DXC))
+        self.assertFalse(same_company_ref(self.DXC, "company:sec-cik:0001467373"))
+        self.assertFalse(is_canonical_company_ref(self.LEGACY_DXC))
+        self.assertTrue(is_canonical_company_ref(WDGT))
+        self.assertEqual(canonical_company_ref(self.LEGACY_DXC), self.DXC)
+        self.assertEqual(company_ref_variants(self.LEGACY_DXC), [self.LEGACY_DXC, self.DXC])
+        self.assertEqual(company_ref_variants(self.DXC), [self.DXC, self.LEGACY_DXC])
+        # The recorded spelling wins: the legacy universe keeps its identity.
+        self.assertEqual(resolve_company_ref(self.DXC, [self.LEGACY_DXC]), self.LEGACY_DXC)
+        self.assertEqual(resolve_company_ref(self.DXC, []), self.DXC)
+        with sqlite3.connect(":memory:") as connection:
+            self.assertIn(self.DXC, index_company_refs(connection, self.LEGACY_DXC))
+
+    def test_parity_reports_a_non_canonical_universe_ref(self) -> None:
+        from dalton_core.workspace_health_parity import _company_ref_canonical_row
+
+        class Env:
+            mission = {"universe": [{"company_ref": self.LEGACY_DXC},
+                                    {"company_ref": "company:sec-cik:0001467373"},
+                                    {"company_ref": WDGT}]}
+
+        row = _company_ref_canonical_row(Env())
+        self.assertEqual(row["status"], "info")
+        self.assertEqual(row["noncanonical"], [self.LEGACY_DXC])
+        self.assertIn(self.DXC, row["detail"])
+        Env.mission = {"universe": [{"company_ref": self.DXC}]}
+        self.assertEqual(_company_ref_canonical_row(Env())["status"], "ok")
+
+
 class AnnualEligibilitySourceTests(unittest.TestCase):
     def test_sec_reviews_are_found_under_the_source_ref_they_carry(self) -> None:
         from dalton_core.mission_annual_research_lane import MissionAnnualResearchCoordinator

@@ -95,7 +95,7 @@ class SupportOnlyReevaluationTests(_automation.AutomationDraftingTests):
         self.h.missions.resolve_document_review(
             self.review_id, resolution="dismissed",
             actor_ref=mission["autonomy"]["automation_principal"],
-            rationale=f"P13i: {UNATTRIBUTED_REASON}", expected_review_hash=content_hash(review))
+            rationale=f"P13i: {UNATTRIBUTED_REASON} [{document_extraction_cli.DocumentExtractionService(self.h.writer).subject_rule_ref(mission)}]", expected_review_hash=content_hash(review))
         second = self._support_only_run()
         self.assertEqual((second["subject_reevaluation"][0]["checked"],
                           second["subject_reevaluation"][0]["reopened"]), (0, []))

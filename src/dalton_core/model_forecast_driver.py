@@ -172,6 +172,33 @@ CASH_FLOW_COMPANION_CONTRACT = {
 }
 GENERATOR_REF = "rule:trailing-carry-forward:1"
 STRUCTURE_GENERATOR_REF = "rule:structured-positive-trailing-carry-forward:2"
+# A 0.6 (coverage) structure: every reported line has a method, and every
+# assumption names its source in the order company guidance > consensus >
+# analyst judgement > trailing history (a company's preliminary 8-K actual,
+# when one exists for a forecast quarter, outranks all four).
+# :4 (2026-10-09, P0): one-off items are taken out of the base before growth
+# and ratio methods; operating costs may not outgrow revenue by more than
+# OPEX_EXCESS_PP for more than OPEX_EXCESS_QUARTERS without an analyst
+# assumption; revenue guidance ranges bound the forecast; operating cash flow
+# is net income + D&A + working capital when those lines exist, and a
+# share-of-revenue cash flow that contradicts the model's losses is
+# unavailable.  A model built under :3 is rebuilt once (``pending_action``).
+COVERAGE_GENERATOR_REF = "rule:structured-coverage-priority:6"
+STRUCTURE_COVERAGE_EXECUTOR_CONTRACT = {
+    "schema_version": "0.2",
+    "ref": STRUCTURE_FORMULA_REF,
+    "operators": ["sum", "divide"],
+    "missing_input": "unavailable",
+    "zero_denominator": "unavailable",
+    "forecast_leaves": [
+        "quarterly_growth", "share_of_line", "carry_forward_mean", "zero_one_off",
+        "rate_times_balance", "hold_last", "roll_forward", "unavailable",
+    ],
+    "rate_times_balance_base": "the base line's forecast, or its last filed value "
+                               "when the base is the rolled cash balance",
+    "cash_roll": "cash[k] = cash[k-1] + free_cash_flow[k] - share_repurchase[k] "
+                 "- dividends_paid[k] - acquisitions[k]",
+}
 AUTOMATION_ACTOR = "automation:driver-model"
 
 # How many trailing quarters the default generator averages. Four, so a full
@@ -183,6 +210,7 @@ TRAILING_QUARTERS = 4
 # 91 days and a 52/53-week filer lands either side of it.
 QUARTER_GAP_MIN_DAYS = 80
 QUARTER_GAP_MAX_DAYS = 100
+MIN_FORECAST_PERIODS = 8
 MAX_FORECAST_PERIODS = 12
 
 # Not a record field: the key a caller stamps on a body to say which version
@@ -295,7 +323,7 @@ CHANGE_REASONS: tuple[str, ...] = (
 MAX_REALISED_PERIODS = 8
 MEASURES: tuple[str, ...] = (
     # The quarter-on-quarter change carried forward.
-    "quarterly_growth",
+    "quarterly_growth", "year_over_year_growth", "seasonal_factor", "reported_actual", "mechanism_amount", "economic_driver_level",
     # A share of forecast revenue.
     "revenue_share",
     # A share of forecast operating income.
@@ -303,6 +331,9 @@ MEASURES: tuple[str, ...] = (
     # The base is frozen on the structure-backed driver rather than inferred
     # from this token.
     "share_of_line",
+    # Coverage (structure 0.6) leaves: an amount held at the trailing mean, a
+    # one-off held at zero, a rate on a balance-sheet line, a balance held.
+    "carry_forward_mean", "zero_one_off", "rate_times_balance", "hold_last",
 )
 # What an assumption may stand on. ``market_proxy`` is W4's addition and the
 # Chem retrospective (§7.2) is why: a spread, a list price or a futures
@@ -313,7 +344,7 @@ MEASURES: tuple[str, ...] = (
 # disclosure -- but it is admitted with a rule: see ``PROXY_GAP_REQUIRED``.
 REF_KINDS: tuple[str, ...] = (
     "input_cell", "claim", "figure", "prior_period", "filing", "event",
-    "human_decision", "market_proxy",
+    "human_decision", "market_proxy", "doc_passage",
 )
 #: The ref kinds that may not be cited without saying how far the quantity sits
 #: from what the company realises. One word, and it is the whole point of the
@@ -332,6 +363,7 @@ _RECORD_FIELDS = frozenset({
     "history_periods", "realised_periods", "forecast_periods", "statements",
     "formula_ref", "formula_hash", "generator_ref", "drivers", "assumptions",
     "results", "mission_version_ref", "actor_ref", "body_hash", "content_hash",
+    "forecast_policy", "execution_contract",
 })
 _STRUCTURE_RECORD_FIELDS = frozenset({
     "financial_statement_structure", "financial_statement_structure_replay",
@@ -351,7 +383,7 @@ _DRIVER_FIELDS = frozenset({
     "ref", "kind", "label", "concept", "unit", "statement", "status", "role",
     "spec_rows", "note", "history",
 })
-_DRIVER_OPTIONAL_FIELDS = frozenset({"cost_driver_slots"})
+_DRIVER_OPTIONAL_FIELDS = frozenset({"cost_driver_slots", "statement_identity"})
 _STRUCTURE_DRIVER_FIELDS = frozenset({
     "structure_line_ref", "forecast_method", "forecast_base_ref",
 })
@@ -392,6 +424,15 @@ class ForecastModelError(RuntimeError):
 
 class ForecastModelValidationError(ForecastModelError, ValueError):
     """A record does not satisfy the closed contract."""
+
+
+class ForecastDriverExecutionRefused(ForecastModelValidationError):
+    """A replayed driver contract that cannot yet be published."""
+    def __init__(self, message: str, *, driver_report: Mapping[str, Any], contract_hash: str):
+        import copy
+        super().__init__(message)
+        self.driver_report = copy.deepcopy(dict(driver_report))
+        self.contract_hash = contract_hash
 
 
 class ForecastModelConflict(ForecastModelError):
@@ -763,7 +804,10 @@ def _structure_historical_values(
     for line_ref, driver in by_line.items():
         values[line_ref] = {}
         refs[line_ref] = {}
-        for cell in quarterly_history(driver):
+        # A balance-sheet leaf is a series of instants, not quarters.
+        history = (driver.get("history") or []) if driver.get("statement") == "balance" \
+            else quarterly_history(driver)
+        for cell in history:
             end = str(cell["period_end"])
             values[line_ref][end] = _decimal(cell["value"], "history value")
             refs[line_ref][end] = [_cell_ref(cell)]
@@ -825,6 +869,9 @@ def default_structure_assumptions(
 ) -> list[dict[str, Any]]:
     """Generate assumptions only for methods named by the validated structure."""
 
+    if _is_coverage(structure):
+        from .forecast_coverage_assumptions import coverage_structure_assumptions
+        return coverage_structure_assumptions(drivers, periods, structure, decided_by=decided_by)
     historical, historical_refs = _structure_historical_values(drivers, structure)
     by_line = {str(item.get("structure_line_ref")): item for item in drivers}
     assumptions: list[dict[str, Any]] = []
@@ -907,28 +954,75 @@ def revenue_anchor(drivers: Sequence[Mapping[str, Any]]) -> Mapping[str, Any]:
     return candidates[0]
 
 
-def forecast_periods(
-    anchor: Mapping[str, Any], count: int,
-) -> list[dict[str, str]]:
-    """The quarters after the anchor's last filed quarter."""
-
-    if isinstance(count, bool) or not isinstance(count, int) or count < 1:
-        raise ForecastModelValidationError("forecast_quarters must be a positive integer")
-    count = min(int(count), MAX_FORECAST_PERIODS)
+def forecast_policy(anchor: Mapping[str, Any], sources: Mapping[str, Any] | None = None) -> dict[str, Any]:
+    sources = sources or {}
     cells = quarterly_history(anchor)
     if not cells:
         raise ForecastModelUnavailable("the revenue driver has no filed quarter to start from")
-    last = cells[-1]
-    period = {
-        "start": _iso_date(last["period_start"], "period_start"),
-        "end": _iso_date(last["period_end"], "period_end"),
-        "calendar": "company:fiscal", "kind": "quarter",
-    }
-    out: list[dict[str, str]] = []
-    for _ in range(count):
+    last_end = str(cells[-1]["period_end"])
+    preliminary = sources.get("preliminary") or {}
+    latest = max(last_end, str(sources.get("latest_actual_end") or last_end),
+                 str(preliminary.get("period_end") or last_end))
+    return {"rule_ref": "rule:rolling-forecast-horizon:1", "latest_actual_end": latest,
+            "fiscal_year_end": sources.get("fiscal_year_end"),
+            "preliminary": dict(preliminary) if preliminary else None}
+
+
+def forecast_periods(anchor: Mapping[str, Any], count: int, *,
+                     policy: Mapping[str, Any] | None = None) -> list[dict[str, str]]:
+    """Consecutive unreported quarters, at least eight and through FY+1."""
+    if isinstance(count, bool) or not isinstance(count, int) or count < MIN_FORECAST_PERIODS:
+        raise ForecastModelValidationError("forecast_quarters must be at least 8")
+    count = min(count, MAX_FORECAST_PERIODS)
+    policy = policy or forecast_policy(anchor)
+    latest = _iso_date(policy["latest_actual_end"], "latest_actual_end")
+    period = {"start": latest, "end": latest, "calendar": "company:fiscal", "kind": "quarter"}
+    target = None
+    if policy.get("fiscal_year_end"):
+        fiscal = date.fromisoformat(str(policy["fiscal_year_end"]))
+        current = date.fromisoformat(latest)
+        fy = date(current.year, fiscal.month, min(fiscal.day, 28) if fiscal.month == 2 else fiscal.day)
+        if fy < current:
+            fy = fy.replace(year=fy.year + 1)
+        target = fy.replace(year=fy.year + 1).isoformat()
+    out = []
+    while len(out) < count or (target is not None and out[-1]["end"] < target):
+        if len(out) >= MAX_FORECAST_PERIODS:
+            raise ForecastModelUnavailable("fiscal calendar requires more than twelve forecast quarters")
         period = quarter_after(period)
         out.append(dict(period))
     return out
+
+
+def validate_new_forecast_rules(record: Mapping[str, Any]) -> None:
+    """Write boundary only: historical published records remain readable."""
+    periods = record.get("forecast_periods") or []
+    if len(periods) < MIN_FORECAST_PERIODS:
+        raise ForecastModelValidationError("new models must forecast at least 8 quarters")
+    anchor = revenue_anchor(record.get("drivers") or [])
+    policy = record.get("forecast_policy") or forecast_policy(anchor)
+    known_end = max([str(c["period_end"]) for d in record.get("drivers") or []
+                    for c in quarterly_history(d)] + list(record.get("history_periods") or []))
+    known_end = max([known_end] + [str(p["end"]) for p in record.get("realised_periods") or []])
+    preliminary = policy.get("preliminary") or {}
+    known_end = max(known_end, str(preliminary.get("period_end") or known_end))
+    if policy["latest_actual_end"] != known_end:
+        raise ForecastModelValidationError("forecast policy must equal the latest known reported history/preliminary actual")
+    expected = forecast_periods(anchor, len(periods), policy=policy)
+    if periods != expected:
+        raise ForecastModelValidationError("forecast periods must follow the latest reported actual and cover FY+1")
+    from .forecast_seasonality import seasonal_profile, RULE_SEASONAL_FACTOR, RULE_YEAR_OVER_YEAR
+    for driver in record.get("drivers") or []:
+        profile = seasonal_profile(quarterly_history(driver))
+        if not profile or not profile["significant"]:
+            continue
+        if driver.get("forecast_method") == "quarterly_growth":
+            raise ForecastModelValidationError(f"seasonal line {driver['ref']} cannot use average quarterly growth")
+        if driver.get("role") == REVENUE and not is_structured_schema(record.get("schema_version")):
+            for item in record.get("assumptions") or []:
+                if item.get("driver_ref") == driver["ref"] and item.get("kind") == "estimate" and (
+                    (item.get("provenance") or {}).get("rule_ref") not in {RULE_SEASONAL_FACTOR, RULE_YEAR_OVER_YEAR}):
+                    raise ForecastModelValidationError("seasonal revenue requires a seasonal or year-over-year method")
 
 
 # -- layer two: assumptions -------------------------------------------------
@@ -1162,6 +1256,24 @@ def default_assumptions(
             if not cells:
                 continue
             if role == REVENUE:
+                from .forecast_seasonality import seasonal_profile, year_ago, RULE_YEAR_OVER_YEAR
+                profile = seasonal_profile(cells)
+                if profile and profile["significant"]:
+                    values = {str(c["period_end"]): _decimal(c["value"], "history value") for c in cells}
+                    prev = values[str(cells[-1]["period_end"])]
+                    for period in periods:
+                        prior = year_ago(str(period["end"]), values)
+                        if prior is None or prev == 0:
+                            continue
+                        level = values[prior] * (1 + profile["year_over_year_growth"])
+                        out.append(_assumption(driver_ref=str(driver["ref"]), period=period,
+                            measure="quarterly_growth", value=level / prev - 1, unit="ratio",
+                            because=f"same fiscal quarter {prior} × year-over-year growth; seasonal distribution retained",
+                            refs=[_cell_ref(c) for c in profile["rows"]], decided_by=decided_by,
+                            rule_ref=RULE_YEAR_OVER_YEAR))
+                        values[str(period["end"])] = level
+                        prev = level
+                    continue
                 trailing = trailing_growth(cells)
                 if trailing is None:
                     continue
@@ -1457,6 +1569,13 @@ def compute_results(
                           driver_ref=str(anchor["ref"]))
         start = dict(base) if base is not None else chain_base(
             anchor, None, str(periods[0]["end"]) if periods else "9999-12-31")
+        preliminary = [a for a in assumptions if a.get("driver_ref") == anchor["ref"]
+                       and a.get("measure") == "reported_actual" and not a.get("superseded_by")
+                       and a["period"]["end"] < str(periods[0]["end"])] if periods else []
+        if preliminary:
+            actual = max(preliminary, key=lambda a: a["period"]["end"])
+            start = {"value": actual["value"], "period_end": actual["period"]["end"], "input_cell": None,
+                     "actual_assumption": actual}
         base_cell = start.get("input_cell")
         running = _decimal(start["value"], "base value")
         revenue_values: dict[str, Decimal] = {}
@@ -1469,12 +1588,14 @@ def compute_results(
                     f"no growth assumption for {anchor['concept']} in this quarter"))
                 break
             rate = _decimal(assumption["value"], "assumption value")
-            running = (running * (Decimal(1) + rate)).quantize(_VALUE_QUANT, ROUND_HALF_UP)
+            running = (rate if assumption.get("measure") == "mechanism_amount" else running * (Decimal(1) + rate)).quantize(_VALUE_QUANT, ROUND_HALF_UP)
             revenue_values[str(period["end"])] = running
             if index:
                 inputs, prior_end = [], str(periods[index - 1]["end"])
             elif base_cell is not None:
                 inputs, prior_end = [_cell_ref(base_cell)], None
+            elif start.get("actual_assumption"):
+                inputs, prior_end = list(start["actual_assumption"]["refs"]), None
             else:
                 inputs, prior_end = [], str(start["period_end"])
             revenue["cells"].append(_computed_cell(
@@ -1743,6 +1864,12 @@ def compute_structure_results(
     results: dict[str, dict[str, Any]] = {}
     values: dict[str, dict[str, Decimal]] = {}
     pending = dict(lines)
+    preliminary_ends = [str(a["period"]["end"]) for a in assumptions
+                        if a.get("measure") == "reported_actual"
+                        and (a.get("provenance") or {}).get("rule_ref") == "rule:preliminary-actual-8k:1"
+                        and not a.get("superseded_by")]
+    preliminary_rolling = bool(periods and preliminary_ends and
+        quarter_after({"end":max(preliminary_ends),"calendar":"company:fiscal"})["end"] == periods[0]["end"])
     prior_growth_values: dict[str, Decimal] = {}
     prior_growth_refs: dict[str, dict[str, Any]] = {}
     for line_ref, driver in drivers_by_line.items():
@@ -1750,6 +1877,26 @@ def compute_structure_results(
         if history:
             prior_growth_values[line_ref] = _decimal(history[-1]["value"], "history value")
             prior_growth_refs[line_ref] = _cell_ref(history[-1])
+
+    for actual in assumptions:
+        if actual.get("measure") != "reported_actual" or actual.get("superseded_by"):
+            continue
+        driver = next((d for d in drivers if d["ref"] == actual["driver_ref"]), None)
+        if driver is not None:
+            line_ref = str(driver.get("structure_line_ref"))
+            prior_growth_values[line_ref] = _decimal(actual["value"], "preliminary actual")
+            prior_growth_refs[line_ref] = {"kind": "assumption", "ref": actual["ref"],
+                                          "period_end": actual["period"]["end"]}
+
+    # The last filed value of every leaf, for methods that hold a level and
+    # for a rate whose balance is the cash rolled after the cash flow.
+    last_filed: dict[str, tuple[Decimal, dict[str, Any]]] = {}
+    for line_ref, driver in drivers_by_line.items():
+        history = (driver.get("history") or []) if driver.get("statement") == "balance" \
+            else quarterly_history(driver)
+        if history:
+            last_filed[line_ref] = (_decimal(history[-1]["value"], "history value"),
+                                    _cell_ref(history[-1]))
 
     while pending:
         progressed = False
@@ -1759,6 +1906,10 @@ def compute_structure_results(
             dependencies: list[str] = []
             if method == "share_of_line":
                 dependencies = [str(line.get("forecast_base_ref"))]
+            elif method == "rate_times_balance":
+                base_line = lines.get(str(line.get("forecast_base_ref"))) or {}
+                if base_line.get("forecast_method") != "roll_forward":
+                    dependencies = [str(line.get("forecast_base_ref"))]
             elif method == "formula":
                 if formula is None:
                     raise ForecastModelUnavailable(
@@ -1776,8 +1927,25 @@ def compute_structure_results(
             driver_ref = None if driver is None else str(driver["ref"])
             if method == "quarterly_growth":
                 formula_text = f"{line_ref}[k] = {line_ref}[k-1] * (1 + growth[k])"
+            elif method == "year_over_year_growth":
+                formula_text = f"{line_ref}[k] = {line_ref}[k-4] * (1 + year_over_year_growth[k])"
+            elif method == "seasonal_factor":
+                formula_text = f"{line_ref}[k] = trend level[k] * fiscal-quarter seasonal factor[k]"
             elif method == "share_of_line":
                 formula_text = f"{line_ref}[k] = {line['forecast_base_ref']}[k] * share[k]"
+            elif method == "rate_times_balance":
+                formula_text = (f"{line_ref}[k] = {line['forecast_base_ref']}[k] * rate[k]"
+                                if dependencies else
+                                f"{line_ref}[k] = {line['forecast_base_ref']}[last filed] * rate[k]")
+            elif method == "carry_forward_mean":
+                formula_text = f"{line_ref}[k] = trailing four-quarter mean (carried)"
+            elif method == "zero_one_off":
+                formula_text = f"{line_ref}[k] = 0 (one-off)"
+            elif method == "hold_last":
+                formula_text = f"{line_ref}[k] = {line_ref}[last filed] (held)"
+            elif method == "roll_forward":
+                formula_text = (f"{line_ref}[k] = {line_ref}[k-1] + free cash flow[k] "
+                                "- buybacks[k] - dividends[k] - acquisitions[k]")
             elif method == "formula" and formula is not None:
                 formula_text = canonical_json({
                     key: formula[key] for key in formula
@@ -1791,10 +1959,73 @@ def compute_structure_results(
             values[line_ref] = {}
             for period in periods:
                 end = str(period["end"])
+                explicit = assumptions_by_driver_period.get((driver_ref, end))
+                if explicit is not None and explicit.get("measure") == "mechanism_amount":
+                    value = _decimal(explicit["value"], "mechanism amount")
+                    values[line_ref][end] = value
+                    result["formula"] = str(explicit["because"])
+                    result["cells"].append(_computed_cell(ref, period, value, assumptions=[explicit["ref"]]))
+                    continue
                 if method == "unavailable":
                     result["cells"].append(_unavailable_cell(
                         ref, period,
                         f"statement line {line_ref} is explicitly unavailable for forecast"))
+                    continue
+                if method == "roll_forward":
+                    # Rolled by ``roll_cash_balance`` once the cash flow is
+                    # known; until then the cell says so.
+                    result["cells"].append(_unavailable_cell(
+                        ref, period, "the cash balance is rolled from the cash flow"))
+                    continue
+                if method in {"year_over_year_growth", "seasonal_factor"}:
+                    from .forecast_seasonality import year_ago
+                    assumption = assumptions_by_driver_period.get((driver_ref, end))
+                    history = {str(c["period_end"]): c for c in quarterly_history(driver or {})}
+                    available = {**{key: _decimal(c["value"], "history value") for key, c in history.items()}, **values[line_ref]}
+                    prior = year_ago(end, available)
+                    if assumption is None or (method == "year_over_year_growth" and prior is None):
+                        result["cells"].append(_unavailable_cell(ref, period, "same-season history or assumption unavailable"))
+                        continue
+                    amount = _decimal(assumption["value"], "assumption value")
+                    if method == "year_over_year_growth":
+                        amount = available[prior] * (1 + amount)
+                    values[line_ref][end] = amount
+                    result["cells"].append(_computed_cell(ref, period, amount,
+                        assumptions=[str(assumption["ref"])],
+                        inputs=[_cell_ref(history[prior])] if prior in history else [],
+                        results=[{"ref": ref, "period_end": prior}] if prior and prior not in history else []))
+                    continue
+                if method in {"carry_forward_mean", "zero_one_off", "hold_last",
+                              "rate_times_balance"}:
+                    assumption = (None if driver is None else
+                                  assumptions_by_driver_period.get((driver_ref, end)))
+                    if assumption is None:
+                        result["cells"].append(_unavailable_cell(
+                            ref, period,
+                            f"statement line {line_ref} has no forecast assumption for this quarter"))
+                        continue
+                    amount = _decimal(assumption["value"], "assumption value")
+                    inputs_used: list[dict[str, Any]] = []
+                    results_used: list[dict[str, str]] = []
+                    if method == "rate_times_balance":
+                        base_ref = str(line.get("forecast_base_ref"))
+                        if dependencies:
+                            base = values[base_ref].get(end)
+                            results_used = [{"ref": result_refs[base_ref], "period_end": end}]
+                        else:
+                            held = last_filed.get(base_ref)
+                            base = None if held is None else held[0]
+                            inputs_used = [] if held is None else [held[1]]
+                        if base is None:
+                            result["cells"].append(_unavailable_cell(
+                                ref, period,
+                                f"forecast base {base_ref} is unavailable for this quarter"))
+                            continue
+                        amount = base * amount
+                    values[line_ref][end] = amount
+                    result["cells"].append(_computed_cell(
+                        ref, period, amount, assumptions=[str(assumption["ref"])],
+                        inputs=inputs_used, results=results_used))
                     continue
                 if method in {"quarterly_growth", "share_of_line"}:
                     if driver is None:
@@ -1818,20 +2049,42 @@ def compute_structure_results(
                         prior_result = prior_growth_refs.get(line_ref)
                         prior_end = (None if prior_result is None
                                      else prior_result.get("period_end"))
+                        steps = 1
+                        # An 8-K can advance the company reporting boundary
+                        # without reporting every leaf. Advance an initial
+                        # filed leaf through the intervening quarters rather
+                        # than relabel one growth step as a later quarter.
+                        if (base is not None and isinstance(prior_end, str)
+                                and prior_result.get("kind") in {"input_cell", "assumption"}
+                                and end == periods[0]["end"] and preliminary_rolling):
+                            cursor = {"end": prior_end, "start": prior_end,
+                                      "calendar": "company:fiscal", "kind": "quarter"}
+                            steps = 0
+                            while cursor["end"] < end and steps < 12:
+                                cursor = quarter_after(cursor)
+                                steps += 1
+                            if cursor["end"] != end:
+                                steps = 0
                         if (base is None or not isinstance(prior_end, str)
-                                or not QUARTER_GAP_MIN_DAYS <= _days(prior_end, end) <=
-                                QUARTER_GAP_MAX_DAYS):
+                                or not steps or (steps == 1 and not
+                                QUARTER_GAP_MIN_DAYS <= _days(prior_end, end) <=
+                                QUARTER_GAP_MAX_DAYS)):
                             prior_growth_values.pop(line_ref, None)
                             prior_growth_refs.pop(line_ref, None)
                             result["cells"].append(_unavailable_cell(
                                 ref, period,
                                 f"statement line {line_ref} has no adjacent prior quarter value"))
                             continue
-                        value = base * (Decimal(1) + rate)
+                        value = base * (Decimal(1) + rate) ** steps
+                        if steps > 1:
+                            result["formula"] = f"{line_ref}[k] = prior known level * (1 + growth[k]) ^ elapsed fiscal quarters"
                         result_refs_for_cell = []
                         inputs = []
                         if prior_result and prior_result.get("kind") == "input_cell":
                             inputs = [prior_result]
+                        elif prior_result and prior_result.get("kind") == "assumption":
+                            # The level is a separately source-bound 8-K actual.
+                            inputs = [dict(item) for actual in assumptions if actual["ref"] == prior_result["ref"] for item in actual["refs"]]
                         elif prior_result:
                             result_refs_for_cell = [prior_result]
                         prior_growth_values[line_ref] = value
@@ -1940,6 +2193,50 @@ def filing_refs(drivers: Sequence[Mapping[str, Any]],
                                           item["concept"]))
 
 
+def preliminary_level_assumptions(drivers: Sequence[Mapping[str, Any]], sources: Mapping[str, Any] | None,
+                                  actor_ref: str) -> list[dict[str, Any]]:
+    preliminary = (sources or {}).get("preliminary") or {}
+    if not preliminary.get("accession") or not preliminary.get("period_end"):
+        return []
+    out = []
+    for driver in drivers:
+        metric = "revenue" if driver.get("role") == REVENUE else "shares_diluted" if driver.get("role") == "diluted_weighted_average_shares" else None
+        value = (preliminary.get("values") or {}).get(metric)
+        history = quarterly_history(driver)
+        if value is None or not history:
+            continue
+        period = quarter_after({"end": history[-1]["period_end"], "calendar": "company:fiscal"})
+        if period["end"] != preliminary["period_end"]:
+            continue
+        out.append(_assumption(driver_ref=driver["ref"], period=period, measure="reported_actual",
+            value=_decimal(value, "preliminary actual"), unit=str(driver.get("unit") or "usd"),
+            kind="actual", because="8-K preliminary actual anchors the forecast",
+            refs=[{"kind": "filing", "ref": preliminary["accession"], "concept": None,
+                   "period_end": preliminary["period_end"], "accession": preliminary["accession"]}],
+            decided_by=actor_ref, rule_ref="rule:preliminary-actual-8k:1"))
+    return out
+
+
+def _new_forecast_model(body: dict[str, Any], *, spec: Mapping[str, Any] | None = None,
+                        table: Mapping[str, Any] | None = None,
+                        assumption_sources: Mapping[str, Any] | None = None) -> dict[str, Any]:
+    if spec is None and body.get("execution_contract"):
+        held = body["execution_contract"]
+        spec = {**held["specification"], "fcf_definition": held.get("fcf_definition")}
+    if spec is not None:
+        from .forecast_financial_execution import execute_financial_model
+        effective = dict(spec)
+        if not effective.get("fcf_definition") and (assumption_sources or {}).get("fcf_definition"):
+            effective["fcf_definition"] = assumption_sources["fcf_definition"]
+        if table is not None and is_structured_schema(body.get("schema_version")):
+            from .forecast_financial_execution import additional_drivers
+            held_refs = {d["ref"] for d in body["drivers"]}
+            body["drivers"].extend(d for d in additional_drivers(effective, table, body["drivers"]) if d["ref"] not in held_refs)
+        execute_financial_model(body, effective)
+    validate_new_forecast_rules(body)
+    return body
+
+
 def build_forecast_model(
     spec: Mapping[str, Any],
     table: Mapping[str, Any],
@@ -1951,6 +2248,7 @@ def build_forecast_model(
     change_reason: str = "evidence_thicker",
     evidence_refs: Sequence[Mapping[str, Any]] | None = None,
     decision: str | None = None,
+    assumption_sources: Mapping[str, Any] | None = None,
 ) -> dict[str, Any]:
     """One company's first driver model, ready to be published as a version.
 
@@ -1972,18 +2270,20 @@ def build_forecast_model(
     horizon = spec.get("horizon") or {}
     wanted = horizon.get("forecast_quarters")
     if isinstance(wanted, bool) or not isinstance(wanted, int) or wanted < 1:
-        wanted = 4
+        wanted = MIN_FORECAST_PERIODS
     drivers = build_drivers(table)
     anchor = revenue_anchor(drivers)
-    periods = forecast_periods(anchor, wanted)
+    policy = forecast_policy(anchor, assumption_sources)
+    periods = forecast_periods(anchor, max(wanted, MIN_FORECAST_PERIODS), policy=policy)
     if assumptions is None:
-        assumptions = default_assumptions(drivers, periods, decided_by=actor_ref)
+        assumptions = [*default_assumptions(drivers, periods, decided_by=actor_ref),
+                       *preliminary_level_assumptions(drivers, assumption_sources, actor_ref)]
     statements = statement_importances(spec)
     results = compute_results(drivers, assumptions, periods, statements=statements)
     unit = str(anchor.get("unit") or "usd")
     if evidence_refs is None:
         evidence_refs = filing_refs(drivers, table.get("periods"))
-    return {
+    return _new_forecast_model({
         # A first model expects to be the first: publishing it against a
         # company that already has one is a lost update, not a first model.
         SOURCE_VERSION_KEY: None,
@@ -1998,6 +2298,7 @@ def build_forecast_model(
         "history_periods": [str(item) for item in (table.get("periods") or [])],
         "realised_periods": [],
         "forecast_periods": [dict(item) for item in periods],
+        "forecast_policy": policy,
         "statements": statements,
         "formula_ref": FORMULA_REF,
         "formula_hash": FORMULA_HASH,
@@ -2010,14 +2311,21 @@ def build_forecast_model(
         "decision": decision,
         "mission_version_ref": mission_version_ref,
         "actor_ref": actor_ref,
-    }
+    }, spec=spec, table=table, assumption_sources=assumption_sources)
+
+
+def _is_coverage(structure: Mapping[str, Any]) -> bool:
+    from .company_financial_statement_structure import is_coverage_structure
+
+    return is_coverage_structure(structure.get("schema_version"))
 
 
 def structure_formula_hash(
     structure: Mapping[str, Any], binding: Mapping[str, Any],
 ) -> str:
     return content_hash({
-        "executor_contract": STRUCTURE_EXECUTOR_CONTRACT,
+        "executor_contract": (STRUCTURE_COVERAGE_EXECUTOR_CONTRACT
+                              if _is_coverage(structure) else STRUCTURE_EXECUTOR_CONTRACT),
         "structure_hash": structure.get("content_hash"),
         "binding_hash": binding.get("content_hash"),
     })
@@ -2416,15 +2724,199 @@ def default_cash_flow_companion_assumptions(
         str(item["driver_ref"]), str(item["period"]["end"])))
 
 
+#: 2026-10-09 (P0): the working-capital lines whose change enters a derived
+#: operating cash flow, with the sign of their increase.
+_WORKING_CAPITAL_SIGNS = (("accounts_receivable", -1), ("accounts_payable", 1),
+                          ("deferred_revenue", 1))
+CASH_BRIDGE_RULE = "rule:cash-bridge-consistency:1"
+#: A forecast quarter whose operating margin is at or below this is "deeply
+#: negative" for the cash-bridge consistency check.
+DEEP_LOSS_MARGIN = Decimal("-0.05")
+
+
+def _income_values(income_results: Sequence[Mapping[str, Any]], role: str
+                   ) -> tuple[str | None, dict[str, Decimal]]:
+    found = [item for item in income_results if item.get("role") == role]
+    if len(found) != 1:
+        return None, {}
+    item = found[0]
+    return str(item["ref"]), {
+        str(cell["period"]["end"]): _decimal(cell["value"], "income result")
+        for cell in item.get("cells") or []
+        if cell.get("status") == "computed" and not cell.get("superseded_by")}
+
+
+def operating_cash_residual(
+    income_drivers: Sequence[Mapping[str, Any]], cash_drivers: Sequence[Mapping[str, Any]],
+    structure: Mapping[str, Any], *, quarters: int = 4,
+) -> dict[str, Any] | None:
+    """The trailing mean of filed CFO - net income - D&A - working-capital change.
+
+    What a derived cash flow carries for everything else between earnings and
+    cash (share-based compensation, deferred taxes, other non-cash items):
+    the company's own recent filed relation, carried forward as an amount.
+    None when the filings do not give the four quarters.
+    """
+
+    try:
+        values, _refs = _structure_historical_values(income_drivers, structure)
+    except ForecastModelUnavailable:
+        return None
+    by_role: dict[str, dict[str, Decimal]] = {}
+    for line in structure.get("lines") or []:
+        role = str(line.get("role"))
+        if str(line.get("ref")) in values and role not in by_role:
+            by_role[role] = values[str(line["ref"])]
+    ocf_driver = next((item for item in cash_drivers
+                       if item.get("role") == OPERATING_CASH_FLOW), None)
+    if ocf_driver is None or "net_income" not in by_role \
+            or "depreciation_amortization" not in by_role:
+        return None
+    ocf = {str(cell["period_end"]): _decimal(cell["value"], "history value")
+           for cell in quarterly_history(ocf_driver)}
+    net, da = by_role["net_income"], by_role["depreciation_amortization"]
+    working = [(by_role[role], sign) for role, sign in _WORKING_CAPITAL_SIGNS if role in by_role]
+    ends = sorted(set(ocf) & set(net) & set(da))
+    residuals: list[tuple[str, Decimal]] = []
+    for end in ends:
+        total = ocf[end] - net[end] - da[end]
+        complete = True
+        for series, sign in working:
+            prior = [day for day in sorted(series) if day < end]
+            if end not in series or not prior:
+                complete = False
+                break
+            total -= sign * (series[end] - series[prior[-1]])
+        if complete:
+            residuals.append((end, total))
+    used = residuals[-quarters:]
+    if len(used) < quarters:
+        return None
+    mean = sum((value for _end, value in used), Decimal(0)) / Decimal(len(used))
+    return {"value": mean.quantize(_VALUE_QUANT, ROUND_HALF_UP),
+            "ends": [end for end, _value in used]}
+
+
+def derived_operating_cash_flow(
+    income_results: Sequence[Mapping[str, Any]], periods: Sequence[Mapping[str, str]],
+    balance_last: Mapping[str, Decimal] | None = None,
+    residual: Mapping[str, Any] | None = None,
+) -> dict[str, Any] | None:
+    """CFO = net income + D&A + working-capital change, when those lines exist.
+
+    The default whenever the model computes net income and carries a D&A
+    line: a cash flow that cannot stay positive while the model's earnings
+    collapse.  Working capital is each held receivable/payable/deferred
+    revenue line's change (receivables with the opposite sign); a line the
+    model does not carry contributes nothing, a line it carries but cannot
+    compute for a quarter leaves that quarter unavailable.  None when net
+    income or D&A is not a line of this model.
+    """
+
+    net_ref, net = _income_values(income_results, "net_income")
+    da_ref, da = _income_values(income_results, "depreciation_amortization")
+    if net_ref is None or da_ref is None:
+        return None
+    working: list[tuple[str, int, dict[str, Decimal], Decimal | None]] = []
+    for role, sign in _WORKING_CAPITAL_SIGNS:
+        ref, values = _income_values(income_results, role)
+        if ref is not None:
+            working.append((ref, sign, values, (balance_last or {}).get(role)))
+    values: dict[str, Decimal] = {}
+    reasons: dict[str, str] = {}
+    links: dict[str, list[dict[str, str]]] = {}
+    for period in periods:
+        end = str(period["end"])
+        if end not in net or end not in da:
+            reasons[end] = "net income or D&A is unavailable for this quarter"
+            continue
+        total = net[end] + da[end]
+        cited = [{"ref": net_ref, "period_end": end}, {"ref": da_ref, "period_end": end}]
+        missing = None
+        for index, (ref, sign, series, last) in enumerate(working):
+            prior_end = None
+            ends = [str(item["end"]) for item in periods]
+            position = ends.index(end)
+            prior = series.get(ends[position - 1]) if position > 0 else last
+            if position > 0:
+                prior_end = ends[position - 1]
+            if end not in series or prior is None:
+                missing = ref
+                break
+            total += sign * (series[end] - prior)
+            cited.append({"ref": ref, "period_end": end})
+            if prior_end is not None:
+                cited.append({"ref": ref, "period_end": prior_end})
+        if missing is not None:
+            reasons[end] = f"working-capital line {missing} is unavailable for this quarter"
+            continue
+        if residual is not None:
+            total += _decimal(residual["value"], "operating cash residual")
+        values[end] = total.quantize(_VALUE_QUANT, ROUND_HALF_UP)
+        links[end] = cited
+    return {"values": values, "reasons": reasons, "links": links,
+            "formula": ("operating_cash_flow[k] = net_income[k] + depreciation_amortization[k] "
+                        + "".join(f" {'-' if sign < 0 else '+'} Δ{ref.split(':', 1)[-1]}[k]"
+                                  for ref, sign, _v, _l in working)
+                        + ("" if residual is None else
+                           f" + other_operating_items ({residual['value']}: the mean of filed "
+                           f"CFO - net income - D&A - Δworking capital over "
+                           f"{', '.join(residual['ends'])}, i.e. share-based pay and other "
+                           "non-cash items, carried forward)")
+                        + f" ({CASH_BRIDGE_RULE})")}
+
+
+def cash_bridge_contradiction(
+    income_results: Sequence[Mapping[str, Any]], periods: Sequence[Mapping[str, str]],
+    operating_cash: Mapping[str, Decimal],
+) -> dict[str, Any] | None:
+    """The first quarter a share-of-revenue cash flow contradicts the model's losses.
+
+    Operating cash flow positive and not falling while the model's operating
+    income is deeply negative (margin at or below ``DEEP_LOSS_MARGIN``) is
+    not a forecast, it is two forecasts that disagree.  Returns the quarter
+    and the numbers, or None.
+    """
+
+    _ref, operating = _income_values(income_results, "operating_income")
+    _rev_ref, revenue = _income_values(income_results, "revenue")
+    previous = None
+    for period in periods:
+        end = str(period["end"])
+        cash, income, sales = operating_cash.get(end), operating.get(end), revenue.get(end)
+        if cash is not None and income is not None and sales and income / sales <= DEEP_LOSS_MARGIN \
+                and cash > 0 and (previous is None or cash >= previous):
+            return {"period_end": end, "operating_income": income, "revenue": sales,
+                    "operating_cash_flow": cash,
+                    "reason": (f"现金桥矛盾（{CASH_BRIDGE_RULE}）：模型在 {end} 的营业利润为 {income}"
+                               f"（营业利润率 {(income / sales * 100).quantize(Decimal('0.1'))}%），"
+                               f"经营现金流却按收入比例外推为 +{cash} 且仍在上升；模型没有净利润＋折旧＋"
+                               "营运资金的现金桥，自此季起经营现金流与自由现金流不可用")}
+        if cash is not None:
+            previous = cash
+    return None
+
+
 def compute_cash_flow_companion_results(
     cash_drivers: Sequence[Mapping[str, Any]],
     assumptions: Sequence[Mapping[str, Any]],
     periods: Sequence[Mapping[str, str]], companion: Mapping[str, Any],
     income_results: Sequence[Mapping[str, Any]],
+    balance_last: Mapping[str, Decimal] | None = None,
+    residual: Mapping[str, Any] | None = None,
 ) -> list[dict[str, Any]]:
-    """Forecast the two selected cash lines and their explicitly bound FCF sum."""
+    """Forecast the two selected cash lines and their explicitly bound FCF sum.
+
+    2026-10-09 (P0): operating cash flow is derived from net income + D&A +
+    working capital whenever the model has those lines
+    (:func:`derived_operating_cash_flow`); otherwise the share-of-revenue
+    forecast stands only until it contradicts the model's own losses
+    (:func:`cash_bridge_contradiction`), and from that quarter on operating
+    and free cash flow are unavailable with the contradiction as the reason.
+    """
 
     wire = validate_cash_flow_companion(companion)
+    derived = derived_operating_cash_flow(income_results, periods, balance_last, residual)
     income_by_ref = {str(item.get("ref")): item for item in income_results}
     by_driver = {str(item["ref"]): item for item in cash_drivers}
     by_assumption = {
@@ -2452,6 +2944,21 @@ def compute_cash_flow_companion_results(
         }
         values[result_ref] = {}
         driver = None if driver_ref is None else by_driver.get(driver_ref)
+        if role == OPERATING_CASH_FLOW and derived is not None:
+            result["formula"] = derived["formula"]
+            for period in periods:
+                end = str(period["end"])
+                if end in derived["values"]:
+                    values[result_ref][end] = derived["values"][end]
+                    result["cells"].append(_computed_cell(
+                        result_ref, period, derived["values"][end],
+                        results=derived["links"][end]))
+                else:
+                    result["cells"].append(_unavailable_cell(
+                        result_ref, period, derived["reasons"].get(end)
+                        or "net income or D&A is unavailable for this quarter"))
+            results.append(_finish(result))
+            continue
         for period in periods:
             end = str(period["end"])
             if source["status"] != "filed" or driver is None:
@@ -2487,6 +2994,25 @@ def compute_cash_flow_companion_results(
                 }],
             ))
         results.append(_finish(result))
+    if derived is None:
+        conflict = cash_bridge_contradiction(
+            income_results, periods, values.get("result:operating_cash_flow") or {})
+        if conflict is not None:
+            ends = [str(period["end"]) for period in periods]
+            cut = set(ends[ends.index(conflict["period_end"]):])
+            for index, item in enumerate(results):
+                if item.get("ref") != "result:operating_cash_flow":
+                    continue
+                cells = []
+                for cell in item["cells"]:
+                    end = str(cell["period"]["end"])
+                    if end in cut and cell.get("status") == "computed":
+                        values["result:operating_cash_flow"].pop(end, None)
+                        cells.append(_unavailable_cell(
+                            "result:operating_cash_flow", cell["period"], conflict["reason"]))
+                    else:
+                        cells.append(cell)
+                results[index] = _finish({**item, "cells": cells})
     fcf = _result(
         "result:free_cash_flow", None, "Free cash flow",
         wire["reporting_unit"],
@@ -2497,8 +3023,12 @@ def compute_cash_flow_companion_results(
         ocf = values["result:operating_cash_flow"].get(end)
         capex = values["result:capital_expenditure"].get(end)
         if ocf is None or capex is None:
+            ocf_cell = next((cell for item in results if item.get("ref") == "result:operating_cash_flow"
+                             for cell in item["cells"] if str(cell["period"]["end"]) == end), None)
+            reason = (ocf_cell or {}).get("reason") if ocf is None else None
             fcf["cells"].append(_unavailable_cell(
                 "result:free_cash_flow", period,
+                reason if reason and CASH_BRIDGE_RULE in reason else
                 "operating cash flow or capital expenditure is unavailable for this quarter"))
         else:
             fcf["cells"].append(_computed_cell(
@@ -2512,6 +3042,168 @@ def compute_cash_flow_companion_results(
     return results
 
 
+NET_CASH_CHANGE_REF = "result:net_cash_change"
+_CASH_OUTFLOW_ROLES = ("share_repurchase", "dividends_paid", "acquisitions")
+
+
+def roll_cash_balance(
+    drivers: Sequence[Mapping[str, Any]], periods: Sequence[Mapping[str, str]],
+    structure: Mapping[str, Any], results: Sequence[Mapping[str, Any]],
+) -> list[dict[str, Any]]:
+    """Roll the cash balance forward from the forecast cash flow (structure 0.6).
+
+    ``net_cash_change[k] = free_cash_flow[k] - buybacks[k] - dividends[k] -
+    acquisitions[k]`` over the outflow lines the structure holds, and
+    ``cash[k] = cash[k-1] + net_cash_change[k]`` starting from the last filed
+    balance.  A first-version roll: debt issuance, FX and other financing are
+    not modelled, which the formula text says.  Without a free-cash-flow line
+    the cash balance is held at its last filed value instead.
+    """
+
+    lines = [line for line in structure.get("lines") or []
+             if line.get("forecast_method") == "roll_forward" and line.get("role") == "cash_and_equivalents"]
+    if not lines:
+        return [dict(item) for item in results]
+    by_ref = {str(item.get("ref")): dict(item) for item in results}
+    result_refs = _structure_result_refs(structure)
+    roles = {str(line.get("role")): str(line["ref"]) for line in structure.get("lines") or []}
+    fcf = by_ref.get("result:free_cash_flow")
+    outflows = [result_refs[roles[role]] for role in _CASH_OUTFLOW_ROLES if role in roles]
+
+    def live(ref: str) -> dict[str, Decimal]:
+        line = by_ref.get(ref) or {}
+        return {str(cell["period"]["end"]): _decimal(cell["value"], "result value")
+                for cell in line.get("cells") or []
+                if cell.get("status") == "computed" and cell.get("kind") == "estimate"
+                and not cell.get("superseded_by")}
+
+    out = [dict(item) for item in results]
+    change: dict[str, Decimal] = {}
+    if fcf is not None:
+        net = _result(
+            NET_CASH_CHANGE_REF, None, "现金净变动（第一版：自由现金流 − 回购 − 分红 − 并购）", str(
+                fcf.get("unit") or "usd"),
+            "net_cash_change[k] = free_cash_flow[k] - "
+            + " - ".join(item.split(":", 1)[1] for item in outflows)
+            + "[k] (debt issuance, FX and other financing not modelled)"
+            if outflows else "net_cash_change[k] = free_cash_flow[k]")
+        fcf_values = live("result:free_cash_flow")
+        outflow_values = {ref: live(ref) for ref in outflows}
+        for period in periods:
+            end = str(period["end"])
+            missing = ([] if end in fcf_values else ["result:free_cash_flow"]) + [
+                ref for ref in outflows if end not in outflow_values[ref]]
+            if missing:
+                net["cells"].append(_unavailable_cell(
+                    NET_CASH_CHANGE_REF, period,
+                    "formula terms unavailable for this quarter: " + ", ".join(missing)))
+                continue
+            value = fcf_values[end] - sum(
+                (outflow_values[ref][end] for ref in outflows), Decimal(0))
+            change[end] = value
+            net["cells"].append(_computed_cell(
+                NET_CASH_CHANGE_REF, period, value,
+                results=[{"ref": "result:free_cash_flow", "period_end": end}]
+                + [{"ref": ref, "period_end": end} for ref in outflows]))
+        out.append(_finish(net))
+    drivers_by_line = {str(item.get("structure_line_ref")): item for item in drivers}
+    for line in lines:
+        ref = result_refs[str(line["ref"])]
+        driver = drivers_by_line.get(str(line["ref"]))
+        history = list((driver or {}).get("history") or [])
+        rolled = _result(
+            ref, str(line.get("role")), str(line.get("label")), str(line.get("unit")),
+            (f"{line['ref']}[k] = {line['ref']}[k-1] + net_cash_change[k]"
+             if fcf is not None else f"{line['ref']}[k] = {line['ref']}[last filed] (held: "
+             "no free-cash-flow forecast to roll it with)"),
+            driver_ref=None if driver is None else str(driver["ref"]))
+        if not history:
+            for period in periods:
+                rolled["cells"].append(_unavailable_cell(
+                    ref, period, f"statement line {line['ref']} has no filed balance"))
+        else:
+            level = _decimal(history[-1]["value"], "history value")
+            prior: dict[str, Any] = _cell_ref(history[-1])
+            for period in periods:
+                end = str(period["end"])
+                if fcf is None:
+                    rolled["cells"].append(_computed_cell(
+                        ref, period, level, inputs=[_cell_ref(history[-1])]))
+                    continue
+                if end not in change or level is None:
+                    level = None
+                    rolled["cells"].append(_unavailable_cell(
+                        ref, period, "the net change in cash is unavailable for this quarter"))
+                    continue
+                level = level + change[end]
+                links = [{"ref": NET_CASH_CHANGE_REF, "period_end": end}]
+                if prior.get("kind") == "input_cell":
+                    rolled["cells"].append(_computed_cell(
+                        ref, period, level, inputs=[prior], results=links))
+                else:
+                    rolled["cells"].append(_computed_cell(
+                        ref, period, level, results=[prior, *links]))
+                prior = {"ref": ref, "period_end": end}
+        rolled = _finish(rolled)
+        out = [rolled if str(item.get("ref")) == ref else item for item in out]
+    return out
+
+
+def compute_structured_model_results(
+    drivers: Sequence[Mapping[str, Any]], assumptions: Sequence[Mapping[str, Any]],
+    periods: Sequence[Mapping[str, str]], structure: Mapping[str, Any],
+    companion: Mapping[str, Any] | None,
+) -> list[dict[str, Any]]:
+    """Income DAG, then the cash companion, then the cash roll -- one order."""
+
+    income_drivers = [item for item in drivers if item.get("kind") != "cash_flow"]
+    cash_drivers = [item for item in drivers if item.get("kind") == "cash_flow"]
+    income = compute_structure_results(income_drivers, assumptions, periods, structure)
+    results = list(income)
+    if companion is not None:
+        # The last filed working-capital balances, for the first forecast
+        # quarter's change in a derived operating cash flow.
+        balance_last: dict[str, Decimal] = {}
+        roles = {str(line.get("ref")): str(line.get("role"))
+                 for line in structure.get("lines") or []}
+        for driver in income_drivers:
+            role = roles.get(str(driver.get("structure_line_ref")))
+            history = driver.get("history") or []
+            if role in {name for name, _sign in _WORKING_CAPITAL_SIGNS} and history:
+                last = max(history, key=lambda cell: str(cell.get("period_end")))
+                balance_last[role] = _decimal(last["value"], "history value")
+        results.extend(compute_cash_flow_companion_results(
+            cash_drivers, assumptions, periods, companion, income, balance_last,
+            operating_cash_residual(income_drivers, cash_drivers, structure)))
+    return roll_cash_balance(income_drivers, periods, structure, results)
+
+
+def _coverage_assumptions(
+    drivers: Sequence[Mapping[str, Any]], periods: Sequence[Mapping[str, Any]],
+    structure: Mapping[str, Any], sources: Mapping[str, Any] | None, actor_ref: str,
+) -> list[dict[str, Any]]:
+    from .forecast_coverage_assumptions import coverage_structure_assumptions
+
+    return coverage_structure_assumptions(
+        drivers, periods, structure, sources=sources, decided_by=actor_ref)
+
+
+def _mark_bands(
+    drivers: Sequence[Mapping[str, Any]], structure: Mapping[str, Any],
+    companion: Mapping[str, Any] | None, assumptions: Sequence[Mapping[str, Any]],
+) -> list[dict[str, Any]]:
+    from .forecast_coverage_assumptions import mark_outside_band
+
+    record = {
+        "schema_version": (STRUCTURED_CASH_SCHEMA_VERSION if companion is not None
+                           else STRUCTURED_SCHEMA_VERSION),
+        "drivers": [dict(item) for item in drivers],
+        "financial_statement_structure": dict(structure),
+        "cash_flow_companion": companion,
+    }
+    return mark_outside_band(record, assumptions)
+
+
 def build_structured_forecast_model(
     spec: Mapping[str, Any], table: Mapping[str, Any], *,
     structure: Mapping[str, Any], replay: Mapping[str, Any],
@@ -2522,8 +3214,15 @@ def build_structured_forecast_model(
     change_reason: str = "evidence_thicker",
     evidence_refs: Sequence[Mapping[str, Any]] | None = None,
     decision: str | None = None,
+    assumption_sources: Mapping[str, Any] | None = None,
 ) -> dict[str, Any]:
-    """Build a v0.4 model from the income DAG and source-bound cash companion."""
+    """Build a v0.4 model from the income DAG and source-bound cash companion.
+
+    A coverage (0.6) structure takes its assumptions from
+    ``forecast_coverage_assumptions`` in source-priority order and rolls the
+    cash balance after the cash flow; ``assumption_sources`` carries the held
+    preliminary actual, guidance/consensus targets and prior judgements.
+    """
 
     from .company_financial_statement_structure import forecast_structure_binding
 
@@ -2542,19 +3241,34 @@ def build_structured_forecast_model(
     horizon = spec.get("horizon") or {}
     wanted = horizon.get("forecast_quarters")
     if isinstance(wanted, bool) or not isinstance(wanted, int) or wanted < 1:
-        wanted = 4
+        wanted = MIN_FORECAST_PERIODS
     income_drivers = build_structure_drivers(table, structure)
+    from .forecast_financial_execution import additional_drivers
+    income_drivers.extend(additional_drivers(spec, table, income_drivers))
+    coverage = _is_coverage(structure)
+    if coverage and generator_ref == STRUCTURE_GENERATOR_REF:
+        generator_ref = COVERAGE_GENERATOR_REF
     if spec.get("schema_version") != "0.4":
-        periods = forecast_periods(revenue_anchor(income_drivers), wanted)
+        policy = forecast_policy(revenue_anchor(income_drivers), assumption_sources)
+        periods = forecast_periods(revenue_anchor(income_drivers), max(wanted, MIN_FORECAST_PERIODS), policy=policy)
         if assumptions is None:
-            assumptions = default_structure_assumptions(
-                income_drivers, periods, structure, decided_by=actor_ref)
-        results = compute_structure_results(
-            income_drivers, assumptions, periods, structure)
+            assumptions = (
+                _coverage_assumptions(income_drivers, periods, structure,
+                                      assumption_sources, actor_ref)
+                if coverage else
+                default_structure_assumptions(
+                    income_drivers, periods, structure, decided_by=actor_ref))
+        if coverage:
+            assumptions = _mark_bands(income_drivers, structure, None, assumptions)
+        results = (
+            compute_structured_model_results(
+                income_drivers, assumptions, periods, structure, None)
+            if coverage else
+            compute_structure_results(income_drivers, assumptions, periods, structure))
         anchor = revenue_anchor(income_drivers)
         if evidence_refs is None:
             evidence_refs = filing_refs(income_drivers, table.get("periods"))
-        return {
+        return _new_forecast_model({
             SOURCE_VERSION_KEY: None,
             "schema_version": STRUCTURED_SCHEMA_VERSION,
             "model_ref": f"forecast-model:{company_ref}",
@@ -2567,6 +3281,7 @@ def build_structured_forecast_model(
             "history_periods": [str(item) for item in (table.get("periods") or [])],
             "realised_periods": [],
             "forecast_periods": [dict(item) for item in periods],
+            "forecast_policy": policy,
             "statements": statement_importances(spec),
             "formula_ref": STRUCTURE_FORMULA_REF,
             "formula_hash": structure_formula_hash(structure, binding),
@@ -2582,32 +3297,41 @@ def build_structured_forecast_model(
             "decision": decision,
             "mission_version_ref": mission_version_ref,
             "actor_ref": actor_ref,
-        }
+        }, spec=spec, table=table, assumption_sources=assumption_sources)
     companion = build_cash_flow_companion(spec, table, structure)
     cash_drivers = build_cash_flow_companion_drivers(table, companion)
     drivers = [*income_drivers, *cash_drivers]
-    periods = forecast_periods(revenue_anchor(income_drivers), wanted)
+    policy = forecast_policy(revenue_anchor(income_drivers), assumption_sources)
+    periods = forecast_periods(revenue_anchor(income_drivers), max(wanted, MIN_FORECAST_PERIODS), policy=policy)
     if assumptions is None:
         assumptions = [
-            *default_structure_assumptions(
-                income_drivers, periods, structure, decided_by=actor_ref),
+            *(_coverage_assumptions(income_drivers, periods, structure,
+                                    assumption_sources, actor_ref)
+              if coverage else
+              default_structure_assumptions(
+                  income_drivers, periods, structure, decided_by=actor_ref)),
             *default_cash_flow_companion_assumptions(
                 income_drivers, cash_drivers, periods, companion,
                 decided_by=actor_ref),
         ]
         assumptions = sorted(assumptions, key=lambda item: (
             str(item["driver_ref"]), str(item["period"]["end"])))
-    income_results = compute_structure_results(
-        income_drivers, assumptions, periods, structure)
-    results = [
-        *income_results,
-        *compute_cash_flow_companion_results(
-            cash_drivers, assumptions, periods, companion, income_results),
-    ]
+    if coverage:
+        assumptions = _mark_bands(drivers, structure, companion, assumptions)
+        results = compute_structured_model_results(
+            drivers, assumptions, periods, structure, companion)
+    else:
+        income_results = compute_structure_results(
+            income_drivers, assumptions, periods, structure)
+        results = [
+            *income_results,
+            *compute_cash_flow_companion_results(
+                cash_drivers, assumptions, periods, companion, income_results),
+        ]
     anchor = revenue_anchor(income_drivers)
     if evidence_refs is None:
         evidence_refs = filing_refs(drivers, table.get("periods"))
-    return {
+    return _new_forecast_model({
         SOURCE_VERSION_KEY: None,
         "schema_version": STRUCTURED_CASH_SCHEMA_VERSION,
         "model_ref": f"forecast-model:{company_ref}",
@@ -2620,6 +3344,7 @@ def build_structured_forecast_model(
         "history_periods": [str(item) for item in (table.get("periods") or [])],
         "realised_periods": [],
         "forecast_periods": [dict(item) for item in periods],
+        "forecast_policy": policy,
         "statements": statement_importances(spec),
         "formula_ref": STRUCTURE_FORMULA_REF,
         "formula_hash": cash_flow_formula_hash(structure, binding, companion),
@@ -2636,7 +3361,7 @@ def build_structured_forecast_model(
         "decision": decision,
         "mission_version_ref": mission_version_ref,
         "actor_ref": actor_ref,
-    }
+    }, spec=spec, table=table, assumption_sources=assumption_sources)
 
 
 # -- versioning: the two entry points a caller may use ----------------------
@@ -2690,10 +3415,33 @@ def _structure_definition(value: Mapping[str, Any]) -> dict[str, Any]:
     note evidence while an existing model is merely being actualised.
     """
 
+    if _is_coverage(value):
+        # A coverage structure is completed against the filings, so its
+        # evidence citations and history depths move with every filing.  The
+        # judgement is the topology: lines, signs, methods and bases.
+        return {
+            "schema_version": value.get("schema_version"),
+            "lines": [dict(item) for item in value.get("lines") or []],
+            "formulas": [
+                {key: item[key] for key in item if key != "evidence_refs"}
+                for item in value.get("formulas") or []
+            ],
+            "note_evidence": value.get("note_evidence"),
+        }
     return {
         key: value for key, value in value.items()
         if key not in {"content_hash", "financial_input_hash", "structure_ref"}
     }
+
+
+def structure_topology_changed(prior: Mapping[str, Any],
+                               structure: Mapping[str, Any]) -> bool:
+    """Whether a model's held structure differs in judgement from a new one."""
+
+    held = prior.get("financial_statement_structure")
+    if not isinstance(held, Mapping):
+        return True
+    return _structure_definition(held) != _structure_definition(structure)
 
 
 def _cash_companion_definition(value: Mapping[str, Any]) -> dict[str, Any]:
@@ -2738,6 +3486,45 @@ def _cash_historical_values(
     return values, refs
 
 
+def _roll_actualized_forecast(body: dict[str, Any]) -> dict[str, Any]:
+    """Append future quarters while retaining the immutable estimates/actuals."""
+    drivers = body["drivers"]
+    anchor = revenue_anchor(drivers)
+    previous_policy = body.get("forecast_policy") or {}
+    policy = forecast_policy(anchor, {"fiscal_year_end": previous_policy.get("fiscal_year_end")})
+    periods = forecast_periods(anchor, max(MIN_FORECAST_PERIODS, len(body["forecast_periods"])), policy=policy)
+    structure = body.get("financial_statement_structure")
+    companion = body.get("cash_flow_companion")
+    actor = body["actor_ref"]
+    if structure is not None:
+        fresh = (_coverage_assumptions(drivers, periods, structure, None, actor)
+                 if _is_coverage(structure) else
+                 default_structure_assumptions(drivers, periods, structure, decided_by=actor))
+        if companion is not None:
+            fresh.extend(default_cash_flow_companion_assumptions(
+                drivers, [d for d in drivers if d.get("kind") == "cash_flow"], periods,
+                companion, decided_by=actor))
+    else:
+        fresh = default_assumptions(drivers, periods, decided_by=actor)
+    held = {(a["driver_ref"], a["period"]["end"]) for a in body["assumptions"]
+            if not a.get("superseded_by") and a.get("kind") != "actual"}
+    assumptions = body["assumptions"] + [a for a in fresh if (a["driver_ref"], a["period"]["end"]) not in held]
+    if structure is not None:
+        results = compute_structured_model_results(drivers, assumptions, periods, structure, companion)
+    else:
+        results = compute_results(drivers, assumptions, periods, statements=body["statements"],
+                                  base=chain_base(anchor, body, str(periods[0]["end"])))
+    ends = {p["end"] for p in periods}
+    prior_by_ref = {r["ref"]: r for r in body["results"]}
+    for result in results:
+        prior = prior_by_ref.get(result["ref"]) or {}
+        result["cells"] = [dict(c) for c in prior.get("cells") or []
+                           if c["period"]["end"] not in ends] + result["cells"]
+        _finish(result)
+    body.update(forecast_periods=periods, forecast_policy=policy, assumptions=assumptions, results=results)
+    return _new_forecast_model(body)
+
+
 def _actualize_structured_model(
     prior: Mapping[str, Any], table: Mapping[str, Any], *,
     structure: Mapping[str, Any] | None, replay: Mapping[str, Any] | None,
@@ -2772,6 +3559,8 @@ def _actualize_structured_model(
         str(item["end"]): dict(item) for item in (prior.get("forecast_periods") or [])
     }
     income_drivers = build_structure_drivers(table, structure)
+    from .forecast_financial_execution import additional_drivers
+    income_drivers.extend(additional_drivers((prior.get("execution_contract") or {}).get("specification") or {}, table, income_drivers))
     current_companion = None
     cash_drivers: list[dict[str, Any]] = []
     if prior.get("schema_version") == STRUCTURED_CASH_SCHEMA_VERSION:
@@ -2810,16 +3599,26 @@ def _actualize_structured_model(
             lines[str(item["ref"])] = item
         result_refs["cash-flow:free-cash-flow"] = "result:free_cash_flow"
         formulas["cash-flow:free-cash-flow"] = current_companion["formula"]
+    if _is_coverage(structure):
+        # The cash roll's net change has no filed history of its own; its
+        # realised cells stay the estimates they were.
+        result_refs["cash-roll:net-change"] = NET_CASH_CHANGE_REF
 
     results: list[dict[str, Any]] = []
     for prior_line in prior.get("results") or []:
         ref = str(prior_line["ref"])
         line_ref = next((key for key, value in result_refs.items() if value == ref), None)
+        if line_ref is None and (ref.startswith("result:free_cash_flow_") or ref == "result:capital_expenditure_company" or ref.startswith("result:fcf-component:")):
+            results.append(dict(prior_line))
+            continue
         if line_ref is None:
             raise ForecastModelUnavailable(
                 f"result {ref} is outside the current statement structure")
         formula = formulas.get(line_ref)
         is_cash = ref in cash_values
+        if ref == NET_CASH_CHANGE_REF:
+            results.append(_finish(dict(prior_line)))
+            continue
         cells: list[dict[str, Any]] = []
         for cell in prior_line.get("cells") or []:
             end = str(cell["period"]["end"])
@@ -2916,13 +3715,17 @@ def _actualize_structured_model(
         # now the filed actual rather than the superseded estimate. Replay the
         # remaining cells from the same immutable assumptions and company DAG
         # so their stored formulas and values continue to agree exactly.
-        income_replayed = compute_structure_results(
-            income_drivers, assumptions, forecast, structure)
-        replayed_results = list(income_replayed)
-        if current_companion is not None:
-            replayed_results.extend(compute_cash_flow_companion_results(
-                cash_drivers, assumptions, forecast, current_companion,
-                income_replayed))
+        if _is_coverage(structure):
+            replayed_results = compute_structured_model_results(
+                drivers, assumptions, forecast, structure, current_companion)
+        else:
+            income_replayed = compute_structure_results(
+                income_drivers, assumptions, forecast, structure)
+            replayed_results = list(income_replayed)
+            if current_companion is not None:
+                replayed_results.extend(compute_cash_flow_companion_results(
+                    cash_drivers, assumptions, forecast, current_companion,
+                    income_replayed))
         replayed = {
             str(item["ref"]): item
             for item in replayed_results
@@ -2931,6 +3734,9 @@ def _actualize_structured_model(
         reanchored: list[dict[str, Any]] = []
         for result in results:
             fresh = replayed.get(str(result["ref"]))
+            if fresh is None and (str(result["ref"]).startswith("result:free_cash_flow_") or result["ref"] == "result:capital_expenditure_company" or str(result["ref"]).startswith("result:fcf-component:")):
+                reanchored.append(result)
+                continue
             if fresh is None:
                 raise ForecastModelUnavailable(
                     f"result {result['ref']} could not replay after actualisation")
@@ -2978,7 +3784,7 @@ def _actualize_structured_model(
         "decision": None,
         "mission_version_ref": prior.get("mission_version_ref"),
     }
-    return body
+    return _roll_actualized_forecast(body)
 
 
 def actualize_model(
@@ -3173,7 +3979,7 @@ def actualize_model(
     body["evidence_refs"] = [dict(item) for item in evidence_refs]
     body["decision"] = None
     body["mission_version_ref"] = prior.get("mission_version_ref")
-    return body
+    return _roll_actualized_forecast(body)
 
 
 def revise_assumptions(
@@ -3259,14 +4065,21 @@ def revise_assumptions(
             raise ForecastModelValidationError(
                 "structured model carries no statement authority")
         income_drivers = [item for item in drivers if item.get("kind") != "cash_flow"]
-        income_results = compute_structure_results(
-            income_drivers, live, forecast, structure)
-        recomputed = list(income_results)
-        if prior.get("schema_version") == STRUCTURED_CASH_SCHEMA_VERSION:
-            companion = validate_cash_flow_companion(prior.get("cash_flow_companion"))
-            cash_drivers = [item for item in drivers if item.get("kind") == "cash_flow"]
-            recomputed.extend(compute_cash_flow_companion_results(
-                cash_drivers, live, forecast, companion, income_results))
+        if _is_coverage(structure):
+            recomputed = compute_structured_model_results(
+                drivers, live, forecast, structure,
+                validate_cash_flow_companion(prior.get("cash_flow_companion"))
+                if prior.get("schema_version") == STRUCTURED_CASH_SCHEMA_VERSION
+                else None)
+        else:
+            income_results = compute_structure_results(
+                income_drivers, live, forecast, structure)
+            recomputed = list(income_results)
+            if prior.get("schema_version") == STRUCTURED_CASH_SCHEMA_VERSION:
+                companion = validate_cash_flow_companion(prior.get("cash_flow_companion"))
+                cash_drivers = [item for item in drivers if item.get("kind") == "cash_flow"]
+                recomputed.extend(compute_cash_flow_companion_results(
+                    cash_drivers, live, forecast, companion, income_results))
     else:
         recomputed = compute_results(
             drivers, live, forecast, statements=prior.get("statements") or {},
@@ -3296,7 +4109,7 @@ def revise_assumptions(
         if kept:
             results.append(_finish({**dict(line), "cells": kept}))
 
-    return {
+    body = {
         SOURCE_VERSION_KEY: str(prior["id"]),
         **{key: value for key, value in prior.items()
            if key in (_RECORD_FIELDS | _STRUCTURE_RECORD_FIELDS
@@ -3313,6 +4126,11 @@ def revise_assumptions(
                                 if mission_version_ref is not None
                                 else prior.get("mission_version_ref")),
     }
+    if prior.get("execution_contract"):
+        from .forecast_financial_execution import execute_financial_model
+        contract = prior["execution_contract"]
+        execute_financial_model(body, {**contract["specification"], "fcf_definition": contract.get("fcf_definition")})
+    return body
 
 
 def replay_cell(
@@ -3394,6 +4212,9 @@ def _normalize_driver(value: Any, name: str, *, schema_version: str) -> dict[str
     fields = (_DRIVER_FIELDS | _STRUCTURE_DRIVER_FIELDS
               if is_structured_schema(schema_version) else _DRIVER_FIELDS)
     wire = _closed(value, fields, name, optional=_DRIVER_OPTIONAL_FIELDS)
+    if wire.get("statement_identity") is not None:
+        from .company_model_inputs import validate_statement_identity
+        wire["statement_identity"]=validate_statement_identity(wire["statement_identity"])
     wire["ref"] = _text(wire["ref"], f"{name}.ref")
     driver_kinds = (
         (*DRIVER_KINDS, "statement_line")
@@ -3409,7 +4230,9 @@ def _normalize_driver(value: Any, name: str, *, schema_version: str) -> dict[str
     if wire["role"] is not None:
         allowed_roles = ROLES
         if is_structured_schema(schema_version):
-            from .company_financial_statement_structure import ROLES as statement_roles
+            from .company_financial_statement_structure import (
+                COVERAGE_ROLES as statement_roles,
+            )
             allowed_roles = (
                 (*statement_roles, OPERATING_CASH_FLOW, CAPITAL_EXPENDITURE)
                 if schema_version == STRUCTURED_CASH_SCHEMA_VERSION else statement_roles
@@ -3421,14 +4244,17 @@ def _normalize_driver(value: Any, name: str, *, schema_version: str) -> dict[str
             wire["structure_line_ref"], f"{name}.structure_line_ref")
         wire["forecast_method"] = _one_of(
             wire["forecast_method"],
-            ("quarterly_growth", "share_of_line", "unavailable"),
+            ("quarterly_growth", "year_over_year_growth", "seasonal_factor", "share_of_line", "unavailable",
+             "carry_forward_mean", "zero_one_off", "rate_times_balance",
+             "hold_last", "roll_forward"),
             f"{name}.forecast_method")
         wire["forecast_base_ref"] = _optional_text(
             wire["forecast_base_ref"], f"{name}.forecast_base_ref")
-        if ((wire["forecast_method"] == "share_of_line")
-                != (wire["forecast_base_ref"] is not None)):
+        if ((wire["forecast_method"] in {"share_of_line", "rate_times_balance"} and wire["forecast_base_ref"] is None)
+                or (wire["forecast_method"] not in {"share_of_line", "rate_times_balance", "roll_forward"} and wire["forecast_base_ref"] is not None)):
             raise ForecastModelValidationError(
-                f"{name}.forecast_base_ref belongs only to share_of_line")
+                f"{name}.forecast_base_ref belongs only to share_of_line "
+                "or rate_times_balance")
     if not isinstance(wire["spec_rows"], list) or not wire["spec_rows"]:
         raise ForecastModelValidationError(f"{name}.spec_rows must name a specification row")
     wire["spec_rows"] = [_text(item, f"{name}.spec_rows[]") for item in wire["spec_rows"]]
@@ -3574,6 +4400,11 @@ def _normalize_ref(value: Any, name: str) -> dict[str, Any]:
         raise ForecastModelValidationError(f"{name} must name a concept and a period")
     if wire["kind"] in ("claim", "figure") and wire["ref"] is None:
         raise ForecastModelValidationError(f"{name} must name the thing it cites")
+    if wire["kind"] == "doc_passage":
+        from .evidence_index import parse_passage_ref, PassageRefInvalid
+        try: parse_passage_ref(wire["ref"])
+        except PassageRefInvalid as exc:
+            raise ForecastModelValidationError(f"{name} must name an exact doc-passage reference") from exc
     if wire["kind"] in PROXY_GAP_REQUIRED:
         if wire["ref"] is None:
             raise ForecastModelValidationError(
@@ -3644,7 +4475,7 @@ def _normalize_assumption(value: Any, name: str, *, driver_refs: set[str]) -> di
     # An actual is not an opinion: it is a filed figure, and it says which
     # filing it came from or it is not an actual.
     if wire["kind"] == "actual" and not any(
-        item["kind"] == "input_cell" and item["accession"] for item in wire["refs"]
+        (item["kind"] == "input_cell" or (wire["measure"] == "reported_actual" and item["kind"] == "filing")) and item["accession"] for item in wire["refs"]
     ):
         raise ForecastModelValidationError(
             f"{name} is an actual and must cite the filing it came from")
@@ -3683,7 +4514,9 @@ def _normalize_result(value: Any, name: str, *, assumption_refs: set[str],
     if wire["role"] is not None:
         allowed_roles = ROLES
         if is_structured_schema(schema_version):
-            from .company_financial_statement_structure import ROLES as statement_roles
+            from .company_financial_statement_structure import (
+                COVERAGE_ROLES as statement_roles,
+            )
             allowed_roles = (
                 (*statement_roles, OPERATING_CASH_FLOW, CAPITAL_EXPENDITURE)
                 if schema_version == STRUCTURED_CASH_SCHEMA_VERSION else statement_roles
@@ -3766,7 +4599,22 @@ def validate_forecast_model(value: Mapping[str, Any]) -> dict[str, Any]:
            if version == STRUCTURED_CASH_SCHEMA_VERSION else frozenset())
         if is_structured_schema(version) else _RECORD_FIELDS
     )
-    wire = _closed(value, fields, "forecast model")
+    wire = _closed(value, fields - {"forecast_policy", "execution_contract"}, "forecast model", optional={"forecast_policy", "execution_contract"})
+    if "forecast_policy" in wire:
+        policy = wire["forecast_policy"]
+        if not isinstance(policy, Mapping) or set(policy) != {"rule_ref", "latest_actual_end", "fiscal_year_end", "preliminary"}:
+            raise ForecastModelValidationError("forecast_policy must carry its closed reporting/calendar authority")
+        if policy["rule_ref"] != "rule:rolling-forecast-horizon:1":
+            raise ForecastModelValidationError("forecast policy rule is unsupported")
+        _iso_date(policy["latest_actual_end"], "forecast policy latest actual")
+        if policy["fiscal_year_end"] is not None:
+            _iso_date(policy["fiscal_year_end"], "forecast policy fiscal year end")
+        preliminary = policy["preliminary"]
+        if preliminary is not None:
+            if not isinstance(preliminary, Mapping) or not preliminary.get("accession") or not preliminary.get("values"):
+                raise ForecastModelValidationError("preliminary forecast anchor needs filed accession and values")
+            _iso_date(preliminary.get("period_end"), "preliminary actual period")
+
     if wire["schema_version"] not in (
         LEGACY_SCHEMA_VERSION, SCHEMA_VERSION, *STRUCTURED_SCHEMA_VERSIONS,
     ):
@@ -3975,6 +4823,8 @@ def validate_forecast_model(value: Mapping[str, Any]) -> dict[str, Any]:
     expected_body = content_hash(body)
     if _sha256(wire["body_hash"], "body_hash") != expected_body:
         raise ForecastModelValidationError("forecast model body_hash is invalid")
+    from .forecast_financial_execution import validate_execution_contract
+    validate_execution_contract(wire)
     expected = _sha256(wire["content_hash"], "content_hash")
     base = {key: value for key, value in wire.items() if key != "content_hash"}
     if content_hash(base) != expected:
@@ -3984,6 +4834,11 @@ def validate_forecast_model(value: Mapping[str, Any]) -> dict[str, Any]:
 
 def _statement_line_proof_row(row: Mapping[str, Any]) -> dict[str, Any]:
     wire = dict(row)
+    dimensions = wire.pop("dimensions_json", None)
+    if dimensions is not None and "dimensions" not in wire:
+        wire["dimensions"] = json.loads(dimensions) if isinstance(dimensions, str) else dimensions
+    if wire.get("dimensions") is None:
+        wire.pop("dimensions", None)
     wire["is_breakdown"] = bool(wire.get("is_breakdown")) or wire.get(
         "dimension_axis") is not None
     return wire
@@ -4056,6 +4911,15 @@ class ForecastModelAuthority:
         if not body.get("evidence_refs"):
             raise ForecastModelValidationError(
                 "a version must name the evidence that triggered it")
+        # A pure generator has no database calendar. Bind a missing fiscal
+        # year end here to the admitted annual authority before hashing.
+        policy = body.get("forecast_policy")
+        if isinstance(policy, Mapping) and policy.get("fiscal_year_end") is None and self.connection.execute(
+            "SELECT 1 FROM sqlite_master WHERE type='table' AND name='coverage_mission_statement_filings'").fetchone():
+            annual_end = self.connection.execute(
+                "SELECT MAX(report_date) FROM coverage_mission_statement_filings WHERE company_ref=? AND form='10-K'", (company_ref,)).fetchone()[0]
+            if annual_end:
+                body["forecast_policy"] = {**policy, "fiscal_year_end": annual_end}
         digest = body_hash(body)
         latest = self.connection.execute(
             "SELECT * FROM forecast_model_versions WHERE model_ref=? "
@@ -4097,6 +4961,29 @@ class ForecastModelAuthority:
         record.setdefault("decision", None)
         record["content_hash"] = content_hash(record)
         wire = validate_forecast_model(record)
+        if not duplicate_existing:
+            validate_new_forecast_rules(wire)
+            from .forecast_financial_execution import validate_execution_contract, validate_assumption_sources, validate_stored_execution_spec
+            validate_execution_contract(wire, publishing=True)
+            validate_assumption_sources(wire, connection=self.connection)
+            validate_stored_execution_spec(self.connection, wire)
+            policy = wire.get("forecast_policy") or forecast_policy(revenue_anchor(wire["drivers"]))
+            known_actual = max(wire["history_periods"] + [str(c["period_end"]) for d in wire["drivers"] for c in quarterly_history(d)])
+            if self.connection.execute("SELECT 1 FROM sqlite_master WHERE type='table' AND name='coverage_mission_statement_filings'").fetchone():
+                latest_filed = self.connection.execute(
+                    "SELECT MAX(report_date) FROM coverage_mission_statement_filings WHERE company_ref=? AND form IN ('10-Q','10-K')", (company_ref,)).fetchone()[0]
+                if latest_filed:
+                    known_actual = max(known_actual, latest_filed)
+                latest_annual = self.connection.execute(
+                    "SELECT MAX(report_date) FROM coverage_mission_statement_filings WHERE company_ref=? AND form='10-K'", (company_ref,)).fetchone()[0]
+                if policy.get("fiscal_year_end") != latest_annual:
+                    raise ForecastModelValidationError("forecast fiscal year end must bind the latest annual filing")
+            from .forecast_assumption_sources import preliminary_quarter
+            preliminary = preliminary_quarter(self.connection, company_ref, reporting_unit=str(wire["unit"]).casefold())
+            if preliminary:
+                known_actual = max(known_actual, preliminary["period_end"])
+            if policy["latest_actual_end"] != known_actual:
+                raise ForecastModelValidationError("forecast boundary must equal the latest admitted actual; arbitrary future dates are refused")
         if duplicate_existing:
             # Preserve the immutable legacy model byte for byte.  Only the
             # separately stored, replayable filing proof is being backfilled.
@@ -4111,8 +4998,10 @@ class ForecastModelAuthority:
         # every other line too.
         from .economic_invariants import evaluate_forecast_model, gate
 
+        from .forecast_statement_scope import statement_scope
+        scoped_rows, model_statement_scope = statement_scope(wire, statement_rows, self.connection)
         candidate_report = evaluate_forecast_model(
-            wire, statement_rows=statement_rows, solver_results=solver_results)
+            wire, statement_rows=scoped_rows, solver_results=solver_results)
         gate(self.store, candidate_report,
              mission_version_ref=wire.get("mission_version_ref"))
         statement_wire = sorted(
@@ -4121,6 +5010,7 @@ class ForecastModelAuthority:
                              int(row.get("ordinal") or 0),
                              str(row.get("concept") or "")),
         )
+        context_bindings = {}
         proof_rows_are_typed = bool(statement_wire) and all(
             row.get("ingest_id") is not None for row in statement_wire)
         if proof_rows_are_typed:
@@ -4128,10 +5018,19 @@ class ForecastModelAuthority:
             if not all(line_refs) or len(set(line_refs)) != len(line_refs):
                 raise ForecastModelValidationError(
                     "filing proof statement rows need unique line_id values")
-            line_placeholders = ",".join("?" for _ in line_refs)
-            stored_lines = self.connection.execute(
-                "SELECT * FROM coverage_mission_statement_lines "
-                f"WHERE line_id IN ({line_placeholders})", line_refs).fetchall()
+            from .statement_context import resolve_line_refs, StatementContextError
+            context_bindings = {}
+            for ingest in {str(row["ingest_id"]) for row in statement_wire}:
+                contexts = {row.get("statement_context_ref") for row in statement_wire if str(row["ingest_id"]) == ingest}
+                if len(contexts) != 1:
+                    raise ForecastModelValidationError("filing proof mixes statement context versions for one ingest")
+                selected = next(iter(contexts))
+                if selected is not None:
+                    context_bindings[ingest] = selected
+            try:
+                stored_lines = resolve_line_refs(self.connection, line_refs, context_bindings)
+            except StatementContextError as exc:
+                raise ForecastModelValidationError(str(exc)) from exc
             authoritative = sorted(
                 [_statement_line_proof_row(row) for row in stored_lines],
                 key=lambda row: (str(row.get("ingest_id") or ""),
@@ -4185,8 +5084,10 @@ class ForecastModelAuthority:
                             row.get("unit"), driver.get("unit"),
                             structured=is_structured_schema(wire.get("schema_version")),
                         )
-                        and row.get("dimension_axis") is None
-                        and row.get("dimension_member") is None
+                        and ((row.get("dimensions")==driver["statement_identity"]["dimensions"]
+                              and row.get("statement")==driver["statement_identity"]["statement"])
+                             if driver.get("statement_identity") else
+                             (row.get("dimension_axis") is None and row.get("dimension_member") is None and not row.get("dimensions")))
                     ]
                     if cell.get("basis") == "derived_from_cumulative":
                         if driver.get("kind") == "cash_flow":
@@ -4228,8 +5129,25 @@ class ForecastModelAuthority:
                             f"company={company_ref} metric={driver.get('ref')} "
                             f"period={cell.get('period_end')} value={cell.get('value')} "
                             f"accessions={cell.get('accessions')}")
+            for method in (wire.get("financial_statement_structure_replay") or {}).get("forecast_methods") or []:
+                source = method.get("annual_forecast_source")
+                if source is None:
+                    continue
+                for observation in source.get("observations") or []:
+                    matches = [row for row in statement_wire
+                               if row.get("concept") == source.get("concept")
+                               and not row.get("dimensions") and row.get("dimension_axis") is None
+                               and row.get("period_start") == observation.get("period_start")
+                               and row.get("period_end") == observation.get("period_end")
+                               and _filing_units_match(row.get("unit"), observation.get("unit"), structured=True)
+                               and _decimal(row.get("value"), "annual source value") == _decimal(observation.get("value"), "annual source value")
+                               and str(found[str(row["ingest_id"])]["accession"]) in set(observation.get("source_accessions") or [])
+                               and found[str(row["ingest_id"])]["form"] in {"10-K", "10-K/A"}]
+                    if not matches:
+                        raise ForecastModelValidationError("annual share forecast source does not match immutable direct annual filing rows")
+        scoped_wire, model_statement_scope = statement_scope(wire, statement_wire, self.connection)
         invariant_report = evaluate_forecast_model(
-            wire, statement_rows=statement_wire, solver_results=solver_results)
+            wire, statement_rows=scoped_wire, solver_results=solver_results)
         gate(self.store, invariant_report,
              mission_version_ref=wire.get("mission_version_ref"))
         statement_rows_hash = content_hash({"statement_rows": statement_wire})
@@ -4245,6 +5163,10 @@ class ForecastModelAuthority:
             "created_at": wire["created_at"],
         }
         if filing_proof is not None:
+            if model_statement_scope is not None:
+                filing_proof["model_statement_scope"] = model_statement_scope
+            if context_bindings:
+                filing_proof["statement_context_bindings"] = context_bindings
             filing_proof["content_hash"] = content_hash(filing_proof)
         with self._transaction() as cur:
             if not duplicate_existing:
@@ -4283,6 +5205,27 @@ class ForecastModelAuthority:
 
     def filing_proof(self, version_ref: str) -> dict[str, Any] | None:
         """The exact deterministic filing check stored with a model, if any."""
+        return self._filing_proof(version_ref, require_replay=True)
+
+    def filing_proof_recheck(self, version_ref: str) -> dict[str, Any] | None:
+        """The stored filing check, re-evaluated now on its exact source rows.
+
+        ADR-0011: the company_model gate asks whether a model's history
+        reconciles to the filings *today*.  The stored proof answers that
+        exactly while the invariant contract is unchanged; once the contract
+        moves (a new report field, a re-defined subject hash) the stored
+        report no longer replays byte-for-byte, although its hash-bound source
+        rows are exactly the same.  This reader still refuses tampered or
+        drifted source rows -- those raise as in ``filing_proof`` -- but on a
+        replay difference it returns the stored proof with
+        ``replays: False`` and the report recomputed under the current
+        contract, so the gate can decide on the current evaluation instead of
+        waiting forever for a model nobody will rebuild.
+        """
+        return self._filing_proof(version_ref, require_replay=False)
+
+    def _filing_proof(self, version_ref: str, *,
+                      require_replay: bool) -> dict[str, Any] | None:
         model = self.model(version_ref)
         row = self.connection.execute(
             "SELECT * FROM forecast_model_filing_proofs WHERE model_version_id=?",
@@ -4315,10 +5258,11 @@ class ForecastModelAuthority:
         refs = wire.get("statement_line_refs") or []
         if not refs:
             raise ForecastModelConflict("forecast model filing proof names no statement rows")
-        placeholders = ",".join("?" for _ in refs)
-        rows = self.connection.execute(
-            "SELECT * FROM coverage_mission_statement_lines "
-            f"WHERE line_id IN ({placeholders})", refs).fetchall()
+        from .statement_context import resolve_line_refs, StatementContextError
+        try:
+            rows = resolve_line_refs(self.connection, refs, wire.get("statement_context_bindings"))
+        except StatementContextError as exc:
+            raise ForecastModelConflict(str(exc)) from exc
         statement_wire = sorted(
             [_statement_line_proof_row(row) for row in rows],
             key=lambda item: (str(item.get("ingest_id") or ""),
@@ -4330,12 +5274,23 @@ class ForecastModelAuthority:
                 != wire["statement_rows_hash"]):
             raise ForecastModelConflict("forecast model filing proof source rows drifted")
         from .economic_invariants import evaluate_forecast_model
+        if wire.get("model_statement_scope") is not None:
+            from .forecast_statement_scope import statement_scope
+            scoped_wire, scope_replay = statement_scope(model, statement_wire, self.connection)
+            if scope_replay != wire["model_statement_scope"]:
+                raise ForecastModelConflict("forecast filing partition scope does not replay")
+        else:
+            scoped_wire = statement_wire
         replay = evaluate_forecast_model(
-            model, statement_rows=statement_wire,
+            model, statement_rows=scoped_wire,
             solver_results=wire.get("solver_results") or [])
-        if replay.as_dict() != wire["invariant_report"]:
-            raise ForecastModelConflict("forecast model filing proof does not replay")
-        return wire
+        current = replay.as_dict()
+        replays = current == wire["invariant_report"]
+        if require_replay:
+            if not replays:
+                raise ForecastModelConflict("forecast model filing proof does not replay")
+            return wire
+        return {**wire, "replays": replays, "current_invariant_report": current}
 
     def publish_annual_projection(
         self, projection: Mapping[str, Any], *, inputs: Mapping[str, Any],
@@ -4521,7 +5476,7 @@ __all__ = [
     "compute_results",
     "default_assumptions",
     "draft_assumptions",
-    "forecast_periods",
+    "forecast_periods", "forecast_policy", "validate_new_forecast_rules",
     "model_readiness",
     "quarterly_history",
     "revenue_anchor",

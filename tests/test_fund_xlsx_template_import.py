@@ -1,6 +1,7 @@
 from __future__ import annotations
 
 import json
+import os
 import tempfile
 import unittest
 import zipfile
@@ -9,7 +10,7 @@ from unittest import mock
 
 from dalton_core.fund_xlsx_template_import import (
     FundXlsxTemplateImportError, NUMBER_STYLE_NAMES, STYLE_NAMES,
-    import_fund_xlsx_template_candidate, main,
+    import_fund_xlsx_template_candidate, main, _source_bytes,
 )
 
 
@@ -128,6 +129,87 @@ class FundXlsxTemplateImportTests(unittest.TestCase):
                     path, sheets={"valuation": "SecretCo Valuation",
                                   "financials": "SecretCo Financials",
                                   "driver": "SecretCo Financials"}, template_slug="owner-reference")
+
+
+class SourceWorkbookStabilityTests(unittest.TestCase):
+    def setUp(self) -> None:
+        self.temp = tempfile.TemporaryDirectory()
+        self.addCleanup(self.temp.cleanup)
+        self.path = Path(self.temp.name).resolve() / "source.xlsx"
+        self.path.write_bytes(b"original source bytes")
+
+    def reading_action(self, action):
+        """Run a real file operation after the real descriptor has been read."""
+        fdopen = os.fdopen
+        class Reader:
+            def __init__(self, handle): self.handle = handle
+            def __enter__(self): self.handle.__enter__(); return self
+            def __exit__(self, *args): return self.handle.__exit__(*args)
+            def fileno(self): return self.handle.fileno()
+            def read(self, *args):
+                data = self.handle.read(*args)
+                action()
+                return data
+        return mock.patch("dalton_core.fund_xlsx_template_import.os.fdopen",
+                          side_effect=lambda fd, *args, **kw: Reader(fdopen(fd, *args, **kw)))
+
+    def test_a_real_read_that_only_updates_atime_is_accepted(self):
+        os.utime(self.path, ns=(1_000_000_000, 2_000_000_000))
+        before = self.path.lstat()
+        self.assertEqual(_source_bytes(self.path), b"original source bytes")
+        after = self.path.lstat()
+        for field in ("st_dev", "st_ino", "st_mode", "st_size", "st_mtime_ns", "st_ctime_ns"):
+            self.assertEqual(getattr(before, field), getattr(after, field), field)
+        if before.st_atime_ns == after.st_atime_ns:
+            self.skipTest("filesystem does not update atime on reads")
+        self.assertNotEqual(before, after)  # the old full-stat comparison refused this
+
+    def test_same_size_mutation_with_restored_mtime_is_refused(self):
+        held = self.path.stat()
+        def mutate():
+            self.path.write_bytes(b"mutated! source bytes")
+            os.utime(self.path, ns=(held.st_atime_ns, held.st_mtime_ns))
+        with self.reading_action(mutate), self.assertRaisesRegex(FundXlsxTemplateImportError, "changed while read"):
+            _source_bytes(self.path)
+
+    def test_same_content_inode_replacement_during_read_is_refused(self):
+        replacement = self.path.with_name("replacement.xlsx")
+        replacement.write_bytes(b"original source bytes")
+        with self.reading_action(lambda: os.replace(replacement, self.path)), self.assertRaisesRegex(FundXlsxTemplateImportError, "changed while read"):
+            _source_bytes(self.path)
+
+    def test_symlink_replacement_during_read_is_refused(self):
+        target = self.path.with_name("other.xlsx")
+        target.write_bytes(b"original source bytes")
+        def replace():
+            self.path.unlink(); self.path.symlink_to(target)
+        with self.reading_action(replace), self.assertRaisesRegex(FundXlsxTemplateImportError, "changed while read"):
+            _source_bytes(self.path)
+
+    def test_inode_replacement_before_open_is_refused_by_fd_identity(self):
+        replacement = self.path.with_name("replacement.xlsx")
+        replacement.write_bytes(b"original source bytes")
+        open_fd = os.open
+        def replace_and_open(*args, **kw):
+            os.replace(replacement, self.path)
+            return open_fd(*args, **kw)
+        with mock.patch("dalton_core.fund_xlsx_template_import.os.open", side_effect=replace_and_open), self.assertRaisesRegex(FundXlsxTemplateImportError, "changed while read"):
+            _source_bytes(self.path)
+
+    def test_symlink_replacement_before_open_is_not_followed(self):
+        target = self.path.with_name("other.xlsx")
+        target.write_bytes(b"original source bytes")
+        open_fd = os.open
+        def replace_and_open(*args, **kw):
+            self.path.unlink(); self.path.symlink_to(target)
+            return open_fd(*args, **kw)
+        with mock.patch("dalton_core.fund_xlsx_template_import.os.open", side_effect=replace_and_open), self.assertRaisesRegex(FundXlsxTemplateImportError, "changed while read"):
+            _source_bytes(self.path)
+
+    def test_permission_change_during_read_is_refused(self):
+        mode = self.path.stat().st_mode & 0o777
+        with self.reading_action(lambda: self.path.chmod(mode ^ 0o040)), self.assertRaisesRegex(FundXlsxTemplateImportError, "changed while read"):
+            _source_bytes(self.path)
 
 
 if __name__ == "__main__": unittest.main()

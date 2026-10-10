@@ -31,6 +31,12 @@ mechanism for a company-confirmed *future* date exists here --
 its caller. It parses nothing and it guesses nothing. Until a text reader
 exists, a forthcoming earnings date in this system is ``estimated``, and the
 calendar says so rather than implying otherwise.
+
+**2026-10-08 (ADR-0015).**  The 8-K spec now exists in every environment
+(``sec_plan_specs``, code-owned), and the fetch lane reads an Item 2.02 8-K's
+Exhibit 99.1 -- the earnings press release -- into preliminary actuals
+(``earnings_release_intake``).  That reader is about the quarter just
+reported; a forward date in an 8-K's prose is still not read here.
 """
 
 from __future__ import annotations

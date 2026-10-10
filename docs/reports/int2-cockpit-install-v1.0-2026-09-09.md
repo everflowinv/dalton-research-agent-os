@@ -1,5 +1,7 @@
 # INT2：把第二批线接到驾驶舱和安装脚本上 v1.0
 
+历史技术评审：保留当时结论与局限；当前运行状态见 [项目状态](../PROJECT_STATUS.md)。原始操作证据私有保存。
+
 日期：2026-09-09
 分支：`int2-cockpit-install`（worktree `~/Projects/dalton-int2-cockpit-install-worktree`），基线 main `8110b23`（3,620 项），
 中途合并 main `6da8f82`（C2 预算池 + tick 账本）
@@ -301,7 +303,7 @@ FAILED (failures=1)
 
 ## 10. 配套文档
 
-[部署之后你要做的事，按顺序 v1.0](owner-steps-after-deploy-v1.0-2026-09-09.md)：
+部署之后你要做的事，按顺序 v1.0（历史证据原件已私有归档）：
 20 条数据源批准（记录路径 → `dalton-connector-governance approve`）、一版 mission（九个 `may_write` 词、
 一个人类检查点、八个来源翻成 connected）、figure 准入策略重签、verifier phase pin 重指、
 mandate 放宽、网关重启、四条装线动作，以及一个要 owner 回答的问题（AlphaEngine 的 24 小时上限）。

@@ -236,7 +236,8 @@ class LaneRegistrationReachesEveryConsumerTests(unittest.TestCase):
                 #    thing the lane needs is on disk.
                 state = root / "state"
                 state.mkdir(parents=True, exist_ok=True)
-                self.assertEqual(lane_argv(LaunchAgentContext(state=state)), [])
+                self.assertNotIn("--fake-probe-marker",
+                                 lane_argv(LaunchAgentContext(state=state)))
                 (state / "fake-probe.json").write_text("{}", encoding="utf-8")
                 writer = plistlib.loads(Path(render(
                     root / "LaunchAgents", root / "venv" / "bin", state,
@@ -517,7 +518,8 @@ class MigratedLanesMatchTheOldLiteralsTests(unittest.TestCase):
                 wired[wired.index("--statement-lane-governance") + 1],
                 str((governance / "sec-financial-statements-v2.json").resolve()),
             )
-            self.assertIn("--statement-lane-user-agent", wired)
+            self.assertNotIn("--statement-lane-user-agent", wired)
+            self.assertIn("--sec-company-resolver-identity", wired)
             self.assertEqual(
                 wired[wired.index("--model-spec-model-config") + 1],
                 str((state / "initial-screen-model-config.json").resolve()),
@@ -604,6 +606,65 @@ class MigratedLanesMatchTheOldLiteralsTests(unittest.TestCase):
     def test_every_lane_is_registered_and_findable(self) -> None:
         for spec in registered_lanes():
             self.assertIsNotNone(lane_for_operation(spec.operation))
+
+
+class DerivedLaneArgumentsTests(unittest.TestCase):
+    """Batch t: a lane added in a release is live after the release switch.
+
+    ``deploy.sh`` repoints and restarts the LaunchAgents; it does not re-render
+    them.  The writer therefore derives, at startup, the lane flags a fresh
+    render would give it and its plist lacks.
+    """
+
+    def setUp(self) -> None:
+        temp = tempfile.TemporaryDirectory()
+        self.addCleanup(temp.cleanup)
+        self.state = Path(temp.name).resolve()
+
+    def test_flags_the_argv_lacks_are_derived_and_present_flags_win(self) -> None:
+        context = LaunchAgentContext(state=self.state)
+        rendered = lane_argv(context)
+        self.assertIn("--owner-delivery-state-dir", rendered)
+        extra = lane_registry.derived_lane_argv(["--db", "core.sqlite"], context)
+        self.assertEqual(extra, rendered)
+        # A plist rendered from the same code adds nothing.
+        self.assertEqual(lane_registry.derived_lane_argv(list(rendered), context), [])
+        # A flag the plist carries keeps the plist's value.
+        stale = ["--owner-delivery-state-dir", "/elsewhere"]
+        self.assertNotIn("--owner-delivery-state-dir",
+                         lane_registry.derived_lane_argv(stale, context))
+        self.assertNotIn("--owner-delivery-state-dir",
+                         lane_registry.derived_lane_argv(["--owner-delivery-state-dir=/x"], context))
+
+    def test_a_new_lane_reaches_a_writer_whose_plist_predates_it(self) -> None:
+        spec = LaneSpec(
+            operation="dispatch_batch_t_probe", order=9_871,
+            argparse=lambda parser: parser.add_argument("--batch-t-probe-dir"),
+            launcher_factory=lambda args: (args.batch_t_probe_dir or None),
+            init_kwarg="batch_t_probe_launcher",
+            argv_fragment=lambda context: ["--batch-t-probe-dir", str(context.state)],
+        )
+        lane_registry.register_lane(spec)
+        self.addCleanup(lane_registry.unregister_lane, spec.operation)
+        parser = argparse.ArgumentParser()
+        parser.add_argument("--db", required=True)
+        parser.add_argument("--candidate-staging")
+        lane_registry.add_lane_arguments(parser)
+        raw = ["--db", str(self.state / "core.sqlite")]
+        args = parser.parse_args(raw)
+        self.assertIsNone(args.batch_t_probe_dir)
+        with contextlib.redirect_stderr(open(os.devnull, "w")):
+            derived = writer_server.with_derived_lane_arguments(parser, raw, args)
+        self.assertEqual(derived.batch_t_probe_dir, str(self.state))
+        self.assertEqual(derived.owner_delivery_state_dir, self.state)
+        self.assertEqual(spec.launcher_factory(derived), str(self.state))
+        self.assertIsNotNone(lane_for_operation("dispatch_owner_delivery")
+                             .launcher_factory(derived))
+
+    def test_an_empty_state_derives_nothing_it_would_not_render(self) -> None:
+        context = LaunchAgentContext(state=self.state)
+        self.assertEqual(lane_registry.derived_lane_argv([], context), lane_argv(context))
+        self.assertEqual(sorted(p.name for p in self.state.iterdir()), [])
 
 
 if __name__ == "__main__":

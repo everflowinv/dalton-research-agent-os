@@ -1,0 +1,14 @@
+# Synthetic reviewed selections; not live withdrawal authorization.
+# group<TAB>environment<TAB>claim-version-ref<TAB>synthetic description
+equity	alpha	claim-version:862dd46b734dc454ce12241ff675ef83d6f6d9bf7988dada8bf78e7a51ebc6e3	Northvale Research Fixture | equity attribute | 2031-01-01..2031-03-31 | synthetic declaration
+equity	alpha	claim-version:ce064ae5389f689e7247a75f3715dcf351d5f216dd862eabb004731662f12092	Northvale Research Fixture | equity attribute | 2031-01-01..2031-03-31 | synthetic declaration
+equity	beta	claim-version:b2e60fca5a674ca3deb3cc79ee72754fd696790bee97599acd9dd3d5483fb24f	Northvale Research Fixture | equity attribute | 2031-01-01..2031-03-31 | synthetic declaration
+equity	beta	claim-version:b97878c18a84c17b889f5e367958d1a45209d95aaf5454b528af1d28613800ed	Northvale Research Fixture | equity attribute | 2031-01-01..2031-03-31 | synthetic declaration
+other	alpha	claim-version:aa66692ad9791762885e37f7940e00d46211c0ff4c53128a4fde845b4bc81a90	Northvale Research Fixture | other attribute | 2031-01-01..2031-03-31 | synthetic declaration
+other	alpha	claim-version:cf97e4e54acaf5448c6576a7a86adc29732897f40798f541699a40ca55c1fbdf	Northvale Research Fixture | other attribute | 2031-01-01..2031-03-31 | synthetic declaration
+other	beta	claim-version:655d4c31629e6206fca0ea9a5e607fda7cb77c0a7be69c64bd08487fdbb7bd70	Northvale Research Fixture | other attribute | 2031-01-01..2031-03-31 | synthetic declaration
+other	beta	claim-version:b5a7e54b3fa242e99b8276ea6fb0c2db9388c94f70246655beea836cd6ed74b6	Northvale Research Fixture | other attribute | 2031-01-01..2031-03-31 | synthetic declaration
+renamed	alpha	claim-version:cd3b548612223ef1b8e41f32496ce772403892f12bdcfe48d6d63a538d81fff5	Northvale Research Fixture | renamed attribute | 2031-01-01..2031-03-31 | synthetic declaration
+renamed	alpha	claim-version:0974cafadb074e036823045f33a157220c9019ad3b0a8b67b77a604e991b9bd5	Northvale Research Fixture | renamed attribute | 2031-01-01..2031-03-31 | synthetic declaration
+renamed	beta	claim-version:f545a0231dead35d8aaa500e2f8da33aaecf46da830a2f922eb492d6e8ddedd5	Northvale Research Fixture | renamed attribute | 2031-01-01..2031-03-31 | synthetic declaration
+renamed	beta	claim-version:fb3414ab1d0d75bb5f4dab443d4bb9a31e0ef79098a71af26dbafcd800e31006	Northvale Research Fixture | renamed attribute | 2031-01-01..2031-03-31 | synthetic declaration

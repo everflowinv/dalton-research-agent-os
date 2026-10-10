@@ -693,6 +693,10 @@ class PriorModelTests(unittest.TestCase):
         # module that imports the prior model can still reach it, and the
         # whole claim being made here is that it cannot.
         package = Path(__file__).resolve().parents[1] / "src" / "dalton_core"
+        # Each chokepoint traverses largely the same graph. Parse each module
+        # once during this check; the closure and every asserted edge remain
+        # identical, without seven full AST scans of the growing package.
+        imports_by_module: dict[str, set[str]] = {}
         for name in self.CHOKEPOINTS:
             with self.subTest(module=name):
                 seen: set[str] = set()
@@ -706,7 +710,9 @@ class PriorModelTests(unittest.TestCase):
                     module_path = package / f"{current}.py"
                     if not module_path.is_file():
                         continue
-                    for imported in sorted(self._imports(module_path)):
+                    if current not in imports_by_module:
+                        imports_by_module[current] = self._imports(module_path)
+                    for imported in sorted(imports_by_module[current]):
                         if imported in seen:
                             continue
                         path_to.setdefault(imported, path_to[current] + [imported])

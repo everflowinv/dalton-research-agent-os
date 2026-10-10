@@ -24,8 +24,8 @@ from __future__ import annotations
 from typing import Any, Callable
 
 from .company_financial_statement_structure import FinancialStatementStructureError
-from .company_model_forecast import model_digest
-from .company_model_forecast_cli import pending_companies
+from .company_model_forecast import model_digest, forecast_reporting_boundary
+from .company_model_forecast_cli import pending_companies, ForecastSpecificationPending
 from .economic_invariants import FORECAST_INVARIANT_CONTRACT_HASH
 from .lane_child_launcher import (
     LaneChildConflict,
@@ -130,15 +130,53 @@ class MissionModelForecastLaneCoordinator:
 
     def dispatch_once(self) -> dict[str, Any]:
         settled = self._settle_open()
+        if self._open is not None:
+            return {"status": "running", "ticket_ref": self._open, "settled": settled}
         mission = self.mission()
         if mission is None:
             return {"status": "unconfigured", "reason": "no mission", "settled": settled}
+        pending_error = None
+        waiting_specifications = {}
         try:
-            pending = pending_companies(self.missions, self.models, mission)
+            pending = pending_companies(self.missions, self.models, mission,
+                                        waiting_specifications=waiting_specifications)
+        except ForecastSpecificationPending as exc:
+            pending = []
+            waiting_specifications = exc.specifications
         except Exception as exc:  # noqa: BLE001 - one lane's failure is not the tick's
-            return {"status": "unavailable", "settled": settled,
-                    "reason": f"{type(exc).__name__}: {exc}"}
+            pending = []
+            pending_error = f"{type(exc).__name__}: {exc}"
+        # Acquisition is a separate governed lane. A financial gap is a source
+        # request even when its model is current or the model builder is held.
+        state_dir=getattr(self.launcher,"state_dir",None)
+        if state_dir is not None:
+            from .forecast_material_gaps import open_gap_requests
+            pending_tables={c:t for c,_s,t in pending}
+            for company in mission.get("universe") or []:
+                ref=company.get("company_ref") if isinstance(company,dict) else None
+                if not ref or ref in waiting_specifications:continue
+                spec=self.missions.latest_company_model_spec(ref)
+                if spec is None:continue
+                record=self.models.latest(ref)
+                table=pending_tables.get(ref,{"periods":[(record or {}).get("forecast_policy",{}).get("latest_actual_end")]})
+                failure = None
+                if pending_error is not None:
+                    from .company_model_inputs import build_model_inputs
+                    try:
+                        table = build_model_inputs(self.missions, spec)
+                    except Exception as exc:
+                        # A company's own source gap, never another company's
+                        # batch exception attributed to every issuer.
+                        failure = f"{type(exc).__name__}: {exc}"
+                open_gap_requests(state_dir,spec,table,record=record,failure=failure)
+        if pending_error is not None:
+            return {"status": "unavailable", "settled": settled, "reason": pending_error}
         if not pending:
+            if waiting_specifications:
+                return {"status": "idle", "settled": settled,
+                        "reason_code": "model_specification_pending",
+                        "reason": "模型规格尚待补齐可执行的驱动公式",
+                        "waiting_specifications": waiting_specifications}
             return {"status": "idle", "settled": settled,
                     "reason": "every company has a current driver model"}
         # The digest comes from the table the chooser already built, for the
@@ -185,10 +223,13 @@ class MissionModelForecastLaneCoordinator:
                         candidate_spec, candidate_table,
                         note_evidence_resolver=candidate_resolver,
                         financial_note_context=candidate_context,
+                        reporting_boundary=forecast_reporting_boundary(self.missions, self.models.connection, candidate, table=candidate_table),
                     )
                 except (FinancialStatementStructureError,
                         FinancialNoteContextError) as exc:
                     unavailable[candidate] = f"{type(exc).__name__}: {exc}"
+                    if state_dir is not None:
+                        open_gap_requests(state_dir,candidate_spec,candidate_table,record=self.models.latest(candidate),failure=str(exc))
                     continue
                 business_key = (
                     f"{candidate}|{candidate_digest}|"
@@ -312,6 +353,7 @@ def argv_fragment(context: Any) -> list[str]:
 
 LANE = register_lane(LaneSpec(
     operation="dispatch_company_model_forecast",
+    failure_ledger="mission_model_forecast",
     order=95,
     driver_key="company_model_forecast",
     handler=dispatch,

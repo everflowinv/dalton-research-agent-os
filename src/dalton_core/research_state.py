@@ -52,6 +52,9 @@ def company_state(
     readable_documents: Sequence[Mapping[str, Any]] = (),
     unavailable_documents: Sequence[Mapping[str, Any]] = (),
     document_research_feedback: Sequence[Mapping[str, Any]] = (),
+    document_research_reopened: Mapping[str, Any] | None = None,
+    filed_statement_figures: Mapping[str, Any] | None = None,
+    reading_pipeline: Mapping[str, Any] | None = None,
 ) -> dict[str, Any]:
     """One company's position, as a planner needs to see it.
 
@@ -75,12 +78,42 @@ def company_state(
             "failed": _int(item.get("failed")),
             "status": item.get("status"),
             "source_ref": item.get("source_ref"),
+            **({"read_without_proof": _int(item.get("legacy_extracted"))}
+               if "legacy_extracted" in item else {}),
             # Why it cannot be worked on, when that is the answer. A planner
             # that cannot tell "not done" from "cannot be done" will keep
             # ordering work against a source nobody has connected.
             "note": item.get("note"),
         })
     held = dict(figures or {})
+    extra: dict[str, Any] = {}
+    if filed_statement_figures is not None:
+        # 2026-10-09: what the filed quarterly statements hold, segment lines
+        # included.  ``figures`` counts document-extracted figures only, and
+        # the planner read its zero as "nothing extracted from 23 filings".
+        extra["filed_statement_figures"] = dict(filed_statement_figures)
+    if reading_pipeline is not None:
+        # Where reading stands per document kind and what stops each open
+        # review -- so a gap is reported as its cause, not as "uneven depth".
+        extra["reading_pipeline"] = dict(reading_pipeline)
+    from .planner_numeric_requirements import numeric_requirements, numeric_waiting_targets, numeric_completed_context
+    numeric = numeric_requirements(document_research_feedback)
+    if numeric["requirements"]:
+        extra["numeric_reading_requirements"] = numeric
+    completed = numeric_completed_context(document_research_feedback, company_ref=entry.get('company_ref'))
+    if completed['sources']:
+        extra['numeric_completed_context'] = completed
+    waiting = numeric_waiting_targets(document_research_feedback)
+    if waiting["targets"]:
+        extra["numeric_waiting_targets"] = waiting
+    refusals = sorted({item["id"] for item in document_research_feedback
+                       if item.get("outcome") == "numeric_admission_source_grade_refused"})
+    if refusals:
+        extra["numeric_source_refusal_ids"] = refusals
+        extra["numeric_source_refusals"] = [{key:item[key] for key in (
+            "id", "document_ref", "document_version_hash", "reason", "source_grade")}
+            for item in document_research_feedback
+            if item.get("outcome") == "numeric_admission_source_grade_refused"]
     return {
         "company_ref": entry.get("company_ref"),
         "ticker": entry.get("ticker"),
@@ -140,8 +173,33 @@ def company_state(
             "material": dict(dossier_feedback.get("material") or {}),
         },
         "readable_documents": [dict(document) for document in readable_documents],
+        # Losing every readable original, or recovering the exact original
+        # for an open withdrawn question, changes what can actually execute.
+        # Freeze this before prompt projection; ordinary row-count churn is
+        # still deliberately excluded from planner pacing.
+        "document_execution_availability": {
+            "has_readable_original": bool(readable_documents),
+            # A preview is a prompt excerpt, not the registered original's
+            # readability or the admission authority. Projection may omit it.
+            "preview_required_for_reading": False,
+            "reopened_originals": sorted({
+                (str(document["document_ref"]), str(document["document_version_hash"]))
+                for document in readable_documents
+                if document.get("document_ref") and document.get("document_version_hash")
+                and any(item.get("document_ref") == document["document_ref"]
+                        for item in (document_research_reopened or {}).get("reopened") or ())
+            }),
+        },
         "unavailable_documents": [dict(document) for document in unavailable_documents],
         "document_research_feedback": [dict(item) for item in document_research_feedback],
+        # Directed reads the owner withdrew because their execution could not
+        # recover, and that the equivalent-inquiry gate would admit again now
+        # (see ``document_research_feedback.read_document_research_settlement``).
+        "document_research_reopened": [
+            dict(item) for item in (document_research_reopened or {}).get("reopened") or ()],
+        "document_research_reopened_omitted": _int(
+            (document_research_reopened or {}).get("reopened_omitted")),
+        **extra,
     }
 
 
@@ -200,6 +258,9 @@ def build_research_state(
     document_research_policy: Mapping[str, Any] | None = None,
     document_research_availability: Mapping[str, Any] | None = None,
     document_research_feedback: Mapping[str, Any] | None = None,
+    document_research_settlement: Mapping[str, Any] | None = None,
+    filed_statements_by_company: Mapping[str, Mapping[str, Any]] | None = None,
+    reading_pipeline_by_company: Mapping[str, Mapping[str, Any]] | None = None,
     budget: Mapping[str, Any] | None = None,
     spend: Mapping[str, Any] | None = None,
     as_of: str,
@@ -220,6 +281,8 @@ def build_research_state(
     readable_documents_by_company = readable_documents_by_company or {}
     unavailable_documents_by_company = unavailable_documents_by_company or {}
     document_research_feedback = document_research_feedback or {}
+    settlement = dict(document_research_settlement or {})
+    reopened_by_company = settlement.pop("by_company", None) or {}
     companies = [
         company_state(
             entry,
@@ -232,6 +295,13 @@ def build_research_state(
             readable_documents=readable_documents_by_company.get(entry.get("company_ref"), ()),
             unavailable_documents=unavailable_documents_by_company.get(entry.get("company_ref"), ()),
             document_research_feedback=document_research_feedback.get("by_company", {}).get(entry.get("company_ref"), ()),
+            document_research_reopened=reopened_by_company.get(entry.get("company_ref")),
+            filed_statement_figures=(
+                None if filed_statements_by_company is None
+                else filed_statements_by_company.get(entry.get("company_ref"))),
+            reading_pipeline=(
+                None if reading_pipeline_by_company is None
+                else reading_pipeline_by_company.get(entry.get("company_ref"), {})),
         )
         for entry in checklist
     ]
@@ -246,10 +316,15 @@ def build_research_state(
         "document_research_contract_ref": "directed-document:0.1",
         "document_research_policy": None if document_research_policy is None else dict(document_research_policy),
         "document_research_availability": dict(document_research_availability or {}),
+        **({"numeric_admission_source_feedback_status": dict(document_research_feedback["admission_source_feedback_status"])}
+           if "admission_source_feedback_status" in document_research_feedback else {}),
         "document_research_feedback_status": {
             key: document_research_feedback[key] for key in ("status", "reason", "content_hash")
             if key in document_research_feedback
         },
+        # Counts and the exact settlement hash: an owner withdrawal or an
+        # admission reaching a terminal outcome moves it, once.
+        "document_research_settlement": settlement,
         "as_of": as_of,
         "goal": {
             "mission_ref": mission.get("mission_ref"),
@@ -367,6 +442,16 @@ def _material_subject(subject: Mapping[str, Any] | None) -> dict[str, Any] | Non
         "stage": subject.get("stage"),
         "stage_status": subject.get("stage_status"),
         "source_base_ready": bool(subject.get("source_base_ready")),
+        **({"numeric_source_refusal_ids": subject["numeric_source_refusal_ids"]}
+           if "numeric_source_refusal_ids" in subject else {}),
+        **({"numeric_completed_context": content_hash(subject["numeric_completed_context"])}
+           if "numeric_completed_context" in subject else {}),
+        **({"numeric_waiting_targets": content_hash(subject["numeric_waiting_targets"])}
+           if "numeric_waiting_targets" in subject else {}),
+        **({"document_execution_availability": subject["document_execution_availability"]}
+           if "document_execution_availability" in subject else {}),
+        **({"numeric_reading_requirements": subject["numeric_reading_requirements"]}
+           if "numeric_reading_requirements" in subject else {}),
         "gaps": sorted(str(item) for item in subject.get("gaps") or ()),
         "blocked_on": sorted(
             content_hash(item) for item in subject.get("blocked_on") or ()
@@ -445,10 +530,32 @@ def planning_core_hash(state: Mapping[str, Any]) -> str:
     """
 
     body = _planning_body(state)
+    body.pop("document_research_settlement", None)
     for subject in [body["industry"], *body["companies"]]:
         if isinstance(subject, dict):
             subject.pop("dossier_feedback", None)
     return content_hash(body)
+
+
+def planning_settlement_hash(state: Mapping[str, Any]) -> str | None:
+    """Which directed reads are done with: withdrawn by the owner or settled.
+
+    Part of :func:`planning_hash` and not of :func:`planning_core_hash`.  It
+    only grows -- a withdrawal or a terminal outcome is written once -- so it
+    moves once per settlement and is still on every tick in between.  The
+    planner child re-plans on it after a short floor rather than at once or
+    after the two-hour interval: a withdrawal re-opens questions the planner
+    could not ask before, and a stream of settlements must not buy a plan each.
+
+    ``None`` when the state carries no settlement (a state built before it
+    existed, or an unreadable Core) -- which never counts as a change.
+    """
+
+    settlement = state.get("document_research_settlement")
+    if not isinstance(settlement, Mapping):
+        return None
+    value = settlement.get("settlement_hash")
+    return value if isinstance(value, str) and value else None
 
 
 def _planning_body(state: Mapping[str, Any]) -> dict[str, Any]:
@@ -460,6 +567,8 @@ def _planning_body(state: Mapping[str, Any]) -> dict[str, Any]:
     return {
         "schema_version": state.get("schema_version"),
         "document_research_contract_ref": state.get("document_research_contract_ref"),
+        **({"document_research_numeric_contract_ref": state["document_research_numeric_contract_ref"]}
+           if "document_research_numeric_contract_ref" in state else {}),
         "document_research_policy": (
             None if not isinstance(policy, Mapping)
             else policy.get("content_hash") or content_hash(dict(policy))
@@ -469,6 +578,10 @@ def _planning_body(state: Mapping[str, Any]) -> dict[str, Any]:
             for key in ("status", "reason", "config_hash", "unavailable_sources")
         },
         "document_research_feedback_status": feedback_status.get("status"),
+        # Paced on its own (see :func:`planning_settlement_hash`).
+        "document_research_settlement": planning_settlement_hash(state),
+        **({"reflection_followup_context": state["reflection_followup_context"]["content_hash"]}
+           if state.get("reflection_followup_context") else {}),
         "goal": state.get("goal"),
         "sources": state.get("sources"),
         "industry": _material_subject(state.get("industry")),
@@ -516,6 +629,7 @@ __all__ = [
     "industry_state",
     "planning_core_hash",
     "planning_hash",
+    "planning_settlement_hash",
     "state_content_hash",
     "state_digest",
 ]

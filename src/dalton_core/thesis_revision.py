@@ -182,7 +182,13 @@ def proposed_content(
     person who wants the refs to move passes ``content`` explicitly.
     """
 
-    content = {field: current_content[field] for field in THESIS_CONTENT_FIELDS}
+    from .thesis_question_model import thesis_payload, validate_revision_proposal
+    content = thesis_payload(current_content)
+    try:
+        validate_revision_proposal(candidate.get("proposed_statement"), candidate.get("proposed_confidence"),
+                                   decision=str(candidate.get("decision") or ""))
+    except ValueError as exc:
+        raise ThesisRevisionValidationError(str(exc)) from exc
     statement = candidate.get("proposed_statement")
     if statement is not None:
         content["statement"] = _text(statement, "proposed_statement", maximum=4000)
@@ -193,8 +199,67 @@ def proposed_content(
                 "confidence is ADR-0001's ordinal vocabulary, never a float"
             )
         content["confidence"] = confidence
+    if candidate.get("decision") == "THESIS_BROKEN" and "view_status" in content:
+        content["view_status"] = "broken"
     content["change_reason"] = revision_change_reason(candidate)
     return validate_thesis_content(content)
+
+
+def require_revision_direction(core, candidate, current, proposed):
+    from .thesis_question_model import direction_binding
+    if current.get("question_ref") and proposed.get("question_ref") != current["question_ref"]:
+        raise ValueError("a different question needs a new thesis admission")
+    if proposed["confidence"] != candidate.get("proposed_confidence"):
+        raise ValueError("accepted confidence must match the reviewed proposal")
+    explicit_flip = {current.get("proposition_direction"), proposed.get("proposition_direction")} == {"supports", "contradicts"}
+    if explicit_flip and (candidate["decision"] != "THESIS_BROKEN" or proposed.get("view_status") != "broken"):
+        raise ValueError("opposite direction must mark the old thesis THESIS_BROKEN")
+    if candidate["decision"] == "THESIS_BROKEN" and proposed.get("view_status") != "broken":
+        raise ValueError("THESIS_BROKEN must remain visibly broken")
+    if proposed["statement"] == current["statement"]:
+        return
+    if proposed["statement"] != candidate.get("proposed_statement"):
+        raise ValueError("changed wording needs its own independently reviewed revision candidate")
+    if candidate.get("origin") == "zero_base_review":
+        row = core.execute("SELECT record_json FROM zero_base_review_versions WHERE version_id=?", (candidate.get("review_version_ref"),)).fetchone()
+        verification = (json.loads(row[0]).get("verification") or {}) if row else {}
+    else:
+        row = core.execute("SELECT record_json FROM event_judgements WHERE judgement_id=?", (candidate.get("judgement_ref"),)).fetchone()
+        verification = (json.loads(row[0]).get("verifier") or {}) if row else {}
+    independence = verification.get("independence") or {}
+    if candidate.get("origin") != "zero_base_review" and verification.get("verdict") != "pass":
+        raise ValueError("statement changes require a passed independent direction review")
+    if verification.get("status") != "verified" or not independence.get("producer_family") or not independence.get("verifier_family") or independence["producer_family"] == independence["verifier_family"]:
+        raise ValueError("statement changes require an independent direction review")
+    binding = direction_binding(current, proposed["statement"], proposed["confidence"])
+    matches = [c for c in verification.get("direction_checks") or () if all(c.get(k) == v for k, v in binding.items())]
+    if len(matches) != 1 or matches[0].get("relation") not in {"same", "opposite"}:
+        raise ValueError("direction review is missing, unclear or bound to another proposal")
+    flipped = matches[0]["relation"] == "opposite"
+    explicit_flip = {current.get("proposition_direction"), proposed.get("proposition_direction")} == {"supports", "contradicts"}
+    if (flipped or explicit_flip) and (candidate["decision"] != "THESIS_BROKEN" or proposed.get("view_status") != "broken"):
+        raise ValueError("opposite direction must mark the old thesis THESIS_BROKEN")
+    if candidate["decision"] == "THESIS_BROKEN" and proposed.get("view_status") != "broken":
+        raise ValueError("THESIS_BROKEN must remain visibly broken")
+
+
+def revision_readiness(core, candidate):
+    """Read-only cockpit explanation; never offer an acceptance known to fail."""
+    row = core.execute("SELECT v.content_json FROM current_pointers p JOIN thesis_versions v "
+                       "ON v.version_id=p.version_id WHERE p.thesis_id=?", (candidate.get("thesis_ref"),)).fetchone()
+    if row is None:
+        return "尚未建立正式论点，请先完成论点准入。"
+    current = json.loads(row[0])
+    if current.get("schema_version") != "0.3":
+        return "原论点尚未注明研究问题、观点立场和量化证伪期限，补齐这些依据后才能接受修订。"
+    if candidate.get("proposed_confidence") not in {"low", "medium", "high"}:
+        return "这条旧建议没有明确修订后的证据充分度，需重新复核后再决定。"
+    try:
+        proposed = proposed_content(current_content=current, candidate=candidate)
+        require_revision_direction(core, candidate, current, proposed)
+    except (ValueError, ThesisRevisionError, sqlite3.OperationalError):
+        return "这条建议尚未通过与当前论点绑定的方向复核，重新复核后才能接受；也可暂缓或不接受。"
+    return None
 
 
 class ThesisRevisionAuthority:
@@ -495,7 +560,12 @@ class ThesisRevisionAuthority:
         record["content_hash"] = content_hash(record)
 
         with self.store._transaction() as cur:
+            if cur.execute("SELECT 1 FROM thesis_revision_decisions WHERE candidate_ref=? AND terminal=1", (candidate_ref,)).fetchone():
+                raise ThesisRevisionConflict("candidate already has a terminal decision")
             if resulting is not None:
+                checked = self._prepare_acceptance(candidate=candidate, content=content)
+                if checked["current"]["version_id"] != resulting["current"]["version_id"] or checked["content_hash"] != resulting["content_hash"]:
+                    raise ThesisRevisionConflict("thesis changed while deciding the revision")
                 self._write_version(cur, candidate=candidate, resulting=resulting,
                                     decision=record, created_at=created_at)
             cur.execute(
@@ -555,9 +625,8 @@ class ThesisRevisionAuthority:
         if current["content_hash"] != candidate["thesis_version_hash"]:
             raise ThesisRevisionConflict("thesis version hash binding failed")
 
-        current_content = {
-            field: current["content"][field] for field in THESIS_CONTENT_FIELDS
-        }
+        from .thesis_question_model import thesis_payload, require_current_question, require_evidence, validate_revision_proposal
+        current_content = thesis_payload(current["content"])
         if content is None:
             next_content = proposed_content(
                 current_content=current_content, candidate=candidate
@@ -565,7 +634,16 @@ class ThesisRevisionAuthority:
         else:
             supplied = dict(content)
             supplied["change_reason"] = revision_change_reason(candidate)
-            next_content = validate_thesis_content(supplied)
+            next_content = validate_thesis_content(supplied, require_question=True)
+        try:
+            validate_revision_proposal(candidate.get("proposed_statement"), candidate.get("proposed_confidence"), decision=candidate["decision"])
+            require_evidence(self.store, next_content)
+            source = self.connection.execute("SELECT industry_ref,company_ref FROM thesis_admission_candidates WHERE thesis_ref=? ORDER BY created_at LIMIT 1", (thesis_ref,)).fetchone()
+            require_current_question(self.connection, next_content, thesis_ref=thesis_ref, industry_ref=source[0] if source else None,
+                                     industry_thesis=bool(source and str(source[1]).startswith("industry:")))
+            require_revision_direction(self.connection, candidate, current["content"], next_content)
+        except ValueError as exc:
+            raise ThesisRevisionValidationError(str(exc)) from exc
         # Compared without ``change_reason``, because the reason is derived
         # from the candidate and so is *always* different -- comparing with it
         # would make this refusal unreachable, which is the shape of a guard
@@ -731,6 +809,8 @@ class ThesisRevisionAuthority:
                 thesis_ref,
             ),
         )
+        from .thesis_question_model import record_disagreement
+        record_disagreement(self.store, cur, wire)
         resulting["wire"] = wire
 
 

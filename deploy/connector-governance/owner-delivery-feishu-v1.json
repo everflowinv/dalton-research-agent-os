@@ -1,0 +1,50 @@
+{
+  "approved_at": null,
+  "approved_by": null,
+  "capability_id": "capability:dalton:connector:owner-delivery-feishu",
+  "content_hash": "e363f017b3b23565c64d1f74836dc3b38f1b257d50353c0eb5ffde38c4abb524",
+  "contract_hash": "fb7b6c26ec02210beebb1961987797e426f2c1d29635d724e5700d839359acf3",
+  "id": "connector-governance:owner-delivery-feishu:v1",
+  "recipient": {
+    "account": null,
+    "chat_id": null
+  },
+  "schema_version": "owner-delivery-contract-0.1",
+  "status": "proposed",
+  "terms": {
+    "allowed_permissions": {
+      "core_db": "read_only",
+      "credential_slot_refs": [],
+      "filesystem_write": [
+        "state:owner-delivery.sqlite"
+      ],
+      "network": false,
+      "risk_class": "medium",
+      "side_effects": [
+        "write:owner-chat-message"
+      ]
+    },
+    "artifact_kinds": [
+      "owner_lever",
+      "model_fallback_notice",
+      "weekly_brief",
+      "needs_human_digest"
+    ],
+    "caps": "daily message cap, digest interval and fallback rate limit enforced in code with defaults; an environment may only override the numbers",
+    "channel": "feishu",
+    "content_policy": "short Chinese summaries, counts, titles and cockpit links only; never document text, evidence bodies, credentials, prompts or file paths",
+    "host_tool": {
+      "action": "send",
+      "argv": [
+        "message",
+        "send",
+        "--channel",
+        "feishu"
+      ],
+      "openclaw_tool": "message",
+      "program": "openclaw",
+      "runs_as": "lane child process, never the writer store thread",
+      "transport": "host_tool"
+    }
+  }
+}

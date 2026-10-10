@@ -554,7 +554,7 @@ OUTPUT_SCHEMA = {
                     "value": {"type": "string", "minLength": 1, "maxLength": 40},
                     "unit": {"enum": list(_ESTIMATE_UNITS)},
                     "currency": {"type": ["string", "null"]},
-                    "scale": {"type": ["string", "null"]},
+                    "scale": {"enum": [None, "thousand", "million", "billion", "trillion"]},
                     # The "Prior" row. Asked for explicitly rather than left to
                     # be inferred, because a superseded estimate looks exactly
                     # like a current one and is the trap this table sets.

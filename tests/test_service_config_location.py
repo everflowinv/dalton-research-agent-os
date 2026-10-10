@@ -5,7 +5,7 @@ where it has always been and points ``.../Dalton/state`` at an external volume.
 Every derivation of ``<root>/config/service.json`` used to call ``resolve()``
 first, so it asked the filesystem where the *bytes* are rather than which
 installation the directory *belongs to*, landed on
-``/Volumes/EveSSD/Dalton/config/service.json`` -- a path that has never existed
+``<external-volume>/Dalton/config/service.json`` -- a path that has never existed
 -- and reported four pinned stages as unconfigured.  A workspace environment
 has no symlink, so the two environments disagreed and neither was obviously
 wrong.

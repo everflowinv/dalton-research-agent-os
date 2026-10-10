@@ -196,7 +196,15 @@ def dossier_material(store: Any, mission: Mapping[str, Any]) -> list[dict[str, A
 
 
 def model_input_tables(missions: Any, mission: Mapping[str, Any]) -> list[dict[str, Any]]:
-    """One ModelInputTable per covered company that has a specification."""
+    """One table per covered company: its ModelInputTable, or its filed statements.
+
+    2026-10-08 (ws-7d): the comparison used to cover only companies with a
+    company-model specification, and a specification is written after the
+    Deep Insight Gate -- so AMZN and MSFT, screened and filed, were missing
+    from the peer table and the industry_model gate ("同业收入/增速/毛利率对比
+    不完整") could not pass for META.  A company without a specification
+    contributes the comparison roles straight from its filed statement lines.
+    """
 
     tables = []
     for member in mission.get("universe") or []:
@@ -205,13 +213,64 @@ def model_input_tables(missions: Any, mission: Mapping[str, Any]) -> list[dict[s
             spec = missions.latest_company_model_spec(company_ref)
         except Exception:  # noqa: BLE001 - a company with no spec is not an error
             spec = None
-        if spec is None:
+        table = None
+        if spec is not None:
+            try:
+                table = build_model_inputs_safely(missions, spec)
+            except Exception:  # noqa: BLE001 - one company's join is not the run
+                table = None
+        if table is None:
+            try:
+                table = statement_comparison_table(missions, company_ref)
+            except Exception:  # noqa: BLE001 - one company's statements are not the run
+                table = None
+        if table is not None:
+            tables.append(table)
+    return tables
+
+
+def statement_comparison_table(missions: Any, company_ref: str) -> dict[str, Any] | None:
+    """The comparison roles of one company, from its filed statement lines alone.
+
+    The same series reader the ModelInputTable uses, for the frozen revenue,
+    cost-of-revenue and operating-income concepts only; ``spec_ref`` is None,
+    which the comparability notes say.  None when nothing is filed.
+    """
+
+    from .company_model_inputs import FILED, MAX_PERIODS, _series_for
+    from .industry_framework import (
+        COST_OF_REVENUE_CONCEPTS,
+        OPERATING_INCOME_CONCEPTS,
+        REVENUE_CONCEPTS,
+    )
+
+    lines: list[dict[str, Any]] = []
+    for concept in (*REVENUE_CONCEPTS, *COST_OF_REVENUE_CONCEPTS,
+                    *OPERATING_INCOME_CONCEPTS):
+        entry = _series_for(missions, company_ref, concept)
+        if entry.get("status") != FILED or not entry.get("series"):
             continue
-        try:
-            tables.append(build_model_inputs_safely(missions, spec))
-        except Exception:  # noqa: BLE001 - one company's join is not the run
+        quarters = {str(item["period_end"]): item
+                    for item in entry["series"].get("quarters") or ()}
+        if not quarters:
             continue
-    return [table for table in tables if table is not None]
+        kept = sorted(quarters)[-MAX_PERIODS:]
+        lines.append({
+            "concept": concept, "statement": entry.get("statement"),
+            "label": entry.get("label"), "status": FILED,
+            "period_basis": "duration",
+            "cells": {end: {"period_start": quarters[end].get("period_start"),
+                            "value": quarters[end]["value"],
+                            "unit": quarters[end].get("unit"),
+                            "basis": quarters[end].get("basis"),
+                            "source_accessions": list(
+                                quarters[end].get("source_accessions") or ())}
+                      for end in kept},
+        })
+    if not lines:
+        return None
+    return {"company_ref": company_ref, "spec_ref": None, "state_hash": None,
+            "source": "filed_statements", "filed_lines": lines}
 
 
 def build_model_inputs_safely(missions: Any, spec: Mapping[str, Any]) -> dict[str, Any] | None:
@@ -305,12 +364,17 @@ def plan_units(
                           "structure": structure, "material": [], "new_refs": 0,
                           "stale": False}
             continue
-        held = {row["ref"] for row in (prior_units.get(unit) or {}).get("sources") or []}
+        held_unit = prior_units.get(unit) or {}
+        held = {row["ref"] for row in held_unit.get("sources") or []}
         fresh = sorted({row["ref"] for row in material} - held)
         plan[unit] = {
             "status": "draftable", "reason": None, "detail": None,
             "structure": structure, "material": material,
             "new_refs": len(fresh),
+            # A part the current version carries without prose or sources
+            # ("not_drafted_this_run") is what the gate's "every input has a
+            # source" check fails on; it outranks a refresh of a drafted part.
+            "drafted": held_unit.get("status") == "drafted",
             "stale": bool(fresh) or unit not in prior_units,
             "link": chain[int(unit.split(":")[1])] if unit.startswith("causal_chain:") else "",
             "title": titles[int(unit.split(":")[1])] if unit.startswith("causal_chain:") else "",
@@ -364,7 +428,8 @@ def stale_units(
     wanted = [unit for unit in plan
               if plan[unit]["status"] == "draftable"
               and (plan[unit]["stale"] or unit in revise)]
-    wanted.sort(key=lambda unit: (-plan[unit]["new_refs"], unit))
+    wanted.sort(key=lambda unit: (bool(plan[unit].get("drafted", True)),
+                                  -plan[unit]["new_refs"], unit))
     return wanted[:max(0, int(limit))]
 
 
@@ -704,13 +769,50 @@ def run_framework(
             summary.update({"status": "held", "framework_status": "causal_chain_unmapped",
                             "failure_reason": str(exc)})
             return summary
+        from .redraft_policy import apply_unit_gates
+        gate_industry = {"industry_ref": str(mission["industry_ref"]),
+                         "tickers": [str(x.get("ticker")) for x in mission["universe"]]}
+        gate_prior_units = _prior_units(prior, chain_hash=causal_chain_hash(
+            list((constitution.get("method") or {}).get("causal_chain") or [])))
+        from .research_followup_product_repair import context as repair_context, pending_units, prior_body as repair_prior_body, unread_repair_units
+        followup_context = repair_context(store.connection, "industry_framework", str(mission["industry_ref"]), prior, mission=mission)
+
+        frozen_inputs = {}
+        for unit, entry in plan.items():
+            if entry["status"] != "draftable":
+                continue
+            frozen_inputs[unit] = {"unit": unit, "structure": entry["structure"],
+                "material": material_rows(entry["material"]), "industry": gate_industry,
+                "mission": mission, "link": entry.get("link") or "", "title": entry.get("title") or "",
+                "link_index": int(unit.split(":")[1]) if unit.startswith("causal_chain:") else 0,
+                "prior_body": repair_prior_body("" if unit not in gate_prior_units else unit_body(gate_prior_units[unit]), followup_context),
+                "comparison_table": render_comparison(comparison)}
+        effective_revise = tuple(sorted(set(revise_units) | set(unread_repair_units(
+            state_dir, "industry_framework", str(mission["industry_ref"]),
+            [str(x["company_ref"]) for x in mission["universe"]],
+            pending_units(store.connection, followup_context), frozen_inputs))))
+        old_bindings = (prior or {}).get("bindings") or {}
+        changed = bool(prior) and any(old_bindings.get(k) != value for k, value in {
+            "constitution_version": {"ref": constitution["id"], "hash": constitution["content_hash"]},
+            "playbook_version": mission["bindings"]["playbook_version"],
+            "driver_pack_version": {"ref": driver_pack["id"], "hash": driver_pack["content_hash"]},
+            "policy_hash": policy_hash(policy)}.items())
+        # A genuinely new filed comparison period is important required data.
+        old_periods = set((prior or {}).get("cross_company_comparison", {}).get("quarters") or [])
+        new_periods = set(comparison.get("quarters") or [])
+        apply_unit_gates(state_dir, store.connection, product="industry_framework",
+            target=str(mission["industry_ref"]),
+            company_refs=[str(x["company_ref"]) for x in mission["universe"]], prior=prior,
+            plan=plan, inputs=frozen_inputs, revise=effective_revise,
+            binding_changed=changed or bool(prior and new_periods - old_periods))
         summary["units_planned"] = {
             unit: {"status": entry["status"], "reason": entry["reason"],
                    "new_refs": entry["new_refs"], "stale": entry["stale"],
-                   "slots": len(entry["structure"])}
+                   "slots": len(entry["structure"]),
+                   "redraft_policy": entry.get("redraft_policy")}
             for unit, entry in plan.items()
         }
-        wanted = stale_units(plan, limit=max_units, revise=revise_units)
+        wanted = stale_units(plan, limit=max_units, revise=effective_revise)
         if not wanted:
             summary.update({"status": "idle", "framework_status": "nothing_new",
                             "failure_reason": "no part of the framework has material "
@@ -764,6 +866,9 @@ def run_framework(
 
         blocks: dict[str, Any] = {}
         draft_routes: list[str | None] = []
+        input_snapshots = {}
+        followup_receipts = {}
+        producer_refs = {}
         spent = 0
         run_bound_blocked = False
         for unit in wanted:
@@ -773,21 +878,21 @@ def run_framework(
                 continue
             entry = plan[unit]
             held = prior_units.get(unit)
-            outcome = draft_unit(
-                model, unit=unit, structure=entry["structure"],
-                material=material_rows(entry["material"]), industry=industry,
-                mission=mission, link=entry.get("link") or "",
-                title=entry.get("title") or "",
-                link_index=int(unit.split(":")[1]) if unit.startswith("causal_chain:") else 0,
-                prior_body="" if held is None else unit_body(held),
-                comparison_table=table_text,
-            )
+            from . import research_product_consumption as consumption
+            frozen_input = frozen_inputs[unit]
+            input_snapshots[unit] = consumption.snapshot(state_dir, store.connection,
+                consumption.scope("industry_framework", str(mission["industry_ref"]), unit,
+                    [str(x["company_ref"]) for x in mission["universe"]]),
+                material=frozen_input["material"], input_data=frozen_input)
+            input_snapshots[unit]["baseline_at"] = (entry.get("redraft_policy") or {}).get("baseline_at")
+            outcome = draft_unit(model, **frozen_input)
             spent += int((outcome.get("model") or {}).get("cost_micros") or 0)
             if outcome["status"] != "drafted":
                 summary["refused"].append({"unit": unit, "reason": outcome["reason"]})
                 continue
             blocks[unit] = outcome["block"]
             draft_routes.append((outcome.get("model") or {}).get("route_decision_ref"))
+            producer_refs[unit] = (outcome.get("model") or {}).get("route_decision_ref")
         summary["cost_micros"] = spent
         summary["units_drafted"] = sorted(blocks)
         if not blocks:
@@ -853,12 +958,6 @@ def run_framework(
             short_term=blocks.get("short_term_drivers") or (prior or {}).get("short_term_drivers"),
         )
         evidence = _fresh_evidence(blocks, comparison, prior, planned_gaps)
-        if not evidence:
-            summary.update({"status": "succeeded", "framework_status": "no_new_evidence",
-                            "failure_reason": "this draft cites nothing the current "
-                                              "version does not; the table has not "
-                                              "moved and no source changed status"})
-            return summary
         record = assemble(
             mission=mission, blocks=blocks, plan=plan, prior=prior,
             constitution=constitution, policy=policy, driver_pack=driver_pack,
@@ -869,7 +968,7 @@ def run_framework(
         )
         gate = rubric_gate(store.connection, record, prior=prior)
         summary["rubric"] = gate["summary"]
-        if gate["failed"]:
+        if [x for x in gate["failed"] if evidence or x != "new_version_cites_new_refs"]:
             summary.update({"status": "succeeded", "framework_status": "rubric_refused",
                             "failure_reason": "hard checks failed: "
                                               + ", ".join(gate["failed"])})
@@ -877,14 +976,39 @@ def run_framework(
         findings = output_rubric_findings(record, constitution=constitution,
                                           policy=policy, prior=prior)
         summary["output_rubric_findings"] = findings
-        if findings:
+        if [x for x in findings if evidence or x.get("code") != "no_new_evidence"]:
             summary.update({"status": "succeeded",
                             "framework_status": "constitution_refused",
                             "failure_reason": "the Constitution's output_rubric was "
                                               "not satisfied"})
             return summary
+        def consume_inputs(result: str) -> None:
+            verifier_ref = (verdict.get("model") or {}).get("route_decision_ref")
+            for unit in blocks:
+                if not producer_refs.get(unit) or not verifier_ref:
+                    continue
+                receipt = consumption.record(state_dir,
+                    consumption.scope("industry_framework", str(mission["industry_ref"]), unit,
+                        [str(x["company_ref"]) for x in mission["universe"]]), input_snapshots[unit],
+                    result=result, producer_refs=[producer_refs[unit]], verifier_ref=verifier_ref,
+                    independent=check["independent"], verified=True)
+                summary.setdefault("input_consumption", {})[unit] = receipt["content_hash"]
+                followup_receipts[unit] = receipt
+        if not evidence:
+            consume_inputs("verified_no_new_evidence")
+            summary.update({"status": "succeeded", "framework_status": "no_new_evidence",
+                            "failure_reason": "this draft adds no new cited evidence"})
+            return summary
         summary["new_refs"] = len(new_refs(record, prior))
         published = authority.publish(record)
+        consume_inputs("published")
+        from .research_followup_product_repair import complete as complete_followup
+        from .research_followup_automation import FollowupAutomationAuthority
+        summary["automatic_followup_results"] = complete_followup(FollowupAutomationAuthority(store),
+            product="industry_framework", published=published, prior=prior, items=followup_context,
+            inputs=frozen_inputs, receipts=followup_receipts)
+        from .research_followup import ResearchFollowupAuthority
+        summary["review_requests"] = ResearchFollowupAuthority(store).capture_existing([published["id"]])
         summary["open_gaps"] = [gap["gap_ref"] for gap in published.get("gaps") or []
                                 if gap["status"] != "covered"]
         if published["status"] == "fresh":
@@ -1029,6 +1153,7 @@ __all__ = [
     "main",
     "framework_gaps",
     "model_input_tables",
+    "statement_comparison_table",
     "plan_units",
     "publish_deliverable",
     "rubric_gate",

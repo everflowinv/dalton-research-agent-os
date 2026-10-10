@@ -9,6 +9,7 @@ Markdown artifact.  A crash between those writes is safe to replay.
 from __future__ import annotations
 
 import hashlib
+import json
 from dataclasses import dataclass
 from datetime import datetime, time, timedelta, timezone
 from pathlib import Path
@@ -29,6 +30,7 @@ from .writer_client import WriterClient
 
 SCHEMA_VERSION = "0.1"
 REFRESH_SCHEMA_VERSION = "0.2"
+PROGRESS_SCHEMA_VERSION = "0.3"
 MAX_CLAIM_WINDOW_DAYS = 730
 WEEKLY_BRIEF_AUTO_PUBLISH_RULE_REF = (
     "weekly-brief-auto-publish:scheduled-exact-plan:v1"
@@ -145,6 +147,7 @@ class WeeklyBriefSchedulePlan:
     company_thesis_refs: Mapping[str, str]
     destination_ref: str
     evidence_refresh: EvidenceRefreshSpec | None = None
+    mission_progress: str | None = None
 
     @classmethod
     def from_mapping(cls, raw: Mapping[str, Any]) -> "WeeklyBriefSchedulePlan":
@@ -160,6 +163,8 @@ class WeeklyBriefSchedulePlan:
             }
         elif version == REFRESH_SCHEMA_VERSION:
             expected = common | {"evidence_refresh"}
+        elif version == PROGRESS_SCHEMA_VERSION:
+            expected = common | {"evidence_refresh", "mission_progress"}
         else:
             expected = None
         if expected is None or set(raw) != expected:
@@ -193,8 +198,14 @@ class WeeklyBriefSchedulePlan:
         refresh = None
         pack_version_id = None
         overlays: tuple[str, ...] = ()
-        if version == REFRESH_SCHEMA_VERSION:
+        progress = None
+        if version in {REFRESH_SCHEMA_VERSION, PROGRESS_SCHEMA_VERSION}:
             refresh = EvidenceRefreshSpec.from_mapping(raw["evidence_refresh"])
+            if version == PROGRESS_SCHEMA_VERSION:
+                spec = raw["mission_progress"]
+                if not isinstance(spec, Mapping) or set(spec) != {"mission_ref"}:
+                    raise WeeklyBriefCoordinatorError("mission_progress has an invalid closed shape")
+                progress = _text(spec["mission_ref"], "mission_progress.mission_ref")
         else:
             overlays_raw = raw["company_overlay_version_ids"]
             if not isinstance(overlays_raw, list) or not overlays_raw:
@@ -229,7 +240,7 @@ class WeeklyBriefSchedulePlan:
             company_overlay_version_ids=overlays,
             company_thesis_refs=MappingProxyType(theses),
             destination_ref=_text(raw["destination_ref"], "destination_ref"),
-            evidence_refresh=refresh,
+            evidence_refresh=refresh, mission_progress=progress,
         )
 
     def to_dict(self) -> dict[str, Any]:
@@ -250,6 +261,9 @@ class WeeklyBriefSchedulePlan:
         else:
             wire["schema_version"] = REFRESH_SCHEMA_VERSION
             wire["evidence_refresh"] = self.evidence_refresh.to_dict()
+            if self.mission_progress is not None:
+                wire["schema_version"] = PROGRESS_SCHEMA_VERSION
+                wire["mission_progress"] = {"mission_ref": self.mission_progress}
         wire["company_thesis_refs"] = dict(self.company_thesis_refs)
         wire["destination_ref"] = self.destination_ref
         return wire
@@ -279,24 +293,61 @@ class WeeklyBriefSchedulePlan:
 
 @dataclass(frozen=True, slots=True)
 class WeeklyBriefCoordinatorConfig:
+    """Either an inline ``plan`` (legacy) or a ``plan_path`` read every run.
+
+    The inline form is how legacy has always run: the plan lives in
+    ``service.json`` and a new plan means an edit and a controller restart.
+    The file form (2026-09-30, ``weekly_brief_workspace_plan``) is what a
+    workspace gets at creation: the owner publishes a plan from the cockpit,
+    the writer writes ``<state>/weekly-brief-plan.json``, and the next run
+    reads it.  No file yet is not an error -- it is an environment whose
+    owner has not scheduled a brief.
+    """
+
     writer_socket: Path
     token_config: Path
-    plan: WeeklyBriefSchedulePlan
+    plan: WeeklyBriefSchedulePlan | None
+    plan_path: Path | None = None
 
     @classmethod
     def from_mapping(cls, raw: Mapping[str, Any]) -> "WeeklyBriefCoordinatorConfig":
-        if set(raw) != {"writer_socket", "token_config", "plan"}:
+        keys = set(raw)
+        if keys not in ({"writer_socket", "token_config", "plan"},
+                        {"writer_socket", "token_config", "plan_path"}):
             raise WeeklyBriefCoordinatorError(
                 "weekly brief coordinator config has an invalid closed shape"
             )
-        plan_raw = raw["plan"]
-        if not isinstance(plan_raw, Mapping):
-            raise WeeklyBriefCoordinatorError("plan must be an object")
+        plan = None
+        plan_path = None
+        if "plan" in raw:
+            plan_raw = raw["plan"]
+            if not isinstance(plan_raw, Mapping):
+                raise WeeklyBriefCoordinatorError("plan must be an object")
+            plan = WeeklyBriefSchedulePlan.from_mapping(plan_raw)
+        else:
+            plan_path = _absolute_path(raw["plan_path"], "plan_path")
         return cls(
             writer_socket=_absolute_path(raw["writer_socket"], "writer_socket"),
             token_config=_absolute_path(raw["token_config"], "token_config"),
-            plan=WeeklyBriefSchedulePlan.from_mapping(plan_raw),
+            plan=plan, plan_path=plan_path,
         )
+
+    def current_plan(self) -> WeeklyBriefSchedulePlan | None:
+        """The plan to run now: the inline one, or the file as it is now."""
+
+        if self.plan is not None:
+            return self.plan
+        assert self.plan_path is not None
+        try:
+            raw = json.loads(self.plan_path.read_text(encoding="utf-8"))
+        except FileNotFoundError:
+            return None
+        except (OSError, UnicodeError, ValueError) as exc:
+            raise WeeklyBriefCoordinatorError(
+                f"weekly brief plan file is unreadable: {exc}") from exc
+        if not isinstance(raw, Mapping):
+            raise WeeklyBriefCoordinatorError("weekly brief plan file must be an object")
+        return WeeklyBriefSchedulePlan.from_mapping(raw)
 
 
 class WeeklyBriefCoordinator:
@@ -326,9 +377,29 @@ class WeeklyBriefCoordinator:
             raise WeeklyBriefCoordinatorError(
                 "coordinator clock must include timezone"
             )
-        return self.client.run_weekly_brief_cycle(
-            plan=self.config.plan.to_dict(), as_of=_utc(now)
+        from .workspace_lifecycle import state_for_core
+        if self.config.plan_path is not None and state_for_core(self.config.plan_path.parent) != "active":
+            return {"status": "skipped", "reason": "workspace is intentionally stopped"}
+        plan = self.config.current_plan()
+        if plan is None:
+            return {"status": "no_plan", "plan_path": str(self.config.plan_path),
+                    "reason": "no weekly brief plan has been published in this environment"}
+        result = self.client.run_weekly_brief_cycle(
+            plan=plan.to_dict(), as_of=_utc(now)
         )
+        from .weekly_brief_workspace_plan import (
+            LOCAL_BRIEFS_DIRNAME, LocalWeeklyBriefDelivery, is_local_destination,
+        )
+
+        if self.config.plan_path is not None and is_local_destination(plan.destination_ref):
+            # No outbox bridge serves a local destination; this is it.
+            delivery = LocalWeeklyBriefDelivery(
+                self.client, endpoint_ref=plan.destination_ref,
+                directory=self.config.plan_path.parent / LOCAL_BRIEFS_DIRNAME,
+            ).run_once(now=now)
+            if isinstance(result, dict):
+                result = {**result, "local_delivery": delivery}
+        return result
 
 
 def _validate_policy(
@@ -474,6 +545,9 @@ def run_weekly_brief_cycle(
     as_of: str,
     actor_ref: str,
 ) -> dict[str, Any]:
+    from .workspace_lifecycle import state_for_core
+    if store.path != ":memory:" and state_for_core(Path(store.path).parent) != "active":
+        return {"status": "skipped", "reason": "workspace is intentionally stopped", "as_of": as_of}
     if actor_ref != "core":
         raise WeeklyBriefCoordinatorError(
             "weekly brief cycle requires the core writer principal"
@@ -506,8 +580,10 @@ def run_weekly_brief_cycle(
         # already issued, the slot is done rather than published twice.
         issued = store.connection.execute(
             "SELECT cycle_id,plan_ref,issue_version_ref FROM weekly_brief_cycle_admissions "
-            "WHERE brief_ref=? AND scheduled_for=? LIMIT 1",
-            (schedule.brief_ref, scheduled_for),
+            "WHERE brief_ref=? AND julianday(scheduled_for)=julianday(?) UNION ALL "
+            "SELECT cycle_id,plan_ref,issue_version_ref FROM weekly_brief_progress_cycle_admissions "
+            "WHERE brief_ref=? AND julianday(scheduled_for)=julianday(?) LIMIT 1",
+            (schedule.brief_ref, scheduled_for, schedule.brief_ref, scheduled_for),
         ).fetchone()
         if issued is not None:
             return {
@@ -530,24 +606,34 @@ def run_weekly_brief_cycle(
             (schedule.brief_ref,),
         ).fetchone()
         prior = None if latest is None else latest["version_id"]
-        pack_version_ref, overlay_refs, refresh = _resolve_evidence(
-            weekly, schedule, active=active, cycle_id=cycle_id,
-            scheduled_for=scheduled_for,
-        )
-        admission = weekly.admit_scheduled_cycle(
-            cycle_id=cycle_id, plan_ref=schedule.plan_ref,
-            plan_hash=schedule.content_hash,
-            policy_version_ref=active["policy_version_id"],
-            policy_version_hash=active["content_hash"],
-            scheduled_for=scheduled_for, period_start=period_start,
-            period_end=scheduled_for, brief_ref=schedule.brief_ref,
-            issue_version_ref=issue_version_ref, prior_version_ref=prior,
-            evidence_pack_version_ref=pack_version_ref,
-            company_overlay_version_refs=overlay_refs,
-            company_thesis_refs=schedule.company_thesis_refs,
-            destination_ref=schedule.destination_ref, actor_ref=actor_ref,
-            idempotency_key=f"weekly-brief-admission:{digest}",
-        )
+        from .mission_progress_weekly import ISSUE_PREFIX, template_missing
+        if template_missing(store.connection, schedule, scheduled_for=scheduled_for):
+            issue_version_ref = f"{ISSUE_PREFIX}{digest}"
+            admission = weekly.progress.admit(
+                schedule=schedule, active=active, cycle_id=cycle_id,
+                issue_id=issue_version_ref, scheduled_for=scheduled_for,
+                period_start=period_start, as_of=_utc(now), actor_ref=actor_ref,
+                idempotency_key=f"weekly-brief-admission:{digest}",
+            )
+        else:
+            pack_version_ref, overlay_refs, refresh = _resolve_evidence(
+                weekly, schedule, active=active, cycle_id=cycle_id,
+                scheduled_for=scheduled_for,
+            )
+            admission = weekly.admit_scheduled_cycle(
+                cycle_id=cycle_id, plan_ref=schedule.plan_ref,
+                plan_hash=schedule.content_hash,
+                policy_version_ref=active["policy_version_id"],
+                policy_version_hash=active["content_hash"],
+                scheduled_for=scheduled_for, period_start=period_start,
+                period_end=scheduled_for, brief_ref=schedule.brief_ref,
+                issue_version_ref=issue_version_ref, prior_version_ref=prior,
+                evidence_pack_version_ref=pack_version_ref,
+                company_overlay_version_refs=overlay_refs,
+                company_thesis_refs=schedule.company_thesis_refs,
+                destination_ref=schedule.destination_ref, actor_ref=actor_ref,
+                idempotency_key=f"weekly-brief-admission:{digest}",
+            )
         admission_status = admission["status"]
     if admission["plan_hash"] != schedule.content_hash:
         raise WeeklyBriefCoordinatorPrecondition(
@@ -571,14 +657,18 @@ def run_weekly_brief_cycle(
             "industry_ref": issue["industry_ref"], "period": issue["period"],
             "destination_ref": admission["destination_ref"],
             "artifact_sha256": artifact_sha256, "body": rendered["body"],
-            "created_at": scheduled_for,
+            "created_at": issue["created_at"] if admission.get("brief_kind") == "mission_progress" else scheduled_for,
         },
         actor_ref=actor_ref,
         idempotency_key=f"weekly-brief-outbox:{digest}",
     )
     if not isinstance(outbox, Mapping) or "message_id" not in outbox:
-        # A rebuilt payload that no longer byte-matches the enqueued message
-        # replays as a conflict; surface that instead of crashing on the key.
+        # The agenda replays an existing message for the same frozen issue
+        # even when the renderer's wording has changed since it was enqueued
+        # (2026-10-10: batch am / ADR-0017 relabelled scenario and return
+        # lines, so the 10-08 issue re-rendered to different bytes).  What is
+        # left here is a different issue under the same cycle -- a real
+        # integrity conflict, raised once per tick, never retried in a loop.
         raise WeeklyBriefCoordinatorError(
             "weekly brief outbox enqueue did not replay an existing message; "
             f"status={outbox.get('status') if isinstance(outbox, Mapping) else 'invalid'}"
@@ -592,13 +682,17 @@ def run_weekly_brief_cycle(
         "issue_version_hash": issue["content_hash"],
         "outbox_status": outbox["status"],
         "outbox_message_ref": outbox["message_id"],
-        "evidence_pack_version_ref": admission["evidence_pack_version_ref"],
+        **({"artifact_drift": True,
+            "outbox_artifact_sha256": outbox.get("artifact_sha256")}
+           if outbox.get("artifact_drift") else {}),
+        "evidence_pack_version_ref": admission.get("evidence_pack_version_ref"),
+        **({"brief_kind": admission["brief_kind"]} if "brief_kind" in admission else {}),
         **({} if refresh is None else {"evidence_refresh": refresh}),
     }
 
 
 __all__ = [
-    "EvidenceRefreshSpec", "REFRESH_SCHEMA_VERSION",
+    "EvidenceRefreshSpec", "REFRESH_SCHEMA_VERSION", "PROGRESS_SCHEMA_VERSION",
     "WEEKLY_BRIEF_AUTO_PUBLISH_RULE_REF", "WeeklyBriefCoordinator",
     "WeeklyBriefCoordinatorConfig", "WeeklyBriefCoordinatorError",
     "WeeklyBriefCoordinatorPrecondition", "WeeklyBriefSchedulePlan",

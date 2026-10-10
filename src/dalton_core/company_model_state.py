@@ -179,6 +179,13 @@ def _numeric_line_authority(row: Mapping[str, Any]) -> dict[str, Any]:
             "value", "unit", "balance",
         )
     }
+    if "dimensions" in row:
+        body["dimensions"] = row["dimensions"]
+    if row.get("statement_context_ref"):
+        body["statement_context_ref"] = row["statement_context_ref"]
+    for key in ("source_unit_ref", "unit_definition_hash"):
+        if key in row:
+            body[key] = row[key]
     return {**body, "content_hash": content_hash(body)}
 
 
@@ -240,6 +247,8 @@ def _numeric_context(
                 "statement", "concept", "dimension_axis", "dimension_member",
                 "unit", "balance",
             ))
+            if "dimensions" in raw:
+                series_key+=(content_hash(raw["dimensions"]),)
             period_key = (
                 str(raw.get("period_start") or ""), str(raw.get("period_end") or ""),
             )
@@ -264,6 +273,7 @@ def _numeric_context(
                 "filing_form": authority["form"],
                 "line_id": str(raw["line_id"]),
                 "line_content_hash": line["content_hash"],
+                **{k:raw[k] for k in ("dimensions","statement_context_ref","source_unit_ref","unit_definition_hash") if k in raw},
                 "filing_content_hash": authority["content_hash"],
                 "_filing_rank": newest_rank[ingest_id],
             }
@@ -552,8 +562,11 @@ def build_company_model_state(
             financial_note_context, company_ref=company_ref,
         )
     # F10: proxy evidence is a separate authority and never enters statement
-    # rows. Carry its current, explicitly mapped records into the hashed model
-    # state so a new source-series version causes a fresh specification.
+    # rows. The specification is told which proxies exist and how far each sits
+    # from the company (2026-10-07: identity only). Carrying the source-series
+    # version made every settled bar a new state hash and therefore a new paid
+    # specification per target company; the values reach the forecast through
+    # the proxy Claim the mapping names, not through the structure.
     connection = getattr(missions, "connection", None)
     if connection is not None and connection.execute(
             "SELECT 1 FROM sqlite_master WHERE type='table' AND "
@@ -567,14 +580,41 @@ def build_company_model_state(
             "p.target_subject_ref=? AND p.version_number=(SELECT MAX(x.version_number) "
             "FROM market_proxy_claim_versions x WHERE x.mapping_ref=p.mapping_ref) "
             "ORDER BY p.mapping_ref", (company_ref,)).fetchall()
-        proxies = [json.loads(row["record_json"]) for row in rows]
+        proxies = [_proxy_identity(json.loads(row["record_json"])) for row in rows]
+        # Catalog proxies arrive one series at a time (one price child a
+        # tick). They enter the specification together, once every proxy the
+        # catalog derives for this company has a record, so the set lands as
+        # one state change -- one respecification -- rather than one per series.
+        from .market_proxy_catalog import AUTO_PREFIX, derive_mappings
+
+        expected = {item["mapping_ref"] for item in derive_mappings(connection, [company_ref])}
+        if expected - {item["mapping_ref"] for item in proxies}:
+            proxies = [item for item in proxies
+                       if not str(item["mapping_ref"]).startswith(AUTO_PREFIX)]
         if proxies:
             body["market_proxies"] = proxies
+    if connection is not None:
+        from .research_followup_automation import model_redraft_context
+        redraft = model_redraft_context(connection, company_ref)
+        if redraft is not None:
+            body["model_redraft_context"] = redraft
     body["numeric_context"] = _fit_prompt_budget(
         body, numeric_context, numeric_groups,
         prompt_byte_limit=prompt_byte_limit,
     )
     return {**body, "state_hash": content_hash(body)}
+
+
+_PROXY_IDENTITY_FIELDS = (
+    "mapping_ref", "mapping_hash", "source_ticker", "source_series_company_ref",
+    "target_subject_ref", "metric_or_aspect", "aspect", "proxy_gap", "unit",
+)
+
+
+def _proxy_identity(record: dict[str, Any]) -> dict[str, Any]:
+    identity = {key: record.get(key) for key in _PROXY_IDENTITY_FIELDS}
+    identity["claim_ref"] = "claim:market-proxy:" + str(record.get("mapping_ref"))
+    return identity
 
 
 __all__ = [

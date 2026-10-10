@@ -7,6 +7,8 @@ from typing import Any
 
 from .store import content_hash
 
+import re
+
 SCHEMA_VERSION = "investment-memo-gate-0.1"
 CHECK_REFS = (
     "key_questions_complete",
@@ -14,6 +16,71 @@ CHECK_REFS = (
     "anti_thesis",
     "risk_reward",
 )
+# Batch D (2026-10-09): owner decision 1 allows views, so a memo states its
+# recommendation -- 多/空/pass + 仓位区间 + 期限 -- labelled 「建议（研究建议）」,
+# and the reasoning lint is a deterministic check.  New gates are 0.2; a 0.1
+# gate already published still validates against its own four checks.
+SCHEMA_VERSION_V2 = "investment-memo-gate-0.2"
+CHECK_REFS_V2 = (*CHECK_REFS, "recommendation_stated", "reasoning_lint")
+SCHEMA_CHECKS = {SCHEMA_VERSION: CHECK_REFS, SCHEMA_VERSION_V2: CHECK_REFS_V2}
+RECOMMENDATION_LABEL = "建议（研究建议）"
+RECOMMENDATION_DIRECTIONS = ("多", "空", "pass")
+RECOMMENDATION_FORMAT = (
+    f"{RECOMMENDATION_LABEL}：方向：多|空|pass；仓位区间：轻仓|标准仓|重仓（可写组合权重，如 1 至 3 个百分点）；"
+    "期限：如 6 至 12 个月")
+_DIRECTION_RE = re.compile(r"方向\s*[：:]\s*(多|空|pass|PASS|Pass)(?![\w间头])")
+_POSITION_RE = re.compile(r"仓位(?:区间)?\s*[：:]\s*([^；;。\n]{1,40})")
+_HORIZON_RE = re.compile(r"期限\s*[：:]\s*([^；;。\n]{1,40})")
+_ADV_RE = re.compile(r"ADV|日均成交")
+_ADV_GIVEN_RE = re.compile(r"(?:ADV|日均成交)[^；;。\n]{0,20}?\d")
+# The playbook's own words. 「30 日 ADV」 is a window label, which the
+# number-source contract (0.8) reads as a period rather than a figure.
+ADV_UNAVAILABLE_LINE = "30 日 ADV：暂不可得（原因）"
+_ADV_UNAVAILABLE_RE = re.compile(r"(?:30\s*日|三十日)\s*ADV[：:]\s*暂不可得（[^）]{2,}）")
+
+
+def recommendation_findings(body: str) -> list[dict[str, str]]:
+    """The Key Information section's recommendation: label, direction, position, horizon.
+
+    ``pass`` needs no position range or horizon: passing is the absence of a
+    position.  Anything else needs all three, in the closed format.
+    """
+
+    text = body or ""
+    findings: list[dict[str, str]] = []
+    if RECOMMENDATION_LABEL not in text:
+        findings.append({"code": "recommendation_label_missing",
+                         "detail": f"写「{RECOMMENDATION_LABEL}」"})
+    direction = _DIRECTION_RE.search(text)
+    if direction is None:
+        findings.append({"code": "recommendation_direction_missing",
+                         "detail": "方向：多 / 空 / pass"})
+        return findings
+    if direction.group(1).lower() == "pass":
+        return findings
+    if _POSITION_RE.search(text) is None:
+        findings.append({"code": "recommendation_position_missing", "detail": "仓位区间：…"})
+    if _HORIZON_RE.search(text) is None:
+        findings.append({"code": "recommendation_horizon_missing", "detail": "期限：…"})
+    return findings
+
+
+def adv_findings(title: str, body: str, gap_items: Sequence[Mapping[str, Any]] = ()) -> list[dict[str, str]]:
+    """A title that asks for 30 日 ADV gets a figure, or the explicit unavailable line
+    bound to a not_acquired gap with a MaterialRequest."""
+
+    if not _ADV_RE.search(title or ""):
+        return []
+    text = body or ""
+    if _ADV_UNAVAILABLE_RE.search(text):
+        if not any(item.get("kind") == "not_acquired" and item.get("request_ref")
+                   for item in gap_items):
+            return [{"code": "adv_unavailable_without_request",
+                     "detail": f"「{ADV_UNAVAILABLE_LINE}」须绑定 not_acquired 缺口与 MaterialRequest"}]
+        return []
+    if _ADV_GIVEN_RE.search(text):
+        return []
+    return [{"code": "adv_missing", "detail": f"写 30 日 ADV，或「{ADV_UNAVAILABLE_LINE}」"}]
 QUESTION_COUNT = 12
 PRODUCER_GROUPS = ("identity_background", "view", "economics", "monitoring")
 
@@ -73,8 +140,9 @@ def validate_memo_gate(gate: Mapping[str, Any], *, material_hash: str,
         "schema_version", "passed", "checks", "verified_body_hash",
         "key_questions", "input_bindings", "producer_calls", "verifier",
     }, "gate")
-    if gate["schema_version"] != SCHEMA_VERSION or gate["passed"] is not True:
-        raise InvestmentMemoContractError("a published memo gate must be a passed 0.1 gate")
+    if gate["schema_version"] not in SCHEMA_CHECKS or gate["passed"] is not True:
+        raise InvestmentMemoContractError("a published memo gate must be a passed 0.1 or 0.2 gate")
+    check_refs = SCHEMA_CHECKS[gate["schema_version"]]
     _sha(material_hash, "material_hash")
     _sha(gate["verified_body_hash"], "verified_body_hash")
     if gate["verified_body_hash"] != material_hash:
@@ -112,8 +180,8 @@ def validate_memo_gate(gate: Mapping[str, Any], *, material_hash: str,
         _sha(b["hash"], "input binding hash")
 
     checks = gate["checks"]
-    if not isinstance(checks, list) or [c.get("check_ref") for c in checks if isinstance(c, Mapping)] != list(CHECK_REFS):
-        raise InvestmentMemoContractError("checks must be the four fixed checks in order")
+    if not isinstance(checks, list) or [c.get("check_ref") for c in checks if isinstance(c, Mapping)] != list(check_refs):
+        raise InvestmentMemoContractError("checks must be the fixed checks of this schema version, in order")
     for check in checks:
         c = _closed(check, {"check_ref", "status", "reason", "evidence_refs"}, "check")
         if c["status"] != "pass" or not isinstance(c["reason"], str) or not c["reason"].strip():
@@ -164,7 +232,9 @@ def model_work_order_refs(gate: Mapping[str, Any]) -> list[str]:
 
 
 __all__ = [
-    "CHECK_REFS", "PRODUCER_GROUPS", "QUESTION_COUNT", "SCHEMA_VERSION",
+    "CHECK_REFS", "CHECK_REFS_V2", "PRODUCER_GROUPS", "QUESTION_COUNT", "SCHEMA_VERSION",
+    "SCHEMA_VERSION_V2", "SCHEMA_CHECKS", "RECOMMENDATION_LABEL", "RECOMMENDATION_FORMAT",
+    "RECOMMENDATION_DIRECTIONS", "ADV_UNAVAILABLE_LINE", "adv_findings", "recommendation_findings",
     "InvestmentMemoContractError", "memo_verified_material",
     "model_work_order_refs", "validate_memo_gate", "verified_body_hash",
 ]

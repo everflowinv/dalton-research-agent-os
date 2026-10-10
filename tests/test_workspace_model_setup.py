@@ -95,6 +95,26 @@ class WorkspaceModelSetupTest(unittest.TestCase):
             self.assertEqual(budget.execute(
                 "SELECT count(*) FROM thesis_impact_budget_policies").fetchone()[0], 1)
 
+    def test_every_lane_is_pinned_to_the_head_of_the_budget_lineage(self):
+        """b3: a config exported on an older day-budget version starts on the head."""
+
+        self.budget_keeper.register_policy(
+            policy_version_id="budget-policy:workspace-default:2",
+            day_cap_micros=500_000_000,
+            prior_version_id="budget-policy:workspace-default:1")
+        # Only one lane follows the new version; the rest still pin :1.
+        name = self.source / "claim-index-model-config.json"
+        config = json.loads(name.read_text())
+        config["budget_policy_ref"] = "budget-policy:workspace-default:2"
+        name.write_text(json.dumps(config))
+        export_runtime_template(self.source, self.bundle_path)
+        workspace = self._workspace()
+        receipt = install_runtime_template(workspace.manifest_path, self.bundle_path)
+        self.assertEqual(receipt["budget_policy_ref"], "budget-policy:workspace-default:2")
+        pins = {json.loads((workspace.state_dir / item).read_text())["budget_policy_ref"]
+                for item in EXPECTED_CONFIG_NAMES}
+        self.assertEqual(pins, {"budget-policy:workspace-default:2"})
+
     def test_install_requires_exact_shared_readonly_broker_bindings(self):
         export_runtime_template(self.source, self.bundle_path)
         workspace = self._workspace(exact_broker_paths=False)

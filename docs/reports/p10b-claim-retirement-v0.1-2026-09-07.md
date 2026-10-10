@@ -71,7 +71,7 @@ P10c 要从 Claim 起草 Initial Screen，这些必须先清掉。
 授权后，被标记的 53 条会在下一跳自动退役（权威仍会逐条重跑检测器）：
 
 ```
-cd /Users/everflow/Projects/dalton-research-agent-os
+cd $HOME/Projects/dalton-research-agent-os
 .venv/bin/python scripts/publish_extraction_authority_chain.py --live \
   --add-write-scope claim_challenge
 ```

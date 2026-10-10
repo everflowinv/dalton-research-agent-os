@@ -44,10 +44,19 @@ def _model_spec(*, historical_quarters):
         "schema_version": "0.4",
         "revenue_anchor_concept": "us-gaap:Revenues",
         "assessment": "A people business: heads times realised rate.",
+        "driver_formulas": [{
+            "output_ref": "revenue", "operator": "product",
+            "driver_refs": ["heads", "realised-rate"],
+            "because": "Synthetic billable capacity times realised price produces revenue.",
+        }],
         "revenue_drivers": [{
             "ref": "heads", "label": "Billable headcount", "kind": "volume",
             "basis_concept": None, "unit": "headcount",
             "because": "Capacity binds delivery revenue.",
+        }, {
+            "ref": "realised-rate", "label": "Realised rate per head", "kind": "price",
+            "basis_concept": None, "unit": "USD",
+            "because": "A price driver completes the synthetic capacity × price mechanism.",
         }],
         "expense_lines": [{
             "ref": "delivery", "label": "Cost of services",

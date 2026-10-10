@@ -1,0 +1,126 @@
+<!doctype html>
+<html lang="zh-CN">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1">
+<title>每周简报</title>
+<style>
+body{font:15px/1.6 -apple-system,BlinkMacSystemFont,"PingFang SC",sans-serif;max-width:760px;margin:24px auto;padding:0 16px;color:#1d1d1f}
+h1{font-size:22px}h2{font-size:17px;margin-top:28px}
+.card{border:1px solid #ddd;border-radius:10px;padding:14px 16px;margin:12px 0}
+label{display:block;margin:8px 0 4px;font-weight:600}
+input,select{font:inherit;padding:6px 8px;border:1px solid #bbb;border-radius:6px;width:100%;box-sizing:border-box}
+.row{display:flex;gap:12px}.row>div{flex:1}
+button{font:inherit;margin-top:14px;padding:8px 16px;border-radius:8px;border:0;background:#0a66c2;color:#fff;cursor:pointer}
+button:disabled{opacity:.5}.muted{color:#666;font-size:13px}.err{color:#b00020}.ok{color:#137333}
+table{border-collapse:collapse;width:100%;font-size:13px}
+.field-error{color:#b00020;font-size:13px;margin-top:4px}[aria-invalid="true"]{border-color:#b00020}td,th{border-bottom:1px solid #eee;padding:4px 6px;text-align:left}
+</style>
+</head>
+<body>
+<p><a href="/#/settings?focus=brief">← 返回研究设置 · 每周简报</a></p>
+<h1>每周简报</h1>
+<p class="muted">每周自动汇总本项目的观点变化、重要证据和下周事件。可以只在工作台保存，也可以发送到已连接的群组。日常设置请在「研究设置 → 每周简报」里完成，那里可以直接选择群组并看到下一次发送时间。</p>
+
+<div class="card" id="current">正在读取…</div>
+
+<div class="card">
+  <h2 style="margin-top:0">设定每周时间</h2>
+  <div class="row">
+    <div><label for="weekday">星期</label>
+      <select id="weekday"><option value="0">周一</option><option value="1">周二</option><option value="2" selected>周三</option><option value="3">周四</option><option value="4">周五</option><option value="5">周六</option><option value="6">周日</option></select></div>
+    <div><label for="hour">时</label><input id="hour" type="number" min="0" max="23" value="7"></div>
+    <div><label for="minute">分</label><input id="minute" type="number" min="0" max="59" value="0"></div>
+  </div>
+  <label for="timezone">时区</label><input id="timezone" value="America/New_York">
+  <label for="destination">发送到（可选）</label><input id="destination" placeholder="不填：只在工作台保存">
+  <button id="save">保存每周简报计划</button>
+  <div id="status" class="muted"></div>
+</div>
+
+<h2>保存在工作台的简报</h2>
+<div id="local" class="muted">—</div>
+<h2>最近几期</h2>
+<div id="recent" class="muted">—</div>
+
+<script>
+let csrf=null,planHash=null;
+const $=id=>document.getElementById(id);
+function text(el,value){el.textContent=value}
+/* BUG-10 (2026-10-07): times in the owner's zone as 年月日 时:分, channels by
+   name rather than by internal address, plan refs by version.  The raw value
+   stays in the cell's tooltip. */
+const OWNER_TZ="Asia/Shanghai";
+function fmtTime(iso){if(!iso)return"";const d=new Date(String(iso).replace(/(\.\d{3})\d+/,"$1"));if(isNaN(d))return String(iso);
+  const p=Object.fromEntries(new Intl.DateTimeFormat("zh-CN",{timeZone:OWNER_TZ,year:"numeric",month:"numeric",day:"numeric",hour:"2-digit",minute:"2-digit",hourCycle:"h23"}).formatToParts(d).map(x=>[x.type,x.value]));
+  return `${p.year}年${p.month}月${p.day}日 ${p.hour}:${p.minute}`}
+function destLabel(ref){if(ref==null||ref==="")return"";const s=String(ref);
+  if(s.startsWith("cockpit:weekly-brief:"))return"只在工作台保存";
+  const m=s.match(/^openclaw:([a-z0-9_-]+):([^:]+):(channel|chat|user|group):(.+)$/i);
+  if(m){const app={discord:"Discord",feishu:"飞书",lark:"飞书",slack:"Slack",telegram:"Telegram"}[m[1].toLowerCase()]||m[1];
+    const account=m[2]==="default"?"默认":m[2],kind={channel:"频道",chat:"群聊",user:"私信",group:"群组"}[m[3].toLowerCase()];
+    return `${app} ${account}${kind}（尾号 ${m[4].slice(-4)}）`}
+  return s}
+/* B04 (2026-10-08 analyst UX review): the plan is checked before it is sent,
+   and each problem is said beside its own field.  The server still checks. */
+function intField(raw,min,max){const s=String(raw==null?"":raw).trim();if(!/^\d+$/.test(s))return null;const n=Number(s);return n>=min&&n<=max?n:null}
+function planProblems(v){const out={};
+  if(intField(v.hour,0,23)===null)out.hour="小时请填 0–23 的整数";
+  if(intField(v.minute,0,59)===null)out.minute="分钟请填 0–59 的整数";
+  const tz=String(v.timezone||"").trim();
+  if(!tz)out.timezone="请填写时区，例如 America/New_York";
+  else{try{new Intl.DateTimeFormat("en-US",{timeZone:tz})}catch(_){out.timezone="这不是可识别的时区名称，例如 America/New_York、Asia/Shanghai"}}
+  return out}
+function fieldProblem(id,message){const el=$(id);let tip=$(`${id}-error`);
+  if(!tip&&message){tip=document.createElement("div");tip.id=`${id}-error`;tip.className="field-error";tip.setAttribute("role","alert");el.insertAdjacentElement("afterend",tip);el.addEventListener("input",()=>fieldProblem(id,null))}
+  if(!tip)return;tip.textContent=message||"";tip.hidden=!message;if(message){el.setAttribute("aria-invalid","true");el.setAttribute("aria-describedby",tip.id)}else{el.removeAttribute("aria-invalid");el.removeAttribute("aria-describedby")}}
+function planLabel(ref){const m=String(ref||"").match(/:v(\d+)$/);return m?`第 ${m[1]} 版计划`:String(ref||"")}
+function sizeLabel(bytes){const n=Number(bytes);if(!isFinite(n))return"";if(n<1024)return`${n} 字节`;if(n<1048576)return`${(n/1024).toFixed(1)} KB`;return`${(n/1048576).toFixed(2)} MB`}
+function table(rows,cols){
+  if(!rows||!rows.length)return document.createTextNode("还没有。");
+  const t=document.createElement("table"),head=t.insertRow();
+  cols.forEach(([,label])=>{const th=document.createElement("th");th.textContent=label;head.appendChild(th)});
+  rows.forEach(row=>{const tr=t.insertRow();cols.forEach(([key,,format])=>{const raw=row[key]==null?"":String(row[key]),cell=tr.insertCell();
+    cell.textContent=format&&raw?format(raw):raw;if(format&&raw&&cell.textContent!==raw)cell.title=raw})});
+  return t;
+}
+async function load(){
+  const r=await fetch("/v1/cockpit/weekly-brief",{credentials:"same-origin"});
+  const v=await r.json();
+  csrf=v.csrf_token;planHash=v.plan_hash||null;
+  const box=$("current");
+  if(v.problem){box.className="card err";text(box,"每周简报的计划读不出来，请重新保存一次；仍不行请联系管理员。")}
+  else if(!v.plan){text(box,"还没有设定每周简报。"+((v.cycles||[]).length?"下面「最近几期」是以前计划留下的历史记录。":""))}
+  else{
+    const p=v.plan;
+    text(box,`已设定：每${p.weekday_label} ${String(p.hour).padStart(2,"0")}:${String(p.minute).padStart(2,"0")}（${p.timezone}），`+
+      (p.local?"只在工作台保存":"发送到 "+destLabel(p.destination_ref))+`。当前为${planLabel(p.plan_ref)}。`);
+    $("weekday").value=p.weekday;$("hour").value=p.hour;$("minute").value=p.minute;$("timezone").value=p.timezone;
+    $("destination").value=p.local?"":p.destination_ref;
+  }
+  $("local").replaceChildren(table(v.local_briefs,[["name","文件"],["written_at","写入时间",fmtTime],["bytes","大小",sizeLabel]]));
+  $("recent").replaceChildren(table(v.cycles,[["scheduled_for","计划时间",fmtTime],["plan_ref","计划",planLabel],["destination_ref","发送到",destLabel]]));
+  /* B03: the tables are in one zone and say which. */
+  if((v.local_briefs||[]).length||(v.cycles||[]).length){const note=document.createElement("p");note.className="muted";note.textContent="表中的时间均为上海时间（Asia/Shanghai）；每周生成时间按上面计划里的时区计算。";$("recent").append(note)}
+}
+$("save").onclick=async()=>{
+  const status=$("status"),problems=planProblems({hour:$("hour").value,minute:$("minute").value,timezone:$("timezone").value});
+  ["hour","minute","timezone"].forEach(id=>fieldProblem(id,problems[id]||null));
+  if(Object.keys(problems).length){status.className="err";text(status,"没有保存：请先改正上面标出的项目。");$(Object.keys(problems)[0]).focus();return}
+  $("save").disabled=true;status.className="muted";text(status,"正在保存…");
+  try{
+    const body={weekday:Number($("weekday").value),hour:Number($("hour").value),minute:Number($("minute").value),
+      timezone:$("timezone").value.trim(),destination_ref:$("destination").value.trim()||null,expected_plan_hash:planHash};
+    const r=await fetch("/v1/cockpit/weekly_brief_plan",{method:"POST",credentials:"same-origin",
+      headers:{"Content-Type":"application/json","X-Dalton-CSRF":csrf},body:JSON.stringify(body)});
+    const v=await r.json();
+    if(!r.ok)throw new Error((v&&(v.display_message||v.message||v.error))||("HTTP "+r.status));
+    status.className="ok";text(status,v.status==="unchanged"?"计划本来就是这样，没有改动。":"已保存。下一次到点时生成。");
+    await load();
+  }catch(e){status.className="err";text(status,"没有保存："+(e instanceof TypeError?"连接失败，请检查网络后重试。":e.message))}
+  finally{$("save").disabled=false}
+};
+load().catch(e=>{$("current").className="card err";text($("current"),"读取失败："+e.message)});
+</script>
+</body>
+</html>

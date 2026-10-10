@@ -304,6 +304,8 @@ class MissionCatalystLaneCoordinator:
                 now=self.clock(),
                 version_ref=latest["id"],
                 moved_entry_refs=moved_entry_refs,
+                late_calibration_entry_refs=self._late_calibrations(
+                    company_ref, latest["entries"]),
             )
         except Exception as exc:  # noqa: BLE001 - one company, not the tick
             reason = f"{type(exc).__name__}: {exc}"
@@ -330,6 +332,26 @@ class MissionCatalystLaneCoordinator:
             "duplicate_count": sum(
                 1 for item in emitted if item.get("status") == "duplicate"),
         }
+
+    def _late_calibrations(self, company_ref: str, entries: Sequence[Mapping[str, Any]]) -> list[str]:
+        """ADR-0015: confirmed entries whose release reported a quarter not yet filed."""
+
+        store = getattr(self.authority, "store", None)
+        connection = getattr(store, "connection", None)
+        if connection is None:
+            return []
+        try:
+            from .earnings_release_intake import reported_release
+
+            release = reported_release(connection, company_ref, today=self._today())
+        except Exception:  # noqa: BLE001 - additive; the on-time windows still open
+            return []
+        if release is None:
+            return []
+        filing = f"sec:filing:{release['accession']}"
+        return [entry["entry_ref"] for entry in entries
+                if entry.get("confidence") == "confirmed"
+                and any(source.get("ref") == filing for source in entry.get("sources") or ())]
 
     # -- the tick ----------------------------------------------------------
 
@@ -528,6 +550,7 @@ def argv_fragment(context: Any) -> list[str]:
 
 LANE = register_lane(LaneSpec(
     operation="dispatch_mission_catalyst_calendar",
+    failure_ledger="mission_catalyst_calendar",
     # After the price lane and before the model specification. It shares the
     # price lane's source and its politeness budget, and it wants the tick's
     # single child slot less than a filing does; running it next to prices

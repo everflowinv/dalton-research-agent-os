@@ -1,0 +1,88 @@
+{
+  "$id": "https://dalton.local/schemas/street-estimate-verifier-provider-output-v0.1.schema.json",
+  "title": "StreetEstimateVerifierProviderOutputV0.1",
+  "type": "object",
+  "additionalProperties": false,
+  "required": [
+    "verdict",
+    "company_ref",
+    "document_ref",
+    "source_sha256",
+    "candidate_hash",
+    "checked_rows",
+    "cell_bindings",
+    "reason"
+  ],
+  "properties": {
+    "verdict": {
+      "enum": [
+        "pass",
+        "reject"
+      ]
+    },
+    "company_ref": {
+      "type": "string"
+    },
+    "document_ref": {
+      "type": "string"
+    },
+    "source_sha256": {
+      "type": "string"
+    },
+    "candidate_hash": {
+      "type": "string"
+    },
+    "checked_rows": {
+      "type": "array",
+      "items": {
+        "type": "integer",
+        "minimum": 0
+      }
+    },
+    "cell_bindings": {
+      "type": "array",
+      "items": {
+        "type": "object",
+        "additionalProperties": false,
+        "required": [
+          "row_index",
+          "period_as_printed",
+          "period_kind",
+          "currency_as_printed",
+          "scale_as_printed",
+          "unit_as_printed"
+        ],
+        "properties": {
+          "row_index": {
+            "type": "integer",
+            "minimum": 0
+          },
+          "period_as_printed": {
+            "type": "string"
+          },
+          "period_kind": {
+            "enum": [
+              "fiscal_year",
+              "quarter"
+            ]
+          },
+          "currency_as_printed": {
+            "type": "string"
+          },
+          "scale_as_printed": {
+            "type": [
+              "string",
+              "null"
+            ]
+          },
+          "unit_as_printed": {
+            "type": "string"
+          }
+        }
+      }
+    },
+    "reason": {
+      "type": "string"
+    }
+  }
+}

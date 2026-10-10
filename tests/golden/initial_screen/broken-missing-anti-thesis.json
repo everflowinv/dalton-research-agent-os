@@ -287,7 +287,7 @@
     "status": "pass"
    },
    "required_sections_present": {
-    "count": 1,
+    "count": 3,
     "status": "fail"
    },
    "residual_citation_artefacts": {

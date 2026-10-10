@@ -105,6 +105,8 @@ def run_reflection(args: argparse.Namespace) -> dict[str, Any]:
                 "id": written["id"], "reflection_ref": written["reflection_ref"],
                 "version": written["version"], "status": written["status"],
             }
+            from .research_followup import ResearchFollowupAuthority
+            summary["review_requests"] = ResearchFollowupAuthority(store).capture_existing([written["id"]])
         if args.summary_dir:
             target = Path(args.summary_dir).expanduser().resolve()
             target.mkdir(parents=True, exist_ok=True)

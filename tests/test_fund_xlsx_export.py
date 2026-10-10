@@ -168,10 +168,10 @@ class FundXlsxExportTests(unittest.TestCase):
         book = load_workbook(self.path, data_only=False)
         sheet = book["Financials"]
         headers = {cell.value: cell.column for cell in sheet[1]}
-        self.assertIsNone(sheet.cell(3, headers["2025"]).value)
+        self.assertIsNone(sheet.cell(3, headers["2025*"]).value)
         self.assertTrue(sheet.cell(3, headers["2026A/E"]).value.startswith("=SUM("))
         self.assertTrue(sheet.cell(3, headers["2027E"]).value.startswith("=SUM("))
-        self.assertTrue(any("FY2025A: annual unavailable" in gap for gap in result["gaps"]))
+        self.assertTrue(any("FY2025A (partial): annual unavailable" in gap for gap in result["gaps"]))
 
     def test_annual_sum_requires_four_typed_duration_quarters(self):
         ends = ["2025-11-30", "2026-02-28", "2026-05-31", "2026-08-31"]
@@ -199,7 +199,7 @@ class FundXlsxExportTests(unittest.TestCase):
         sheet = book["Financials"]
         headers = [cell.value for cell in sheet[1]]
         self.assertEqual(headers[4:8], [
-            "2025", "2026A/E", "2027E", "2028E*",
+            "2025*", "2026A/E", "2027E", "2028E*",
         ])
         self.assertIsNone(headers[8])
         self.assertEqual(headers[9:12], ["CAGR", None, "4Q25"])
@@ -332,6 +332,8 @@ class FundXlsxExportTests(unittest.TestCase):
         candidate = translate(copy.deepcopy(self.model))
         candidate.pop("status", None)
         candidate["inputs_hash"] = content_hash(inputs)
+        if candidate.get("execution_contract"):
+            contract=candidate["execution_contract"];contract["content_hash"]=content_hash({k:v for k,v in contract.items() if k!="content_hash"})
         candidate["body_hash"] = forecast_body_hash(candidate)
         candidate["content_hash"] = content_hash({
             key: value for key, value in candidate.items()

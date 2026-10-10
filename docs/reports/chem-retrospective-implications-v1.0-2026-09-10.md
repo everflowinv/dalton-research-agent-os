@@ -1,7 +1,9 @@
 # Chem（原版 Dalton agent）复盘对现在这套 practice 的启示
 
+历史技术评审：保留当时结论与局限；当前运行状态见 [项目状态](../PROJECT_STATUS.md)。原始操作证据私有保存。
+
 日期：2026-09-10
-输入：`docs/external/Chem项目复盘报告.md`（owner 提供，审阅区间 2026-07-18 至 09-10）、`docs/external/chem-review-20260910/` 支撑材料、`docs/external/thoughts-on-ai-for-hedge-fund-2026-08-25.md`
+输入：研究流程回顾材料（原件已私有归档；owner 提供，审阅区间 2026-07-18 至 09-10）、`docs/external/chem-review-20260910/` 支撑材料、`docs/external/thoughts-on-ai-for-hedge-fund-2026-08-25.md`
 方法：主报告由主 agent 通读；支撑材料的数字由 Opus 5 subagent 提炼（附录 A）；逐条对照当前 Dalton Research Agent OS 的 practice
 立场：不是照着 Chem 改。Chem 是 OpenClaw runtime + cron + 提示词 + SQLite 台账的一代实现；现在这套是 append-only authority + 哈希 + lane registry + 独立 review 的二代实现。二代在结构上明显更好，但 Chem 有几件事做对了、有几个坑我们正在走向，值得说清楚。
 
@@ -98,7 +100,7 @@ Chem 54 天里最有价值的不是文件数量，而是三件事：**按商业�
 | coverage-daily-report / health / industry | 5 / 5 / 5 | 约 36 小时（「日报」并非每日） |
 | coverage-weekly-pack | 1 | 09-07 单次 |
 
-停用：本轮新停 10、原已停 10、1 个仍启用（skill-collection-review-chem，「系统限制」）。缺：每 job 停用理由、每次运行成本 / token / 时长、运行级失败日志。`交付验证.json` 仍写 `all_cron_stopped: false`。
+停用：本轮新停 10、原已停 10、1 个仍启用（skill-collection-review-chem，「系统限制」）。缺：每 job 停用理由、每次运行成本 / token / 时长、运行级失败日志。当时的停用检查收据（原件已私有归档）仍写 `all_cron_stopped: false`。
 
 ### A.2 任务（88 行）
 done 80 / ready 7 / failed 1；尝试次数 1×74、0×7、2×6、3×1。公司：basf 30、wanhua 27、linde 10、行业 21。38 种任务类型，`industry_driver_update` 28、`company_driver_update` 8、`deep_insight_initiation` 3、`price_move_analysis` / `zero_base_review` / `peer_read_across_analysis` 各 3，其余一次性。唯一失败 = 62 号 linde `peer_read_across_analysis`，3 次，`AlphaEngine Desktop status=no_module_page`。缺：创建者列（人 / cron / agent 不可分）、创建 / 开始 / 完成时间戳。

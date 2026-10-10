@@ -3,6 +3,7 @@
 from __future__ import annotations
 
 import json
+import re
 from collections.abc import Callable, Mapping
 from datetime import timedelta, timezone
 from decimal import Decimal
@@ -121,11 +122,33 @@ class AnnualReportQualitativeError(ResearchVerificationError):
     pass
 
 
+# One markdown code fence around the whole reply, and nothing else.  Live on
+# 2026-09-25..28 (ws-7d document research), 26 of 56 rejected drafts were a
+# complete, schema-valid JSON object that the model had wrapped in
+# ```json ... ```; every one of them was bought, paid for and thrown away, and
+# the automatic retry bought the same fence again.  Only the exact outer fence
+# is removed: prose before or after it, two fences, or an unterminated fence is
+# still not strict JSON.
+_WHOLE_REPLY_FENCE = re.compile(
+    r"\A\s*```(?:json|JSON)?[ \t]*\r?\n(?P<body>.*?)\r?\n[ \t]*```\s*\Z", re.DOTALL)
+
+
+def unfence_json_text(text: str) -> str:
+    """The reply with one enclosing markdown code fence removed, if it has one."""
+
+    if not isinstance(text, str):
+        return text
+    match = _WHOLE_REPLY_FENCE.match(text)
+    if match is None or "```" in match.group("body"):
+        return text
+    return match.group("body")
+
+
 def _strict_json(text: str, name: str) -> dict[str, Any]:
     if not isinstance(text, str):
         raise AnnualReportQualitativeError(f"{name} must be JSON text")
     try:
-        value = json.loads(text)
+        value = json.loads(unfence_json_text(text))
     except (TypeError, json.JSONDecodeError) as exc:
         raise AnnualReportQualitativeError(f"{name} is not strict JSON") from exc
     if not isinstance(value, dict):
@@ -309,11 +332,27 @@ class RegisteredAnnualReportModelWorker(RoutedTranscriptPolishModelWorker):
     def _before_model_call(self, work, route, profile, replayed):
         if self.budget_store is None:
             return
-        from .openclaw_model_adapter import OpenClawModelAdapterError
+        import sqlite3
+
+        from .openclaw_model_adapter import LocalAdmissionBusy, OpenClawModelAdapterError
         try:
             self._admit_model_call(work, route, profile, replayed)
         except OpenClawModelAdapterError:
             raise
+        except sqlite3.OperationalError as exc:
+            # A locked or busy budget ledger is contention, not a verdict on
+            # this call: the reservation was never written and nothing was
+            # sent.  Typed as a proved no-send so the bounded transport and
+            # Scheduler retries take it, instead of a terminal rejection that
+            # held a document admission for a person (live legacy 3c49a49c).
+            message = str(exc).lower()
+            if "locked" in message or "busy" in message:
+                raise LocalAdmissionBusy(
+                    "annual-report budget ledger was busy; the call was not sent"
+                ) from exc
+            raise OpenClawModelAdapterError(
+                "annual-report budget/mission admission rejected"
+            ) from exc
         except Exception as exc:
             raise OpenClawModelAdapterError(
                 "annual-report budget/mission admission rejected"
@@ -444,6 +483,7 @@ class RegisteredAnnualReportModelWorker(RoutedTranscriptPolishModelWorker):
             attempt_number=route["attempt_number"], phase=phase,
             route_decision_ref=route["id"], reserved_micros=ceiling,
             mission_binding=scope,
+            purpose=self.purpose, thinking_level=route.get("thinking_level"),
         )
         if self.admission.get("status") == "rejected":
             raise AnnualReportQualitativeError("annual-report mission budget refused the call")
@@ -892,6 +932,7 @@ __all__ = [
     "build_annual_report_candidate_bundle", "build_annual_report_qualitative_candidate",
     "draft_prompt", "parse_draft_text",
     "qualitative_router_capability",
-    "parse_verifier_text", "stage_annual_report_candidate", "validate_draft_output",
+    "parse_verifier_text", "stage_annual_report_candidate", "unfence_json_text",
+    "validate_draft_output",
     "validate_model_proof", "validate_verifier_output", "verifier_prompt",
 ]

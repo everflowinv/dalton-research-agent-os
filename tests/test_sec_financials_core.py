@@ -42,7 +42,7 @@ from dalton_core.sec_financials_core import (
 REPO = Path(__file__).resolve().parents[1]
 # The record the current contract is covered by. v1 predates period_start and
 # is kept as history, exactly as the three sec-company-facts records are.
-RECORD = REPO / "deploy" / "connector-governance" / "sec-financial-statements-v3.json"
+RECORD = REPO / "deploy" / "connector-governance" / "sec-financial-statements-v4.json"
 
 
 class IdentityTests(unittest.TestCase):
@@ -221,6 +221,10 @@ class GovernanceTests(unittest.TestCase):
             sec_financials_schema_hash(version=2),
             "086316a8feb82c20b8a8a54fc71fb055631edc31ada2ec44bffdd1cb90dc7330",
         )
+
+    def test_v3_schema_identity_remains_byte_compatible(self):
+        self.assertEqual(sec_financials_schema_hash(version=3),
+                         "b428a6dc9f4a3d0ebc11c0236d53dba00a0d4f0382e0a6a319d51b5efd5065ac")
 
     def test_the_shipped_record_loads_and_is_not_yet_usable(self):
         import tempfile

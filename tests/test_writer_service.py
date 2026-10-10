@@ -1,3 +1,4 @@
+from tests.thesis_question_fixtures import formal_content
 import json
 import hashlib
 import os
@@ -524,7 +525,7 @@ class WriterServiceTests(unittest.TestCase):
             mandate_version_hash=mandate["content_hash"],
             driver_pack_version_ref=pack["id"],
             driver_pack_version_hash=pack["content_hash"],
-            content={
+            content=formal_content(self.core, {
                 "statement": "AI demand can sustain Accenture growth.",
                 "mechanism": "Bookings convert while productivity protects margin.",
                 "confidence": "medium",
@@ -533,7 +534,7 @@ class WriterServiceTests(unittest.TestCase):
                 "catalyst_refs": ["catalyst:quarterly-results"],
                 "falsifier_refs": ["falsifier:bookings-conversion-breaks"],
                 "change_reason": "Initial human-reviewed ACN admission.",
-            },
+            }, question="question:" + "thesis:acn:ai-reinvention-growth"),
             idempotency_key="thesis-admission-candidate:acn:1",
         )
         admitted = self.governance.decide_thesis_admission(

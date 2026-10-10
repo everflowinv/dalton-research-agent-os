@@ -56,6 +56,7 @@ second opinion.
 
 from __future__ import annotations
 
+import copy
 import json
 import sqlite3
 from contextlib import contextmanager
@@ -210,13 +211,33 @@ _RECORD_FIELDS = frozenset({
     "bridge_detail", "consensus_fingerprint", "fingerprint",
     "mission_version_ref", "actor_ref", "body_hash", "content_hash",
 })
+#: Batch an (2026-10-09): fields a projection may carry beyond the closed
+#: set.  ``upstream_bindings`` lists the exact upstream versions (the model
+#: version, every consensus version the bridge read) the projection was
+#: computed from, so ``product_consistency`` can mark it stale the moment a
+#: newer model or consensus version exists.  Older rows lack it and are read
+#: from ``model_version_ref`` and the bridge refs.
+_OPTIONAL_FIELDS = frozenset({"upstream_bindings", "linked_mechanisms"})
 #: What a projection *is*, as opposed to when it was made and which mission
 #: asked. Two projections with the same body are the same projection: a tick
 #: that recomputes an unchanged model is a duplicate, not a second opinion.
+#: The bindings restate refs the body already holds, so they stay out of it.
 _BODY_EXCLUDED = frozenset({
     "id", "created_at", "version", "prior_projection_ref",
-    "mission_version_ref", "body_hash", "content_hash",
+    "mission_version_ref", "body_hash", "content_hash", "upstream_bindings",
 })
+
+
+def projection_bindings(body: Mapping[str, Any]) -> list[dict[str, Any]]:
+    """The ``upstream_bindings`` of a projection body: its model and consensus versions."""
+
+    from .product_consistency import upstream_bindings, version_refs_in
+
+    refs: list[Any] = [{"ref": body.get("model_version_ref"), "role": "model",
+                        "content_hash": body.get("model_version_hash")}]
+    refs += [{"ref": ref, "role": "consensus"} for ref in version_refs_in(body.get("consensus_bridge"))
+             if ref.startswith("consensus-estimate-version:")]
+    return upstream_bindings(refs)
 
 
 class SensitivityError(RuntimeError):
@@ -332,7 +353,10 @@ def measure_series(
     points: list[dict[str, Any]] = []
     with localcontext() as ctx:
         ctx.prec = _PRECISION
-        if measure == "quarterly_growth":
+        if measure == "economic_driver_level":
+            for cell in cells:
+                points.append({"period_end":str(cell["period_end"]),"value":str(cell["value"]),"refs":[_cell_ref(cell)]})
+        elif measure == "quarterly_growth":
             for prior, current in zip(cells, cells[1:]):
                 if not _adjacent(str(prior["period_end"]), str(current["period_end"])):
                     continue
@@ -575,11 +599,32 @@ def recompute(
             replaced.append(str(item["ref"]))
             item = {**item, "value": _rate(value)}
         assumptions.append(item)
+    if record.get("execution_contract"):
+        from .forecast_financial_execution import execute_financial_model, _apply_overrides
+        body = copy.deepcopy(dict(record))
+        body["assumptions"] = assumptions
+        held = record["execution_contract"]
+        _apply_overrides(body, [])
+        execute_financial_model(body, {**held["specification"], "fcf_definition": held.get("fcf_definition")})
+        return body["results"], sorted(replaced)
     if is_structured_schema(record.get("schema_version")):
         structure = record.get("financial_statement_structure")
         if not isinstance(structure, Mapping):
             raise SensitivityUnavailable("structured model has no statement authority")
         income_drivers = [item for item in drivers if item.get("kind") != "cash_flow"]
+        from .company_financial_statement_structure import is_coverage_structure
+
+        if is_coverage_structure(structure.get("schema_version")):
+            # Same arithmetic as the coverage builder and revise_assumptions:
+            # income DAG, cash companion, then the cash roll.
+            from .model_forecast_driver import compute_structured_model_results
+
+            companion = (record.get("cash_flow_companion")
+                         if record.get("schema_version") == STRUCTURED_CASH_SCHEMA_VERSION
+                         else None)
+            return (compute_structured_model_results(
+                drivers, assumptions, periods, structure, companion),
+                sorted(set(replaced)))
         results = compute_structure_results(
             income_drivers, assumptions, periods, structure)
         if record.get("schema_version") == STRUCTURED_CASH_SCHEMA_VERSION:
@@ -846,7 +891,13 @@ def candidate_drivers(record: Mapping[str, Any]) -> list[dict[str, Any]]:
 
     order = {str(item["ref"]): index
              for index, item in enumerate(record.get("drivers") or [])}
-    refs = sorted({str(item["driver_ref"]) for item in live_assumptions(record)},
+    eligible = live_assumptions(record)
+    if record.get("execution_contract"):
+        # Dated levels and mechanism outputs are replayed jointly below. They
+        # have no meaningful single flat rate or one-percentage-point unit.
+        eligible = [item for item in eligible if item["measure"] not in
+                    {"economic_driver_level", "mechanism_amount", "reported_actual"}]
+    refs = sorted({str(item["driver_ref"]) for item in eligible},
                   key=lambda ref: (order.get(ref, len(order)), ref))
     out = []
     for ref in refs:
@@ -1073,7 +1124,47 @@ def fingerprint(record: Mapping[str, Any], consensus_fingerprint: str | None) ->
         "consensus_fingerprint": consensus_fingerprint,
         "selection_rule_hash": SELECTION_RULE_HASH,
         "schema_version": SCHEMA_VERSION,
+        "linked_rule_ref": "rule:sensitivity-linked-economic:1",
     })
+
+
+#: 2026-10-09 (P0 review: a sensitivity column showed -$292.1B of quarterly
+#: operating income for a company whose largest filed quarter of revenue is a
+#: fraction of that).  A what-if quarter whose absolute value exceeds this
+#: multiple of the largest filed quarterly revenue is arithmetic run past any
+#: economic meaning, and the whole projection is refused with the reason.
+MAGNITUDE_FACTOR = Decimal("3")
+MAGNITUDE_RULE_REF = "rule:sensitivity-magnitude:1"
+
+
+def magnitude_breaches(record: Mapping[str, Any],
+                       drivers: Sequence[Mapping[str, Any]]) -> list[str]:
+    """What-if quarters beyond ``MAGNITUDE_FACTOR`` x the largest filed revenue."""
+
+    try:
+        anchor = revenue_anchor([item for item in record.get("drivers") or []
+                                 if item.get("kind") != "cash_flow"])
+    except ForecastModelUnavailable:
+        return []
+    filed = [abs(_decimal(cell["value"], "history value"))
+             for cell in quarterly_history(anchor)]
+    if not filed:
+        return []
+    ceiling = max(filed) * MAGNITUDE_FACTOR
+    found: list[str] = []
+    for driver in drivers:
+        for row in driver.get("what_if") or []:
+            for line in row.get("lines") or []:
+                for cell in line.get("cells") or []:
+                    if cell.get("status") != "computed" or cell.get("value") is None:
+                        continue
+                    value = _decimal(cell["value"], "what-if value")
+                    if abs(value) > ceiling:
+                        found.append(
+                            f"{driver.get('label') or driver.get('driver_ref')} at the "
+                            f"{row.get('scenario')} level gives {line.get('ref')} "
+                            f"{_plain(value)} for {cell.get('period_end')}")
+    return found
 
 
 def build_projection(
@@ -1126,6 +1217,14 @@ def build_projection(
             "what_if": what_if(record, ref, band, ours, ends),
         })
 
+    breaches = magnitude_breaches(record, drivers)
+    if breaches:
+        raise SensitivityUnavailable(
+            f"{MAGNITUDE_RULE_REF}: {len(breaches)} what-if quarter(s) exceed "
+            f"{_plain(MAGNITUDE_FACTOR)}x the largest filed quarterly revenue, so the "
+            "projection is refused rather than shown: " + "; ".join(breaches[:3])
+            + (f"; and {len(breaches) - 3} more" if len(breaches) > 3 else ""))
+
     history = [str(item) for item in (record.get("history_periods") or [])]
     body = {
         "schema_version": SCHEMA_VERSION,
@@ -1163,6 +1262,8 @@ def build_projection(
         "actor_ref": actor_ref,
         "mission_version_ref": mission_version_ref,
     }
+    if record.get("execution_contract"):
+        body["linked_mechanisms"]=build_linked_projection(record)
     return body
 
 
@@ -1222,7 +1323,7 @@ def validate_projection(value: Mapping[str, Any]) -> dict[str, Any]:
     if not isinstance(value, Mapping):
         raise SensitivityValidationError("a projection must be an object")
     wire = dict(value)
-    unknown = sorted(set(wire) - _RECORD_FIELDS)
+    unknown = sorted(set(wire) - _RECORD_FIELDS - _OPTIONAL_FIELDS)
     missing = sorted(_RECORD_FIELDS - set(wire))
     if unknown or missing:
         raise SensitivityValidationError(
@@ -1294,6 +1395,13 @@ class SensitivityProjectionAuthority:
         body = {key: value for key, value in dict(body).items()
                 if key not in (_BODY_EXCLUDED - {"mission_version_ref"})}
         company_ref = _text(body.get("company_ref"), "company_ref")
+        if body.get("linked_mechanisms") is not None and self.connection.execute(
+                "SELECT 1 FROM sqlite_master WHERE type='table' AND name='forecast_model_versions'").fetchone():
+            row=self.connection.execute("SELECT record_json FROM forecast_model_versions WHERE company_ref=? ORDER BY version_number DESC LIMIT 1",(company_ref,)).fetchone()
+            if row is None: raise SensitivityConflict("linked projection has no current model authority")
+            model=json.loads(row[0])
+            if body.get("model_version_ref")!=model.get("id") or body.get("model_version_hash")!=model.get("content_hash") or body["linked_mechanisms"]!=build_linked_projection(model):
+                raise SensitivityConflict("linked projection does not replay against the current model")
         projection_ref = f"{PROJECTION_PREFIX}{company_ref}"
         body["projection_ref"] = projection_ref
         digest = body_hash(body)
@@ -1302,7 +1410,9 @@ class SensitivityProjectionAuthority:
             "ORDER BY version_number DESC LIMIT 1", (projection_ref,),
         ).fetchone()
         if latest is not None and latest["body_hash"] == digest:
-            return {**self.projection(latest["projection_id"]), "status": "duplicate"}
+            stored = self.projection(latest["projection_id"])
+            self._backfill_version_verdict(stored, statement_rows, solver_results)
+            return {**stored, "status": "duplicate"}
         version = 1 if latest is None else int(latest["version_number"]) + 1
         prior = None if latest is None else latest["projection_id"]
         projection_id = f"{PROJECTION_PREFIX}{company_slug(company_ref)}:{version}"
@@ -1313,6 +1423,7 @@ class SensitivityProjectionAuthority:
             "version": version,
             "prior_projection_ref": prior,
             "body_hash": digest,
+            "upstream_bindings": projection_bindings(body),
         }
         # Validate first, then hash what validation produced. The validator
         # normalises -- ``validate_bridge`` runs every gap row through P15d's
@@ -1359,6 +1470,28 @@ class SensitivityProjectionAuthority:
         if stored["content_hash"] != wire["content_hash"]:
             raise SensitivityConflict("sensitivity projection did not read back as written")
         return {**stored, "status": "fresh"}
+
+    def _backfill_version_verdict(self, stored: Mapping[str, Any],
+                                  statement_rows: Sequence[Mapping[str, Any]],
+                                  solver_results: Sequence[Mapping[str, Any]]) -> None:
+        """Batch an: a projection published before exact-version verdicts gets one.
+
+        Only the version ledger is written (a refusal here would refuse a
+        projection already on the page; that is the refusal chain's job on
+        the next publish).  A failure to evaluate leaves it 「未验证」.
+        """
+
+        from .economic_invariants import (
+            EconomicInvariantAuthority, evaluate_projection, verdict_for_output)
+
+        try:
+            if verdict_for_output(self.connection, str(stored["id"])) is not None:
+                return
+            report = evaluate_projection(stored, statement_rows=statement_rows,
+                                         solver_results=solver_results)
+            EconomicInvariantAuthority(self.store).record_version(report)
+        except Exception:  # noqa: BLE001 - an unverifiable old projection stays unverified
+            return
 
     def projection(self, projection_ref: str) -> dict[str, Any]:
         projection_ref = _text(projection_ref, "projection_ref")
@@ -1455,3 +1588,96 @@ __all__ = [
     "validate_projection",
     "what_if",
 ]
+
+
+def recompute_linked(record: Mapping[str, Any], deltas: Sequence[Mapping[str, Any]]) -> dict[str, Any]:
+    """Change quantity/price/cost assumptions together through the frozen engine."""
+    body = copy.deepcopy(dict(record))
+    live = body["assumptions"]
+    touched = []
+    known = {a["driver_ref"] for a in live if a.get("kind") != "actual" and not a.get("superseded_by")}
+    for change in deltas:
+        if set(change) != {"driver_ref", "mode", "delta", "because", "refs"}:
+            raise SensitivityUnavailable("mechanism delta needs driver_ref, mode, delta, because and source refs")
+        if change["driver_ref"] not in known or not change["because"] or not change["refs"]:
+            raise SensitivityUnavailable("mechanism delta must bind a model assumption and its source")
+        delta = _decimal(change["delta"], "driver delta")
+        if change["mode"] not in {"relative_level", "rate_shift"}:
+            raise SensitivityUnavailable("mechanism delta mode is relative_level or rate_shift")
+        matched = False
+        for a in live:
+            if a["driver_ref"] != change["driver_ref"] or a.get("kind") == "actual" or a.get("superseded_by"): continue
+            level = a["measure"] == "economic_driver_level"
+            if (change["mode"] == "relative_level") != level or a["measure"] in {"mechanism_amount", "reported_actual"}:
+                raise SensitivityUnavailable("change underlying economic quantity/price; formula outputs cannot be edited")
+            value = _decimal(a["value"], "assumption value")
+            value = value * (1 + delta) if level else value + delta
+            if level and value < 0:
+                raise SensitivityUnavailable("economic quantity/price cannot be negative")
+            if not level and not Decimal("-1") <= value <= Decimal("1"):
+                raise SensitivityUnavailable("rate/share outside economically meaningful interval [-1,1]")
+            a["value"] = _rate(value)
+            touched.append(a["ref"]); matched = True
+        if not matched: raise SensitivityUnavailable("mechanism delta changed no open assumption")
+    if body.get("execution_contract"):
+        from .forecast_financial_execution import execute_financial_model, _apply_overrides
+        contract = body["execution_contract"]
+        if contract["drivers"]["status"] != "executed":
+            raise SensitivityUnavailable("driver plan is unexecuted; linked sensitivity is unavailable")
+        _apply_overrides(body, [])
+        execute_financial_model(body, {**contract["specification"], "fcf_definition": contract.get("fcf_definition")})
+    else:
+        # Historical models keep their replay arithmetic; no new economic
+        # execution claim is invented for them.
+        body["results"], _ = recompute(body, None, None)
+    check = [{"driver_ref": "joint mechanisms", "what_if": [{"scenario": "linked", "lines": [
+        {"ref": r["ref"], "cells": [{"period_end": c["period"]["end"], "status": c["status"], "value": c["value"]}
+                                    for c in r["cells"]]} for r in body["results"] if r["ref"] in WHAT_IF_LINES and r.get("unit") == body["unit"]]}]}]
+    breaches = magnitude_breaches(record, check)
+    if breaches:
+        raise SensitivityUnavailable("linked mechanism interval is implausible: " + "; ".join(breaches[:3]))
+    body["scenario_binding"] = {"model_version_ref": record.get("id"), "model_version_hash": record.get("content_hash"),
+                                "deltas": copy.deepcopy(list(deltas)), "assumption_refs": sorted(set(touched))}
+    return body
+
+
+def build_linked_projection(record):
+    """Joint intervals from held economic history; this is a what-if, not probabilities."""
+    binding={"model_version_ref":record.get("id"),"model_version_hash":record.get("content_hash")}
+    out={"rule_ref":"rule:sensitivity-linked-economic:1","binding":binding,"status":"unavailable","reason":None,"intervals":[],"rows":[]}
+    if record.get("execution_contract",{}).get("drivers",{}).get("status")!="executed":
+        out["reason"]="economic driver plan is not executed";return out
+    assumptions=live_assumptions(record);intervals=[]
+    for driver in record.get("drivers") or []:
+        ref=driver["ref"];active=[a for a in assumptions if a["driver_ref"]==ref]
+        if not active:continue
+        measure=active[0]["measure"]
+        if measure not in {"economic_driver_level","share_of_line","revenue_share","operating_income_share"}:continue
+        series=measure_series(record,ref,measure);points=series.get("points") or []
+        if len(points)<4:continue
+        latest=_decimal(points[-1]["value"],"latest economic history")
+        if measure=="economic_driver_level":
+            if latest<=0:continue
+            values=[_decimal(p["value"],"history")/latest-1 for p in points[-8:]]
+            mode="relative_level"
+        else:
+            current=_decimal(active[0]["value"],"assumption")
+            values=[_decimal(p["value"],"history")-current for p in points[-8:]];mode="rate_shift"
+        intervals.append({"driver_ref":ref,"label":driver.get("label"),"unit":driver.get("unit"),"measure":measure,"mode":mode,"low":str(min(values)),"high":str(max(values)),
+            "history_window":{"start":points[-8:][0]["period_end"],"end":points[-1]["period_end"]},
+            "refs":[record["id"]],"basis":"filed source levels relative to latest filed level" if mode=="relative_level" else "filed source rate minus current assumption"})
+    out["intervals"]=intervals
+    if len(intervals)<2:out["reason"]="fewer than two source-backed executable economic intervals";return out
+    rows=[]
+    for name,edge in (("historical_low","low"),("current",None),("historical_high","high")):
+        deltas=[] if edge is None else [{"driver_ref":p["driver_ref"],"mode":p["mode"],"delta":p[edge],
+            "because":"Joint sensitivity from the held historical interval","refs":p["refs"]} for p in intervals]
+        try:
+            moved=recompute_linked(record,deltas)
+            rows.append({"key":name,"status":"computed","reason":None,"driver_deltas":deltas,
+                "lines":scenario_lines(record,moved["results"],[p["end"] for p in open_periods(record)])})
+        except (SensitivityUnavailable,ValueError) as exc:
+            rows.append({"key":name,"status":"unavailable","reason":str(exc),"driver_deltas":deltas,"lines":[]})
+    out.update(status="available" if all(r["status"]=="computed" for r in rows) else "unavailable",
+        reason=None if all(r["status"]=="computed" for r in rows) else "joint interval failed economic plausibility or input coverage",rows=rows)
+    return out

@@ -2,6 +2,8 @@
 
 from __future__ import annotations
 
+from tests.thesis_question_fixtures import formal_content
+
 import json
 import sqlite3
 import unittest
@@ -9,7 +11,7 @@ import unittest
 from dalton_core.agenda import AgendaStore
 from dalton_core.contracts import ThesisVersion
 from dalton_core.coverage_admission import CoverageAdmissionAuthority
-from dalton_core.event_judgement import EventJudgementAuthority
+from dalton_core.event_judgement import EventJudgementAuthority, EventJudgementValidationError
 from dalton_core.research_event import ResearchEventAuthority, record_event
 from dalton_core.thesis_revision import (
     ADMISSION_ONLY_DECISION,
@@ -76,7 +78,7 @@ class RevisionHarness(P14aHarness):
             mandate_version_hash=self.mandate["content_hash"],
             driver_pack_version_ref=self.pack["id"],
             driver_pack_version_hash=self.pack["content_hash"],
-            content=thesis_content(), actor_ref=OWNER,
+            content=formal_content(self.store, thesis_content(), question="question:" + THESIS_REF, industry=(INDUSTRY if str(ACN).startswith("industry:") else None)), actor_ref=OWNER,
             idempotency_key="thesis-admission-candidate:acn:1",
         )
         admitted = self.admission.decide_thesis_admission(
@@ -98,7 +100,7 @@ class RevisionHarness(P14aHarness):
             "thesis_ref": THESIS_REF,
         }
 
-    def judgement(self, suffix="1"):
+    def judgement(self, suffix="1", statement=None, confidence="low", relation="same"):
         event = record_event(
             self.events, company_ref=ACN, kind="claim",
             occurred_at=f"2026-09-0{suffix}T00:00:00+00:00",
@@ -116,14 +118,17 @@ class RevisionHarness(P14aHarness):
                        "citations": [self.claim_ref], "note": None,
                        "research_question": None, "forecast_change": None,
                        "model": {"work_order_ref": f"work:{suffix}", "cost_micros": 10}},
-            verification={"status": "verified", "verdict": "pass", "findings": []},
+            verification={"status": "verified", "verdict": "pass", "findings": [],
+                          "independence": {"producer_family": "producer", "verifier_family": "verifier"},
+                          "direction_checks": ([{**__import__('dalton_core.thesis_question_model', fromlist=['direction_binding']).direction_binding(self.version_one, statement, confidence),
+                                                "relation": relation, "reason": "Synthetic independent direction comparison."}] if statement else [])},
             effect={"kind": "revise_thesis", "status": "candidate"},
             mission=self.mission, actor_ref=AUTOMATION,
         )
 
     def candidate(self, *, decision="THESIS_WEAKENED", confidence="low",
                   statement=None, suffix="1", reflection_ref=None):
-        judged = self.judgement(suffix)
+        judged = self.judgement(suffix, statement, confidence)
         return self.judgements.record_thesis_candidate(
             judgement_ref=judged["id"], thesis=self.thesis_wire(), company_ref=ACN,
             decision=decision,
@@ -270,7 +275,7 @@ class DecisionTests(RevisionHarness):
             self.revisions.decide(**{**args, "verdict": "accept", "reason": "Changed my mind."})
 
     def test_a_new_thesis_candidate_is_sent_to_the_admission_path(self):
-        candidate = self.candidate(decision=ADMISSION_ONLY_DECISION, confidence=None)
+        candidate = self.candidate(decision=ADMISSION_ONLY_DECISION, confidence="low")
         with self.assertRaisesRegex(ThesisRevisionConflict, "coverage admission"):
             self.revisions.decide(
                 candidate_ref=candidate["id"], candidate_hash=candidate["content_hash"],
@@ -285,12 +290,8 @@ class DecisionTests(RevisionHarness):
         self.assertEqual(rejected["verdict"], "reject")
 
     def test_a_revision_that_says_nothing_new_is_refused(self):
-        candidate = self.candidate(confidence="medium", statement=None)
-        with self.assertRaisesRegex(ThesisRevisionConflict, "ADR-0008"):
-            self.revisions.decide(
-                candidate_ref=candidate["id"], candidate_hash=candidate["content_hash"],
-                verdict="accept", reason="Looks right.", actor_ref=OWNER,
-            )
+        with self.assertRaisesRegex(EventJudgementValidationError, "unchanged"):
+            self.candidate(confidence="medium", statement=None)
 
     def test_an_unknown_candidate_and_an_unknown_verdict_are_both_refused(self):
         with self.assertRaises(ThesisRevisionNotFound):
@@ -307,32 +308,22 @@ class DecisionTests(RevisionHarness):
         self.assertEqual(set(VERDICTS), {"accept", "reject", "defer"})
         self.assertEqual(TERMINAL_VERDICTS, {"accept", "reject"})
 
-    def test_a_person_may_revise_further_than_the_candidate_proposed(self):
+    def test_a_person_changed_statement_needs_a_new_direction_review(self):
+        from dalton_core.thesis_question_model import thesis_payload
         candidate = self.candidate()
-        decided = self.revisions.decide(
-            candidate_ref=candidate["id"], candidate_hash=candidate["content_hash"],
-            verdict="accept", reason="Weaker, and for a different reason.",
-            actor_ref=OWNER,
-            content=thesis_content(
-                statement="Reinvention demand is cyclical, not structural.",
-                confidence="low", change_reason="ignored; the authority computes it",
-            ),
-        )
-        version = decided["thesis_version"]
-        self.assertEqual(version["statement"],
-                         "Reinvention demand is cyclical, not structural.")
-        # The person may rewrite the thesis; they may not rewrite why it changed.
-        self.assertIn("thesis-revision-candidate:", version["change_reason"])
-        self.assertIn("THESIS_WEAKENED", version["change_reason"])
+        proposed = {**thesis_payload(self.version_one), "statement": "Reinvention demand is cyclical, not structural.", "confidence": "low"}
+        with self.assertRaisesRegex(ThesisRevisionValidationError, "own independently reviewed"):
+            self.revisions.decide(candidate_ref=candidate["id"], candidate_hash=candidate["content_hash"],
+                                  verdict="accept", reason="Different wording.", actor_ref=OWNER, content=proposed)
 
     def test_a_claim_ref_that_is_not_in_the_ledger_is_refused(self):
         candidate = self.candidate()
-        with self.assertRaises(ThesisRevisionNotFound):
+        with self.assertRaises(ThesisRevisionValidationError):
             self.revisions.decide(
                 candidate_ref=candidate["id"], candidate_hash=candidate["content_hash"],
                 verdict="accept", reason="r", actor_ref=OWNER,
-                content=thesis_content(statement="Weaker.",
-                                       claim_refs=["claim-version:invented"]),
+                content={**__import__("dalton_core.thesis_question_model", fromlist=["thesis_payload"]).thesis_payload(self.version_one),
+                         "confidence": "low", "claim_refs": ["claim-version:invented"]},
             )
 
 

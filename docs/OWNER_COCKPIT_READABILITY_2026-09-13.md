@@ -4,11 +4,11 @@
 
 ## 用户原始要求
 
-> 向旧版 cockpit 的链接以及相关文字不要再出现在新版 cockpit 网页里；所有最终的研究产物（无论是 initial screen 还是其他什么最终文字交付物）除了专有名词、原文引用等确实需要使用原始语言的情况外，都要用通顺、是人话的简体中文（生成的excel 模型可以用英文）；要制止模型在产出研究结果时的过度保守和过度防御倾向（例如大量使用不是 XXX，不能 XXX，不作为 XXX等等，只有该用的时候用，不要正反话都说）；'/Users/everflow/Documents/Dalton Cockpit 页面文字语言优化与“说人话”重构建议.md'是一个语言检查 agent 的检查结果，请你参考它的检查结果（他也有可能犯错，你自己要先评估下）以及你刚刚完整检查中暴露出的问题，对 cockpit 网页和背后的功能代码（如果涉及）进行改造和修复，自己迭代直到部署完成，之前暂时搁置的开发内容仍然搁置，我们优先把这个 cockpit 做成正常人能读懂、正常人容易操作的版本。
+> 向旧版 cockpit 的链接以及相关文字不要再出现在新版 cockpit 网页里；所有最终的研究产物（无论是 initial screen 还是其他什么最终文字交付物）除了专有名词、原文引用等确实需要使用原始语言的情况外，都要用通顺、是人话的简体中文（生成的excel 模型可以用英文）；要制止模型在产出研究结果时的过度保守和过度防御倾向（例如大量使用不是 XXX，不能 XXX，不作为 XXX等等，只有该用的时候用，不要正反话都说）；'$HOME/Documents/Dalton Cockpit 页面文字语言优化与“说人话”重构建议.md'是一个语言检查 agent 的检查结果，请你参考它的检查结果（他也有可能犯错，你自己要先评估下）以及你刚刚完整检查中暴露出的问题，对 cockpit 网页和背后的功能代码（如果涉及）进行改造和修复，自己迭代直到部署完成，之前暂时搁置的开发内容仍然搁置，我们优先把这个 cockpit 做成正常人能读懂、正常人容易操作的版本。
 
 > 还是之前的要求，你自己调试、部署、完善，用 5.6 Sol subagent 并行写代码（如果需要），直到所有问题都解决之前不要停下来。
 
-> 另外我觉得 /Users/everflow/Documents/Dalton Cockpit 页面文字语言优化与“说人话”重构建议.md 对语言本身的建议挺好的，你最后调完之后，再对着他这个核对一遍，看看是不是除了他确实改错了的地方，其他地方语言都改了。
+> 另外我觉得 $HOME/Documents/Dalton Cockpit 页面文字语言优化与“说人话”重构建议.md 对语言本身的建议挺好的，你最后调完之后，再对着他这个核对一遍，看看是不是除了他确实改错了的地方，其他地方语言都改了。
 
 补充验收：最终部署与调试后，逐项对照该建议文档复核。除确实改错事实、状态或功能含义的条目外，其余语言问题均须落实；未采纳项记录具体理由，不因代理自身措辞偏好而略过。建立逐节对照记录，避免只完成少数显眼的替换。
 
@@ -24,7 +24,7 @@
 
 ## README 与空间清理补充要求
 
-Owner 指定 README 使用 `/Users/everflow/Documents/Dalton Research OS README（面向非技术读者）2026-09-13.md`，原版放入 docs 存档。已逐字替换，旧版在 `docs/archive/README-before-nontechnical-2026-09-13.md`，原件 SHA-256 为 `07600a1d0e26fcf79cb32a6f7d99515fae2b0ec6ec0ccbe9a9501c12777a4a5f`。
+Owner 指定 README 使用 `$HOME/Documents/Dalton Research OS README（面向非技术读者）2026-09-13.md`，原版放入 docs 存档。已逐字替换，旧版在 `docs/archive/README-before-nontechnical-2026-09-13.md`，原件 SHA-256 为 `07600a1d0e26fcf79cb32a6f7d99515fae2b0ec6ec0ccbe9a9501c12777a4a5f`。
 
 > 我没让你暂停工作，我就让你清空间出来。
 
@@ -44,8 +44,8 @@ Owner 指定 README 使用 `/Users/everflow/Documents/Dalton Research OS README�
 
 ## 参考资料
 
-- [语言检查 agent 的建议](</Users/everflow/Documents/Dalton Cockpit 页面文字语言优化与“说人话”重构建议.md>)：需要判断真伪和适用范围，不是逐字替换指令。
-- [上轮页面文字全量摘录](</Users/everflow/Documents/Dalton Cockpit 页面文字全量摘录-2026-09-13.md>)：101 个页面、弹层和展开状态，包括五家公司产物与导出；保存修复前原文。
+- 语言检查 agent 的建议（本机参考：`$HOME/Documents/Dalton Cockpit 页面文字语言优化与“说人话”重构建议.md`）：需要判断真伪和适用范围，不是逐字替换指令。
+- 上轮页面文字全量摘录（本机参考：`$HOME/Documents/Dalton Cockpit 页面文字全量摘录-2026-09-13.md`）：101 个页面、弹层和展开状态，包括五家公司产物与导出；保存修复前原文。
 - [项目进度](PROJECT_STATUS.md)。
 - [R24 已部署版本验收](reports/demo-release-r24-2026-09-13.md)。
 
@@ -55,14 +55,14 @@ Owner 指定 README 使用 `/Users/everflow/Documents/Dalton Research OS README�
 
 | 工作 | 工作树／负责人 | 当前范围 |
 | --- | --- | --- |
-| 集成、存量中文呈现、真实验证与部署 | `/Users/everflow/Projects/dalton-continuous-0913-worktree`，主代理 | 存量产物中文附件的原文哈希绑定、只读加载与批处理；集成、部署、复查 |
-| 新版前端 | `/Users/everflow/Projects/dalton-cockpit-language-0913`，`writer_transition`，GPT-5.6 Sol | 移除旧版入口、全部界面文案、错误呈现、引用、表单、分页、审批与交互 |
-| 后台显示和功能正确性 | `/Users/everflow/Projects/dalton-cockpit-backend-0913`，`r21_acceptance`，GPT-5.6 Sol | EPS、事件、claims 分页、来源状态、错误分类、复盘时间、展示字典入口 |
-| 研究生成与 HTML 导出 | `/Users/everflow/Projects/dalton-chinese-research-output-0913`，`financial_review`，GPT-5.6 Sol | 所有最终文字生成路径的共同中文写作规则，减少防御性套话，中文版本校验与 HTML 导出 |
+| 集成、存量中文呈现、真实验证与部署 | `$HOME/Projects/dalton-continuous-0913-worktree`，主代理 | 存量产物中文附件的原文哈希绑定、只读加载与批处理；集成、部署、复查 |
+| 新版前端 | `$HOME/Projects/dalton-cockpit-language-0913`，`writer_transition`，GPT-5.6 Sol | 移除旧版入口、全部界面文案、错误呈现、引用、表单、分页、审批与交互 |
+| 后台显示和功能正确性 | `$HOME/Projects/dalton-cockpit-backend-0913`，`r21_acceptance`，GPT-5.6 Sol | EPS、事件、claims 分页、来源状态、错误分类、复盘时间、展示字典入口 |
+| 研究生成与 HTML 导出 | `$HOME/Projects/dalton-chinese-research-output-0913`，`financial_review`，GPT-5.6 Sol | 所有最终文字生成路径的共同中文写作规则，减少防御性套话，中文版本校验与 HTML 导出 |
 
 后台首个候选为 `9cfac370bf7a1652da7855bba85a87b73d827c0f`，主代理复查发现其 EPS 修复尚未覆盖实际使用的 `render_forecast_model` 全部路径，分页游标还需严格类型校验，已要求补齐。不得把这个首个候选当成本轮完成版本。
 
-本轮开始时线上仍为 R24：runtime `702564902a0ede520afbf8a62262be19641242d2`，OPS `2790c85397cc4b8b23b4a14dc8810ea9e3947186`。尚未部署本轮修复。正式交互入口为 <https://everflowdemac-mini.taild2c767.ts.net:8793/>。
+本轮开始时线上仍为 R24：runtime `702564902a0ede520afbf8a62262be19641242d2`，OPS `2790c85397cc4b8b23b4a14dc8810ea9e3947186`。尚未部署本轮修复。正式交互入口为 <https://your-node.your-tailnet.ts.net:8793/>。
 
 ## 存量中文内容处理约定
 

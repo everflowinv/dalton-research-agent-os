@@ -12,7 +12,8 @@ from __future__ import annotations
 
 import json
 import re
-from datetime import date
+from datetime import date, timedelta
+from calendar import monthrange
 from decimal import Decimal, InvalidOperation
 from typing import Any, Mapping, Sequence
 
@@ -35,7 +36,9 @@ from .model_forecast_driver import (
 from .store import canonical_json, content_hash
 
 
-SCHEMA_VERSION = "company-model-annual-projection-0.2"
+LEGACY_SCHEMA_VERSION = "company-model-annual-projection-0.2"
+SCHEMA_VERSION = "company-model-annual-projection-0.3"
+CLASSIFICATION_REF = "fiscal-year-classification:complete-grid:1"
 _HEX64 = re.compile(r"[0-9a-f]{64}")
 
 
@@ -98,8 +101,8 @@ def validate_calendar_binding(value: Mapping[str, Any] | None) -> dict[str, Any]
 
 
 def verify_statement_filing(
-    connection: Any, filing: Mapping[str, Any],
-) -> None:
+    connection: Any, filing: Mapping[str, Any], *, allow_legacy_metadata: bool = False,
+) -> str:
     """Replay one immutable statement filing and all of its stored lines."""
 
     rows = connection.execute(
@@ -128,10 +131,18 @@ def verify_statement_filing(
     line_hashes = []
     for fields in (
             common_fields,
-            common_fields[:8] + ("dimension_count",) + common_fields[8:]):
+            common_fields[:8] + ("dimension_count",) + common_fields[8:],
+            common_fields[:8] + ("dimension_count", "dimensions") + common_fields[8:]):
+        has_identity = any(dict(row).get("dimensions_json") is not None for row in rows)
+        if has_identity and "dimensions" not in fields:
+            continue  # New identity must be bound; a legacy hash cannot authorize it.
+        required = {"dimensions_json" if field == "dimensions" else field for field in fields}
+        if not all(required <= set(dict(row)) for row in rows):
+            continue
         lines = []
         for row in rows:
-            line = {field: row[field] for field in fields}
+            line = {field: (None if row["dimensions_json"] is None else json.loads(row["dimensions_json"]))
+                    if field == "dimensions" else row[field] for field in fields}
             line["is_breakdown"] = bool(line["is_breakdown"])
             lines.append(line)
         line_hashes.append(content_hash(lines))
@@ -154,8 +165,13 @@ def verify_statement_filing(
     matches = [line_hash for line_hash in line_hashes
                if content_hash({**body, "statement_lines_hash": line_hash})
                == filing["content_hash"]]
-    if len(matches) != 1:
-        raise AnnualProjectionError("annual filing authority hash is invalid")
+    if len(matches) == 1:
+        return "line_bound"
+    if content_hash(body) == filing["content_hash"]:
+        if allow_legacy_metadata:
+            return "header_only"
+        raise AnnualProjectionError("legacy filing binds metadata only; strong source context snapshot is required")
+    raise AnnualProjectionError("annual filing authority hash is invalid")
 
 
 def validate_stored_calendar_binding(
@@ -178,18 +194,39 @@ def validate_stored_calendar_binding(
     if (filing.get("content_hash") != binding["source_hash"]
             or filing.get("report_date") != binding["as_of"]):
         raise AnnualProjectionError("fiscal calendar differs from its stored annual filing")
-    verify_statement_filing(connection, filing)
+    verify_statement_filing(connection, filing, allow_legacy_metadata=True)
     return binding
 
 
 def fiscal_groups(
     periods: Sequence[str], binding: Mapping[str, Any] | None,
-    historical: set[str],
+    historical: set[str], *, complete_grid: bool = True,
 ) -> list[tuple[str, list[str]]]:
     """Group exact quarter ends under the bound fiscal year-end month."""
 
     if binding is None:
         return []
+    if complete_grid and periods:
+        dates = sorted({date.fromisoformat(str(raw)) for raw in periods})
+        month = binding["fiscal_year_end_month"]
+        first_year = dates[0].year + int(dates[0].month > month)
+        last_year = dates[-1].year + int(dates[-1].month > month)
+        groups = []
+        latest_actual = max(historical) if historical else ""
+        for year in range(first_year, last_year + 1):
+            quarter_ends = []
+            for offset in (-9, -6, -3, 0):
+                absolute = year * 12 + month - 1 + offset
+                y, m = divmod(absolute, 12)
+                expected = date(y, m + 1, monthrange(y, m + 1)[1])
+                matches = [day for day in dates if abs((day - expected).days) <= 7]
+                quarter_ends.append(min(matches, key=lambda day: abs((day - expected).days)).isoformat()
+                                    if matches else expected.isoformat())
+            kinds = {"A" if day <= latest_actual else "E" for day in quarter_ends}
+            suffix = next(iter(kinds)) if len(kinds) == 1 else "A/E"
+            partial = any(day not in periods for day in quarter_ends)
+            groups.append((f"FY{year}{suffix}" + (" (partial)" if partial else ""), quarter_ends))
+        return groups
     groups: list[tuple[str, list[str]]] = []
     pending: list[str] = []
     for raw in periods:
@@ -276,7 +313,7 @@ def _structure_facts(
 def _historical_eps(
     inputs: Mapping[str, Any], structure: Mapping[str, Any],
     replay: Mapping[str, Any], label: str, group: Sequence[str],
-    calendar: Mapping[str, Any],
+    calendar: Mapping[str, Any], *, prefer_filed: bool = True,
 ) -> dict[str, Any]:
     lines = {str(item["ref"]): item for item in (structure.get("lines") or [])}
     formulas = {str(item["output_ref"]): item
@@ -327,6 +364,26 @@ def _historical_eps(
         inputs, structure, eps, group, label, calendar,
         formulas.get(str(eps["ref"])),
     )
+    if prefer_filed:
+        # EPS is nonadditive. Preserve the filed annual value, rather than NI/shares rounding.
+        if not eps_cells:
+            for concept in ("us-gaap:EarningsPerShareDiluted", "us-gaap:EarningsPerShareBasicAndDiluted"):
+                candidate = {**eps, "kind": "filed", "concept": concept}
+                eps_cells = _structure_facts(inputs, structure, candidate, group, label, calendar)
+                if eps_cells:
+                    break
+        annual_eps = [cell for cell in eps_cells if cell["period_kind"] == "annual"]
+        values = {cell["value"] for cell in annual_eps}
+        if len(values) == 1:
+            cell = annual_eps[0]
+            return {"status": "computed", "value": format(Decimal(cell["value"]).normalize(), "f"), "basis": "filed_annual_eps", "unit": cell["unit"],
+                    "source_accessions": cell["source_accessions"], "filed_cells": annual_eps,
+                    "direct_numerator": aggregate_fiscal_year(numerator_cells, semantic="direct_annual", fiscal_year=fiscal_year),
+                    "direct_shares": aggregate_fiscal_year(share_cells, semantic="direct_annual", fiscal_year=fiscal_year)}
+        if len(values) > 1:
+            return {"status": "unavailable", "value": None, "reason": "conflicting filed annual diluted EPS"}
+        return {"status": "unavailable", "value": None,
+                "reason": "filed annual diluted EPS is not held; quarterly EPS cannot be summed"}
     outcome = annual_diluted_eps(
         diluted_eps_numerator_cells=numerator_cells,
         diluted_weighted_share_cells=share_cells,
@@ -391,7 +448,7 @@ def _projected_quarter_cells(
 def _forecast_outcomes(
     model: Mapping[str, Any], structure: Mapping[str, Any],
     label: str, group: Sequence[str], calendar: Mapping[str, Any],
-    *, historical_values: Mapping[str, Mapping[str, Decimal]],
+    *, inputs: Mapping[str, Any], historical_values: Mapping[str, Mapping[str, Decimal]],
     historical_refs: Mapping[str, Mapping[str, Sequence[Mapping[str, Any]]]],
     historical_starts: Mapping[str, str],
 ) -> tuple[dict[str, Any], dict[str, Any]]:
@@ -412,7 +469,8 @@ def _forecast_outcomes(
         (item for item in (replay.get("forecast_methods") or [])
          if item.get("line_ref") == shares_line.get("ref")), None,
     )
-    if (shares_line.get("annual_forecast_method") != "day_weighted_quarters"
+    annual_method = shares_line.get("annual_forecast_method")
+    if (annual_method not in {"day_weighted_quarters", "annual_growth_from_filed"}
             or not isinstance(share_replay, Mapping)
             or share_replay.get("annual_status") != "validated"):
         reason = {"status": "unavailable", "value": None,
@@ -432,10 +490,28 @@ def _forecast_outcomes(
     )
     for cell in share_cells:
         cell["fiscal_year"] = fiscal_year
-    shares = day_weighted_annual_shares(
-        share_cells, required_calendar=calendar["content_hash"],
-        required_definition_ref=share_definition,
-    )
+    if annual_method == "annual_growth_from_filed":
+        from .annual_share_forecast import annual_share_forecast, annual_share_source
+        sources = [item for item in inputs.get("filed_lines") or []
+                   if item.get("concept") == shares_line.get("concept")
+                   and item.get("unit", shares_line.get("unit")) == shares_line.get("unit")]
+        if len(sources) != 1:
+            raise AnnualProjectionError("annual diluted shares lack one exact filed identity")
+        source = sources[0]
+        if annual_share_source(source) != share_replay.get("annual_forecast_source"):
+            raise AnnualProjectionError("annual share forecast source differs from exact inputs")
+        end = date.fromisoformat(group[-1])
+        start = date(end.year - 1, end.month,
+                     min(end.day, monthrange(end.year - 1, end.month)[1])) + timedelta(days=1)
+        shares = annual_share_forecast(
+            source, period_start=start.isoformat(), period_end=end.isoformat())
+        shares.update(period_start=start.isoformat(), period_end=end.isoformat(),
+                      calendar=calendar["content_hash"], definition_ref=share_definition)
+    else:
+        shares = day_weighted_annual_shares(
+            share_cells, required_calendar=calendar["content_hash"],
+            required_definition_ref=share_definition,
+        )
     if numerator_line.get("annual_semantics") != "sum_quarters":
         numerator = {"status": "unavailable", "value": None,
                      "reason": "annual diluted-EPS numerator is not a four-quarter flow"}
@@ -657,6 +733,7 @@ def _cash_line_outcomes(
 def build_annual_projection(
     *, model: Mapping[str, Any], inputs: Mapping[str, Any],
     calendar_binding: Mapping[str, Any] | None,
+    _legacy: bool = False,
 ) -> dict[str, Any]:
     """Derive the immutable annual diluted-EPS projection for one model."""
 
@@ -690,7 +767,20 @@ def build_annual_projection(
         *held["history_periods"],
         *[item["end"] for item in held["realised_periods"] + held["forecast_periods"]],
     ]))
-    groups = fiscal_groups(periods, calendar, set(held["history_periods"]))
+    anchors = list(periods)
+    available_source_quarters = set()
+    source_quarter_coverage_recorded = any("source_quarter_ends" in line for line in inputs.get("filed_lines") or [])
+    if not _legacy:
+        for line in inputs.get("filed_lines") or []:
+            available_source_quarters.update(line.get("source_quarter_ends") or [])
+            for fact in line.get("duration_facts") or []:
+                try:
+                    start, end = date.fromisoformat(fact["period_start"]), date.fromisoformat(fact["period_end"])
+                except (ValueError, KeyError, TypeError):
+                    continue
+                if 290 < (end - start).days <= 380 and end.month == calendar["fiscal_year_end_month"]:
+                    anchors.append(end.isoformat())
+    groups = fiscal_groups(anchors, calendar, set(held["history_periods"]), complete_grid=not _legacy)
     drivers = build_structure_drivers(inputs, structure)
     historical_values, historical_refs = structure_historical_values(
         drivers, structure)
@@ -713,12 +803,22 @@ def build_annual_projection(
             "historical_eps": None, "forecast_shares": None,
             "forecast_eps": None,
         }
+        if not _legacy:
+            missing_quarters = [day for day in group if day not in periods]
+            latest_actual = max(held["history_periods"]) if held["history_periods"] else ""
+            basis = ("historical" if all(day <= latest_actual for day in group) else
+                     "forecast" if all(day > latest_actual for day in group) else "mixed")
+            row.update(source_basis=basis, missing_quarters=missing_quarters,
+                       classification_ref=CLASSIFICATION_REF)
+            row["kind"] = "incomplete" if missing_quarters else basis
+            kind = basis
         if kind == "historical":
             row["historical_eps"] = _historical_eps(
-                inputs, structure, replay, label, group, calendar)
+                inputs, structure, replay, label, group, calendar, prefer_filed=not _legacy)
         elif kind in {"forecast", "mixed"}:
             shares, eps = _forecast_outcomes(
                 held, structure, label, group, calendar,
+                inputs=inputs,
                 historical_values=historical_values,
                 historical_refs=historical_refs,
                 historical_starts=historical_starts,
@@ -739,7 +839,7 @@ def build_annual_projection(
                 _cash_line_outcomes(held, inputs, label, group, calendar))
         rows.append(row)
     body = {
-        "schema_version": SCHEMA_VERSION,
+        "schema_version": LEGACY_SCHEMA_VERSION if _legacy else SCHEMA_VERSION,
         "projection_ref": (
             f"annual-projection:{held['id']}:{calendar['content_hash']}"),
         "company_ref": held["company_ref"],
@@ -754,6 +854,15 @@ def build_annual_projection(
         "calendar_binding": calendar,
         "periods": rows,
     }
+    if not _legacy:
+        body["classification_ref"] = CLASSIFICATION_REF
+        body["historical_gaps"] = [{"label": row["label"], "quarter_ends": row["missing_quarters"],
+                                    "kind": "entire_year" if len(row["missing_quarters"]) == 4 else "quarters",
+                                    "scope": "model_quarter_inputs",
+                                    "held_but_outside_model_window": [day for day in row["missing_quarters"] if day in available_source_quarters],
+                                    "not_held_as_quarter": [day for day in row["missing_quarters"] if day not in available_source_quarters] if source_quarter_coverage_recorded else [],
+                                    "source_coverage_unknown": [] if source_quarter_coverage_recorded else list(row["missing_quarters"])}
+                                   for row in rows if row.get("source_basis") == "historical" and row["missing_quarters"]]
     return {**body, "content_hash": content_hash(body)}
 
 
@@ -762,7 +871,8 @@ def validate_annual_projection(
     inputs: Mapping[str, Any], calendar_binding: Mapping[str, Any],
 ) -> dict[str, Any]:
     exact = build_annual_projection(
-        model=model, inputs=inputs, calendar_binding=calendar_binding)
+        model=model, inputs=inputs, calendar_binding=calendar_binding,
+        _legacy=value.get("schema_version") == LEGACY_SCHEMA_VERSION)
     if dict(value) != exact:
         raise AnnualProjectionError("annual projection differs from its exact authorities")
     return exact
@@ -781,12 +891,16 @@ def validate_projection_record(
         "forecast_structure_binding_hash", "calendar_binding", "periods",
         "content_hash",
     }
+    if wire.get("schema_version") == SCHEMA_VERSION:
+        expected.update({"classification_ref", "historical_gaps"})
+        if wire.get("classification_ref") != CLASSIFICATION_REF or not isinstance(wire.get("historical_gaps"), list):
+            raise AnnualProjectionError("annual classification authority differs")
     asserted = wire.pop("content_hash", None)
     structure = model.get("financial_statement_structure") or {}
     replay = model.get("financial_statement_structure_replay") or {}
     binding = model.get("forecast_structure_binding") or {}
     if (
-        set(value) != expected or wire.get("schema_version") != SCHEMA_VERSION
+        set(value) != expected or wire.get("schema_version") not in {SCHEMA_VERSION, LEGACY_SCHEMA_VERSION}
         or not isinstance(asserted, str) or asserted != content_hash(wire)
         or wire.get("company_ref") != model.get("company_ref")
         or wire.get("model_version_ref") != model.get("id")

@@ -235,6 +235,60 @@ def source_credential_slots(source_state_dir: str | Path) -> list[str]:
     return slots
 
 
+
+def _configured_credential_slots(config: Mapping[str, Any], host_slots: list[str]) -> list[str]:
+    """For a proved closed profile pin, require its slots rather than every host account.
+
+    Tier policies and legacy/unproved configs retain the host comparison. This
+    does not infer a provider from a profile name or expand a pinned policy.
+    """
+    import sqlite3
+    from contextlib import closing
+    from .model_router import _policy_wire, _profile_wire
+
+    ref, database = config.get("routing_policy_ref"), config.get("model_router_db")
+    if not isinstance(ref, str) or not isinstance(database, str):
+        return host_slots
+    try:
+        with closing(sqlite3.connect(
+            Path(database).expanduser().resolve().as_uri() + "?mode=ro", uri=True,
+        )) as db:
+            db.execute("PRAGMA query_only=ON")
+            db.execute("BEGIN")
+            row = db.execute(
+                "SELECT policy_json, policy_hash FROM model_routing_policy_versions WHERE policy_version_ref=?",
+                (ref,),
+            ).fetchone()
+            if row is None:
+                return host_slots
+            policy = _policy_wire(json.loads(row[0]))
+            if policy["policy_version_ref"] != ref or policy["content_hash"] != row[1]:
+                return host_slots
+            if policy.get("fallback_chains") or policy.get("purpose_overrides"):
+                return host_slots
+            pins = policy["filters"]["allowed_profile_ids"]
+            if not pins or len(pins) > 256:
+                return host_slots
+            slots: list[str] = []
+            for profile_id in pins:
+                row = db.execute(
+                    "SELECT profile_json, profile_hash FROM model_endpoint_profile_versions "
+                    "WHERE profile_id=? ORDER BY version DESC LIMIT 1", (profile_id,),
+                ).fetchone()
+                if row is None:
+                    return host_slots
+                profile = _profile_wire(json.loads(row[0]))
+                if profile["id"] != profile_id or profile["content_hash"] != row[1]:
+                    return host_slots
+                slot = profile["credential_slot_ref"]
+                if slot not in slots:
+                    slots.append(slot)
+            return slots
+    except (OSError, ValueError, sqlite3.Error, TypeError, KeyError):
+        # Missing/corrupt policy or profile evidence must never exempt a config.
+        return host_slots
+
+
 def align_credential_slots(
     state_dir: str | Path, *, source_state_dir: str | Path,
 ) -> dict[str, Any]:
@@ -264,7 +318,7 @@ def align_credential_slots(
         if not isinstance(config, Mapping):
             continue
         held = [str(item) for item in config.get("credential_slot_refs") or []]
-        merged = _merge(held, wanted)
+        merged = _merge(held, _configured_credential_slots(config, wanted))
         if merged != held:
             writes.append((path, {**config, "credential_slot_refs": merged}))
             updated.append(path.name)
@@ -304,6 +358,225 @@ def align_credential_slots(
                  f"改写了 {len(updated)} 处。" if updated else
                  "模型凭证槽位本来就和本机现有环境一致。"),
     }
+
+
+# ---------------------------------------------------------------------------
+# The per-call budgets (the non-routing half of a model configuration).
+
+#: The model-configuration fields that set how much one call may spend and
+#: say, as opposed to where it is routed.  A tier or stage selection moves the
+#: routing pin; these move only when the owner edits a budget, which on this
+#: machine happens in the mature environment (the cockpit's "模型与预算" page
+#: or an ops script) -- and the runtime template a new environment is built
+#: from is a snapshot of the day it was exported.
+CALL_BUDGET_FIELDS: tuple[str, ...] = ("call_budget", "purpose_call_budgets")
+
+
+def call_budget_differences(
+    state_dir: str | Path, source_state_dir: str | Path,
+) -> list[dict[str, Any]]:
+    """Every call-budget field this environment holds differently from the source.
+
+    Only configurations both environments have are compared: a lane
+    configuration one side lacks is a template question
+    (``workspace_model_setup``), not a budget one.
+    """
+
+    state = Path(state_dir).expanduser().resolve()
+    source = Path(source_state_dir).expanduser().resolve()
+    found: list[dict[str, Any]] = []
+    for path in sorted(state.glob("*model-config.json")):
+        held = _read_json(path)
+        wanted = _read_json(source / path.name)
+        if not isinstance(held, Mapping) or not isinstance(wanted, Mapping):
+            continue
+        for field in CALL_BUDGET_FIELDS:
+            if held.get(field) != wanted.get(field):
+                found.append({"config": path.name, "field": field,
+                              "held": held.get(field), "wanted": wanted.get(field)})
+    return found
+
+
+def align_call_budgets(
+    state_dir: str | Path, *, source_state_dir: str | Path,
+) -> dict[str, Any]:
+    """Give this environment the source's per-call budgets, config by config.
+
+    The observed failure (2026-09-30): the mature environment raised
+    ``mission_directed_document_draft`` to 16 000 output tokens because a
+    reasoning model on that chain spent the default 4 096 thinking and
+    returned an empty, billed answer.  Template v5 predates that, so every
+    environment created from it -- and ws-e399, which the fix script did not
+    cover -- would have met the same empty answers again.
+
+    A mirror, not a merge: the source's value replaces this one's, and a field
+    the source does not set is removed, because the defect is "the new
+    environment is on a different budget than the one the owner chose", in
+    either direction.  Validated with the lanes' own config check before
+    anything is written, and written as one recoverable set.
+    """
+
+    from .document_extraction import validate_model_config
+    from .model_selection import _write_configs_atomically
+
+    state = Path(state_dir).expanduser().resolve()
+    source = Path(source_state_dir).expanduser().resolve()
+    differences = call_budget_differences(state, source)
+    if not differences:
+        return {"status": "unchanged", "source_state_dir": str(source),
+                "updated": [], "note": "每次调用的预算本来就和本机现有环境一致。"}
+    writes: list[tuple[Path, Mapping[str, Any]]] = []
+    updated: list[str] = []
+    for name in sorted({row["config"] for row in differences}):
+        path = state / name
+        config = dict(_read_json(path))
+        wanted = _read_json(source / name)
+        for field in CALL_BUDGET_FIELDS:
+            if field in wanted:
+                config[field] = json.loads(json.dumps(wanted[field]))
+            else:
+                config.pop(field, None)
+        validate_model_config(config)
+        writes.append((path, config))
+        updated.append(name)
+    _write_configs_atomically(writes)
+    return {
+        "status": "aligned", "source_state_dir": str(source),
+        "updated": updated,
+        "fields": [f"{row['config']}#{row['field']}" for row in differences],
+        "note": f"每次调用的预算已按本机现有环境对齐，改写了 {len(updated)} 份模型配置。",
+    }
+
+
+# ---------------------------------------------------------------------------
+# The day-budget policy an existing environment pins.
+
+BUDGET_FILENAME = "thesis-impact-budget.sqlite"
+
+
+def _budget_lineage(budget_db: Path) -> list[dict[str, Any]]:
+    """Every day-budget policy version in one ledger, read-only."""
+
+    if not budget_db.is_file():
+        return []
+    connection = sqlite3.connect(f"file:{budget_db}?mode=ro", uri=True, timeout=5)
+    try:
+        rows = connection.execute(
+            "SELECT policy_version_id, prior_version_id, day_cap_micros, created_at "
+            "FROM thesis_impact_budget_policies").fetchall()
+    finally:
+        connection.close()
+    return [{"policy_version_id": row[0], "prior_version_id": row[1],
+             "day_cap_micros": int(row[2]), "created_at": row[3]} for row in rows]
+
+
+def budget_policy_plan(state_dir: str | Path, source_state_dir: str | Path) -> dict[str, Any]:
+    """What it would take for this environment to run on the source's day cap.
+
+    ``ok`` when every lane configuration and ``service.json`` already pin a
+    policy with the source head's cap.  ``extend`` when this ledger's head is
+    an ancestor of the source head, so the source's newer versions can be
+    registered here unchanged (ids, caps and priors) and the pins moved -- the
+    ws-e399 case: production:3 ($180) here, production:3 -> ... -> $500 there.
+    ``diverged`` when this environment has its own lineage (a cockpit budget
+    save); that is the owner's choice and is reported, never rewritten.
+    """
+
+    from .workspace_model_setup import latest_budget_policy_id
+
+    state = Path(state_dir).expanduser().resolve()
+    source = Path(source_state_dir).expanduser().resolve()
+    theirs = _budget_lineage(source / BUDGET_FILENAME)
+    ours = _budget_lineage(state / BUDGET_FILENAME)
+    head = latest_budget_policy_id(theirs)
+    if head is None:
+        return {"status": "unknown", "reason": f"{source} 没有日预算策略"}
+    by_id = {row["policy_version_id"]: row for row in theirs}
+    held_ids = {row["policy_version_id"] for row in ours}
+    pins: dict[str, Any] = {}
+    for path in sorted(state.glob("*model-config.json")):
+        config = _read_json(path)
+        if isinstance(config, Mapping):
+            pins[path.name] = config.get("budget_policy_ref")
+    service = _read_json(service_config_path(state))
+    thesis = ((service or {}).get("thesis_impact") or {}).get("config") or {}
+    if "budget_policy_version_id" in thesis:
+        pins["service.json#thesis_impact"] = thesis["budget_policy_version_id"]
+    our_caps = {row["policy_version_id"]: row["day_cap_micros"] for row in ours}
+    wanted_cap = by_id[head]["day_cap_micros"]
+    record = {"source_head": head, "source_cap_micros": wanted_cap, "pins": pins}
+    if pins and all(our_caps.get(value) == wanted_cap for value in pins.values()) \
+            and len(set(pins.values())) == 1:
+        return {**record, "status": "ok"}
+    chain: list[dict[str, Any]] = []
+    cursor: str | None = head
+    while cursor is not None and cursor not in held_ids:
+        row = by_id.get(cursor)
+        if row is None:
+            break
+        chain.append(row)
+        cursor = row["prior_version_id"]
+    our_head = latest_budget_policy_id(ours)
+    if cursor is not None and cursor not in held_ids:
+        return {**record, "status": "diverged",
+                "reason": "源环境的预算血统不完整"}
+    if cursor is not None and our_head is not None and cursor != our_head:
+        # The source extends an older version of ours; ours moved on its own.
+        return {**record, "status": "diverged",
+                "reason": f"这个环境有自己的预算版本（{our_head}），与源环境分叉"}
+    if cursor is None and ours:
+        return {**record, "status": "diverged",
+                "reason": "两个环境的预算血统没有共同祖先"}
+    return {**record, "status": "extend",
+            "register": list(reversed(chain))}
+
+
+def align_budget_policy(state_dir: str | Path, *, source_state_dir: str | Path,
+                        clock: Any = None) -> dict[str, Any]:
+    """Register the source's newer day-budget versions here and pin the head.
+
+    The ledger rows are registered through ``ThesisImpactBudgetStore`` exactly
+    as ``install_runtime_template`` registers a template's lineage, so an
+    existing environment ends where a newly created one starts.  The writer and
+    thesis-impact hold this ledger, so the services must be stopped first.
+    """
+
+    from .model_selection import _write_configs_atomically
+    from .thesis_impact_budget import ThesisImpactBudgetStore
+
+    state = Path(state_dir).expanduser().resolve()
+    plan = budget_policy_plan(state, source_state_dir)
+    if plan["status"] == "ok":
+        return {**plan, "updated": []}
+    if plan["status"] != "extend":
+        return {**plan, "updated": []}
+    kwargs = {} if clock is None else {"clock": clock}
+    with ThesisImpactBudgetStore(state / BUDGET_FILENAME, **kwargs) as budget:
+        for row in plan["register"]:
+            budget.register_policy(policy_version_id=row["policy_version_id"],
+                                   day_cap_micros=row["day_cap_micros"],
+                                   prior_version_id=row["prior_version_id"])
+    head = plan["source_head"]
+    writes: list[tuple[Path, Mapping[str, Any]]] = []
+    updated: list[str] = []
+    for path in sorted(state.glob("*model-config.json")):
+        config = _read_json(path)
+        if isinstance(config, Mapping) and config.get("budget_policy_ref") != head:
+            writes.append((path, {**config, "budget_policy_ref": head}))
+            updated.append(path.name)
+    service_path = service_config_path(state)
+    service = _read_json(service_path)
+    thesis = ((service or {}).get("thesis_impact") or {}).get("config")
+    if isinstance(thesis, dict) and thesis.get("budget_policy_version_id") != head:
+        service = json.loads(json.dumps(service))
+        service["thesis_impact"]["config"]["budget_policy_version_id"] = head
+        writes.append((service_path, service))
+        updated.append("service.json#thesis_impact.config.budget_policy_version_id")
+    if writes:
+        _write_configs_atomically(writes)
+    return {**plan, "status": "aligned",
+            "registered": [row["policy_version_id"] for row in plan["register"]],
+            "updated": updated}
 
 
 # ---------------------------------------------------------------------------
@@ -561,7 +834,8 @@ def adopt_host_scheme(
                 "这个环境用打包的默认模型配置。")
         return {"schema_version": SCHEMA_VERSION, "source_state_dir": None,
                 "credential_slots": {"status": "skipped", "note": note},
-                "model_routing": {"status": "skipped", "note": note}}
+                "model_routing": {"status": "skipped", "note": note},
+                "call_budgets": {"status": "skipped", "note": note}}
     try:
         slots = align_credential_slots(state, source_state_dir=source)
     except Exception as exc:  # noqa: BLE001 - never fail a creation for this
@@ -571,8 +845,13 @@ def adopt_host_scheme(
             state, source_state_dir=source, actor_ref=actor_ref, now=now)
     except Exception as exc:  # noqa: BLE001 - never fail a creation for this
         routing = {"status": "failed", "note": f"模型路由没有对齐：{exc}"}
+    try:
+        budgets = align_call_budgets(state, source_state_dir=source)
+    except Exception as exc:  # noqa: BLE001 - never fail a creation for this
+        budgets = {"status": "failed", "note": f"每次调用的预算没有对齐：{exc}"}
     return {"schema_version": SCHEMA_VERSION, "source_state_dir": str(source),
-            "credential_slots": slots, "model_routing": routing}
+            "credential_slots": slots, "model_routing": routing,
+            "call_budgets": budgets}
 
 
 def _shared_budget_row(state: Path) -> dict[str, Any]:
@@ -667,7 +946,7 @@ def _slot_row(state: Path, source: Path | None) -> dict[str, Any]:
         config = _read_json(path)
         if not isinstance(config, Mapping):
             continue
-        missing = [slot for slot in wanted
+        missing = [slot for slot in _configured_credential_slots(config, wanted)
                    if slot not in (config.get("credential_slot_refs") or [])]
         if missing:
             short.append(f"{path.name}：缺 {'、'.join(missing)}")
@@ -683,6 +962,24 @@ def _slot_row(state: Path, source: Path | None) -> dict[str, Any]:
             "blockers": [*_first(short),
                          "少一个槽位就够让那条链路每次调用都报 credential_slot_unavailable；"
                          "运行 scripts/repair_workspace_lane_parity.py --apply 补齐后重启服务。"]}
+
+
+def _call_budget_row(state: Path, source: Path | None) -> dict[str, Any]:
+    row: dict[str, Any] = {"key": "call_budgets", "label": "每次调用的预算（输出上限等）",
+                           "blockers": []}
+    if source is None:
+        return {**row, "status": "unknown", "detail": "没有找到可以比对的现有研究环境"}
+    differences = call_budget_differences(state, source)
+    detail = f"比对的环境：{source}"
+    if not differences:
+        return {**row, "status": "ok", "detail": detail}
+    return {**row, "status": "differs", "detail": detail,
+            "blockers": [*_first([f"{item['config']} 的 {item['field']}：这里是 "
+                                  f"{json.dumps(item['held'], ensure_ascii=False)}，那边是 "
+                                  f"{json.dumps(item['wanted'], ensure_ascii=False)}"
+                                  for item in differences]),
+                         "新建环境会自动对齐；已有环境运行 "
+                         "scripts/repair_workspace_lane_parity.py --apply 补齐后重启服务。"]}
 
 
 def audit_host_scheme(
@@ -705,12 +1002,14 @@ def audit_host_scheme(
         state, manager_config_path=manager_config_path,
         source_state_dir=source_state_dir, source_id=source_id)
     return [_shared_budget_row(state), _routing_row(state, source),
-            _slot_row(state, source)]
+            _slot_row(state, source), _call_budget_row(state, source)]
 
 
 __all__ = [
-    "ROUTER_FILENAME", "SCHEMA_VERSION", "SLOT_FIELDS", "adopt_host_scheme",
-    "align_credential_slots", "align_model_routing", "audit_host_scheme",
+    "CALL_BUDGET_FIELDS", "ROUTER_FILENAME", "SCHEMA_VERSION", "SLOT_FIELDS",
+    "adopt_host_scheme", "align_budget_policy", "align_call_budgets",
+    "budget_policy_plan", "align_credential_slots",
+    "align_model_routing", "audit_host_scheme", "call_budget_differences",
     "copy_missing_profiles", "resolve_manager_config", "resolve_source_state_dir",
     "service_config_path", "source_credential_slots", "source_environment",
 ]

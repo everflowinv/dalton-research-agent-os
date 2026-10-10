@@ -34,7 +34,7 @@ The first 61f5675 full run had three fixture errors, fixed by explicitly syncing
 
 ## Owner actions and next step
 
-The private packet is `/Users/everflow/Projects/dalton-owner-activation-20260910`. Its release manifest now records the passed full suite and exact accepted artifacts. It contains reviewed deployment, mission-v14 signing and read-only postdeployment scripts. Deployment verifies the exact release, drains services, creates and verifies a database backup, installs an archived commit, and retains its source. Signing adds 11 write kinds and 3 checkpoints while preserving the five-company universe, budget and source bindings.
+The private packet is `$HOME/Projects/dalton-owner-activation-20260910`. Its release manifest now records the passed full suite and exact accepted artifacts. It contains reviewed deployment, mission-v14 signing and read-only postdeployment scripts. Deployment verifies the exact release, drains services, creates and verifies a database backup, installs an archived commit, and retains its source. Signing adds 11 write kinds and 3 checkpoints while preserving the five-company universe, budget and source bindings.
 
 After deployment/signing, verify actual dossier, DebateMap and event-judgement products for ACN, CTSH, EPAM, IBM and DXC. The predeploy baseline has all 15 targets missing. Stub dispatch never counts as product completion. The postdeploy checker compares installed Python/SQL/HTML with the accepted artifact and reports mission, artifact and per-purpose route state using read-only database handles.
 

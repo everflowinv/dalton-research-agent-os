@@ -2,6 +2,8 @@
 
 from __future__ import annotations
 
+from tests.thesis_question_fixtures import formal_content
+
 import hashlib
 import json
 import sqlite3
@@ -400,14 +402,14 @@ class ResearchDoctrineTests(unittest.TestCase):
             driver_refs=["driver:hidden-obligations"], mandate_version_ref=self.mandate["id"],
             mandate_version_hash=self.mandate["content_hash"],
             driver_pack_version_ref=driver["id"], driver_pack_version_hash=driver["content_hash"],
-            content={
+            content=formal_content(self.store, {
                 "statement": "Lease obligations may reduce balance-sheet flexibility.",
                 "mechanism": "Fixed commitments consume future cash flow.", "confidence": "low",
                 "implied_expectation": "Disclosed commitments are material.", "claim_refs": [],
                 "catalyst_refs": ["catalyst:annual-filing"],
                 "falsifier_refs": ["falsifier:commitments-immaterial"],
                 "change_reason": "Initial human admission.",
-            }, actor_ref="human:owner", idempotency_key="thesis-candidate:lease:1",
+            }, question="question:" + "thesis:acme:hidden-obligations", industry=("industry:lease-analysis" if str("acme").startswith("industry:") else None)), actor_ref="human:owner", idempotency_key="thesis-candidate:lease:1",
         )
         admitted = coverage.decide_thesis_admission(
             candidate_id=candidate["id"], candidate_hash=candidate["content_hash"],

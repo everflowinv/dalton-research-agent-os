@@ -252,6 +252,7 @@ def argv_fragment(context: Any) -> list[str]:
 
 LANE = register_lane(LaneSpec(
     operation="dispatch_forecast_sensitivity",
+    failure_ledger="mission_sensitivity",
     order=96,
     driver_key="forecast_sensitivity",
     handler=dispatch,

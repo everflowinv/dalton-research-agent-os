@@ -269,7 +269,7 @@ class FinancialStatementStructureTests(unittest.TestCase):
         )
         self.assertEqual(structure["schema_version"], SCHEMA_VERSION)
         self.assertEqual(structure["authority_ref"],
-                         "company-financial-statement-structure:0.5")
+                         "company-financial-statement-structure:0.6")
         annual = replay["note_formula_periods"][0]
         self.assertEqual(annual["status"], "validated")
         self.assertEqual(annual["periods"][0]["value"], "7685673000")

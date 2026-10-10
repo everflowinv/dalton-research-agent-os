@@ -1,0 +1,923 @@
+{
+ "artefact": {
+  "artefact_kind": "initial_screen",
+  "cited_tags": [],
+  "confidence": null,
+  "contract": {
+   "lint": "be1cf368fe7c03599accd33bc387ae59aab30b79a9d5a24a2f68915d5866665d",
+   "pack": {
+    "as_of": "2026-08-15",
+    "content_hash": "db8dd50bb05928664007c2b489e4da7a59f2c19f94756b1a0ef1efeb4d322cca",
+    "gap_request_refs": [],
+    "inputs": [
+     {
+      "date": "2026-07-30",
+      "doc_kind": "transcript",
+      "kind": "document",
+      "ref": "doc:synw-q2-2026-call"
+     },
+     {
+      "date": "2026-07-29",
+      "doc_kind": "sec_exhibit",
+      "kind": "document",
+      "ref": "doc:synw-q2-2026-release"
+     },
+     {
+      "date": "2026-02-20",
+      "doc_kind": "sec_10k",
+      "kind": "document",
+      "ref": "doc:synw-10k-2025"
+     },
+     {
+      "date": "2026-08-05",
+      "doc_kind": "broker_report",
+      "kind": "document",
+      "ref": "doc:brokera-synw-2026-08-05"
+     },
+     {
+      "date": "2026-06-30",
+      "doc_kind": "web_page",
+      "kind": "document",
+      "ref": "doc:widget-industry-2026"
+     },
+     {
+      "date": "2026-04-30",
+      "doc_kind": "transcript",
+      "kind": "document",
+      "ref": "doc:synw-q1-2026-call"
+     }
+    ],
+    "recipe_version": "initial_screen:synthetic",
+    "total_chars": 1884
+   },
+   "product_contract": "9547d80479dee6c8dc5588961adc271fcf905f42f7bbc2401b5aef4aa2c3ed2e",
+   "stance": "观察",
+   "verifier": {
+    "finding_codes": [
+     "watch_price_disagrees_with_worksheet"
+    ],
+    "verdict": "reject"
+   },
+   "version": "initial-screen-contract:strl:1",
+   "watch_price": {
+    "currency": "USD",
+    "current_price": "80.00",
+    "eps": "5.00",
+    "expression": "17.0*5.00",
+    "implied_return_pct": "6.3",
+    "multiple": "17.0",
+    "multiple_basis": "FY2027 前瞻 P/E",
+    "status": "given",
+    "value": "85.0"
+   },
+   "worksheet": {
+    "core_judgement": "一致预期低估了服务业务的经营杠杆，FY2027 EPS 差异来自利润率假设。",
+    "forecasts": [
+     {
+      "consensus": "4950",
+      "consensus_tag": "N1",
+      "diff_expression": "(5050/4950-1)*100",
+      "diff_pct": "2.0",
+      "driver": "下半年服务收入延续第二季度增速",
+      "metric": "revenue",
+      "ours": "5050",
+      "ours_tag": "N17",
+      "year": "FY2026"
+     },
+     {
+      "consensus": "4.00",
+      "consensus_tag": "N2",
+      "diff_expression": "(4.20/4.00-1)*100",
+      "diff_pct": "5.0",
+      "driver": "服务占比上升带动利润率",
+      "metric": "eps",
+      "ours": "4.20",
+      "ours_tag": "N18",
+      "year": "FY2026"
+     },
+     {
+      "consensus": "5400",
+      "consensus_tag": "N3",
+      "diff_expression": "(5700/5400-1)*100",
+      "diff_pct": "5.6",
+      "driver": "backlog 转化节奏维持历史水平",
+      "metric": "revenue",
+      "ours": "5700",
+      "ours_tag": "N19",
+      "year": "FY2027"
+     },
+     {
+      "consensus": "4.50",
+      "consensus_tag": "N4",
+      "diff_expression": "(5.00/4.50-1)*100",
+      "diff_pct": "11.1",
+      "driver": "服务占比上升带动营业利润率",
+      "metric": "eps",
+      "ours": "5.00",
+      "ours_tag": "N20",
+      "year": "FY2027"
+     }
+    ],
+    "key_passages": [
+     "P1",
+     "P2",
+     "P3"
+    ],
+    "multiple_rationale": {
+     "business": "多年期服务合同、续约率高",
+     "history": "过去 5 年中位数 16.0x",
+     "peers": "同业中位数 18.0x"
+    },
+    "open_questions": [
+     {
+      "affects_conclusion": true,
+      "gap_kind": "not_acquired",
+      "question": "服务分部利润率历史",
+      "request_ref": "material-request:synw-seg-margin"
+     }
+    ],
+    "stance": "观察",
+    "trade": {
+     "catalysts": [
+      {
+       "date": "2026-10",
+       "event": "Q3 财报"
+      }
+     ],
+     "crowding": "现价接近 52 周上沿",
+     "earnings_reaction": "财报日波动大",
+     "edge": "EPS 预期差"
+    },
+    "watch_price": {
+     "currency": "USD",
+     "current_price": "80.00",
+     "current_price_tag": "N5",
+     "eps": "5.00",
+     "eps_tag": "N20",
+     "expression": "17.0*5.00",
+     "implied_expression": "(85.0/80.00-1)*100",
+     "implied_return_pct": "6.3",
+     "multiple": "17.0",
+     "multiple_basis": "FY2027 前瞻 P/E",
+     "reference_tags": [
+      "N12",
+      "P4"
+     ],
+     "status": "given",
+     "value": "85.0"
+    }
+   }
+  },
+  "expected_sections": [
+   "结论与观点",
+   "商业模式与经济性",
+   "行业结构与竞争",
+   "盈利预测 vs consensus",
+   "估值与观察价",
+   "交易角度",
+   "风险与证伪",
+   "跟踪指标",
+   "附录：我们不知道什么"
+  ],
+  "gaps": [
+   "company_not_disclosed：按客户的续约数据",
+   "not_acquired：服务业务分部利润率历史序列"
+  ],
+  "hash": "0000000000000000000000000000000000000000000000000000000000000005",
+  "prior": null,
+  "question": null,
+  "ref": "golden:initial-screen-strl:watch-price-unavailable-with-reason",
+  "sections": [
+   {
+    "body": "立场：观察。观察价：暂无法给出（我们的 FY2027 EPS 预测所在模型未通过不变量检查，倍数没有可依托的 EPS）。作为参照，一致预期目标价均值为 92.00 美元，区间 75.00 至 110.00 美元。核心判断：服务业务的经营杠杆可能被低估，但在模型修好之前我们不给价格；证伪条件是服务续约率明显低于 2025 年的 92%。",
+    "claim_refs": [],
+    "gaps": [],
+    "numbers": [
+     {
+      "claim_version_ref": "",
+      "metric": "一致预期目标价均值",
+      "number_ref": "pack-json:/numbers/consensus/target/mean",
+      "period": "12M",
+      "text": "92.00",
+      "unit": "美元"
+     },
+     {
+      "claim_version_ref": "",
+      "metric": "一致预期目标价最高",
+      "number_ref": "pack-json:/numbers/consensus/target/high",
+      "period": "12M",
+      "text": "110.00",
+      "unit": "美元"
+     },
+     {
+      "claim_version_ref": "",
+      "metric": "一致预期目标价最低",
+      "number_ref": "pack-json:/numbers/consensus/target/low",
+      "period": "12M",
+      "text": "75.00",
+      "unit": "美元"
+     },
+     {
+      "claim_version_ref": "",
+      "metric": "续约率",
+      "passage_ref": "doc-passage:doc:synw-10k-2025:0-156:b64461ba6dbf",
+      "period": "2025",
+      "text": "renewal rates were 92% in 2025",
+      "unit": "%"
+     }
+    ],
+    "source_refs": [
+     {
+      "ref": "pack-json:/numbers/consensus/target/mean",
+      "source_kind": "consensus",
+      "tag": "N12"
+     },
+     {
+      "as_of": "2026-02-20",
+      "ref": "doc-passage:doc:synw-10k-2025:0-156:b64461ba6dbf",
+      "source_kind": "filing",
+      "tag": "P3",
+      "title": "SYNW 10-K 2025"
+     },
+     {
+      "ref": "pack-json:/numbers/consensus/target/high",
+      "source_kind": "consensus",
+      "tag": "N13"
+     },
+     {
+      "ref": "pack-json:/numbers/consensus/target/low",
+      "source_kind": "consensus",
+      "tag": "N14"
+     }
+    ],
+    "title": "结论与观点"
+   },
+   {
+    "body": "服务是利润中心：第二季度服务占收入 60%、占经营利润 75%，公司整体营业利润率为 21.0%（第二季度电话会）。服务合同平均期限 36 个月，2025 年续约率 92%（年报），收入以多年期合同为主。硬件按台销售，平均单价 1,200 美元，毛利率 28%（年报），主要作用是带出后续服务合同。季末 backlog 为 4,800 百万美元，历史上约 45% 在 12 个月内转化为收入（第二季度电话会），按此节奏推算未来 12 个月可转化约 2,160 百万美元。",
+    "claim_refs": [],
+    "gaps": [],
+    "numbers": [
+     {
+      "claim_version_ref": "",
+      "metric": "服务收入与经营利润占比",
+      "passage_ref": "doc-passage:doc:synw-q2-2026-call:0-280:5fe83d487fb2",
+      "period": "FY2026Q2",
+      "text": "Services were 60% of revenue and 75% of operating profit",
+      "unit": "%"
+     },
+     {
+      "claim_version_ref": "",
+      "metric": "营业利润率",
+      "passage_ref": "doc-passage:doc:synw-q2-2026-call:0-280:5fe83d487fb2",
+      "period": "FY2026Q2",
+      "text": "operating margin was 21.0%",
+      "unit": "%"
+     },
+     {
+      "claim_version_ref": "",
+      "metric": "合同期限与续约率",
+      "passage_ref": "doc-passage:doc:synw-10k-2025:0-156:b64461ba6dbf",
+      "period": "2025",
+      "text": "Services contracts run 36 months on average and renewal rates were 92% in 2025",
+      "unit": "月/%"
+     },
+     {
+      "claim_version_ref": "",
+      "metric": "硬件单价与毛利率",
+      "passage_ref": "doc-passage:doc:synw-10k-2025:0-156:b64461ba6dbf",
+      "period": "2025",
+      "text": "Hardware units sell at an average price of $1,200, with gross margin of 28%",
+      "unit": "美元/%"
+     },
+     {
+      "claim_version_ref": "",
+      "metric": "backlog 与转化率",
+      "passage_ref": "doc-passage:doc:synw-q2-2026-call:0-280:5fe83d487fb2",
+      "period": "FY2026Q2",
+      "text": "Backlog ended the quarter at $4,800 million, and historically about 45% of backlog converts to revenue within 12 months",
+      "unit": "百万美元/%"
+     },
+     {
+      "claim_version_ref": "",
+      "derivation": {
+       "expression": "4800*45/100",
+       "result": "2160"
+      },
+      "metric": "12 个月可转化 backlog",
+      "period": "FY2026Q3-FY2027Q2",
+      "text": "约 2,160 百万美元",
+      "unit": "百万美元"
+     }
+    ],
+    "source_refs": [
+     {
+      "as_of": "2026-07-30",
+      "ref": "doc-passage:doc:synw-q2-2026-call:0-280:5fe83d487fb2",
+      "source_kind": "transcript",
+      "tag": "P1",
+      "title": "SYNW Q2 2026 earnings call"
+     },
+     {
+      "as_of": "2026-02-20",
+      "ref": "doc-passage:doc:synw-10k-2025:0-156:b64461ba6dbf",
+      "source_kind": "filing",
+      "tag": "P3",
+      "title": "SYNW 10-K 2025"
+     }
+    ],
+    "title": "商业模式与经济性"
+   },
+   {
+    "body": "行业规模约 60,000 百万美元，年增速 6%，前三大厂商合计份额 35%，公司份额 4%（行业报告）。市场分散，公司靠多年期服务合同与客户粘性守住份额。管理层称公司正在大客户中赢得份额，目前没有独立的份额数据可以核实这一点，我们只把它当作公司观点。",
+    "claim_refs": [
+     "claim-version:cccccccccccccccccccccccccccccccccccccccccccccccccccccccccccccccc"
+    ],
+    "gaps": [],
+    "numbers": [
+     {
+      "claim_version_ref": "",
+      "metric": "市场规模、增速与份额",
+      "passage_ref": "doc-passage:doc:widget-industry-2026:0-148:7b8baef58773",
+      "period": "2026",
+      "text": "The widget services market is about $60,000 million and grows 6% a year; the three largest vendors hold 35% combined share and the company holds 4%",
+      "unit": "百万美元/%"
+     }
+    ],
+    "source_refs": [
+     {
+      "ref": "claim-version:cccccccccccccccccccccccccccccccccccccccccccccccccccccccccccccccc",
+      "source_kind": "claim",
+      "tag": "C1"
+     },
+     {
+      "as_of": "2026-06-30",
+      "ref": "doc-passage:doc:widget-industry-2026:0-148:7b8baef58773",
+      "source_kind": "web",
+      "tag": "P5",
+      "title": "Widget services market review"
+     }
+    ],
+    "title": "行业结构与竞争"
+   },
+   {
+    "body": "我们预计 FY2026 收入 5,050 百万美元、EPS 4.20 美元，分别高于一致预期（12 家券商）的 4,950 百万美元和 4.00 美元 2.0% 与 5.0%。我们预计 FY2027 收入 5,700 百万美元、EPS 5.00 美元，比一致预期的 5,400 百万美元和 4.50 美元高 5.6% 与 11.1%。差异主要来自利润率假设：我们假设服务占比延续第二季度的水平，带动营业利润率高于一致预期隐含的水平。FY2026 收入与公司上调后的 5,000 百万美元至 5,100 百万美元指引区间一致（发布稿）。",
+    "claim_refs": [],
+    "gaps": [],
+    "numbers": [
+     {
+      "claim_version_ref": "",
+      "estimate": {
+       "assumption_ref": "pack-json:/our_model/periods/0/revenue"
+      },
+      "metric": "收入",
+      "period": "FY2026",
+      "text": "5,050（5050）",
+      "unit": "百万美元"
+     },
+     {
+      "claim_version_ref": "",
+      "estimate": {
+       "assumption_ref": "pack-json:/our_model/periods/0/eps"
+      },
+      "metric": "EPS",
+      "period": "FY2026",
+      "text": "4.20",
+      "unit": "美元"
+     },
+     {
+      "claim_version_ref": "",
+      "estimate": {
+       "assumption_ref": "pack-json:/our_model/periods/1/revenue"
+      },
+      "metric": "收入",
+      "period": "FY2027",
+      "text": "5,700（5700）",
+      "unit": "百万美元"
+     },
+     {
+      "claim_version_ref": "",
+      "estimate": {
+       "assumption_ref": "pack-json:/our_model/periods/1/eps"
+      },
+      "metric": "EPS",
+      "period": "FY2027",
+      "text": "5.00",
+      "unit": "美元"
+     },
+     {
+      "claim_version_ref": "",
+      "metric": "一致预期收入",
+      "number_ref": "pack-json:/numbers/consensus/periods/0/revenue/mean",
+      "period": "FY2026",
+      "text": "4,950（4950）",
+      "unit": "百万美元"
+     },
+     {
+      "claim_version_ref": "",
+      "metric": "一致预期 EPS",
+      "number_ref": "pack-json:/numbers/consensus/periods/0/eps/mean",
+      "period": "FY2026",
+      "text": "4.00",
+      "unit": "美元"
+     },
+     {
+      "claim_version_ref": "",
+      "metric": "一致预期收入",
+      "number_ref": "pack-json:/numbers/consensus/periods/1/revenue/mean",
+      "period": "FY2027",
+      "text": "5,400（5400）",
+      "unit": "百万美元"
+     },
+     {
+      "claim_version_ref": "",
+      "metric": "一致预期 EPS",
+      "number_ref": "pack-json:/numbers/consensus/periods/1/eps/mean",
+      "period": "FY2027",
+      "text": "4.50",
+      "unit": "美元"
+     },
+     {
+      "claim_version_ref": "",
+      "metric": "收入指引",
+      "passage_ref": "doc-passage:doc:synw-q2-2026-release:0-151:ea1a5d0b6c52",
+      "period": "FY2026",
+      "text": "raised full-year 2026 revenue guidance to $5,000 million to $5,100 million",
+      "unit": "百万美元"
+     },
+     {
+      "claim_version_ref": "",
+      "derivation": {
+       "expression": "(5050/4950-1)*100",
+       "result": "2.0"
+      },
+      "metric": "收入差异",
+      "period": "FY2026",
+      "text": "收入高 2.0%",
+      "unit": "%"
+     },
+     {
+      "claim_version_ref": "",
+      "derivation": {
+       "expression": "(4.20/4.00-1)*100",
+       "result": "5.0"
+      },
+      "metric": "EPS 差异",
+      "period": "FY2026",
+      "text": "EPS 高 5.0%",
+      "unit": "%"
+     },
+     {
+      "claim_version_ref": "",
+      "derivation": {
+       "expression": "(5700/5400-1)*100",
+       "result": "5.6"
+      },
+      "metric": "收入差异",
+      "period": "FY2027",
+      "text": "收入高 5.6%",
+      "unit": "%"
+     },
+     {
+      "claim_version_ref": "",
+      "derivation": {
+       "expression": "(5.00/4.50-1)*100",
+       "result": "11.1"
+      },
+      "metric": "EPS 差异",
+      "period": "FY2027",
+      "text": "EPS 高 11.1%",
+      "unit": "%"
+     }
+    ],
+    "source_refs": [
+     {
+      "ref": "pack-json:/numbers/consensus/periods/0/revenue/mean",
+      "source_kind": "consensus",
+      "tag": "N1"
+     },
+     {
+      "ref": "pack-json:/numbers/consensus/periods/0/eps/mean",
+      "source_kind": "consensus",
+      "tag": "N2"
+     },
+     {
+      "ref": "pack-json:/numbers/consensus/periods/1/revenue/mean",
+      "source_kind": "consensus",
+      "tag": "N3"
+     },
+     {
+      "ref": "pack-json:/numbers/consensus/periods/1/eps/mean",
+      "source_kind": "consensus",
+      "tag": "N4"
+     },
+     {
+      "as_of": "2026-07-29",
+      "ref": "doc-passage:doc:synw-q2-2026-release:0-151:ea1a5d0b6c52",
+      "source_kind": "release",
+      "tag": "P2",
+      "title": "SYNW Q2 2026 results release"
+     },
+     {
+      "ref": "pack-json:/our_model/periods/0/revenue",
+      "source_kind": "ours",
+      "tag": "N17"
+     },
+     {
+      "ref": "pack-json:/our_model/periods/0/eps",
+      "source_kind": "ours",
+      "tag": "N18"
+     },
+     {
+      "ref": "pack-json:/our_model/periods/1/revenue",
+      "source_kind": "ours",
+      "tag": "N19"
+     },
+     {
+      "ref": "pack-json:/our_model/periods/1/eps",
+      "source_kind": "ours",
+      "tag": "N20"
+     }
+    ],
+    "title": "盈利预测 vs consensus"
+   },
+   {
+    "body": "观察价：暂无法给出（FY2027 EPS 所在模型未通过不变量检查）。作为参照，过去 5 年前瞻 P/E 中位数为 16.0x，同业前瞻 P/E 中位数为 18.0x；BrokerA 的目标价为 95 美元，FY2027 EPS 预测 4.70 美元。模型修复后按历史与同业中点的倍数乘以我们的 EPS 给出观察价。现价 80.00 美元，52 周区间 62.00–88.00 美元。",
+    "claim_refs": [],
+    "gaps": [],
+    "numbers": [
+     {
+      "claim_version_ref": "",
+      "metric": "股价",
+      "number_ref": "pack-json:/numbers/market/price/close",
+      "period": "2026-08-14",
+      "text": "80.00",
+      "unit": "美元"
+     },
+     {
+      "claim_version_ref": "",
+      "metric": "52 周低点",
+      "number_ref": "pack-json:/numbers/market/range_52w/low",
+      "period": "52W",
+      "text": "62.00",
+      "unit": "美元"
+     },
+     {
+      "claim_version_ref": "",
+      "metric": "52 周高点",
+      "number_ref": "pack-json:/numbers/market/range_52w/high",
+      "period": "52W",
+      "text": "88.00",
+      "unit": "美元"
+     },
+     {
+      "claim_version_ref": "",
+      "metric": "历史前瞻 P/E",
+      "number_ref": "pack-json:/numbers/valuation/long_pe/median",
+      "period": "5Y",
+      "text": "16.0",
+      "unit": "x"
+     },
+     {
+      "claim_version_ref": "",
+      "metric": "同业前瞻 P/E",
+      "number_ref": "pack-json:/numbers/peers/median_pe",
+      "period": "FY2027",
+      "text": "18.0",
+      "unit": "x"
+     },
+     {
+      "claim_version_ref": "",
+      "metric": "卖方目标价与 EPS",
+      "passage_ref": "doc-passage:doc:brokera-synw-2026-08-05:0-74:1350cbd53386",
+      "period": "FY2027",
+      "text": "BrokerA maintains a price target of $95 and estimates FY2027 EPS of $4.70",
+      "unit": "美元"
+     }
+    ],
+    "source_refs": [
+     {
+      "ref": "pack-json:/numbers/market/price/close",
+      "source_kind": "market",
+      "tag": "N5"
+     },
+     {
+      "ref": "pack-json:/numbers/valuation/long_pe/median",
+      "source_kind": "valuation",
+      "tag": "N9"
+     },
+     {
+      "ref": "pack-json:/numbers/peers/median_pe",
+      "source_kind": "peers",
+      "tag": "N11"
+     },
+     {
+      "as_of": "2026-08-05",
+      "ref": "doc-passage:doc:brokera-synw-2026-08-05:0-74:1350cbd53386",
+      "source_kind": "sell_side_note",
+      "tag": "P4",
+      "title": "BrokerA update"
+     },
+     {
+      "ref": "pack-json:/numbers/market/range_52w/low",
+      "source_kind": "market",
+      "tag": "N7"
+     },
+     {
+      "ref": "pack-json:/numbers/market/range_52w/high",
+      "source_kind": "market",
+      "tag": "N8"
+     }
+    ],
+    "title": "估值与观察价"
+   },
+   {
+    "body": "预期差：我们的 FY2027 EPS 高于一致预期两位数，若下半年服务利润率兑现，业绩超预期的胜率较高。拥挤度：30 日 ADV 45.0 百万美元，52 周区间 62.00–88.00 美元，现价接近区间上沿，追高的赔率一般。财报反应：过去 8 次财报次日平均绝对涨跌幅 6.5%，期权隐含波动率 38%，押注财报的期权并不便宜。催化日历：10 月下旬第三季度财报；明年 2 月年报与 FY2027 指引。",
+    "claim_refs": [],
+    "gaps": [],
+    "numbers": [
+     {
+      "claim_version_ref": "",
+      "metric": "30 日 ADV",
+      "number_ref": "pack-json:/numbers/market/adv_30d/value",
+      "period": "2026-08-14",
+      "text": "45.0（45000000）",
+      "unit": "百万美元"
+     },
+     {
+      "claim_version_ref": "",
+      "metric": "52 周低点",
+      "number_ref": "pack-json:/numbers/market/range_52w/low",
+      "period": "52W",
+      "text": "62.00",
+      "unit": "美元"
+     },
+     {
+      "claim_version_ref": "",
+      "metric": "52 周高点",
+      "number_ref": "pack-json:/numbers/market/range_52w/high",
+      "period": "52W",
+      "text": "88.00",
+      "unit": "美元"
+     },
+     {
+      "claim_version_ref": "",
+      "metric": "财报次日平均绝对涨跌幅",
+      "number_ref": "pack-json:/numbers/market/earnings_reaction/mean_abs_percent",
+      "period": "8Q",
+      "text": "6.5%",
+      "unit": "%"
+     },
+     {
+      "claim_version_ref": "",
+      "metric": "隐含波动率",
+      "number_ref": "pack-json:/numbers/market/implied_vol/percent",
+      "period": "2026-08-14",
+      "text": "38%",
+      "unit": "%"
+     }
+    ],
+    "source_refs": [
+     {
+      "ref": "pack-json:/numbers/consensus/periods/1/eps/mean",
+      "source_kind": "consensus",
+      "tag": "N4"
+     },
+     {
+      "ref": "pack-json:/numbers/market/adv_30d/value",
+      "source_kind": "market",
+      "tag": "N6"
+     },
+     {
+      "ref": "pack-json:/numbers/market/earnings_reaction/mean_abs_percent",
+      "source_kind": "market",
+      "tag": "N15"
+     },
+     {
+      "ref": "pack-json:/numbers/market/range_52w/low",
+      "source_kind": "market",
+      "tag": "N7"
+     },
+     {
+      "ref": "pack-json:/numbers/market/range_52w/high",
+      "source_kind": "market",
+      "tag": "N8"
+     },
+     {
+      "ref": "pack-json:/numbers/market/implied_vol/percent",
+      "source_kind": "market",
+      "tag": "N16"
+     }
+    ],
+    "title": "交易角度"
+   },
+   {
+    "body": "需求风险：若大客户推迟 IT 预算，新签订单放慢，backlog 转化会拖累 FY2027 收入，证伪信号是连续两个季度 book-to-bill 低于 1。利润率风险：服务交付人力成本上升会压缩利润率，若服务毛利率同比下降超过 2 个百分点，我们的 EPS 假设不成立。估值风险：若同业倍数回落到历史中位数，观察价对应的倍数也需下调。",
+    "claim_refs": [],
+    "gaps": [],
+    "numbers": [],
+    "source_refs": [
+     {
+      "as_of": "2026-07-30",
+      "ref": "doc-passage:doc:synw-q2-2026-call:0-280:5fe83d487fb2",
+      "source_kind": "transcript",
+      "tag": "P1",
+      "title": "SYNW Q2 2026 earnings call"
+     }
+    ],
+    "title": "风险与证伪"
+   },
+   {
+    "body": "每月：主要客户的 IT 招标与续约公告（公司官网与客户公告），续约率低于 2025 年水平即警示。每季：服务收入占比与营业利润率（季报），服务占比回落说明利润率假设偏乐观；book-to-bill（电话会），低于 1 为负面信号；一致预期 FY2027 EPS 的修正方向（一致预期数据源），向我们的估计靠拢说明预期差在兑现。",
+    "claim_refs": [],
+    "gaps": [],
+    "numbers": [],
+    "source_refs": [
+     {
+      "ref": "pack-json:/numbers/consensus/periods/1/eps/mean",
+      "source_kind": "consensus",
+      "tag": "N4"
+     }
+    ],
+    "title": "跟踪指标"
+   },
+   {
+    "body": "我们不知道下半年大客户的续约节奏：公司不按客户公布续约数据，已查年报与第二季度电话会。我们也没有取得服务业务的分部利润率历史序列：已发起 material-request:synw-seg-margin，已尝试：年报分部附注、第二季度电话会、BrokerA 研报，均只有收入口径。这两点决定服务利润率假设的可信度。",
+    "claim_refs": [],
+    "gap_items": [
+     {
+      "kind": "company_not_disclosed",
+      "need": "按客户的续约数据"
+     },
+     {
+      "kind": "not_acquired",
+      "need": "服务业务分部利润率历史序列",
+      "request_ref": "material-request:synw-seg-margin",
+      "tried": "年报分部附注、第二季度电话会、BrokerA 研报"
+     }
+    ],
+    "gaps": [],
+    "numbers": [],
+    "title": "附录：我们不知道什么"
+   }
+  ],
+  "shown_claims": [],
+  "subject_ref": "company:ticker:synw",
+  "title": ""
+ },
+ "case_ref": "watch-price-unavailable-with-reason",
+ "expected": {
+  "deterministic": {
+   "actual_vs_estimate_labelling": {
+    "count": 0,
+    "status": "pass"
+   },
+   "cash_bridge_consistency": {
+    "count": 0,
+    "status": "skipped"
+   },
+   "cross_product_consistency": {
+    "count": 0,
+    "status": "skipped"
+   },
+   "fact_repetition": {
+    "count": 0,
+    "status": "pass"
+   },
+   "gap_classification": {
+    "count": 0,
+    "status": "pass"
+   },
+   "indirect_placeholders": {
+    "count": 0,
+    "status": "pass"
+   },
+   "issuer_attribution": {
+    "count": 0,
+    "status": "skipped"
+   },
+   "latest_transcript_and_release_cited": {
+    "count": 0,
+    "status": "pass"
+   },
+   "material_missing_bound": {
+    "count": 0,
+    "status": "pass"
+   },
+   "number_display_rounding": {
+    "count": 0,
+    "status": "pass"
+   },
+   "number_metadata": {
+    "count": 0,
+    "status": "pass"
+   },
+   "numbers_without_refs": {
+    "count": 0,
+    "status": "pass"
+   },
+   "one_off_normalisation": {
+    "count": 0,
+    "status": "pass"
+   },
+   "ours_vs_consensus": {
+    "count": 0,
+    "status": "pass"
+   },
+   "reasoning_lint": {
+    "count": 0,
+    "status": "pass"
+   },
+   "required_sections_present": {
+    "count": 0,
+    "status": "pass"
+   },
+   "residual_citation_artefacts": {
+    "count": 0,
+    "status": "pass"
+   },
+   "source_kind_diversity": {
+    "count": 0,
+    "status": "pass"
+   },
+   "sourced_quantitative_statements": {
+    "count": 0,
+    "status": "pass"
+   },
+   "stance_and_watch_price": {
+    "count": 0,
+    "status": "pass"
+   },
+   "valuation_six_elements": {
+    "count": 0,
+    "status": "pass"
+   }
+  },
+  "rationale": "矛盾 1 的决定：无法给价时写明原因并列一致预期与卖方目标价，立场与估值检查都应通过。",
+  "score_ranges": {
+   "actual_vs_estimate": [
+    3,
+    4
+   ],
+   "cash_bridge_consistency": [
+    2,
+    4
+   ],
+   "cross_product_consistency": [
+    2,
+    4
+   ],
+   "gaps_bound": [
+    3,
+    4
+   ],
+   "issuer_attribution": [
+    3,
+    4
+   ],
+   "judgement_quality": [
+    3,
+    4
+   ],
+   "no_restatement": [
+    3,
+    4
+   ],
+   "one_off_normalisation": [
+    3,
+    4
+   ],
+   "ours_vs_consensus": [
+    3,
+    4
+   ],
+   "quantitative_density": [
+    3,
+    4
+   ],
+   "reasoning_lint": [
+    3,
+    4
+   ],
+   "source_breadth": [
+    3,
+    4
+   ],
+   "substance_and_hygiene": [
+    3,
+    4
+   ],
+   "valuation_six_elements": [
+    3,
+    4
+   ],
+   "view_and_watch_price": [
+    2,
+    3
+   ]
+  },
+  "score_ranges_are_calibration_only": true
+ },
+ "note": "合成公司（tests/synthetic_company.py），不是任何覆盖公司；由合约起草输出 strl_document() 改造。",
+ "rubric": "initial_screen_strl",
+ "source": "由 good 改造：估值链不可得，写「观察价：暂无法给出（原因）」并列参照"
+}

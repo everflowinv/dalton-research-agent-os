@@ -2,7 +2,7 @@
  "case_ref": "epam-bookings-refuses-and-says-where-to-look",
  "expected": {
   "cited_tags": [
-   "C3"
+   "C1"
   ],
   "confidence": "low",
   "quality": {
@@ -14,13 +14,19 @@
   "rationale": "拒答有理由、有类型、有去处；这是 P15a 想让 answer_after_refresh 第一次真正跑起来的入口。",
   "refused": true,
   "verification": {
+   "citations_resolve": "skipped",
    "cites_only_shown_rows": "pass",
    "confidence_in_vocabulary": "pass",
    "market_vs_us_present": "skipped",
-   "numeric_sentences_cite": "pass",
+   "material_gap_has_request": "skipped",
+   "numbers_sourced": "pass",
+   "our_view_not_used_as_evidence": "pass",
+   "reasoning_lint": "pass",
    "refresh_names_a_capable_source": "pass",
    "refusal_states_why": "pass",
-   "unknowns_typed": "pass"
+   "structure_present": "skipped",
+   "unknowns_typed": "pass",
+   "what_happened_cites_evidence": "skipped"
   },
   "wants_market_vs_us": false
  },
@@ -37,14 +43,6 @@
   "refusal_detail": "回答它需要最近四个季度的 bookings 金额，账本上没有。",
   "refusal_reason": "needs_refresh",
   "refused": true,
-  "sentences": [
-   {
-    "refs": [
-     "C3"
-    ],
-    "text": "我不知道。账本里没有任何一条记录 EPAM 新签订单金额的结论，只有利用率与收入。"
-   }
-  ],
   "unknowns": [
    {
     "content_kind": "sell_side_report",
@@ -56,15 +54,25 @@
     "source": "alphaengine",
     "what": "缺 book-to-bill 的口径说明，不同来源定义不一致"
    }
+  ],
+  "what_happened": [
+   {
+    "refs": [
+     "C1"
+    ],
+    "text": "我不知道。账本里没有任何一条记录 EPAM 新签订单金额的结论，只有利用率与收入。"
+   }
   ]
  },
  "shown": [
   {
    "block": "claims",
+   "evidence": true,
    "period": "years ended December 31, 2025, 2024 and 2023",
    "ref": "claim-version:29b5ce3638",
+   "source_text": "EPAM reports utilization rates of its delivery professionals increased modestly year over year, with a slightly larger increase compared to the prior year, suggesting stable demand.",
    "statement": "EPAM reports utilization rates of its delivery professionals increased modestly year over year, with a slightly larger increase compared to the prior year, suggesting stable demand.",
-   "tag": "C3"
+   "tag": "C1"
   }
  ],
  "source": "live 只读副本 2026-09-09：EPAM 的 775 条 Claim 里没有一条记录 bookings 金额。"

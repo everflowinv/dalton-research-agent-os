@@ -23,7 +23,7 @@ from typing import Any, Mapping, Sequence
 SCHEMA = "r11a-ops-stage-input-0.1"
 CANDIDATE_SCHEMA = "r11a-ops-packet-candidate-0.1"
 COMMIT = "424c22529d5317c4c5c9dc8ba88f37299cea3f49"
-SOURCE = Path("/Users/everflow/Projects/dalton-foundation-followup-r11a-acceptance-worktree")
+SOURCE = Path.home() / "Projects/dalton-foundation-followup-r11a-acceptance-worktree"
 WHEEL_SHA256 = "418bf77f7b5285f9e53e041bdcf9d36463e57a7fa0bd4ce368ded2ec1e50d046"
 OPENCLAW_SHA256 = "f45fa4698e55e6404f2558b2aa5f558bd906fd68f1d2e8c0914c475bd5b6a9a6"
 HEX64 = re.compile(r"[0-9a-f]{64}")

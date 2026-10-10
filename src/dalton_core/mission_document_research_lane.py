@@ -10,6 +10,7 @@ retry and only escalates to a person when that retry fails as well.
 
 from __future__ import annotations
 
+import contextlib
 import hashlib
 import json
 import sqlite3
@@ -65,6 +66,48 @@ STAGE_NAMES = {
     2: "qualitative_model_draft",
     3: "independent_qualitative_verifier",
 }
+# 2026-10-03: what a failed unproved send actually was, as the token appended
+# to ``unproved_send_failed_after_automatic_retry`` in the hold reason.  The
+# broker's error code is kept verbatim beside it.
+#
+# * HOST_CONTROL_PROOF_MISSING -- the host's provider-control preflight
+#   (Google ``countTokens`` against the frozen input/total/cost limits) refused
+#   the verifier request *before* it was sent: nothing sent, nothing charged,
+#   and the same request is refused the same way every time.  Live 131c8936:
+#   its glm draft read 62k tokens, so the verifier prompt is over the admitted
+#   ``max_input_tokens`` 64000.
+# * INVALID_HOST_RESULT / HOST_OUTPUT_LIMIT_REACHED -- the reply came back
+#   with no text.  Live: glm-5.3 (thinking high) used exactly the admitted
+#   4096 output tokens on reasoning, was charged, and returned "".  Broker
+#   builds before d3813c00 say INVALID_HOST_RESULT for this.
+# * HOST_EMPTY_COMPLETION -- nothing came back at all (CLI gateway usage
+#   limit answered in-band); that one is the provider's, not the admission's.
+UNPROVED_SEND_CAUSES: Mapping[str, str] = {
+    "HOST_CONTROL_PROOF_MISSING": "not_sent_host_preflight_refused",
+    "REQUIRED_CONTROLS_UNAVAILABLE": "not_sent_required_controls_unavailable",
+    "HOST_OUTPUT_LIMIT_REACHED": "empty_reply_output_cap_exhausted",
+    "INVALID_HOST_RESULT": "empty_or_invalid_reply",
+    "HOST_EMPTY_COMPLETION": "provider_returned_nothing",
+}
+
+
+def unproved_send_hold_reason(
+    reason: str, code: str | None, profile: str | None,
+) -> str:
+    """``reason[:CODE[:cause]][:profile=<profile_version_ref>]``, bounded."""
+
+    parts = [reason]
+    if isinstance(code, str) and code and all(
+            ch.isalnum() or ch == "_" for ch in code):
+        parts.append(code)
+        cause = UNPROVED_SEND_CAUSES.get(code)
+        if cause is not None:
+            parts.append(cause)
+    if isinstance(profile, str) and profile and len(profile) <= 160:
+        parts.append("profile=" + profile)
+    return ":".join(parts)[:300]
+
+
 # The hold reason for an admission whose recovery chain this lane cannot read.
 # It is a person's errand -- nothing automatic may resume a chain it cannot
 # verify -- but it stops with that one admission.
@@ -140,6 +183,22 @@ REENTRY_ESCALATION_NOTE = (
     "工作区绑定不对、票据被占用等），修好之后这条会自己继续。"
     "确实需要人重开时，才用 owner 的受控恢复授权。"
 )
+# The words for a re-entry the launcher keeps refusing *before* it takes the
+# one-shot claim.  Nothing was attempted, so nothing was bought; the refusal is
+# a standing condition of the ticket or the workspace, and the lane keeps
+# re-checking it every tick.  The escalation exists so that the condition is
+# named to a person instead of being repeated for ever with no door.
+REENTRY_UNAVAILABLE_ESCALATION_NOTE = (
+    "这条 admission 的受控重新进入连续两次在同一个地方被拒绝，而且被拒绝时还没占用"
+    "一次性重入名额——也就是没有发出任何模型调用、没有花钱。原因是票据或工作区"
+    "本身的一个固定状态（车道原因里 controlled_reentry_unavailable 后面那句原文，"
+    "例如票据文件缺失、工作区绑定不对），不是这条研究本身的问题。"
+    "车道每一轮都会自己再检查；把那条原因修好之后，它会自己继续，不需要授权。"
+    "如果原因已经修好但仍然停着，再放行一次受控重新进入："
+    "`python -m dalton_core.document_recovery_cli authorize-reentry "
+    "--state-dir <state> --admission-ref <ref> --apply --actor human:<owner>`"
+    "（不加 --apply 是只读预览；重新进入本身不买模型调用。）"
+)
 # The words for the one contract failure that has already been retried once by
 # the lane itself.  This is the only contract state a person is asked about,
 # and the ask has to say what was already tried, or the owner will just
@@ -158,6 +217,53 @@ CONTRACT_ESCALATION_NOTE = (
     "（不加 --apply 是只读预览；--max-cost-usd 是愿意花的上限，"
     "那一阶段自己的预算超过它就直接拒绝，不会偷偷少买。）"
 )
+
+# 2026-10-06: a provider-budget refusal is now retried once by the lane under a
+# corrected ceiling (the provider's own count plus headroom).  What still
+# reaches a person is the case the correction cannot settle, and the hold
+# reason carries the numbers (``budget_hold_reason``).  Buying the same call
+# again at the same ceiling is never the answer, so the owner action is the
+# one that works: withdraw, and the planner re-admits the question; a
+# re-admitted draft that overruns again gets its own automatic correction.
+PROVIDER_BUDGET_CORRECTION_ESCALATION_NOTE = (
+    "这条的模型调用已经送达并计费，但供应商回报的 token 用量超过了 WorkOrder 冻结的"
+    "预算（PROVIDER_BUDGET_EXCEEDED）。系统已按供应商自己的计数加 25% 余量自动重试过一次"
+    "（或者这次超出无法靠调高输入上限解决：输出超限、费用超限，或所需输入超过准入值的 2 倍）。"
+    "停住原因里写着具体数字：input=供应商计数>准入上限，need=所需上限。"
+    "再按同样的上限买一次只会同样超出、再付一次钱，所以不提供「再买一次」。"
+    "一条命令处理：撤回它，规划器会按当前预算重新立项（重新立项的起草若仍超出，"
+    "会再自动按实际用量修正一次）："
+    "`python -m dalton_core.document_recovery_cli withdraw "
+    "--state-dir <state> --admission-ref <ref> --reason <原因> --apply --actor human:<owner>`"
+    "（不加 --apply 是只读预览。）"
+)
+
+
+def budget_hold_reason(reason: str, overrun: Any) -> str:
+    """``reason:input=<used>><admitted>[:need=<tokens>][:<refusal>]``, bounded."""
+
+    if not isinstance(overrun, Mapping):
+        return reason
+    parts = [reason]
+    used = overrun.get("provider_input_tokens")
+    admitted = overrun.get("admitted") if isinstance(overrun.get("admitted"), Mapping) else {}
+    corrected = (overrun.get("corrected_budget")
+                 if isinstance(overrun.get("corrected_budget"), Mapping) else {})
+    if isinstance(used, int) and isinstance(admitted.get("max_input_tokens"), int):
+        parts.append(f"input={used}>{admitted['max_input_tokens']}")
+    output = overrun.get("provider_output_tokens")
+    if (isinstance(output, int) and isinstance(admitted.get("max_output_tokens"), int)
+            and output > admitted["max_output_tokens"]):
+        parts.append(f"output={output}>{admitted['max_output_tokens']}")
+    need = overrun.get("needed_input_tokens") or corrected.get("max_input_tokens")
+    if isinstance(need, int):
+        parts.append(f"need={need}")
+    refusal = overrun.get("refusal")
+    if isinstance(refusal, str) and refusal and all(
+            ch.isalnum() or ch == "_" for ch in refusal):
+        parts.append(refusal)
+    return ":".join(parts)[:300]
+
 
 # The words for a paid call the adapter refused because the provider's own
 # token telemetry exceeded the WorkOrder budget.  Nothing is retried on the
@@ -269,6 +375,15 @@ class _StoredWorkReader:
         return {"work_order": work, "work_order_hash": row["work_order_hash"]}
 
 
+def _repeated_unavailable(unavailable: str, prior_reason: str | None) -> str:
+    """Escalate a pre-claim re-entry refusal that repeats (see lane_reentry_claim)."""
+
+    from .lane_reentry_claim import escalate_repeated_refusal
+
+    return escalate_repeated_refusal(
+        unavailable, prior_reason, REENTRY_ESCALATED_REASON)
+
+
 def _read_holds(path: Path) -> dict[str, dict[str, Any]]:
     if not path.is_file():
         return {}
@@ -352,10 +467,14 @@ class MissionDocumentResearchCoordinator:
     def __init__(
         self, *, store: Any, launcher: Any | None,
         clock: Callable[[], datetime] | None = None,
+        model_router_db: Path | str | None = None,
     ) -> None:
         self.store = store
         self.launcher = launcher
         self.clock = clock or (lambda: datetime.now(timezone.utc))
+        # 2026-10-09: read-only, to see whether a model of a failed route's
+        # chain has been served since (``_fresh_work_round_state``).
+        self.model_router_db = model_router_db
 
     @property
     def latest_path(self) -> Path:
@@ -411,6 +530,9 @@ class MissionDocumentResearchCoordinator:
 
         from .mission_document_research_executor import (
             CONTRACT_FAILED_AFTER_AUTOMATIC_RETRY,
+            PROVIDER_BUDGET_CORRECTION_REFUSED,
+            PROVIDER_BUDGET_EXCEEDED_AFTER_CORRECTION,
+            PROVIDER_BUDGET_EXCEEDED_AFTER_FINAL_CORRECTION,
             PROVIDER_BUDGET_EXCEEDED_NOT_RETRIED,
             UNPROVED_SEND_FAILED_AFTER_AUTOMATIC_RETRY,
         )
@@ -419,6 +541,11 @@ class MissionDocumentResearchCoordinator:
             CONTRACT_FAILED_AFTER_AUTOMATIC_RETRY: CONTRACT_ESCALATION_NOTE,
             UNPROVED_SEND_FAILED_AFTER_AUTOMATIC_RETRY: UNPROVED_SEND_ESCALATION_NOTE,
             PROVIDER_BUDGET_EXCEEDED_NOT_RETRIED: PROVIDER_BUDGET_ESCALATION_NOTE,
+            PROVIDER_BUDGET_EXCEEDED_AFTER_CORRECTION:
+                PROVIDER_BUDGET_CORRECTION_ESCALATION_NOTE,
+            PROVIDER_BUDGET_EXCEEDED_AFTER_FINAL_CORRECTION:
+                PROVIDER_BUDGET_CORRECTION_ESCALATION_NOTE,
+            PROVIDER_BUDGET_CORRECTION_REFUSED: PROVIDER_BUDGET_CORRECTION_ESCALATION_NOTE,
             HINT_DRIFT_HOLD_REASON: HINT_DRIFT_ESCALATION_NOTE,
         }
 
@@ -442,10 +569,13 @@ class MissionDocumentResearchCoordinator:
                 "started": started,
                 "needs_owner_authorization": needs_owner,
                 "owner_action": (
-                    (REENTRY_ESCALATION_NOTE
+                    (REENTRY_UNAVAILABLE_ESCALATION_NOTE
+                     if held["reason"].startswith(
+                         REENTRY_ESCALATED_REASON + ":controlled_reentry_unavailable:")
+                     else REENTRY_ESCALATION_NOTE
                      if held["reason"].startswith(REENTRY_ESCALATED_REASON)
                      else escalation_notes.get(
-                         held["reason"], OWNER_AUTHORIZATION_NOTE))
+                         held["reason"].split(":", 1)[0], OWNER_AUTHORIZATION_NOTE))
                     if needs_owner else None
                 ),
                 "order": order.get(admission_ref, len(order)),
@@ -488,9 +618,12 @@ class MissionDocumentResearchCoordinator:
         if now - since < DEADLOCK_ESCAPE_AFTER:
             return None
         counts = dict(record.get("escapes") or {})
+        from .mission_document_research_withdrawal import WITHDRAWN_REASON
+
         candidate = next(
             (item for item in detail
              if not item["started"]
+             and item["reason"] != WITHDRAWN_REASON
              and counts.get(item["admission_ref"], 0) < MAX_ESCAPES_PER_ADMISSION),
             None,
         )
@@ -514,6 +647,38 @@ class MissionDocumentResearchCoordinator:
                 "重开它不会重复计费。"
             ),
         }
+
+    def _settle_withdrawn(
+        self, holds: dict[str, dict[str, Any]], admissions: Sequence[Mapping[str, Any]],
+    ) -> list[Mapping[str, Any]]:
+        from .mission_document_research_withdrawal import (
+            WITHDRAWN_REASON, read_withdrawals,
+        )
+
+        withdrawn = read_withdrawals(self.store.connection)
+        if not withdrawn:
+            return list(admissions)
+        changed = False
+        for admission in admissions:
+            record = withdrawn.get(admission["id"])
+            if record is None:
+                continue
+            held = holds.get(admission["id"])
+            reason = ("withdrawn_after_deadline" if record["actor_ref"] == "automation:document-research-deadline" else WITHDRAWN_REASON)
+            if (held is not None and held["reason"] == reason
+                    and held["disposition"] == "terminal_hold"):
+                continue
+            holds[admission["id"]] = {
+                "admission_hash": admission["content_hash"],
+                "ticket_ref": None if held is None else held["ticket_ref"],
+                "reason": reason,
+                "disposition": "terminal_hold",
+                "retry_at": None,
+            }
+            changed = True
+        if changed:
+            _write_holds(self.holds_path, holds)
+        return [admission for admission in admissions if admission["id"] not in withdrawn]
 
     def _latest(self) -> dict[str, Any] | None:
         if not self.latest_path.is_file():
@@ -691,6 +856,9 @@ class MissionDocumentResearchCoordinator:
                         "ON r.admission_ref=a.admission_id "
                     )
                     where = f"WHERE ({pending}) AND r.rejection_id IS NULL "
+            if self.store.connection.execute("SELECT 1 FROM sqlite_master WHERE type='table' AND name='mission_document_numeric_results'").fetchone():
+                joins += "LEFT JOIN mission_document_numeric_results n ON n.admission_ref=a.admission_id LEFT JOIN scheduler_formal_results nf ON nf.work_order_id=n.work_order_ref "
+                where = (where.rstrip() + " AND (n.admission_ref IS NULL OR nf.terminal_state IS NULL OR nf.terminal_state!='succeeded') " if where else "WHERE (n.admission_ref IS NULL OR nf.terminal_state IS NULL OR nf.terminal_state!='succeeded') ")
             query = (
                 "SELECT a.* FROM mission_document_research_admissions a "
                 + joins + where + "ORDER BY a.created_at,a.admission_id"
@@ -769,6 +937,35 @@ class MissionDocumentResearchCoordinator:
                 refs.add(ref)
         return refs
 
+    def _withdraw_expired_holds(self, holds, admissions):
+        from .mission_document_research_withdrawal import (
+            MissionDocumentWithdrawalAuthority, MissionDocumentWithdrawalError,
+            pending_reentry_grant,
+        )
+        expired = [item for item in admissions
+                   if "fresh_work_recovery_deadline_exceeded" in str(holds.get(item["id"], {}).get("reason", ""))]
+        if not expired:
+            return
+        from .store import DaltonStore
+        if not isinstance(self.store, DaltonStore):
+            return
+        authority = MissionDocumentWithdrawalAuthority(self.store, clock=self.clock)
+        latest = self._latest()
+        for admission in expired:
+            if latest is not None and latest["admission_ref"] == admission["id"] and self.launcher.status(latest["ticket_ref"]).get("status") == "running":
+                continue
+            held = holds[admission["id"]]
+            ticket_ref = held.get("ticket_ref")
+            if ticket_ref:
+                if self.launcher.status(ticket_ref).get("status") == "running":
+                    continue
+                if pending_reentry_grant(self.launcher.tickets_dir, admission["id"]):
+                    continue
+            try:
+                authority.withdraw_expired(admission["id"], hold=held)
+            except MissionDocumentWithdrawalError:
+                continue
+
     def _plan_next_steps(self) -> list[dict[str, Any]]:
         """What the newest plan asks for that the held material can already answer.
 
@@ -778,11 +975,9 @@ class MissionDocumentResearchCoordinator:
         answerable out of bytes already paid for -- and until now nothing said
         so anywhere a person looks.
 
-        Read-only, and deliberately so.  Acting on one of these means writing
-        an admission, and an admission is a paid-work authority that needs the
-        owner's whole chain: the exact plan, the exact inquiry, the exact
-        question version, the exact document registration.  This lane holds
-        none of that, so it says what it sees and stops.
+        A fully read document can proceed through the existing exact-plan
+        admission host.  Its mission, question, model and spending authority
+        are revalidated there; this does not authorize a new paid search.
 
         Fail-open at every step: a Core without these tables, an unreadable
         plan, an inquiry whose identity cannot be computed -- each is silence,
@@ -825,20 +1020,56 @@ class MissionDocumentResearchCoordinator:
                 continue
             kind = PLAN_FOLLOW_UP_LABELS.get(held["spec_ref"], "原始材料")
             subject = row["company_ref"] or "全行业"
+            admission = None
+            failure = None
+            try:
+                admission = self._admit_held_plan_inquiry(plan, raw)
+            except Exception as exc:  # isolated; authority rejection buys no work
+                failure = type(exc).__name__
             steps.append({
                 "rank": row["rank"],
                 "company_ref": row["company_ref"],
                 "document_ref": document_ref,
                 "spec_ref": held["spec_ref"],
                 "question": row["question"],
+                "admission": admission,
+                "admission_blocked_reason": failure,
                 "suggestion": (
                     f"计划建议的下一步：{subject}「{row['question']}」——"
                     f"计划点名的{kind} {document_ref} 已经获取并读完，"
                     "现在就能从已有材料里回答。"
-                    "本车道只做展示：真要做这条，需要 owner 的授权链写入 admission。"
+                    + ("已自动安排研究，将在下一轮处理。" if admission is not None
+                       else "现有研究授权或配置不完整，暂未安排研究。")
                 ),
             })
         return steps
+
+    def _admit_held_plan_inquiry(self, plan_row, inquiry):
+        from .coverage_mission import CoverageMissionAuthority
+        from .mission_document_research_admission import (
+            admit_directed_inquiry, open_mission_document_admission_authority,
+        )
+        from .research_question_backlog import ResearchQuestionBacklog
+
+        missions = CoverageMissionAuthority(self.store)
+        backlog = ResearchQuestionBacklog(self.store)
+        mission = missions.mission(plan_row["mission_version_ref"])
+        plan = missions.latest_research_plan(mission["id"])
+        if plan is None or plan["plan_id"] != plan_row["plan_id"]:
+            raise MissionDocumentResearchLaneError("planner authority changed")
+        with open_mission_document_admission_authority(
+            store=self.store, state_dir=self.launcher.state_dir, mission=mission,
+            planner_scheduler_db=self.launcher.planner_scheduler_db,
+            planner_model_config_path=self.launcher.planner_model_config_path,
+            document_config_path=self.launcher.document_config_path,
+            draft_model_config_path=self.launcher.draft_model_config_path,
+            verifier_model_config_path=self.launcher.verifier_model_config_path,
+            clock=self.clock,
+        ) as (authority, registrations):
+            return admit_directed_inquiry(
+                authority=authority, registrations=registrations,
+                backlog=backlog, mission=mission, plan=plan, inquiry=inquiry,
+            )
 
     def _held_document(
         self, mission_version_ref: Any, document_ref: str,
@@ -1213,6 +1444,60 @@ class MissionDocumentResearchCoordinator:
             and metadata.get("stage") == STAGE_NAMES[stage_ordinal]
         )
 
+    def _stopped_reason_with_cause(
+        self, work_ref: str, recovery: Mapping[str, Any],
+    ) -> str:
+        """The stopped reason, plus what the failed send actually was.
+
+        2026-10-03, live legacy: thirteen holds the owner authorized came back
+        within hours as the same bare ``unproved_send_failed_after_automatic_
+        retry``, which says nothing about *why*: four glm-5.3 drafts had
+        spent their whole admitted 4096-token output cap thinking and
+        returned empty text (``INVALID_HOST_RESULT``, paid), one verifier was
+        refused by the host before anything was sent
+        (``HOST_CONTROL_PROOF_MISSING``, not paid).  Those are different
+        decisions for the owner.  The base reason stays the prefix -- every
+        door, label and withdrawal rule matches it as a substring -- and the
+        failed Work's own formal result supplies the code and the profile.
+        """
+
+        from .mission_document_research_executor import (
+            PROVIDER_BUDGET_CORRECTION_REFUSED,
+            PROVIDER_BUDGET_EXCEEDED_AFTER_CORRECTION,
+            PROVIDER_BUDGET_EXCEEDED_AFTER_FINAL_CORRECTION,
+            UNPROVED_SEND_FAILED_AFTER_AUTOMATIC_RETRY,
+        )
+
+        reason = str(recovery.get("reason") or "")
+        if reason in {PROVIDER_BUDGET_EXCEEDED_AFTER_CORRECTION,
+                      PROVIDER_BUDGET_EXCEEDED_AFTER_FINAL_CORRECTION,
+                      PROVIDER_BUDGET_CORRECTION_REFUSED}:
+            return budget_hold_reason(reason, recovery.get("budget_overrun"))
+        if reason != UNPROVED_SEND_FAILED_AFTER_AUTOMATIC_RETRY:
+            return reason
+        code = profile = None
+        try:
+            row = self.store.connection.execute(
+                "SELECT result_envelope_json FROM scheduler_formal_results "
+                "WHERE work_order_id=?", (work_ref,),
+            ).fetchone()
+            envelope = json.loads(row[0]) if row is not None else {}
+        except (sqlite3.Error, TypeError, ValueError, RecursionError):
+            envelope = {}
+        if isinstance(envelope, Mapping):
+            error = envelope.get("error")
+            if isinstance(error, Mapping) and isinstance(error.get("code"), str):
+                code = error["code"]
+            metadata = envelope.get("metadata")
+            if isinstance(metadata, Mapping) and isinstance(
+                    metadata.get("profile_version_ref"), str):
+                profile = metadata["profile_version_ref"]
+        proof = recovery.get("proof")
+        if code is None and isinstance(proof, Mapping) and isinstance(
+                proof.get("error_code"), str):
+            code = proof["error_code"]
+        return unproved_send_hold_reason(reason, code, profile)
+
     def _typed_recovery_state(
         self, admission: Mapping[str, Any], work_ref: str,
     ) -> dict[str, Any] | None:
@@ -1237,6 +1522,21 @@ class MissionDocumentResearchCoordinator:
             item["recovery"]["status"]: item for item in observations
             if isinstance(item.get("recovery"), Mapping)
         }
+        # These rows retain the failed formal timestamp; ID ordering is not
+        # UTC day ordering. Compare daily waits only for this exact Work/stage.
+        waiting = by_status.get("waiting")
+        if waiting is not None:
+            daily = [item for item in observations
+                if item.get("stage") == waiting.get("stage")
+                and isinstance(item.get("recovery"), Mapping)
+                and item["recovery"].get("status") == "waiting"
+                and item["recovery"].get("reason") in {
+                    "numeric_technical_maintenance_day_cap_reached",
+                    "numeric_maintenance_budget_backoff_day_cap",
+                    "numeric_maintenance_budget_waiting"}]
+            if daily:
+                by_status["waiting"] = max(daily,
+                    key=lambda item: str(item["recovery"].get("day") or ""))
         stopped = [
             item for item in observations
             if isinstance(item.get("recovery"), Mapping)
@@ -1261,9 +1561,12 @@ class MissionDocumentResearchCoordinator:
             )
         recovery = selected["recovery"]
         from .mission_document_research_executor import (
+            AUTOMATIC_BUDGET_CORRECTION_REASON,
             AUTOMATIC_UNPROVED_SEND_RETRY_REASON,
             LEGACY_PAID_CONTRACT_REASON,
             LEGACY_UNPROVED_SEND_REASON,
+            PROVIDER_BUDGET_EXCEEDED_AFTER_CORRECTION,
+            PROVIDER_BUDGET_EXCEEDED_NOT_RETRIED,
         )
 
         legacy_retry_available = {
@@ -1271,12 +1574,46 @@ class MissionDocumentResearchCoordinator:
             # recorded a proved paid contract rejection as permanently stopped
             # and waited for a signature.
             LEGACY_PAID_CONTRACT_REASON: "automatic_contract_retry_available",
+            "contract_failed_after_automatic_retry": "automatic_second_contract_retry_available",
             # And every release before the bounded unproved-send retry existed
             # did the same for a failure whose send state nothing could prove.
             # Twenty live holds, seventeen of them waiting on a person who was
             # being asked the same question every tick.
             LEGACY_UNPROVED_SEND_REASON: "automatic_unproved_send_retry_available",
+            # 2026-10-06: releases before the automatic budget correction held
+            # a provider-budget refusal for a person whose only door bought the
+            # same call at the same ceiling (live ws-7d, two MSFT drafts).
+            # Such a stage has not spent its one correction, so it re-enters.
+            PROVIDER_BUDGET_EXCEEDED_NOT_RETRIED: "automatic_budget_correction_available",
+            # 2026-10-09: releases before the second correction stopped every
+            # corrected call that overran again -- even when another model of
+            # the chain had served it and counted the prompt differently (live
+            # ws-7d, two MSFT drafts: glm counted 64,341, opus 115,500).  The
+            # executor decides afresh: one more correction from the new count,
+            # or ``..._after_corrected_retry_final``, which is never re-entered.
+            PROVIDER_BUDGET_EXCEEDED_AFTER_CORRECTION:
+                "automatic_budget_second_correction_available",
         }
+        if recovery.get("reason") == "contract_failed_after_automatic_retry":
+            from .directed_numeric_recovery import read_contract_retry_links, contract_retry_disposition
+            links = read_contract_retry_links(self.store.connection, admission,
+                                             STAGE_ORDINALS.get(selected.get("stage")))
+            if contract_retry_disposition(links) is not None:
+                legacy_retry_available.pop("contract_failed_after_automatic_retry", None)
+        if recovery["status"] == "stopped":
+            newer_technical = next((by_status[key] for key in ("waiting", "admitted")
+                if key in by_status and by_status[key]["recovery"].get("reason") in {
+                    "numeric_technical_maintenance_day_cap_reached",
+                    "numeric_maintenance_budget_backoff_day_cap", "numeric_maintenance_budget_waiting",
+                    "versioned_numeric_technical_maintenance"}), None)
+            if newer_technical is not None:
+                recovery = newer_technical["recovery"]
+        if (recovery["status"] == "stopped" and recovery.get("reason") in {
+                "contract_failed_after_automatic_retry", "unproved_send_failed_after_automatic_retry"}):
+            from .directed_numeric_maintenance import can_resume
+            if can_resume(self.store.connection, admission, work_ref, STAGE_ORDINALS.get(selected.get("stage"))):
+                return {"action": "resume", "reason": "numeric_technical_maintenance_candidate",
+                        "work_order_ref": work_ref}
         if (recovery["status"] == "stopped"
                 and recovery.get("reason") in legacy_retry_available):
             # Such an admission has not spent its one automatic retry, so the
@@ -1302,6 +1639,8 @@ class MissionDocumentResearchCoordinator:
                 "reason": (
                     "controlled_unproved_send_retry_admitted"
                     if recovery.get("reason") == AUTOMATIC_UNPROVED_SEND_RETRY_REASON
+                    else "controlled_budget_correction_admitted"
+                    if recovery.get("reason") == AUTOMATIC_BUDGET_CORRECTION_REASON
                     else "controlled_contract_retry_admitted"),
                 "work_order_ref": work_ref,
             }
@@ -1401,8 +1740,13 @@ class MissionDocumentResearchCoordinator:
                     "action": "resume", "reason": "typed_day_budget_recovery_due",
                     "work_order_ref": work_ref,
                 }
+            from .mission_document_research_executor import FRESH_WORK_CAP_REASONS
+
+            if recovery.get("reason") in FRESH_WORK_CAP_REASONS:
+                return self._fresh_work_round_state(admission, selected, recovery, work_ref)
             return {
-                "action": "recovery_required", "reason": recovery["reason"],
+                "action": "recovery_required",
+                "reason": self._stopped_reason_with_cause(work_ref, recovery),
                 "work_order_ref": work_ref,
             }
         retry_at = recovery.get("retry_at")
@@ -1428,6 +1772,95 @@ class MissionDocumentResearchCoordinator:
             }
         return {
             "action": "resume", "reason": "typed_recovery_due",
+            "work_order_ref": work_ref,
+        }
+
+    def _fresh_work_round_state(
+        self, admission: Mapping[str, Any], selected: Mapping[str, Any],
+        recovery: Mapping[str, Any], work_ref: str,
+    ) -> dict[str, Any]:
+        """A stage stopped on a fresh-work cap: resume a round, open one, or ask.
+
+        2026-10-09, live legacy EPAM 09b4bb82 / 3c49a49c: both drafts stopped
+        as ``fresh_work_recovery_exhausted`` because the bound of two fresh
+        Works had been spent on 10-06 and 10-07, before the owner's 10-09
+        re-entry, and the last failure was a rejected route -- every model of
+        the chain was unavailable then.  Owner decision 2: no routine human
+        gates.  So:
+
+        * a round already recorded for this failed Work (the owner's door, or
+          an earlier tick) is resumed -- the executor opens its one fresh Work;
+        * after a rejected route, the lane opens the round itself once a model
+          of the same routing policy has been served since the failure (a
+          cooldown lifted, a key renewed), at most once per stage per UTC day,
+          and otherwise says on the hold that it is waiting for a model;
+        * any other cap is a policy bound the owner may lift: the hold names
+          the failure, and the owner's door records the round.
+        """
+
+        from .mission_document_research_executor import (
+            ALL_MODELS_UNAVAILABLE_CAUSE, AUTOMATIC_RECOVERY_ROUND_ACTOR,
+            FRESH_WORK_RECOVERY_ROUND_REASON, MAX_AUTOMATIC_RECOVERY_ROUNDS_PER_DAY,
+            NEXT_AUTOMATIC_RETRY_MARK, ROUTE_REJECTED_NO_SEND_CLASSIFICATION,
+            MissionDocumentResearchExecutorError, append_recovery_round,
+            model_availability_since, read_recovery_round, recovery_rounds_on,
+        )
+
+        reason = str(recovery.get("reason") or "")
+        connection = self.store.connection
+        existing = read_recovery_round(connection, work_ref)
+        if existing is not None:
+            return {
+                "action": "resume",
+                "reason": FRESH_WORK_RECOVERY_ROUND_REASON + ":" + existing["id"].split(":")[-1],
+                "work_order_ref": work_ref,
+            }
+        proof = recovery.get("proof") if isinstance(recovery.get("proof"), Mapping) else {}
+        classification = str(proof.get("classification") or "unclassified")
+        if classification != ROUTE_REJECTED_NO_SEND_CLASSIFICATION:
+            return {"action": "recovery_required", "reason": f"{reason}:{classification}",
+                    "work_order_ref": work_ref}
+        stage_ordinal = STAGE_ORDINALS.get(str(selected.get("stage") or ""))
+        now = self.clock().astimezone(timezone.utc)
+        day = now.date().isoformat()
+        tomorrow = (datetime(now.year, now.month, now.day, tzinfo=timezone.utc)
+                    + timedelta(days=1)).isoformat()
+        waiting = {"action": "recovery_required",
+                   "reason": f"{reason}:{ALL_MODELS_UNAVAILABLE_CAUSE}:awaiting_model_availability",
+                   "work_order_ref": work_ref}
+        used_today = {"action": "recovery_required",
+                      "reason": (f"{reason}:{ALL_MODELS_UNAVAILABLE_CAUSE}:automatic_round_used_today:"
+                                 f"{NEXT_AUTOMATIC_RETRY_MARK}{tomorrow}"),
+                      "work_order_ref": work_ref}
+        if stage_ordinal is None:
+            return waiting
+        if recovery_rounds_on(connection, admission["id"], stage_ordinal, kind="automatic",
+                              day=day) >= MAX_AUTOMATIC_RECOVERY_ROUNDS_PER_DAY:
+            return used_today
+        served = model_availability_since(
+            self.model_router_db, route_decision_ref=str(proof.get("route_decision_ref") or ""),
+            since=str(proof.get("failed_at") or ""))
+        if served is None:
+            return waiting
+        work_hash = selected.get("work_order_hash")
+        if not isinstance(work_hash, str) or not work_hash:
+            return waiting
+        try:
+            recorded = append_recovery_round(
+                connection, admission_ref=admission["id"],
+                admission_hash=admission["content_hash"], stage_ordinal=stage_ordinal,
+                failed_work_order_ref=work_ref, failed_work_order_hash=work_hash,
+                hold_reason=reason, kind="automatic", actor_ref=AUTOMATIC_RECOVERY_ROUND_ACTOR,
+                basis={"cause": ALL_MODELS_UNAVAILABLE_CAUSE,
+                       "failed_route_decision_ref": proof.get("route_decision_ref"),
+                       "failed_at": proof.get("failed_at"),
+                       "model_available_again": served},
+                now=now)
+        except MissionDocumentResearchExecutorError:
+            return used_today
+        return {
+            "action": "resume",
+            "reason": FRESH_WORK_RECOVERY_ROUND_REASON + ":" + recorded["id"].split(":")[-1],
             "work_order_ref": work_ref,
         }
 
@@ -1659,6 +2092,7 @@ class MissionDocumentResearchCoordinator:
     def _reentry_hold_reason(
         self, admission: Mapping[str, Any], ticket_ref: str | None,
         recovery: Mapping[str, Any], exc: Exception,
+        *, prior_reason: str | None = None,
     ) -> str:
         """Automatic once, then a person -- the rule the retry doors follow.
 
@@ -1668,8 +2102,9 @@ class MissionDocumentResearchCoordinator:
         attempt is a different fact, and it has to reach the owner saying so.
         """
 
+        unavailable = "controlled_reentry_unavailable:" + str(exc)
         if ticket_ref is None:
-            return "controlled_reentry_unavailable:" + str(exc)
+            return _repeated_unavailable(unavailable, prior_reason)
         try:
             if self.launcher.status(ticket_ref).get(
                     "rebound_from_ticket_ref") is not None:
@@ -1691,7 +2126,7 @@ class MissionDocumentResearchCoordinator:
             attempted = False
         if attempted:
             return REENTRY_ESCALATED_REASON + ":" + str(exc)
-        return "controlled_reentry_unavailable:" + str(exc)
+        return _repeated_unavailable(unavailable, prior_reason)
 
     def _resume(
         self, admission: Mapping[str, Any], *, ticket_ref: str,
@@ -1734,6 +2169,10 @@ class MissionDocumentResearchCoordinator:
         if self.launcher is None:
             return {"status": "unconfigured", "reason": "document research lane is absent"}
         holds = _read_holds(self.holds_path)
+        # The reasons as the previous tick left them: a refusal only counts as
+        # repeated against an earlier tick, never against itself earlier in
+        # this one (the same admission can be tried from two places per tick).
+        prior_reasons = {ref: held["reason"] for ref, held in holds.items()}
         admissions = self._admissions()
         # A completed child records query_miss/no_verified_claim/candidate_staged
         # as an immutable observation.  Older dispatches could later recreate a
@@ -1775,7 +2214,6 @@ class MissionDocumentResearchCoordinator:
             admission for admission in admissions
             if admission["id"] not in completed_refs
         ]
-        by_ref = {item["id"]: item for item in admissions}
         if any(admission_ref in holds for admission_ref in completed_refs):
             holds = {
                 admission_ref: held
@@ -1783,6 +2221,13 @@ class MissionDocumentResearchCoordinator:
                 if admission_ref not in completed_refs
             }
             _write_holds(self.holds_path, holds)
+        # 2026-09-30: an admission its owner withdrew is closed for good.  It
+        # is never dispatched, recovered or escaped again, and its hold stays
+        # in the ledger as a terminal ``withdrawn_by_owner`` -- which is not
+        # waiting on anybody.
+        self._withdraw_expired_holds(holds, admissions)
+        admissions = self._settle_withdrawn(holds, admissions)
+        by_ref = {item["id"]: item for item in admissions}
         latest = self._latest()
         settled = None
         errors: list[dict[str, Any]] = []
@@ -1839,7 +2284,8 @@ class MissionDocumentResearchCoordinator:
                     except Exception as exc:  # noqa: BLE001 - held, tick goes on
                         reason = (
                             self._reentry_hold_reason(
-                                admission, ticket["id"], recovery, exc)
+                                admission, ticket["id"], recovery, exc,
+                                prior_reason=prior_reasons.get(admission["id"]))
                             if isinstance(exc, LaneChildRejected) else
                             f"{DISPATCH_ERROR_REASON}:{type(exc).__name__}:{exc}"[:300]
                         )
@@ -2032,7 +2478,8 @@ class MissionDocumentResearchCoordinator:
                     self._hold(
                         holds, admission,
                         reason=self._reentry_hold_reason(
-                            admission, item["ticket_ref"], item["recovery"], exc),
+                            admission, item["ticket_ref"], item["recovery"], exc,
+                            prior_reason=prior_reasons.get(admission["id"])),
                         ticket_ref=item["held_ticket_ref"],
                         disposition=item["rejected_disposition"],
                     )
@@ -2175,10 +2622,64 @@ def authorize_reentry(server: Any, params: Mapping[str, Any]) -> dict[str, Any]:
     if launcher is None:
         return {"status": "unconfigured",
                 "reason": "document research lane is absent"}
+    # 2026-10-09: on a fresh-work cap a re-entry alone buys nothing -- the
+    # executor stops the same Work on the same bound again (live EPAM, the
+    # owner's 10-09 press).  The same door there records one more round of
+    # fresh-work recovery for the exact failed Work, append-only; the lane
+    # resumes it on its next tick.
+    round_result = _owner_recovery_round(server, launcher, params)
+    if round_result is not None:
+        return round_result
     return launcher.authorize_controlled_reentry(
         params["admission_ref"], actor_ref=params["actor_ref"],
         granted_at=datetime.now(timezone.utc).isoformat(timespec="microseconds"),
     )
+
+
+def _owner_recovery_round(server: Any, launcher: Any,
+                          params: Mapping[str, Any]) -> dict[str, Any] | None:
+    """The owner's round for a hold stopped on a fresh-work cap, or ``None``."""
+
+    from .mission_document_research_executor import (
+        FRESH_WORK_CAP_REASONS, append_recovery_round, available_doors, hold_reason_code,
+        read_mission_document_research_observations,
+    )
+
+    admission_ref = params.get("admission_ref")
+    held = _read_holds(launcher.tickets_dir / HOLDS_FILE).get(str(admission_ref))
+    if (not isinstance(held, Mapping) or held.get("disposition") != "recovery_required"
+            or hold_reason_code(held.get("reason")) not in FRESH_WORK_CAP_REASONS):
+        return None
+    actor_ref = params.get("actor_ref")
+    if not isinstance(actor_ref, str) or not actor_ref.startswith("human:"):
+        raise MissionDocumentResearchLaneError("a recovery round needs a human actor")
+    if not any(door["door"] == "retry_round" for door in available_doors(held)):
+        return {"status": "refused", "admission_ref": admission_ref,
+                "reason": "the lane retries this hold by itself once a model is available",
+                "hold": {"disposition": held["disposition"], "reason": held["reason"]}}
+    stopped = [
+        item for item in read_mission_document_research_observations(server.store.connection)
+        if item["admission_ref"] == admission_ref and item["outcome"] == "recovery_required"
+        and isinstance(item.get("recovery"), Mapping)
+        and item["recovery"].get("status") == "stopped"
+        and item["recovery"].get("reason") in FRESH_WORK_CAP_REASONS
+        and item.get("stage") in STAGE_ORDINALS
+    ]
+    if not stopped:
+        return {"status": "refused", "admission_ref": admission_ref,
+                "reason": "no stopped fresh-work recovery to extend"}
+    latest = stopped[-1]
+    recorded = append_recovery_round(
+        server.store.connection, admission_ref=str(admission_ref),
+        admission_hash=held["admission_hash"], stage_ordinal=STAGE_ORDINALS[latest["stage"]],
+        failed_work_order_ref=latest["work_order_ref"],
+        failed_work_order_hash=latest["work_order_hash"], hold_reason=held["reason"],
+        kind="owner", actor_ref=actor_ref,
+        basis={"door": "retry_round", "observation_ref": latest["id"]},
+        now=datetime.now(timezone.utc))
+    return {"status": "granted", "kind": "recovery_round", "admission_ref": admission_ref,
+            "round_ref": recorded["id"], "round_status": recorded["status"],
+            "failed_work_order_ref": latest["work_order_ref"]}
 
 
 OWNER_RECOVERY_ACTOR = "operator:owner-authorized-document-recovery"
@@ -2193,7 +2694,6 @@ STAGE_ORDINALS: Mapping[str, int] = {
 def _recovery_doors() -> dict[str, dict[str, Any]]:
     from .mission_document_research_executor import (
         CONTRACT_FAILED_AFTER_AUTOMATIC_RETRY,
-        PROVIDER_BUDGET_EXCEEDED_NOT_RETRIED,
         UNPROVED_SEND_FAILED_AFTER_AUTOMATIC_RETRY,
     )
 
@@ -2207,10 +2707,12 @@ def _recovery_doors() -> dict[str, dict[str, Any]]:
         },
         "unproved": {
             "reason": UNPROVED_SEND_FAILED_AFTER_AUTOMATIC_RETRY,
-            # A provider-budget refusal was sent and charged like an unproved
-            # send is feared to be, and this door buys exactly one more call.
-            "reasons": (UNPROVED_SEND_FAILED_AFTER_AUTOMATIC_RETRY,
-                        PROVIDER_BUDGET_EXCEEDED_NOT_RETRIED),
+            # 2026-10-06: no longer a provider-budget refusal.  This door buys
+            # one more call at the failed Work's own ceiling, which a prompt
+            # the provider counted over that ceiling breaks the same way; the
+            # lane corrects the ceiling itself, and what it cannot correct is
+            # a withdrawal.
+            "reasons": (UNPROVED_SEND_FAILED_AFTER_AUTOMATIC_RETRY,),
             "prefix": "mission-document-unproved-send-recovery-authorization",
             "method": "authorize_unproved_send_recovery",
             "cli": "authorize-unproved",
@@ -2295,7 +2797,8 @@ def authorize_owner_recovery(
     from decimal import Decimal
 
     from .mission_document_research_executor import (
-        _effective_stage, _formal_hash, _formal_ref, _ref,
+        MissionDocumentResearchExecutorError, _effective_stage, _formal_hash,
+        _formal_ref, _ref,
     )
     from .store import content_hash as _content_hash
 
@@ -2311,8 +2814,19 @@ def authorize_owner_recovery(
                 "door": door, "reason": spec["reason"]}
     index = ordinal - 1
     worker = executor.draft_worker if index == 1 else executor.verifier_worker
-    work, _links = _effective_stage(
-        executor.authority, executor.scheduler, admission, index, worker=worker)
+    try:
+        work, _links = _effective_stage(
+            executor.authority, executor.scheduler, admission, index, worker=worker)
+    except MissionDocumentResearchExecutorError as exc:
+        # 2026-10-03: live legacy 49d92fa7/a2d4854e/bca93fcb/c4554401.  The
+        # stage's failed Work is a rebound Work of an *earlier* model
+        # authority epoch and the authority has rolled again since, so the
+        # executor cannot map that execution onto the current epoch.  That is
+        # a fact about this admission, not a writer fault: it used to escape
+        # as an unmapped error (and the CLI then called again, twice).  Say
+        # what it is and which door still opens.
+        return _unresolvable_stage_refusal(
+            admission["id"], door=door, ordinal=ordinal, error=exc)
     ceiling = work["budget"]["max_cost_usd"]
     if max_cost_usd is not None and Decimal(str(ceiling)) > Decimal(str(max_cost_usd)):
         return {
@@ -2346,7 +2860,17 @@ def authorize_owner_recovery(
         }
         authorization = {**body, "id": _ref(spec["prefix"], body)}
         authorization["content_hash"] = _content_hash(authorization)
-    result = getattr(executor, spec["method"])(admission["id"], authorization)
+    try:
+        result = getattr(executor, spec["method"])(admission["id"], authorization)
+    except MissionDocumentResearchExecutorError as exc:
+        # A refusal the executor makes *before* it writes anything is the
+        # owner's answer.  Once its row exists the door has (partly) opened,
+        # and that must still surface as the failure it is.
+        if _existing_owner_authorization(
+                executor, admission["id"], ordinal, spec["prefix"]) is not None:
+            raise
+        return _unresolvable_stage_refusal(
+            admission["id"], door=door, ordinal=ordinal, error=exc)
     return {
         "status": result.get("status", "admitted"),
         "admission_ref": admission["id"], "door": door,
@@ -2359,19 +2883,56 @@ def authorize_owner_recovery(
     }
 
 
-def _open_writer_executor(server: Any, admission_ref: str) -> Any:
-    """Build this lane's executor inside the writer, out of the writer's state.
+# Executor refusals of a stage whose authority cannot be rebuilt under the
+# current model authority.  Each is permanent for this admission: nothing the
+# owner can buy changes which epochs already ran.
+EPOCH_UNRESOLVED_MESSAGES = (
+    "model authority refresh has an unresolved prior execution epoch",
+    "model authority refresh has an unresolved historical stage",
+    "model authority refresh has multiple prior succeeded epochs",
+    "recovery link authority epoch drifted",
+)
+MODEL_AUTHORITY_EPOCH_UNRESOLVED = "model_authority_epoch_unresolved"
+EXECUTOR_REFUSED = "executor_refused_owner_recovery"
 
-    The child process the lane normally launches assembles exactly this from
-    exactly these files.  The owner's door has to reach the same executor
-    without a second process opening the Ledger, the Scheduler and the staging
-    store behind the writer's back, so it is assembled here instead, from the
-    launcher's own configuration -- the same paths, proved the same way.
-    """
 
-    launcher = server.lane_launcher(LAUNCHER_KWARG)
-    if launcher is None:
-        raise MissionDocumentResearchLaneError("document research lane is absent")
+def _unresolvable_stage_refusal(
+    admission_ref: str, *, door: str, ordinal: int, error: BaseException,
+) -> dict[str, Any]:
+    """The owner door's answer when the executor cannot rebuild the stage."""
+
+    import shlex
+
+    detail = str(error)
+    epoch = any(message in detail for message in EPOCH_UNRESOLVED_MESSAGES)
+    withdraw = (
+        "python -m dalton_core.document_recovery_cli withdraw --state-dir <state> "
+        f"--admission-ref {shlex.quote(admission_ref)} "
+        f"--reason {shlex.quote('owner door refused: ' + detail)} "
+        "--apply --actor human:<owner>")
+    return {
+        "status": "refused", "admission_ref": admission_ref, "door": door,
+        "stage_ordinal": ordinal,
+        "reason": MODEL_AUTHORITY_EPOCH_UNRESOLVED if epoch else EXECUTOR_REFUSED,
+        "detail": detail,
+        "explanation": (
+            "这一阶段失败的那条 WorkOrder 是在更早的一个模型授权纪元里重绑出来的，"
+            "之后模型授权（路由策略/模型档案版本）又换过一次；执行器无法把那次已经"
+            "执行过的纪元映射到当前纪元，所以这道门不能再买一次调用，以后也不会变。"
+            if epoch else
+            "执行器在写入任何东西之前拒绝了这次授权（原文见 detail）；没有发出调用、"
+            "没有花钱。"),
+        "next_step": "withdraw",
+        "next_command": withdraw,
+        "note": ("用 withdraw 关掉这条 admission（先不加 --apply 预览）；之后规划器可以"
+                 "按当前模型授权和预算重新立项同一个问题。"),
+        "model_calls": 0,
+    }
+
+
+def _admission_hash(server: Any, admission_ref: str) -> str:
+    """The admission's recorded hash: one primary-key read on the store thread."""
+
     row = server.store.connection.execute(
         "SELECT content_hash FROM mission_document_research_admissions "
         "WHERE admission_id=?", (admission_ref,),
@@ -2379,6 +2940,18 @@ def _open_writer_executor(server: Any, admission_ref: str) -> Any:
     if row is None:
         raise MissionDocumentResearchLaneError(
             "mission document admission is unavailable")
+    return row["content_hash"]
+
+
+def _open_runtime(launcher: Any, admission_ref: str, admission_hash: str) -> Any:
+    """Build this lane's executor out of the launcher's own configuration.
+
+    The child process the lane normally launches assembles exactly this from
+    exactly these files.  It opens its own handles on the Ledger, the
+    Scheduler and the staging store -- never the writer's store connection --
+    so it can run on the owner-door thread while lanes keep the store thread.
+    """
+
     from .mission_document_research_runtime import MissionDocumentResearchRuntime
 
     return MissionDocumentResearchRuntime(
@@ -2390,8 +2963,32 @@ def _open_writer_executor(server: Any, admission_ref: str) -> Any:
         draft_config_path=launcher.draft_model_config_path,
         verifier_config_path=launcher.verifier_model_config_path,
         admission_ref=admission_ref,
-        expected_admission_hash=row["content_hash"],
+        expected_admission_hash=admission_hash,
     )
+
+
+def _run_owner_recovery(launcher: Any, admission_ref: str, admission_hash: str, *,
+                        door: str, actor_ref: str, max_cost_usd: Any) -> dict[str, Any]:
+    """The heavy half of an owner recovery door: runtime build and the door."""
+
+    runtime = _open_runtime(launcher, admission_ref, admission_hash)
+    try:
+        # Every derivation of the stage chain re-verifies the draft's document
+        # search proof, and one door derives the chain several times; verify
+        # each proof once.
+        replay = getattr(runtime.executor.registry, "replayed_search_proofs", None)
+        with (replay() if replay is not None else contextlib.nullcontext()):
+            return authorize_owner_recovery(
+                runtime.executor, admission_ref, door=door, actor_ref=actor_ref,
+                max_cost_usd=max_cost_usd,
+            )
+    finally:
+        runtime.close()
+
+
+def _door_operation(door: str) -> str:
+    return {"paid": "authorize_mission_document_paid_recovery",
+            "unproved": "authorize_mission_document_unproved_recovery"}[door]
 
 
 def _authorize_recovery(
@@ -2407,14 +3004,43 @@ def _authorize_recovery(
                 "mission-document-research-admission:")):
         raise MissionDocumentResearchLaneError(
             "admission_ref is not a mission document research admission")
-    runtime = _open_writer_executor(server, admission_ref)
-    try:
-        return authorize_owner_recovery(
-            runtime.executor, admission_ref, door=door, actor_ref=actor_ref,
-            max_cost_usd=params.get("max_cost_usd"),
-        )
-    finally:
-        runtime.close()
+    launcher = server.lane_launcher(LAUNCHER_KWARG)
+    if launcher is None:
+        raise MissionDocumentResearchLaneError("document research lane is absent")
+    jobs = getattr(server, "owner_door_jobs", None)
+    operation = _door_operation(door)
+    job_ref = params.get("job_ref")
+    if jobs is None:
+        # A server without the job runner (a hand-built test double): the door
+        # runs where it is called.
+        return _run_owner_recovery(
+            launcher, admission_ref, _admission_hash(server, admission_ref),
+            door=door, actor_ref=actor_ref, max_cost_usd=params.get("max_cost_usd"))
+    # 2026-10-07: the store thread only takes the request.  The runtime build
+    # and the door run on the owner-door thread with their own handles; the
+    # caller polls with ``job_ref``.
+    if job_ref is not None:
+        if not isinstance(job_ref, str) or not job_ref.startswith("owner-door-job:"):
+            raise MissionDocumentResearchLaneError("job_ref is not an owner door job")
+        view = jobs.view(server.store.connection, job_ref)
+        if view.get("job_ref") == job_ref and view.get("state") != "unknown" and (
+                view.get("operation") != operation
+                or view.get("admission_ref") != admission_ref):
+            raise MissionDocumentResearchLaneError(
+                "job_ref belongs to another door or admission")
+        return view
+    deferred = jobs.deferred(operation, admission_ref)
+    if deferred is not None:
+        return deferred
+    admission_hash = _admission_hash(server, admission_ref)
+    max_cost_usd = params.get("max_cost_usd")
+    return jobs.request(
+        server.store.connection, operation=operation, admission_ref=admission_ref,
+        actor_ref=actor_ref, params=params,
+        work=lambda: _run_owner_recovery(
+            launcher, admission_ref, admission_hash, door=door,
+            actor_ref=actor_ref, max_cost_usd=max_cost_usd),
+    )
 
 
 def authorize_paid_recovery(server: Any, params: Mapping[str, Any]) -> dict[str, Any]:
@@ -2429,15 +3055,142 @@ def authorize_unproved_recovery(server: Any, params: Mapping[str, Any]) -> dict[
     return _authorize_recovery(server, params, door="unproved")
 
 
+def withdrawal_blockers(
+    launcher: Any, store_connection: Any, admission_ref: str,
+    held: Mapping[str, Any] | None, *, now: datetime | None = None,
+) -> list[str]:
+    """Everything that makes withdrawing this admission unsafe right now.
+
+    Empty means the owner may close it: the lane has escalated the hold or
+    made it terminal, no child run of it is running, no stage, recovery or
+    rebound WorkOrder of it holds a live lease, and no recovery or re-entry
+    the owner has granted is still waiting to run.  Read-only.
+    """
+
+    from .mission_document_research_withdrawal import (
+        pending_owner_recoveries, pending_reentry_grant, running_work_orders,
+        withdrawable_hold,
+    )
+
+    blockers: list[str] = []
+    allowed, why = withdrawable_hold(held)
+    if not allowed:
+        blockers.append("hold:" + why)
+    tickets = []
+    if isinstance(held, Mapping) and isinstance(held.get("ticket_ref"), str):
+        tickets.append(held["ticket_ref"])
+    latest_path = launcher.tickets_dir / LATEST_FILE
+    try:
+        latest = json.loads(latest_path.read_text(encoding="utf-8"))
+    except (OSError, ValueError):
+        latest = None
+    if isinstance(latest, Mapping) and latest.get("admission_ref") == admission_ref \
+            and isinstance(latest.get("ticket_ref"), str):
+        tickets.append(latest["ticket_ref"])
+    for ticket_ref in dict.fromkeys(tickets):
+        try:
+            ticket = launcher.status(ticket_ref)
+        except LookupError:
+            continue
+        except LaneChildRejected:
+            blockers.append("child:unreadable:" + ticket_ref)
+            continue
+        if ticket.get("status") == "running":
+            blockers.append("child:running:" + ticket_ref)
+    for work_order_ref in running_work_orders(store_connection, admission_ref, now=now):
+        blockers.append("work:running:" + work_order_ref)
+    # 2026-09-30: a recovery the owner has bought and the lane has not yet run
+    # to a result.  The hold ledger still shows the failure it was bought to
+    # retry until the lane's next tick, and nothing of it holds a lease yet.
+    for item in pending_owner_recoveries(store_connection, admission_ref):
+        blockers.append("owner_recovery:pending:" + str(item["authorization_ref"]))
+    grant = pending_reentry_grant(launcher.tickets_dir, admission_ref)
+    if grant is not None:
+        blockers.append("owner_reentry:pending:" + str(grant["grant_path"]))
+    return blockers
+
+
+def withdraw_admission(server: Any, params: Mapping[str, Any]) -> dict[str, Any]:
+    """The owner's door that closes one escalated or terminal admission for good.
+
+    Runs in the writer, which owns the lane's hold ledger and the Core.  It
+    refuses -- without writing anything -- unless the hold is one the owner
+    may close and nothing of it is running.  A second call for an admission
+    already withdrawn replays the first row.
+    """
+
+    from .mission_document_research_withdrawal import (
+        MissionDocumentWithdrawalAuthority, WITHDRAWN_REASON, withdrawal_for,
+    )
+
+    actor_ref = params.get("actor_ref")
+    if not isinstance(actor_ref, str) or not actor_ref.startswith("human:"):
+        raise MissionDocumentResearchLaneError("a withdrawal needs a human actor")
+    admission_ref = params.get("admission_ref")
+    if (not isinstance(admission_ref, str)
+            or not admission_ref.startswith("mission-document-research-admission:")):
+        raise MissionDocumentResearchLaneError(
+            "admission_ref is not a mission document research admission")
+    launcher = server.lane_launcher(LAUNCHER_KWARG)
+    if launcher is None:
+        return {"status": "unconfigured", "reason": "document research lane is absent"}
+    existing = withdrawal_for(server.store.connection, admission_ref)
+    if existing is not None:
+        return {"status": "already_withdrawn", **existing}
+    holds = _read_holds(launcher.tickets_dir / HOLDS_FILE)
+    held = holds.get(admission_ref)
+    blockers = withdrawal_blockers(
+        launcher, server.store.connection, admission_ref, held)
+    if blockers:
+        return {"status": "refused", "admission_ref": admission_ref,
+                "reasons": blockers,
+                "hold": None if held is None else {
+                    "disposition": held["disposition"], "reason": held["reason"]}}
+    authority = MissionDocumentWithdrawalAuthority(server.store)
+    result = authority.withdraw(
+        admission_ref, actor_ref=actor_ref, reason=params.get("reason"), hold=held)
+    # The lane would do this on its next tick; doing it now means the owner's
+    # ``holds`` stops listing it the moment the door answers.
+    holds[admission_ref] = {**held, "reason": WITHDRAWN_REASON,
+                            "disposition": "terminal_hold", "retry_at": None}
+    _write_holds(launcher.tickets_dir / HOLDS_FILE, holds)
+    return result
+
+
 def dispatch(server: Any, _params: Mapping[str, Any]) -> dict[str, Any]:
     launcher = server.lane_launcher(LAUNCHER_KWARG)
     coordinator = server.lane_state.get(LAUNCHER_KWARG)
     if coordinator is None:
         coordinator = MissionDocumentResearchCoordinator(
-            store=server.store, launcher=launcher
+            store=server.store, launcher=launcher,
+            model_router_db=_model_router_db(server, launcher),
         )
         server.lane_state[LAUNCHER_KWARG] = coordinator
-    return coordinator.dispatch_once()
+    if launcher is not None:
+        from .research_question_maintenance import maintain_questions
+        staging = server.candidate_review if getattr(server, "_candidate_staging_path", None) else None
+        maintenance = maintain_questions(server.store, staging=staging)
+    else:
+        maintenance = None
+    result = coordinator.dispatch_once()
+    if maintenance is not None:
+        result["question_maintenance"] = maintenance
+    return result
+
+
+def _model_router_db(server: Any, launcher: Any) -> Path | None:
+    """The router database the writer routes with; the state default otherwise."""
+
+    try:
+        configured = server._model_router_db()
+    except Exception:  # noqa: BLE001 - no configured router is not a failed tick
+        configured = None
+    if configured:
+        return Path(str(configured))
+    if launcher is None:
+        return None
+    candidate = Path(launcher.tickets_dir).parent / "model-router.sqlite"
+    return candidate if candidate.is_file() else None
 
 
 def add_arguments(parser: Any) -> None:
@@ -2563,11 +3316,14 @@ __all__ = [
     "authorize_paid_recovery",
     "authorize_reentry",
     "authorize_unproved_recovery",
+    "withdraw_admission",
+    "withdrawal_blockers",
     "DEADLOCK_ESCAPE_AFTER",
     "ESCAPES_FILE",
     "MAX_ESCAPES_PER_ADMISSION",
     "OWNER_AUTHORIZATION_NOTE",
     "REENTRY_ESCALATED_REASON",
+    "REENTRY_UNAVAILABLE_ESCALATION_NOTE",
     "REENTRY_ESCALATION_NOTE",
     "UNPROVED_SEND_ESCALATION_NOTE",
     "DRIVER_KEY", "LANE", "LANE_CONFIG", "LAUNCHER_KWARG",

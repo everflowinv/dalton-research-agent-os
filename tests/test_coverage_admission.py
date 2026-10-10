@@ -1,3 +1,4 @@
+from tests.thesis_question_fixtures import formal_content
 import json
 import os
 import sqlite3
@@ -129,7 +130,7 @@ class CoverageAdmissionTests(unittest.TestCase):
             mandate_version_hash=self.mandate["content_hash"],
             driver_pack_version_ref=self.pack["id"],
             driver_pack_version_hash=self.pack["content_hash"],
-            content=thesis_content(),
+            content=formal_content(self.store, thesis_content(), question="question:" + "thesis:acn:ai-reinvention-growth", industry=(INDUSTRY_REF if str(COMPANY_REF).startswith("industry:") else None)),
             actor_ref="human:coverage-owner",
             idempotency_key="thesis-admission-candidate:acn:1",
         )
@@ -187,7 +188,7 @@ class CoverageAdmissionTests(unittest.TestCase):
             replay["thesis_version"]["id"], admitted["thesis_version"]["id"]
         )
         thesis = ThesisVersion.from_dict(admitted["thesis_version"])
-        self.assertEqual(thesis.schema_version, "0.2")
+        self.assertEqual(thesis.schema_version, "0.3")
         self.assertEqual(thesis.confidence, "medium")
         self.assertEqual(thesis.authority_kind, "human_admission")
         self.assertEqual(thesis.authority_ref, decision_args["decision_id"])
@@ -232,7 +233,7 @@ class CoverageAdmissionTests(unittest.TestCase):
                 mandate_version_hash=self.mandate["content_hash"],
                 driver_pack_version_ref=self.pack["id"],
                 driver_pack_version_hash=self.pack["content_hash"],
-                content=thesis_content(),
+                content=formal_content(self.store, thesis_content(), question="question:" + "thesis:acn:bad-driver", industry=(INDUSTRY_REF if str(COMPANY_REF).startswith("industry:") else None)),
                 actor_ref="human:coverage-owner",
                 idempotency_key="candidate:bad-driver",
             )
@@ -270,7 +271,7 @@ class CoverageAdmissionTests(unittest.TestCase):
                 mandate_version_hash=self.mandate["content_hash"],
                 driver_pack_version_ref=self.pack["id"],
                 driver_pack_version_hash=self.pack["content_hash"],
-                content=thesis_content(),
+                content=formal_content(self.store, thesis_content(), question="question:" + "thesis:acn:ai-reinvention-growth", industry=(INDUSTRY_REF if str(COMPANY_REF).startswith("industry:") else None)),
                 actor_ref="human:coverage-owner",
                 idempotency_key="candidate:revision",
             )

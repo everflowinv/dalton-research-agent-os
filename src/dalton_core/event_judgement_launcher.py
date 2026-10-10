@@ -157,7 +157,7 @@ class EventJudgementLauncher(LaneChildLauncher):
                 summary, scheduler_db=self.scheduler_db,
                 budget_db=budget_db, mission=mission,
                 allowed_purposes={
-                    "event_judgement", "event_judgement_verifier",
+                    "event_judgement", "event_judgement_verifier", "event_triage",
                     "thesis_reflection", "thesis_reflection_verifier",
                 },
             )

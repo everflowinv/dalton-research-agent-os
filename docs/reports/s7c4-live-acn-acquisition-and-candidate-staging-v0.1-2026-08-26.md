@@ -67,7 +67,7 @@ correction set / citation 所绑定的 `a8a9fbff…bd96bd` 逐字节一致，`tr
 
 ## 下一步
 
-1. owner 在 Cockpit（`https://everflowdemac-mini.taild2c767.ts.net:8793/`）对 `candidate-claim-version:3fafc07d…e9a87d` accept；
+1. owner 在 Cockpit（`https://your-node.your-tailnet.ts.net:8793/`）对 `candidate-claim-version:3fafc07d…e9a87d` accept；
    之后用 `transcript_candidate_status` 确认 `review_state=committed`，live Core `evidence_versions=1`、`claim_versions=1`、claim_kind qualitative。
 2. 8/27 00:xx UTC 的万华 cycle 是 S7a + policy v4 的首次真实验证，回看 heartbeat。
 3. 再排 S7c-3 报告里的两条设计点（policy pointer 回退 prior chain；snapshot_id 带内容 hash）。

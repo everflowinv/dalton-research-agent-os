@@ -45,7 +45,7 @@ BACKLOG_TABLES = {
     "backlog_question_events",
     "backlog_selection_links",
     "backlog_answer_bindings",
-    "backlog_idempotency",
+    "backlog_idempotency", "backlog_canonical_aliases",
 }
 
 
@@ -271,13 +271,13 @@ class ResearchQuestionBacklogTests(unittest.TestCase):
         self.govern()
         started, decision = self.start_decided_cycle(
             "agenda:cycle:1", "agenda-cycle:1", "decision:1",
-            questions=[{"question": "Question A?", "answer_criteria": "Answer A"}],
+            questions=[{"question": "Question A?", "answer_criteria": "revenue"}],
         )
         recorded = self.record(
-            question="Question A?", answer_criteria="Answer A",
+            question="Question A?", answer_criteria="revenue",
             idempotency_key="record:lifecycle",
         )
-        self.assertEqual(recorded["status"], "fresh")
+        self.assertEqual(recorded["status"], "duplicate")
         self.assertEqual(recorded["state"], "open")
         question_ref = recorded["question_ref"]
         self.assertEqual(question_ref, question_ref_for("mandate:coverage-quality", "wanhua", "Question A?"))
@@ -333,21 +333,21 @@ class ResearchQuestionBacklogTests(unittest.TestCase):
             version_id="mandate-version:2", idempotency_key="mandate:other-identity",
         )
         base = self.record(
-            question="Q?", answer_criteria="A",
+            question="Q?", answer_criteria="revenue",
             idempotency_key="record:identity:base",
         )["question_ref"]
         other_text = self.record(
-            question="Q??", answer_criteria="A",
+            question="Q??", answer_criteria="revenue",
             idempotency_key="record:identity:text",
         )["question_ref"]
         other_company = self.backlog.record_question(
             mandate_version_ref="mandate-version:2", company_ref="other-co",
-            question="Q?", answer_criteria="A", source_refs=["s"],
+            question="Q?", answer_criteria="revenue", source_refs=["s"],
             actor_ref="core", idempotency_key="record:identity:company",
         )["question_ref"]
         other_mandate = self.backlog.record_question(
             mandate_version_ref="mandate-version:2", company_ref="other-co",
-            question="Q??", answer_criteria="A", source_refs=["s"],
+            question="Q??", answer_criteria="revenue", source_refs=["s"],
             actor_ref="core", idempotency_key="record:identity:mandate",
         )["question_ref"]
         self.assertNotEqual(base, other_text)
@@ -355,7 +355,7 @@ class ResearchQuestionBacklogTests(unittest.TestCase):
         self.assertNotEqual(base, other_mandate)
         self.assertNotEqual(other_company, other_mandate)
         self.assertEqual(
-            self.record(question="Q?", answer_criteria="A", idempotency_key="record:identity:again")["question_ref"],
+            self.record(question="Q?", answer_criteria="revenue", idempotency_key="record:identity:again")["question_ref"],
             base,
         )
 
@@ -363,9 +363,9 @@ class ResearchQuestionBacklogTests(unittest.TestCase):
         self.govern()
         self.start_decided_cycle(
             "agenda:cycle:v2", "agenda-cycle:v2", "decision:v2",
-            questions=[{"question": "Q v2?", "answer_criteria": "A v2"}],
+            questions=[{"question": "Q v2?", "answer_criteria": "revenue"}],
         )
-        self.record(question="Q v2?", answer_criteria="A v2", idempotency_key="record:v2")
+        self.record(question="Q v2?", answer_criteria="revenue", idempotency_key="record:v2")
         question_ref = question_ref_for("mandate:coverage-quality", "wanhua", "Q v2?")
         self.backlog.select_question(
             question_ref=question_ref, decision_ref="decision:v2",
@@ -419,34 +419,36 @@ class ResearchQuestionBacklogTests(unittest.TestCase):
             ).fetchone()[0], 1,
         )
 
-    def test_duplicate_question_with_different_content_conflicts(self):
+    def test_duplicate_question_with_different_content_appends_version(self):
         self.govern()
-        self.record(question="Q?", answer_criteria="A", idempotency_key="record:q:1")
-        with self.assertRaises(ResearchQuestionConflict):
-            self.record(question="Q?", answer_criteria="A DIFFERENT", idempotency_key="record:q:2")
+        first = self.record(question="Q?", answer_criteria="revenue", idempotency_key="record:q:1")
+        changed = self.record(question="Q?", answer_criteria="gross margin", idempotency_key="record:q:2")
+        self.assertEqual(changed["status"], "revised")
+        self.assertEqual(changed["question_ref"], first["question_ref"])
+        self.assertEqual(self.backlog.question(first["question_ref"])["head"]["version"], 2)
 
     def test_duplicate_replay_after_terminal_state(self):
         self.govern()
         self.start_decided_cycle(
             "agenda:cycle:1", "agenda-cycle:1", "decision:1",
-            questions=[{"question": "Q?", "answer_criteria": "A"}],
+            questions=[{"question": "Q?", "answer_criteria": "revenue"}],
         )
-        self.record(question="Q?", answer_criteria="A", idempotency_key="record:1")
+        self.record(question="Q?", answer_criteria="revenue", idempotency_key="record:1")
         question_ref = question_ref_for("mandate:coverage-quality", "wanhua", "Q?")
         self.backlog.select_question(question_ref=question_ref, decision_ref="decision:1", actor_ref="core", idempotency_key="select:1")
         # Re-recording in a later cycle cannot resurrect or duplicate an in-flight question.
-        replay = self.record(question="Q?", answer_criteria="A", idempotency_key="record:2")
+        replay = self.record(question="Q?", answer_criteria="revenue", idempotency_key="record:2")
         self.assertEqual(replay["status"], "duplicate")
         self.assertEqual(replay["state"], "selected")
 
     def test_idempotent_replay_and_conflict(self):
         self.govern()
-        first = self.record(question="Q?", answer_criteria="A", idempotency_key="record:idem")
-        replay = self.record(question="Q?", answer_criteria="A", idempotency_key="record:idem")
+        first = self.record(question="Q?", answer_criteria="revenue", idempotency_key="record:idem")
+        replay = self.record(question="Q?", answer_criteria="revenue", idempotency_key="record:idem")
         self.assertEqual(replay["status"], "duplicate")
         self.assertEqual(replay["question_ref"], first["question_ref"])
         conflict = self.record(
-            question="Q? DIFFERENT", answer_criteria="A",
+            question="Q? DIFFERENT", answer_criteria="revenue",
             idempotency_key="record:idem",
         )
         self.assertEqual(conflict["status"], "conflict")
@@ -459,10 +461,10 @@ class ResearchQuestionBacklogTests(unittest.TestCase):
     def test_idempotency_key_is_canonicalized(self):
         self.govern()
         first = self.record(
-            question="Q?", answer_criteria="A", idempotency_key="  record:trim  "
+            question="Q?", answer_criteria="revenue", idempotency_key="  record:trim  "
         )
         replay = self.record(
-            question="Q?", answer_criteria="A", idempotency_key="record:trim"
+            question="Q?", answer_criteria="revenue", idempotency_key="record:trim"
         )
         self.assertEqual(first["question_ref"], replay["question_ref"])
         self.assertEqual(replay["status"], "duplicate")
@@ -477,9 +479,9 @@ class ResearchQuestionBacklogTests(unittest.TestCase):
         self.govern()
         self.start_decided_cycle(
             "agenda:cycle:1", "agenda-cycle:1", "decision:1",
-            questions=[{"question": "Q?", "answer_criteria": "A"}],
+            questions=[{"question": "Q?", "answer_criteria": "revenue"}],
         )
-        self.record(question="Q?", answer_criteria="A", idempotency_key="record:1")
+        self.record(question="Q?", answer_criteria="revenue", idempotency_key="record:1")
         question_ref = question_ref_for("mandate:coverage-quality", "wanhua", "Q?")
         self.backlog.select_question(question_ref=question_ref, decision_ref="decision:1", actor_ref="core", idempotency_key="select:1")
         self.plan_and_start_question(question_ref, suffix="replay")
@@ -509,7 +511,7 @@ class ResearchQuestionBacklogTests(unittest.TestCase):
 
     def test_illegal_transitions_fail_closed(self):
         self.govern()
-        self.record(question="Q?", answer_criteria="A", idempotency_key="record:1")
+        self.record(question="Q?", answer_criteria="revenue", idempotency_key="record:1")
         question_ref = question_ref_for("mandate:coverage-quality", "wanhua", "Q?")
         with self.assertRaises(TypeError):
             self.backlog.plan_question(question_ref=question_ref, actor_ref="core")
@@ -532,9 +534,9 @@ class ResearchQuestionBacklogTests(unittest.TestCase):
         self.govern()
         self.start_decided_cycle(
             "agenda:cycle:1", "agenda-cycle:1", "decision:1",
-            questions=[{"question": "Q?", "answer_criteria": "A"}],
+            questions=[{"question": "Q?", "answer_criteria": "revenue"}],
         )
-        self.record(question="Q?", answer_criteria="A", idempotency_key="record:1")
+        self.record(question="Q?", answer_criteria="revenue", idempotency_key="record:1")
         question_ref = question_ref_for("mandate:coverage-quality", "wanhua", "Q?")
         self.backlog.select_question(question_ref=question_ref, decision_ref="decision:1", actor_ref="core", idempotency_key="select:1")
         # Re-select by a second decision is an illegal out-of-order transition.
@@ -567,9 +569,9 @@ class ResearchQuestionBacklogTests(unittest.TestCase):
         self.govern()
         self.start_decided_cycle(
             "agenda:cycle:1", "agenda-cycle:1", "decision:1",
-            questions=[{"question": "Q?", "answer_criteria": "A"}],
+            questions=[{"question": "Q?", "answer_criteria": "revenue"}],
         )
-        self.record(question="Q?", answer_criteria="A", idempotency_key="record:1")
+        self.record(question="Q?", answer_criteria="revenue", idempotency_key="record:1")
         question_ref = question_ref_for("mandate:coverage-quality", "wanhua", "Q?")
         self.backlog.select_question(question_ref=question_ref, decision_ref="decision:1", actor_ref="core", idempotency_key="select:1")
         self.plan_and_start_question(question_ref, suffix="terminal")
@@ -593,12 +595,12 @@ class ResearchQuestionBacklogTests(unittest.TestCase):
         # The cycle freezes mandate-version:1 -> mandate:coverage-quality.
         self.start_decided_cycle(
             "agenda:cycle:1", "agenda-cycle:1", "decision:1",
-            questions=[{"question": "Q?", "answer_criteria": "A"}],
+            questions=[{"question": "Q?", "answer_criteria": "revenue"}],
         )
         # The question is recorded under the other mandate.
         other_ref = self.backlog.record_question(
             mandate_version_ref="mandate-version:2", company_ref="wanhua",
-            question="Q?", answer_criteria="A", source_refs=["s"],
+            question="Q?", answer_criteria="revenue", source_refs=["s"],
             actor_ref="core", idempotency_key="record:cross",
         )["question_ref"]
         with self.assertRaises(ResearchQuestionConflict):
@@ -633,12 +635,12 @@ class ResearchQuestionBacklogTests(unittest.TestCase):
         self.start_decided_cycle(
             "agenda:cycle:source", "agenda-cycle:source", "decision:source",
             questions=[{
-                "question": "Q?", "answer_criteria": "A",
+                "question": "Q?", "answer_criteria": "revenue",
                 "source_refs": ["evidence:cycle"],
             }],
         )
         recorded = self.record(
-            question="Q?", answer_criteria="A", source_refs=["evidence:backlog"],
+            question="Q?", answer_criteria="revenue", source_refs=["evidence:backlog"],
             idempotency_key="record:source",
         )
         with self.assertRaises(ResearchQuestionConflict):
@@ -652,7 +654,7 @@ class ResearchQuestionBacklogTests(unittest.TestCase):
 
     def test_fabricated_decision_ref_rejected(self):
         self.govern()
-        self.record(question="Q?", answer_criteria="A", idempotency_key="record:1")
+        self.record(question="Q?", answer_criteria="revenue", idempotency_key="record:1")
         question_ref = question_ref_for("mandate:coverage-quality", "wanhua", "Q?")
         with self.assertRaises(ResearchQuestionNotFound):
             self.backlog.select_question(
@@ -668,9 +670,9 @@ class ResearchQuestionBacklogTests(unittest.TestCase):
         self.govern()
         self.start_decided_cycle(
             "agenda:cycle:1", "agenda-cycle:1", "decision:1",
-            questions=[{"question": "Q?", "answer_criteria": "A"}],
+            questions=[{"question": "Q?", "answer_criteria": "revenue"}],
         )
-        self.record(question="Q?", answer_criteria="A", idempotency_key="record:1")
+        self.record(question="Q?", answer_criteria="revenue", idempotency_key="record:1")
         question_ref = question_ref_for("mandate:coverage-quality", "wanhua", "Q?")
         self.backlog.select_question(question_ref=question_ref, decision_ref="decision:1", actor_ref="core", idempotency_key="select:1")
         self.plan_and_start_question(question_ref, suffix="answer-helper")
@@ -756,7 +758,7 @@ class ResearchQuestionBacklogTests(unittest.TestCase):
 
     def test_tampered_question_rows_detected(self):
         self.govern()
-        self.record(question="Q?", answer_criteria="A", idempotency_key="record:1")
+        self.record(question="Q?", answer_criteria="revenue", idempotency_key="record:1")
         question_ref = question_ref_for("mandate:coverage-quality", "wanhua", "Q?")
         connection = self.store.connection
 
@@ -782,11 +784,11 @@ class ResearchQuestionBacklogTests(unittest.TestCase):
         self.govern()
         self.start_decided_cycle(
             f"agenda:cycle:{suffix}", f"agenda-cycle:{suffix}", f"decision:{suffix}",
-            questions=[{"question": f"Q {suffix}?", "answer_criteria": f"A {suffix}"}],
+            questions=[{"question": f"Q {suffix}?", "answer_criteria": "revenue"}],
             snapshot_id=f"perception:{suffix}",
         )
         self.record(
-            question=f"Q {suffix}?", answer_criteria=f"A {suffix}",
+            question=f"Q {suffix}?", answer_criteria="revenue",
             idempotency_key=f"record:{suffix}",
         )
         question_ref = question_ref_for("mandate:coverage-quality", "wanhua", f"Q {suffix}?")
@@ -821,7 +823,7 @@ class ResearchQuestionBacklogTests(unittest.TestCase):
         # different, existing question.  The FK target must exist for the
         # write to go through; the row hash check must still reject it.
         self.record(
-            question="Someone else?", answer_criteria="A",
+            question="Someone else?", answer_criteria="revenue",
             idempotency_key="record:mixup",
         )
         connection.execute("DROP TRIGGER backlog_answer_bindings_no_update")
@@ -909,9 +911,9 @@ class ResearchQuestionBacklogTests(unittest.TestCase):
         self.govern()
         self.start_decided_cycle(
             "agenda:cycle:1", "agenda-cycle:1", "decision:1",
-            questions=[{"question": "Q?", "answer_criteria": "A"}],
+            questions=[{"question": "Q?", "answer_criteria": "revenue"}],
         )
-        self.record(question="Q?", answer_criteria="A", idempotency_key="record:1")
+        self.record(question="Q?", answer_criteria="revenue", idempotency_key="record:1")
         question_ref = question_ref_for("mandate:coverage-quality", "wanhua", "Q?")
         self.backlog.select_question(question_ref=question_ref, decision_ref="decision:1", actor_ref="core", idempotency_key="select:1")
         self.plan_and_start_question(question_ref, suffix="progress")
@@ -953,7 +955,7 @@ class ResearchQuestionBacklogTests(unittest.TestCase):
 
     def test_projection_is_per_mandate_and_fails_on_tamper(self):
         self.govern()
-        self.record(question="Q?", answer_criteria="A", idempotency_key="record:1")
+        self.record(question="Q?", answer_criteria="revenue", idempotency_key="record:1")
         self.agenda.create_mandate(
             "mandate:other", objective="Other", scope_refs=["wanhua"],
             constraints={}, success_criteria={}, effective_from=NOW,
@@ -989,13 +991,13 @@ class ResearchQuestionBacklogTests(unittest.TestCase):
         self.govern()
         self.start_decided_cycle(
             "agenda:cycle:1", "agenda-cycle:1", "decision:1",
-            questions=[{"question": "Q?", "answer_criteria": "A"}],
+            questions=[{"question": "Q?", "answer_criteria": "revenue"}],
         )
         claim = self.formal_claim("claim:side")
         claim_rows_before = self.store.connection.execute(
             "SELECT COUNT(*) FROM claim_versions"
         ).fetchone()[0]
-        self.record(question="Q?", answer_criteria="A", idempotency_key="record:1")
+        self.record(question="Q?", answer_criteria="revenue", idempotency_key="record:1")
         question_ref = question_ref_for("mandate:coverage-quality", "wanhua", "Q?")
         self.backlog.select_question(question_ref=question_ref, decision_ref="decision:1", actor_ref="core", idempotency_key="select:1")
         self.plan_and_start_question(question_ref, suffix="side")
@@ -1033,9 +1035,9 @@ class ResearchQuestionBacklogTests(unittest.TestCase):
         self.govern()
         self.start_decided_cycle(
             "agenda:cycle:1", "agenda-cycle:1", "decision:1",
-            questions=[{"question": "Q?", "answer_criteria": "A"}],
+            questions=[{"question": "Q?", "answer_criteria": "revenue"}],
         )
-        self.record(question="Q?", answer_criteria="A", idempotency_key="record:1")
+        self.record(question="Q?", answer_criteria="revenue", idempotency_key="record:1")
         question_ref = question_ref_for("mandate:coverage-quality", "wanhua", "Q?")
         self.backlog.select_question(question_ref=question_ref, decision_ref="decision:1", actor_ref="core", idempotency_key="select:1")
         planned = self.plan_selected_question(question_ref, key="plan:boundary")
@@ -1056,13 +1058,13 @@ class ResearchQuestionBacklogTests(unittest.TestCase):
             self.backlog.record_question(
                 question_ref="research-question:forged",  # type: ignore[call-arg]
                 mandate_version_ref="mandate-version:1", company_ref="wanhua",
-                question="Q?", answer_criteria="A", source_refs=["s"],
+                question="Q?", answer_criteria="revenue", source_refs=["s"],
                 actor_ref="core",
             )
         with self.assertRaises(TypeError):
             self.backlog.record_question(
                 mandate_version_ref="mandate-version:1", company_ref="wanhua",
-                question="Q?", answer_criteria="A", source_refs=["s"],
+                question="Q?", answer_criteria="revenue", source_refs=["s"],
                 actor_ref="core", content_hash="0" * 64,  # type: ignore[call-arg]
             )
 
@@ -1070,9 +1072,9 @@ class ResearchQuestionBacklogTests(unittest.TestCase):
         self.govern()
         self.start_decided_cycle(
             "agenda:cycle:1", "agenda-cycle:1", "decision:1",
-            questions=[{"question": "Q?", "answer_criteria": "A"}],
+            questions=[{"question": "Q?", "answer_criteria": "revenue"}],
         )
-        recorded = self.record(question="Q?", answer_criteria="A", idempotency_key="record:1")
+        recorded = self.record(question="Q?", answer_criteria="revenue", idempotency_key="record:1")
         question_ref = recorded["question_ref"]
         self.backlog.select_question(question_ref=question_ref, decision_ref="decision:1", actor_ref="core", idempotency_key="select:1")
         history = self.backlog.history(question_ref)

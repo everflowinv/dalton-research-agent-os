@@ -616,6 +616,43 @@ class ChecklistSurvivesARepublishTests(StageHarness):
         self.assertEqual(after["read"], 4)
         self.assertEqual(after["status"], before["status"])
 
+    def test_a_read_decision_carried_verbatim_into_a_new_version_stays_read(self) -> None:
+        """2026-10-09: EPAM's four transcripts were read (five-window proofs
+        under v23-v26) but carried into v28 as proof-less copies of the same
+        decision; the copy tied on ``updated_at`` and won, so three of four
+        counted as "legacy" and the planner said only one had been read."""
+
+        company = self.params["universe"][0]["company_ref"]
+        documents = [self.document(company, TRANSCRIPTS, "acquired", read=True)
+                     for _ in range(4)]
+        self.assertEqual(self.item(self.evaluate(), company, "earnings_calls")["read"], 4)
+        new_version = self._publish_next_version()
+        with self.missions._transaction() as cur:
+            for index, document_ref in enumerate(documents):
+                # The shape ``_carry_review_into_version(keep_decision=True)``
+                # writes: same state, rationale, candidate, created_at and
+                # updated_at; new id and version; no proof.  ``zzz`` makes the
+                # copy sort after the original on the updated_at tie.
+                cur.execute(
+                    "INSERT INTO coverage_mission_document_reviews(review_id,mission_version_ref,"
+                    "company_ref,source_ref,document_ref,discovered_document_ref,state,"
+                    "candidate_claim_version_ref,rationale,registered_by,created_at,updated_at) "
+                    "SELECT 'mission-document-review:zzz" + str(index) + "',?,company_ref,source_ref,"
+                    "document_ref,discovered_document_ref,state,candidate_claim_version_ref,"
+                    "rationale,registered_by,created_at,updated_at "
+                    "FROM coverage_mission_document_reviews WHERE document_ref=?",
+                    (new_version["id"], document_ref))
+        item = self.item(self.evaluate(), company, "earnings_calls")
+        self.assertEqual((item["read"], item["legacy_extracted"]), (4, 0))
+        # A copy whose decision differs (reopened and decided again without a
+        # proof) does not borrow the original's proof.
+        with self.missions._transaction() as cur:
+            cur.execute(
+                "UPDATE coverage_mission_document_reviews SET updated_at='2026-10-09T00:00:00+00:00', "
+                "rationale='decided again' WHERE review_id='mission-document-review:zzz0'")
+        item = self.item(self.evaluate(), company, "earnings_calls")
+        self.assertEqual(item["read"], 3)
+
     def test_a_document_carried_into_the_new_version_is_not_counted_twice(self) -> None:
         company = self.params["universe"][0]["company_ref"]
         document_ref = self.document(company, "earnings-call-transcripts", "acquired")
@@ -714,3 +751,90 @@ class IndustryChecklistTests(unittest.TestCase):
         industry = {s for i in INDUSTRY_BASE_ITEMS for s in i["spec_refs"]}
         company = {s for i in SOURCE_BASE_ITEMS for s in i["spec_refs"]}
         self.assertEqual(industry & company, set())
+
+
+class TranscriptBootstrapTests(StageHarness):
+    """2026-10-03 (ws-7d): a company holding no transcript still has quarters to ask for."""
+
+    def filing(self, company_ref: str, form: str, report_date: str) -> None:
+        self._seq += 1
+        self.store.connection.execute("PRAGMA foreign_keys = OFF")
+        try:
+            with self.missions._transaction() as cur:
+                cur.execute(
+                    "INSERT INTO coverage_mission_statement_filings(ingest_id,dispatch_id,company_ref,"
+                    "cik,entity_name,accession,form,filed,report_date,line_count,source_record_refs_json,"
+                    "governance_ref,governance_hash,recorded_at,content_hash) "
+                    "VALUES(?,?,?,?,?,?,?,?,?,?,?,?,?,?,?)",
+                    (f"ingest:{self._seq}", f"dispatch:{self._seq}", company_ref, "0000000001",
+                     "Fixture", f"0000000001-26-{self._seq:06d}", form, report_date, report_date,
+                     1, "[]", "governance:test", "8" * 64, "2026-09-01T00:00:00+00:00", "9" * 64))
+        finally:
+            self.store.connection.execute("PRAGMA foreign_keys = ON")
+
+    def test_zero_transcripts_take_the_four_quarters_from_the_filings(self) -> None:
+        # GOOGL in ws-7d: December year end, newest 10-Q for June 2026.
+        self.filing(CTSH, "10-K", "2025-12-31")
+        self.filing(CTSH, "10-Q", "2026-03-31")
+        self.filing(CTSH, "10-Q", "2026-06-30")
+        calls = self.item(self.evaluate(), CTSH, "earnings_calls")
+        self.assertEqual(calls["have"], 0)
+        self.assertEqual(calls["missing_periods"],
+                         ["FY2025-Q3", "FY2025-Q4", "FY2026-Q1", "FY2026-Q2"])
+        self.assertEqual(calls["period_coverage"], "known")
+        self.assertEqual(calls["period_basis"], "sec_filings")
+
+    def test_a_non_december_year_end_is_labelled_by_its_fiscal_year(self) -> None:
+        # Accenture (August year end): the May 2026 10-Q closes FY2026-Q3, the
+        # quarter AlphaEngine titles "Accenture Q3 2026".  Microsoft (June)
+        # works the same way: its June 2026 10-K closes FY2026-Q4.
+        self.filing(ACN, "10-K", "2025-08-31")
+        self.filing(ACN, "10-Q", "2026-05-31")
+        self.filing(EPAM, "10-K", "2026-06-30")
+        self.filing(EPAM, "10-Q", "2026-03-31")
+        companies = self.evaluate()
+        self.assertEqual(self.item(companies, ACN, "earnings_calls")["missing_periods"],
+                         ["FY2025-Q4", "FY2026-Q1", "FY2026-Q2", "FY2026-Q3"])
+        self.assertEqual(self.item(companies, EPAM, "earnings_calls")["missing_periods"],
+                         ["FY2026-Q1", "FY2026-Q2", "FY2026-Q3", "FY2026-Q4"])
+
+    def test_first_call_acquired_does_not_slide_the_window_back(self) -> None:
+        self.filing(CTSH, "10-K", "2025-12-31")
+        self.filing(CTSH, "10-Q", "2026-06-30")
+        self.document(CTSH, TRANSCRIPTS, "acquired",
+                      title="Cognizant Technology Solutions Q3 2025")
+        calls = self.item(self.evaluate(), CTSH, "earnings_calls")
+        self.assertEqual(calls["have"], 1)
+        self.assertEqual(calls["missing_periods"], ["FY2025-Q4", "FY2026-Q1", "FY2026-Q2"])
+
+    def test_held_calls_newer_than_the_filings_keep_their_window(self) -> None:
+        self.filing(CTSH, "10-K", "2025-12-31")
+        self.document(CTSH, TRANSCRIPTS, "acquired", title="Cognizant Q2 2026 Earnings Call")
+        calls = self.item(self.evaluate(), CTSH, "earnings_calls")
+        self.assertEqual(calls["required_periods"],
+                         ["FY2025-Q3", "FY2025-Q4", "FY2026-Q1", "FY2026-Q2"])
+        self.assertEqual(calls["period_basis"], "transcripts")
+
+    def test_without_a_10k_the_year_end_is_not_guessed(self) -> None:
+        self.filing(CTSH, "10-Q", "2026-06-30")
+        calls = self.item(self.evaluate(), CTSH, "earnings_calls")
+        self.assertEqual(calls["missing_periods"], [])
+        self.assertEqual(calls["period_coverage"], "unknown")
+
+    def test_alphaengine_call_titles_classify_by_fiscal_quarter(self) -> None:
+        from dalton_core.discovery_candidate_selection import _matches_missing_quarter
+        from dalton_core.document_subject import earnings_call_names_issuer
+        from dalton_core.mission_stage import _earnings_call_period
+
+        for title, ticker, period in (
+            ("Alphabet Q2 2026", "GOOGL", "FY2026-Q2"),
+            ("Microsoft Q4 2026", "MSFT", "FY2026-Q4"),
+            ("Amazon Q2 2026", "AMZN", "FY2026-Q2"),
+            ("Meta Platforms Q1 2026", "META", "FY2026-Q1"),
+            ("Meta Platforms Q3 2025", "META", "FY2025-Q3"),
+        ):
+            self.assertEqual(_earnings_call_period(title), period, title)
+            self.assertTrue(earnings_call_names_issuer(title, ticker)["names_issuer"], title)
+            self.assertTrue(_matches_missing_quarter(title, [period]), title)
+        self.assertIsNone(_earnings_call_period(
+            "Microsoft Goldman Sachs Communacopia + Technology Conference 2025"))

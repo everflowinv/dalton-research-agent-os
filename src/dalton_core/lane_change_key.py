@@ -94,11 +94,13 @@ def _scalar(connection: Any, sql: str, *, optional: bool = False) -> str:
 def claim_change_keys(connection: Any) -> dict[str, str]:
     """Per-subject Claim aggregate: how many, and which is newest.
 
-    ``subject_ref`` lives inside ``claim_json``, so this is one grouped scan
-    with a JSON extraction rather than an index seek.  It is still two orders
-    of magnitude cheaper than the fingerprint it gates -- 0.05 s warm against
-    5 s -- because it parses one field instead of building every row, and one
-    scan answers for every company at once rather than once per company.
+    ``subject_ref`` lives inside ``claim_json``, so without help this is one
+    grouped scan with a JSON extraction per Claim.  It is still two orders of
+    magnitude cheaper than the fingerprint it gates -- 0.05 s warm against
+    5 s -- but "warm" is the catch: cold on the external volume it reads the
+    whole Claim table twice a tick.  ``claim_versions_subject_metric_period``
+    (``migrations``) leads with this expression and ends with
+    ``claim_version_id``, so the statement is answered from that index alone.
     """
 
     return _grouped(

@@ -237,8 +237,8 @@ class AuditTests(HostSchemeCase):
     def test_before_and_after_adoption_the_three_rows_say_so(self) -> None:
         rows = {row["key"]: row for row in audit_host_scheme(
             self.workspace, source_state_dir=self.source)}
-        self.assertEqual(sorted(rows), ["credential_slots", "model_routing_alignment",
-                                        "shared_daily_budget"])
+        self.assertEqual(sorted(rows), ["call_budgets", "credential_slots",
+                                        "model_routing_alignment", "shared_daily_budget"])
         self.assertEqual(rows["shared_daily_budget"]["status"], "missing")
         self.assertEqual(rows["model_routing_alignment"]["status"], "differs")
         self.assertEqual(rows["credential_slots"]["status"], "differs")
@@ -261,7 +261,7 @@ class AuditTests(HostSchemeCase):
                              source_state_dir=self.source)
         self.assertEqual([row["key"] for row in report["host_scheme"]],
                          ["shared_daily_budget", "model_routing_alignment",
-                          "credential_slots"])
+                          "credential_slots", "call_budgets"])
         rendered = render_audit(report)
         self.assertIn("共享每日预算", rendered)
         self.assertIn("模型凭证槽位", rendered)

@@ -1,0 +1,50 @@
+{
+  "$id": "https://dalton.local/schemas/initial-screen-verifier-provider-output-v0.1.schema.json",
+  "title": "InitialScreenVerifierProviderOutputV0.1",
+  "type": "object",
+  "additionalProperties": false,
+  "required": [
+    "verdict",
+    "findings"
+  ],
+  "properties": {
+    "verdict": {
+      "enum": [
+        "pass",
+        "reject"
+      ]
+    },
+    "findings": {
+      "type": "array",
+      "items": {
+        "type": "object",
+        "additionalProperties": false,
+        "required": [
+          "code",
+          "section",
+          "detail"
+        ],
+        "properties": {
+          "code": {
+            "enum": [
+              "unsupported_figure",
+              "arithmetic_error",
+              "view_missing",
+              "forecast_gap_missing",
+              "valuation_missing",
+              "reasoning_lint",
+              "material_missing_unbound",
+              "contradiction"
+            ]
+          },
+          "section": {
+            "type": "string"
+          },
+          "detail": {
+            "type": "string"
+          }
+        }
+      }
+    }
+  }
+}

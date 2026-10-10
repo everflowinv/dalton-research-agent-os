@@ -35,25 +35,25 @@ import json
 import re
 import sqlite3
 from collections.abc import Mapping, Sequence
-from datetime import datetime, timezone
+from datetime import date, datetime, timezone
 from pathlib import Path
 from typing import Any, Callable
 
 from .coverage_mission import CoverageMissionError, STAGE_ORDER, fold_stage_status
 from .store import content_hash
+from .terminology import label as _term
 
 SCHEMA_VERSION = "0.1"
 FIRST_STAGE = "initial_screen"
 ACQUIRED_STATUSES = ("acquired", "already_in_authority")
 READ_REVIEW_STATE = "extraction_staged"
 
+# Batch am: the research stages in the analyst's words come from the
+# terminology registry (text evaluation 4.2: 立项初筛 / 深度模型构建 ...).
 STAGE_LABELS: dict[str, str] = {
-    "initial_screen": "初步筛选",
-    "deep_insight_gate": "深度认知门",
-    "industry_model": "行业模型",
-    "company_model": "公司模型",
-    "investment_memo": "投资备忘录",
-    "active_coverage": "持续覆盖",
+    stage: _term("stage", stage)
+    for stage in ("initial_screen", "deep_insight_gate", "industry_model", "company_model",
+                  "investment_memo", "active_coverage")
 }
 STAGE_STATUS_LABELS: dict[str, str] = {
     "entered": "进行中",
@@ -222,9 +222,23 @@ _STATUS_RANK = {
 }
 
 
+def _decision_signature(row: Mapping[str, Any]) -> tuple[Any, ...]:
+    """The decision a resolved review records, independent of its review id.
+
+    A carried copy keeps every one of these fields byte for byte; a review
+    that was reopened and decided again does not (its ``updated_at`` moves),
+    so a proof is never borrowed by a later, different decision.
+    """
+
+    return (row["company_ref"], row["document_ref"], row["state"],
+            row["updated_at"], row["candidate_claim_version_ref"], row["rationale"])
+
+
 def _document_counts(
     connection: sqlite3.Connection, mission_version_ref: str,
     *, company_name_keys: Mapping[str, str] | None = None,
+    latest_quarters: Mapping[str, str] | None = None,
+    reported_quarters: Mapping[str, Mapping[str, Any]] | None = None,
 ) -> dict[tuple[str, str], dict[str, int]]:
     """(company_ref, spec_ref) → acquired / pending / failed / read counts.
 
@@ -248,8 +262,8 @@ def _document_counts(
         return counts.setdefault(
             (company, spec), {"acquired": 0, "pending": 0, "candidates": 0, "failed": 0,
                               "read": 0, "legacy_extracted": 0, "periods": [], "required_periods": [],
-                              "missing_periods": [], "unclassified": 0,
-                              "not_attributed": 0}
+                              "missing_periods": [], "period_basis": None, "unclassified": 0,
+                              "not_attributed": 0, "candidate_periods": []}
         )
 
     row = connection.execute(
@@ -274,8 +288,13 @@ def _document_counts(
         review_params = (row["mission_ref"],)
 
     latest_reviews: dict[tuple[str, str], tuple[str, str, str | None]] = {}
+    # 2026-10-09: what each latest review decided, so a decision carried
+    # verbatim into a later mission version can be recognised as the decision
+    # a completion proof was written for (see ``_decision_signature``).
+    latest_signatures: dict[tuple[str, str], tuple[Any, ...]] = {}
     for review in connection.execute(
-        "SELECT company_ref, document_ref, state, rationale, updated_at, review_id "
+        "SELECT company_ref, document_ref, state, rationale, updated_at, review_id, "
+        "candidate_claim_version_ref "
         "FROM coverage_mission_document_reviews "
         f"WHERE {review_scope.replace('r.', '')} ORDER BY updated_at, review_id",
         review_params,
@@ -283,8 +302,19 @@ def _document_counts(
         latest_reviews[(review["company_ref"], review["document_ref"])] = (
             review["state"], review["review_id"], review["rationale"]
         )
+        latest_signatures[(review["company_ref"], review["document_ref"])] = (
+            _decision_signature(review))
 
     completed_reviews: set[str] = set()
+    # Decisions a completion proof stands behind.  ``carry_review_into_version``
+    # with ``keep_decision`` copies a resolved review into the version in force
+    # verbatim -- same state, rationale, candidate and ``updated_at`` -- under a
+    # new review id that has no proof of its own.  Ordered by ``updated_at``
+    # then id, the copy and the proven original tie and the copy often wins,
+    # so live on 2026-10-09 three of EPAM's four read transcripts (each with a
+    # five-window proof under v23-v26) counted as "legacy" and the planner
+    # wrote "EPAM 有 4 份电话会逐字稿，只读了 1 份" for days.
+    completed_signatures: set[tuple[Any, ...]] = set()
     try:
         from .document_read_completion import review_wire
         rows = connection.execute(
@@ -315,8 +345,17 @@ def _document_counts(
                     and proof.get("company_ref") == proof_row["company_ref"]
                     and proof.get("document_ref") == proof_row["document_ref"]):
                 completed_reviews.add(proof_row["review_id"])
+                completed_signatures.add(_decision_signature(proof_row))
     except (sqlite3.OperationalError, ValueError, TypeError, json.JSONDecodeError):
         completed_reviews = set()
+        completed_signatures = set()
+
+    def _proven(key: tuple[str, str]) -> bool:
+        latest = latest_reviews.get(key)
+        if latest is None:
+            return False
+        return (latest[1] in completed_reviews
+                or latest_signatures.get(key) in completed_signatures)
 
     # A dismissed review may still represent acquired issuer material, but the
     # document-ref prefix alone does not prove issuer attribution.  Only the
@@ -355,7 +394,7 @@ def _document_counts(
             and entry["source_ref"] == "source:sec-edgar"
             and (entry["company_ref"], document_ref) in authoritative_annuals
         )
-        completed = latest_review[1] in completed_reviews
+        completed = _proven((entry["company_ref"], document_ref))
         if dismissed and (wrong_issuer or (not issuer_authoritative_annual and not completed)):
             continue
         key = (entry["company_ref"], entry["spec_ref"], document_ref)
@@ -416,6 +455,18 @@ def _document_counts(
             entry_counts["pending"] += 1
         elif status == "acquisition_failed":
             entry_counts["failed"] += 1
+        if status in {"discovered", "acquisition_launched"} and spec_ref == "earnings-call-transcripts":
+            # 2026-10-02 (ws-7d): which quarters the *unacquired* candidates
+            # already cover, by the same attribution and period rules an
+            # acquired transcript is counted by.  "META's three missing calls
+            # are found and waiting for selection" and "AlphaEngine never
+            # returned GOOGL's calls" are different stalls with different
+            # owners, and the checklist used to report both as "还差 4 份".
+            period = _candidate_call_period(
+                provenance.get(document_ref), (company_name_keys or {}).get(company_ref))
+            if period is not None:
+                entry_counts["candidate_periods"] = sorted(
+                    {*entry_counts["candidate_periods"], period})
 
     read_docs: set[tuple[str, str, str]] = set()
     legacy_extracted_docs: set[tuple[str, str, str]] = set()
@@ -428,7 +479,7 @@ def _document_counts(
     ).fetchall():
         key = (entry["company_ref"], entry["document_ref"])
         latest = latest_reviews.get(key)
-        if (latest is not None and latest[1] in completed_reviews
+        if (latest is not None and _proven(key)
                 and not (latest[0] == "dismissed" and isinstance(latest[2], str)
                          and latest[2].startswith("P13i:"))):
             read_docs.add((entry["company_ref"], entry["spec_ref"], entry["document_ref"]))
@@ -457,9 +508,32 @@ def _document_counts(
                 legacy_periods.setdefault((company_ref, spec_ref), set()).add(period)
         elif (company_ref, spec_ref, document_ref) in best:
             bucket(company_ref, spec_ref)["legacy_extracted"] += 1
-    for key, periods in earnings_periods.items():
+    # 2026-10-03 (ws-7d): the four required quarters used to be anchored on
+    # the newest transcript held, so a company holding none (GOOGL, MSFT) had
+    # no required quarters, `missing_periods: []`, and a selector that could
+    # never be told which call to pick.  The issuer's own filings say which
+    # fiscal quarter is the latest; with a known fiscal year end they also
+    # keep the window from sliding back when the first call acquired is the
+    # oldest missing one.
+    anchored = {key: periods for key, periods in earnings_periods.items()}
+    for company_ref in latest_quarters or {}:
+        anchored.setdefault((company_ref, "earnings-call-transcripts"), set())
+    for key, periods in anchored.items():
         entry_counts = bucket(*key)
-        required = _required_quarters(max(periods, key=_quarter_ordinal))
+        filed = (latest_quarters or {}).get(key[0])
+        latest, basis = None, None
+        if periods:
+            latest, basis = max(periods, key=_quarter_ordinal), "transcripts"
+        if filed is not None and (latest is None or _quarter_ordinal(filed) > _quarter_ordinal(latest)):
+            latest, basis = filed, "sec_filings"
+            # ADR-0015: the quarter the company's own Item 2.02 8-K just
+            # reported, not yet filed.  Its call is a required period now.
+            if (reported_quarters or {}).get(key[0], {}).get("period") == filed:
+                basis = "earnings_release"
+        if latest is None:
+            continue
+        required = _required_quarters(latest)
+        entry_counts["period_basis"] = basis
         entry_counts["required_periods"] = required
         entry_counts["missing_periods"] = [period for period in required
                                             if period not in periods]
@@ -472,6 +546,131 @@ def _document_counts(
             for period in required
         )
     return counts
+
+
+_PERIODIC_FORMS = ("10-Q", "10-K", "10-Q/A", "10-K/A")
+
+
+def _period_month(value: date) -> tuple[int, int]:
+    """(year, month) a fiscal period ending on ``value`` belongs to.
+
+    52/53-week years end on a weekday near the month end (2026-06-27, or
+    2026-07-02): an early-month date closes the previous month.
+    """
+
+    if value.day < 15:
+        return (value.year - 1, 12) if value.month == 1 else (value.year, value.month - 1)
+    return value.year, value.month
+
+
+def _fiscal_quarter_of(period_end: date, fiscal_year_end_month: int) -> str | None:
+    """The fiscal quarter a period ending on ``period_end`` closes.
+
+    Labelled by the fiscal year it ends in, which is how issuers and
+    AlphaEngine name calls: Microsoft (June year end) June 2026 is FY2026-Q4,
+    September 2025 is FY2026-Q1.
+    """
+
+    year, month = _period_month(period_end)
+    offset = (month - fiscal_year_end_month) % 12
+    if offset % 3:
+        return None
+    quarter = 4 if offset == 0 else offset // 3
+    fiscal_year = year if month <= fiscal_year_end_month else year + 1
+    return f"FY{fiscal_year}-Q{quarter}"
+
+
+def _parse_day(value: Any) -> date | None:
+    try:
+        return date.fromisoformat(str(value)[:10])
+    except (TypeError, ValueError):
+        return None
+
+
+def _latest_fiscal_quarters(
+    connection: sqlite3.Connection, company_refs: Sequence[str],
+) -> dict[str, str]:
+    """company_ref -> the newest fiscal quarter the issuer has filed.
+
+    The newest 10-Q/10-K period end, labelled with the fiscal year end the
+    newest 10-K reports.  Only with a 10-K: a guessed December year end would
+    ask a June-year-end issuer for the wrong quarters, and directed selection
+    would then drop its real calls ("Microsoft Q4 2026" is FY2026-Q4, not a
+    calendar quarter).  A company without one keeps the old behaviour.
+    """
+
+    filings: dict[str, list[tuple[str, date]]] = {}
+    try:
+        rows = connection.execute(
+            "SELECT company_ref,form,report_date FROM coverage_mission_statement_filings "
+            f"WHERE form IN ({','.join('?' for _ in _PERIODIC_FORMS)})", _PERIODIC_FORMS,
+        ).fetchall()
+    except sqlite3.OperationalError:
+        rows = []
+    for row in rows:
+        day = _parse_day(row[2])
+        if day is not None:
+            filings.setdefault(str(row[0]), []).append((str(row[1]), day))
+    result: dict[str, str] = {}
+    for company_ref in company_refs:
+        held = filings.get(company_ref) or []
+        annual = [day for form, day in held if form.startswith("10-K")]
+        if not annual:
+            continue
+        latest = _fiscal_quarter_of(max(day for _form, day in held), _period_month(max(annual))[1])
+        if latest is not None:
+            result[company_ref] = latest
+    return result
+
+
+def _reported_quarters(
+    connection: sqlite3.Connection, company_refs: Sequence[str],
+    filed: Mapping[str, str],
+) -> dict[str, dict[str, Any]]:
+    """company_ref -> the reported-not-filed release whose quarter is after ``filed``.
+
+    ADR-0015: read from the SEC filings index already on disk (no network);
+    a Core without one, or in memory, simply has none.
+    """
+
+    try:
+        from .earnings_release_intake import reported_fiscal_quarters
+
+        found = reported_fiscal_quarters(connection, company_refs)
+    except Exception:  # noqa: BLE001 - the advance is additive; never break the stage view
+        return {}
+    out: dict[str, dict[str, Any]] = {}
+    for company_ref, release in found.items():
+        held = filed.get(company_ref)
+        if held is None or _quarter_ordinal(release["period"]) > _quarter_ordinal(held):
+            out[company_ref] = release
+    return out
+
+
+def _candidate_call_period(source_metadata: Any, name_key: str | None) -> str | None:
+    """Quarter a not-yet-acquired transcript candidate covers, or ``None``.
+
+    The same three tests an acquired transcript passes before it is counted:
+    source metadata seen, the issuer named in the issuer position of the title
+    and among the named companies, and an explicit fiscal quarter.
+    """
+
+    if source_metadata is None or not source_metadata["metadata_seen"]:
+        return None
+    from .document_subject import document_names_subject, earnings_call_names_issuer
+
+    title = source_metadata["title"]
+    if not earnings_call_names_issuer(title, name_key).get("names_issuer"):
+        return None
+    try:
+        named_companies = json.loads(source_metadata["named_companies_json"])
+    except (TypeError, ValueError, json.JSONDecodeError):
+        named_companies = []
+    if not document_names_subject(
+            " | ".join(str(value) for value in named_companies or ()), name_key
+    ).get("names_subject"):
+        return None
+    return _earnings_call_period(title)
 
 
 _QUARTER_PATTERNS = (
@@ -571,12 +770,19 @@ def evaluate_mission(
     """The Initial Screen source base, per company, as plain counted items."""
 
     planned = set(planned_specs or set())
+    periods = _claim_periods(connection)
+    company_refs = [member["company_ref"] for member in mission["universe"]]
+    latest_quarters = _latest_fiscal_quarters(connection, company_refs)
+    reported = _reported_quarters(connection, company_refs, latest_quarters)
+    for company_ref, release in reported.items():
+        latest_quarters[company_ref] = release["period"]
     counts = _document_counts(
         connection, mission["id"],
         company_name_keys={member["company_ref"]: member.get("ticker", "")
                            for member in mission["universe"]},
+        latest_quarters=latest_quarters,
+        reported_quarters=reported,
     )
-    periods = _claim_periods(connection)
     connected = {
         entry["source_ref"]
         for entry in mission["source_plan"]
@@ -605,6 +811,8 @@ def evaluate_mission(
                 classified_periods: set[str] = set()
                 required_periods: set[str] = set()
                 missing_periods: set[str] = set()
+                candidate_periods: set[str] = set()
+                period_basis = None
                 for spec in item["spec_refs"]:
                     entry = counts.get((company_ref, spec))
                     if entry is None:
@@ -619,7 +827,9 @@ def evaluate_mission(
                     not_attributed += int(entry.get("not_attributed") or 0)
                     classified_periods.update(entry.get("periods") or ())
                     required_periods.update(entry.get("required_periods") or ())
+                    period_basis = entry.get("period_basis") or period_basis
                     missing_periods.update(entry.get("missing_periods") or ())
+                    candidate_periods.update(entry.get("candidate_periods") or ())
             item_status, note = _item_status(
                 item,
                 have,
@@ -638,7 +848,13 @@ def evaluate_mission(
                 **({"classified_periods": sorted(classified_periods),
                     "required_periods": sorted(required_periods),
                     "missing_periods": sorted(missing_periods),
+                    # Quarters a found-but-unacquired candidate covers, minus
+                    # the ones already held.
+                    "candidate_periods": sorted(candidate_periods - classified_periods),
                     "period_coverage": "known" if required_periods else "unknown",
+                    # Where the required quarters came from: the newest call
+                    # held ("transcripts") or the issuer's filings.
+                    "period_basis": period_basis,
                     "unclassified": unclassified,
                     "not_attributed": not_attributed}
                    if item["item_ref"] == "earnings_calls" else {}),
@@ -653,6 +869,12 @@ def evaluate_mission(
             "source_base_ready": all(item["status"] == "complete" for item in items),
             "gaps": [i["item_ref"] for i in blocking],
             "blocked_on": [i["item_ref"] for i in items if i["status"] in {"not_planned", "source_unavailable"}],
+            # ADR-0015: a quarter the company reported in an Item 2.02 8-K and
+            # has not filed yet (None when its newest quarter is filed).
+            "reported_release": (None if company_ref not in reported else {
+                key: reported[company_ref].get(key) for key in (
+                    "period", "period_end", "report_date", "accession", "items",
+                    "latest_filed_period", "status")}),
         })
     return result
 

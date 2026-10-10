@@ -1,5 +1,7 @@
 # Dalton Phase 8：单主题自主认知闭环 v1.0
 
+历史技术评审：保留当时结论与局限；当前运行状态见 [项目状态](../PROJECT_STATUS.md)。原始操作证据私有保存。
+
 日期：2026-08-27  
 状态：当前执行顺序基线；owner 已要求更新文档并继续开发  
 触发：第三方对 Dalton 长程自主研究与知识检索能力的评审
@@ -161,12 +163,12 @@ in-memory canary 跑通（2 条 `human_admission` ThesisVersion），weekly brie
 
 ## 2026-08-27 owner 批准与 live 激活更新
 
-Owner 同日批准全部保留 gate 并已执行（详见 [live 激活报告](p8a-s7f-live-activation-v0.1-2026-08-27.md)）：DXC 第 5 家
+Owner 同日批准全部保留 gate 并已执行（详见 live 激活报告（历史证据原件已私有归档））：DXC 第 5 家
 SEC issuer 入 lane（-5.06%，policy 自动提交，Phase 7 严格门槛达成）；evidence pack v2 / 五家 overlay；ResearchConstitution
 v1、行业 Thesis 与 ACN Thesis 人工准入进入 live；schedule plan v3 + `policy-3` 激活 weekly brief 自动发布（首个窗口
 2026-09-03）；thesis-impact 首条真实 assessment 为 insufficient。两次 live 事故（缺失 broker key 的永久卡死、host 完成
 失败一次终态）已修复为有界 re-drive / 重试。未决：OpenClaw host 的 Gemini 路径故障需 host 侧排查。（当日追记：root cause 在 broker 侧已修复，ACN 链路
-全链闭环，见 [live 激活报告](p8a-s7f-live-activation-v0.1-2026-08-27.md)。）
+全链闭环；当时的 live 激活报告原件已私有归档。
 
 P8b（最小知识调用层）development candidate 亦已完成：可重建 `CompanyResearchView` 纯投影（当前 Thesis、
 带 ClaimIndex 派生状态的最新 Claim、open questions、impact、最近 issue 与研究停点）、company / aspect /

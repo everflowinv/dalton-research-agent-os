@@ -2,6 +2,8 @@
 
 from __future__ import annotations
 
+from .final_text_state import DRAFT_LABEL
+
 import argparse, base64, hashlib, html, json, os, re, sqlite3, tempfile
 from datetime import date
 from pathlib import Path
@@ -9,16 +11,16 @@ from typing import Any, Mapping, Sequence
 
 from .cockpit_research_library import research_library
 from .store import content_hash
-from .numeric_display import format_typed_value
+from .numeric_display import format_prose_machine_numbers, format_typed_value
+from .terminology import label as _term
 from .research_gap_display import display_metadata_text, gap_display_text
 
 _SHA = re.compile(r"^[0-9a-f]{64}$")
 _IMAGE_TYPES = {"image/png": ".png", "image/jpeg": ".jpg", "image/jpg": ".jpeg"}
-_PRODUCT_LABELS = {
-    "initial_screen": "初步筛选", "dossier": "公司档案", "debate_map": "争议地图",
-    "industry_framework": "行业框架", "investment_memo": "投资备忘录",
-    "conviction_call": "投资判断",
-}
+# Batch am: product names from the terminology registry ("report_kind").
+_PRODUCT_LABELS = {kind: _term("report_kind", kind) for kind in (
+    "initial_screen", "dossier", "debate_map", "industry_framework", "investment_memo",
+    "conviction_call")}
 
 _APPROVAL_LABELS = {
     "approved": "已通过",
@@ -88,6 +90,11 @@ _COMPARISON_METRIC_LABELS = {
     "gross_margin": "毛利率",
     "operating_margin": "营业利润率",
 }
+# The comparison section's title as stored and as localized ("跨公司横向对比"
+# came back from review on 2026-10-08 and the table fell back to one line).
+COMPARISON_SECTION_TITLES = frozenset({
+    "cross_company_comparison", "跨公司对比", "跨公司横向对比", "公司比较", "同行比较",
+})
 _COMPARISON_TICKER_SUBJECTS = {
     "ACN": "company-sec-cik-0001467373",
     "CTSH": "company-sec-cik-0001058290",
@@ -97,6 +104,19 @@ _COMPARISON_TICKER_SUBJECTS = {
 }
 
 
+def _comparison_subject(ticker: str) -> str:
+    """The comparison-cell subject slug a ticker's cells must carry.
+
+    The five SEC-CIK companies of the first mission are named in the closed
+    table; any other mission's companies are keyed by ticker
+    (``company:ticker:meta`` -> ``company-ticker-meta``), so a ws-7d peer
+    table is checked as strictly instead of falling back to one line of text.
+    """
+
+    return _COMPARISON_TICKER_SUBJECTS.get(
+        ticker, "company-ticker-" + ticker.lower().replace(".", "-"))
+
+
 def _comparison_number_text(item: Mapping[str, Any], raw: str) -> str | None:
     """Translate only the frozen industry-comparison material template."""
     matched = _COMPARISON_NUMBER_RE.fullmatch(raw)
@@ -104,9 +124,7 @@ def _comparison_number_text(item: Mapping[str, Any], raw: str) -> str | None:
         return None
     metric = matched.group("metric")
     ticker = matched.group("ticker")
-    subject_ref = _COMPARISON_TICKER_SUBJECTS.get(ticker)
-    if subject_ref is None:
-        return None
+    subject_ref = _comparison_subject(ticker)
     cell = item.get("cell")
     expected_ref = (f'comparison-cell:{subject_ref}:'
                     f'{metric}:{matched.group("quarter")}')
@@ -144,7 +162,7 @@ def _structured_comparison_display(
 ) -> tuple[str, str] | None:
     """Fold only the closed computed-comparison TSV carried beside its table."""
     raw = str(body or "")
-    if raw_title not in {"cross_company_comparison", "跨公司对比"} or not numbers:
+    if raw_title not in COMPARISON_SECTION_TITLES or not numbers:
         return None
     if any(_comparison_number_text(item, str(item.get("text") or "")) is None
            for item in numbers):
@@ -157,13 +175,18 @@ def _structured_comparison_display(
         return None
     width = len(header)
     boundary = len(lines)
+    # The five first-mission tickers, any ticker whose cited cells passed
+    # the check above, or a ticker-shaped company column (a peer table cites
+    # only some of its cells).
+    tickers = {str(item.get("text") or "").split(" ", 1)[0] for item in numbers}
+    tickers |= set(_COMPARISON_TICKER_SUBJECTS)
     for index, line in enumerate(lines[1:], 1):
         if not line or line.startswith("# "):
             boundary = index
             break
         cells = line.split("\t")
         if (len(cells) != width
-                or cells[0] not in _COMPARISON_TICKER_SUBJECTS
+                or not (cells[0] in tickers or re.fullmatch(r"[A-Z][A-Z0-9.]{0,9}", cells[0]))
                 or cells[1] not in {*_COMPARISON_METRIC_LABELS,
                                     *_COMPARISON_METRIC_LABELS.values()}):
             return None
@@ -192,6 +215,13 @@ def _number_text(item: Mapping[str, Any],
     comparison = _comparison_number_text(item, raw)
     if comparison is not None:
         return comparison, raw
+    # 2026-10-08 (DEFECT-04/05): the generated filed-figure sentences (not
+    # quotations) read as account name, period and amount; the sentence with
+    # its XBRL id and raw amount moves to 技术详情.
+    from .financial_display import filing_figure_display
+    figure = filing_figure_display(raw)
+    if figure is not None:
+        return figure, raw
     claim = claims.get(item.get("claim_version_ref"))
     if not isinstance(claim, Mapping):
         return f"来源说明（保留原文）：{raw}", None
@@ -454,7 +484,7 @@ def _chart(
         f'<figure><svg role="img" aria-labelledby="{_esc(chart_id)}-title" '
         f'viewBox="0 0 700 {height}"><title id="{_esc(chart_id)}-title">'
         f'结构化数据序列：{_esc(_metric_label(series[0][3][1]))}</title>{"".join(rows)}</svg>'
-        "<figcaption>已披露值与预测值分别标注；所有数值来自哈希已核验、公司归属一致且指标、单位、刻度和币种相同的定量结论版本。</figcaption></figure>"
+        "<figcaption>已披露值与预测值分别标注；所有数值来自数字指纹已核验、公司归属一致且指标、单位、刻度和币种相同的定量结论版本。</figcaption></figure>"
     )
 
 
@@ -614,15 +644,18 @@ def render_research_html(
         )
         status = product.get("status", "unknown")
         binding = product.get("mission_binding", "unknown")
-        status_label = {"available": "已发布", "missing": "尚未发布", "invalid": "记录无效"}.get(status, "状态未确认")
+        ready = (product.get("publication_status") == "ready"
+                 or (product.get("final_text") or {}).get("status") == "ready")
+        status_label = {"available": "已定稿" if ready else "研究底稿已入库",
+                        "missing": "尚未发布", "invalid": "记录无效"}.get(status, "状态未确认")
         binding_label = {"current": "当前研究任务", "historical": "历史研究任务",
                          "unknown": "研究任务绑定未确认"}.get(binding, "研究任务绑定未确认")
         identity = (f'版本 {_esc(product.get("version_ref") or "未知")} · '
-                    f'原文哈希 {_esc(product.get("content_hash") or "未知")}')
+                    f'原文数字指纹 {_esc(product.get("content_hash") or "未知")}')
         localization = product.get("localization") or {}
         if localization:
             identity += f' · 中文呈现 {_esc(localization.get("content_hash") or "未知")}'
-        head = f'<section id="{anchor}"><h2>{_esc(product_label)}</h2><p class="meta">{_esc(status_label)} · {_esc(binding_label)}</p><details class="identity"><summary>查看版本与完整哈希</summary><code>{identity}</code></details>'
+        head = f'<section id="{anchor}"><h2>{_esc(product_label)}</h2><p class="meta">{_esc(status_label)}{(" · " + _esc(product["version_label"])) if product.get("version_label") else ""} · {_esc(binding_label)}</p><details class="identity"><summary>数据版本与溯源指纹</summary><code>{identity}</code></details>'
         completeness = product.get("completeness")
         if completeness:
             partial = completeness.get("status") == "partial"
@@ -633,17 +666,40 @@ def render_research_html(
                 f'{_esc(completeness.get("total_units"))} 单元。'
                 '起草进度不代表资料已更新或研究质量已验收。</p>'
             )
+        # 2026-10-07 (BUG-02): a product whose review has been given up on or
+        # is overdue exports its drafted text, watermarked -- never an empty
+        # section when a draft exists (``final_text_state``).
+        # 2026-10-09 (analyst UX reviews): a product still under Chinese
+        # review is exported the same way when its draft is shown -- the
+        # badge from ``final_text_state`` is the watermark.
+        draft = (product.get("publication_status") == "draft"
+                 or (product.get("publication_status") == "pending_language_review"
+                     and bool(product.get("draft_label"))
+                     and bool(product.get("sections"))))
+        draft_label = str(product.get("draft_label") or DRAFT_LABEL)
+        if draft:
+            head += (f'<p class="draft">{_esc(draft_label)}：以下为研究系统起草的原文，'
+                     '文字表达尚未经过语言校对，仅供参考。</p>')
+        elif status == "available" and not ready and not product.get("publication_status"):
+            head += '<p class="unavailable">文字审核状态未确认：以下为已入库底稿，尚不能确认其已完成文字审核。</p>'
         approval = product.get("approval") or {"status": "unknown"}
         approval_label = _APPROVAL_LABELS.get(
             approval.get("status", "unknown"), "状态未确认")
-        approval_detail = " · ".join(str(x) for x in (approval.get("decision_record_ref"),
-                                    approval.get("actor_ref"), approval.get("decided_at")) if x)
+        actor_label = str(approval.get("actor_ref") or "").removeprefix("human:")
+        approval_detail = " · ".join(x for x in (
+            f"审批人：{actor_label}" if actor_label else "",
+            f"时间：{approval['decided_at']}" if approval.get("decided_at") else "") if x)
         head += f'<p class="approval">人工审批：{_esc(approval_label)}{(" · " + _esc(approval_detail)) if approval_detail else ""}</p>'
+        if approval.get("decision_record_ref"):
+            head += ('<details class="identity"><summary>审批原始记录</summary><code>'
+                     + _esc(" · ".join(str(approval.get(k) or "") for k in
+                                       ("decision_record_ref", "actor_ref", "decided_at")))
+                     + '</code></details>')
         if product.get("reason"):
             head += f'<p class="unavailable">{_esc(_display_reason(product["reason"]))}</p>'
         if product.get("gaps"):
             product_gaps = [(gap, _gap_text(gap)) for gap in product["gaps"]]
-            head += f'<p class="gaps">产物待补资料：{_esc("；".join(shown for _, shown in product_gaps))}</p>'
+            head += f'<p class="gaps">研究报告待补充资料：{_esc("；".join(shown for _, shown in product_gaps))}</p>'
             changed_gaps = [_gap_raw_text(raw) for raw, shown in product_gaps
                             if shown != _gap_raw_text(raw)]
             if changed_gaps:
@@ -652,7 +708,7 @@ def render_research_html(
         chunks = []
         for si, section in enumerate(product.get("sections") or [], 1):
             raw_title = str(section.get("title") or "未命名章节")
-            shown_title = _section_title(raw_title)
+            shown_title = str(section.get("label") or "") or _section_title(raw_title)
             nums = section.get("numbers") or []
             refs = section.get("sources") or []
             number_rows = [(_period_label(n.get("period")), *_number_text(n, claims))
@@ -673,6 +729,8 @@ def render_research_html(
                 [row for row in nums if isinstance(row, Mapping)])
             shown_body = (_display_metric_terms(structured_comparison[0]) if structured_comparison is not None
                           else _display_metric_terms(section.get("body") or "暂无可核验内容"))
+            # Batch am: machine-precision numbers read as a person writes them.
+            shown_body = format_prose_machine_numbers(shown_body) if isinstance(shown_body, str) else shown_body
             if structured_comparison is not None:
                 technical_text += "\n结构化比较原始记录：\n" + structured_comparison[1]
             if original_templates:
@@ -685,7 +743,9 @@ def render_research_html(
             if changed_gaps:
                 technical_text += "\n待补项原始记录：\n" + "\n".join(changed_gaps)
             chunks.append(
-                f'<article><h3>{_esc(shown_title)}</h3><p class="prose">{_esc(shown_body)}</p>{_chart(nums, claims, f"chart-{pi}-{si}", subject_ref=product.get("subject_ref")) if nums else ""}{("<div class=\"tablewrap\"><table><thead><tr><th>期间</th><th>结构化数据</th></tr></thead><tbody>"+table+"</tbody></table></div>") if table else ""}<details class="refs"><summary>技术详情与来源（{len(technical_refs)}）</summary><code>{_esc(technical_text)}</code></details><p class="gaps">待补资料：{_esc("；".join(shown for _, shown in gap_rows) or "当前未记录待补项")}</p></article>'
+                (f'<article class="draft"><p class="watermark">{_esc(draft_label)}</p>' if draft
+                 else '<article>')
+                + f'<h3>{_esc(shown_title)}</h3><p class="prose">{_esc(shown_body)}</p>{_chart(nums, claims, f"chart-{pi}-{si}", subject_ref=product.get("subject_ref")) if nums else ""}{("<div class=\"tablewrap\"><table><thead><tr><th>期间</th><th>结构化数据</th></tr></thead><tbody>"+table+"</tbody></table></div>") if table else ""}<details class="refs"><summary>技术详情与来源（{len(technical_refs)}）</summary><code>{_esc(technical_text)}</code></details><p class="gaps">待补资料：{_esc("；".join(shown for _, shown in gap_rows) or "当前未记录待补项")}</p></article>'
             )
         if not chunks:
             chunks = [
@@ -696,7 +756,7 @@ def render_research_html(
         f'<figure><img src="{a["data"]}" alt="{_esc(a["caption"])}"><figcaption>{_esc(a["caption"])} · {_esc(a["refs"])} · 用户提供的本地图表 · sha256 {_esc(a["sha256"])}</figcaption></figure>'
         for a in assets
     )
-    css = """body{margin:0;background:#f5f5f7;color:#1d1d1f;font:16px/1.55 -apple-system,BlinkMacSystemFont,"Segoe UI",sans-serif}main{max-width:980px;margin:auto;padding:48px 24px}h1{font-size:42px}h2{border-top:1px solid #ccc;padding-top:32px}article{background:white;border-radius:18px;padding:24px;margin:18px 0;box-shadow:0 2px 18px #0001}.meta,.refs,figcaption{color:#666;font-size:13px;overflow-wrap:anywhere}.approval{font-weight:700}.prose{white-space:pre-wrap}.unavailable,.gaps{background:#fff4ce;padding:10px;border-radius:8px}.tablewrap{overflow:auto}table{border-collapse:collapse;min-width:620px;width:100%}th,td{text-align:left;padding:8px;border-bottom:1px solid #ddd}svg{width:100%;height:auto}rect.actual{fill:#147ce5}rect.estimate{fill:#8e8e93}.sl,.sv{font-size:12px;fill:#333}img{max-width:100%;height:auto}@media(max-width:520px){main{padding:24px 14px}h1{font-size:32px}article{padding:16px}}@media print{body{background:#fff}article{box-shadow:none;border:1px solid #ddd;break-inside:avoid}nav{break-after:page}}"""
+    css = """body{margin:0;background:#f5f5f7;color:#1d1d1f;font:16px/1.55 -apple-system,BlinkMacSystemFont,"Segoe UI",sans-serif}main{max-width:980px;margin:auto;padding:48px 24px}h1{font-size:42px}h2{border-top:1px solid #ccc;padding-top:32px}article{background:white;border-radius:18px;padding:24px;margin:18px 0;box-shadow:0 2px 18px #0001}.meta,.refs,figcaption{color:#666;font-size:13px;overflow-wrap:anywhere}.approval{font-weight:700}.prose{white-space:pre-wrap}.unavailable,.gaps{background:#fff4ce;padding:10px;border-radius:8px}.draft{background:#fdecea;color:#8a1f11;padding:10px;border-radius:8px;font-weight:700}article.draft{background:#fffaf9;color:inherit;font-weight:400;border:2px dashed #e0a39b}.watermark{display:inline-block;color:#8a1f11;border:1px solid #e0a39b;border-radius:6px;padding:2px 8px;font-size:12px;font-weight:700;margin:0}.tablewrap{overflow:auto}table{border-collapse:collapse;min-width:620px;width:100%}th,td{text-align:left;padding:8px;border-bottom:1px solid #ddd}svg{width:100%;height:auto}rect.actual{fill:#147ce5}rect.estimate{fill:#8e8e93}.sl,.sv{font-size:12px;fill:#333}img{max-width:100%;height:auto}@media(max-width:520px){main{padding:24px 14px}h1{font-size:32px}article{padding:16px}}@media print{body{background:#fff}article{box-shadow:none;border:1px solid #ddd;break-inside:avoid}nav{break-after:page}}"""
     return (
         '<!doctype html><html lang="zh-CN"><head><meta charset="utf-8"><meta name="viewport" content="width=device-width,initial-scale=1"><title>'
         + _esc(company)
@@ -717,7 +777,7 @@ def render_research_html(
         + (
             "<section><h2>图表</h2>" + figs + "</section>"
             if figs
-            else '<section><h2>图表</h2><p class="unavailable">未提供带本地哈希和来源绑定的图表。</p></section>'
+            else '<section><h2>图表</h2><p class="unavailable">未提供带数字指纹和来源绑定的图表。</p></section>'
         )
         + "</main></body></html>\n"
     )
@@ -816,6 +876,8 @@ def export_research_html(
                 "content_hash": p.get("content_hash"),
                 "mission_binding": p.get("mission_binding", "unknown"),
                 "approval": (p.get("approval") or {}).get("status", "unknown"),
+                **({"publication_status": p["publication_status"]}
+                   if p.get("publication_status") else {}),
                 **({"localization": p["localization"]} if p.get("localization") else {}),
                 **({"completeness": p["completeness"]}
                    if p.get("completeness") is not None else {}),

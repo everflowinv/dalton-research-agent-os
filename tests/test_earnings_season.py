@@ -641,6 +641,7 @@ class CalibrationHarness(P14aHarness):
                 "action": "revise_thesis",
                 "because": "预算解冻这条机制第一次在数字上看得见",
                 "proposed_statement": "IT 服务需求已经触底并开始回升",
+                "proposed_confidence": "high",
                 "refs": [self.claim_ref],
             }],
             "reflection": {
@@ -689,10 +690,10 @@ class CalibrationDeterministicTests(CalibrationHarness):
         after = {cell["period"]["end"]: cell["value"]
                  for cell in cells_all(self.models.latest(ACN), "result:revenue")
                  if cell["kind"] == "estimate"}
-        for end, value in after.items():
-            if end == "2026-08-31":
-                continue
-            self.assertEqual(value, before[end])
+        for end, value in before.items():
+            if end > "2026-08-31":
+                self.assertEqual(after[end], value)
+        self.assertGreaterEqual(len(after), sum(end > "2026-08-31" for end in before))
 
     def test_what_we_thought_and_what_happened_can_both_be_replayed(self):
         self.actualized()
@@ -766,6 +767,15 @@ class CalibrationContextTests(CalibrationHarness):
 
 
 class CalibrationOutputTests(CalibrationHarness):
+    def test_revision_confidence_must_be_explicit_and_independently_supported(self):
+        output = self.answer()
+        output["theses"][0]["proposed_confidence"] = None
+        with self.assertRaises(season.EarningsSeasonValidationError):
+            calibration.validate_calibration_output(output, self.context())
+        output["theses"][0]["proposed_confidence"] = "high"
+        output["theses"][0]["proposed_statement"] = "低置信度：需求恢复仍缺证据"
+        with self.assertRaises(season.EarningsSeasonValidationError):
+            calibration.validate_calibration_output(output, self.context())
     def test_a_well_formed_answer_is_accepted(self):
         checked = calibration.validate_calibration_output(
             self.answer(), self.context())
@@ -811,15 +821,15 @@ class CalibrationOutputTests(CalibrationHarness):
                 self.answer(theses=[]), self.context())
         self.assertIn("has not done the work", str(caught.exception))
 
-    def test_a_revision_that_proposes_no_statement_must_be_a_broken_thesis(self):
+    def test_a_revision_that_proposes_no_statement_is_incomplete_even_when_broken(self):
         answer = self.answer()
         answer["theses"][0]["proposed_statement"] = None
         with self.assertRaises(season.EarningsSeasonValidationError) as caught:
             calibration.validate_calibration_output(answer, self.context())
         self.assertIn("proposes nothing", str(caught.exception))
         answer["theses"][0]["decision"] = "THESIS_BROKEN"
-        checked = calibration.validate_calibration_output(answer, self.context())
-        self.assertIsNone(checked["theses"][0]["proposed_statement"])
+        with self.assertRaises(season.EarningsSeasonValidationError):
+            calibration.validate_calibration_output(answer, self.context())
 
     def test_the_body_says_the_forward_view_was_not_touched(self):
         context = self.context()
@@ -878,6 +888,16 @@ class CalibrationEffectTests(CalibrationHarness):
         self.assertEqual(candidates[0]["checkpoint_kind"], "thesis_revision_candidate")
         self.assertEqual(candidates[0]["decision"], "THESIS_STRENGTHENED")
         self.assertEqual(candidates[0]["thesis_version_ref"], "thesis-version:1")
+        self.assertEqual(candidates[0]["proposed_confidence"], "high")
+
+    def test_historical_empty_confidence_does_not_emit_an_empty_candidate(self):
+        import copy
+        historical = copy.deepcopy(self.output)
+        historical["theses"][0].pop("proposed_confidence")
+        _event, effects = self.apply(historical)
+        self.assertEqual(effects["status"], "blocked")
+        self.assertEqual(effects["reason"], "incomplete_proposal")
+        self.assertEqual(self.judgements.thesis_candidates(ACN), [])
 
     def test_the_reflection_is_written_and_attached_to_the_candidate(self):
         _event, effects = self.apply()

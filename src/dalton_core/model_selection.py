@@ -62,7 +62,13 @@ from .store import content_hash
 
 SELECTION_MODES: tuple[str, ...] = ("tier", "explicit")
 PURPOSE_MODEL_CONFIGS: dict[str, tuple[str, ...]] = {
+    "street_estimate": ("street-estimate-model-config.json",),
+    "street_estimate_verifier": ("street-estimate-verifier-model-config.json",),
     "draft": ("initial-screen-model-config.json",),
+    # Batch C2: the STRL Initial Screen's worksheet/document and its verifier
+    # run through the same installed model config as the legacy drafter.
+    "initial_screen": ("initial-screen-model-config.json",),
+    "initial_screen_verifier": ("initial-screen-model-config.json",),
     "document_extraction": ("document-extraction-model-config.json",),
     "discovery_selection": ("discovery-selection-model-config.json",),
     "registered_annual_report_draft": (
@@ -85,8 +91,10 @@ PURPOSE_MODEL_CONFIGS: dict[str, tuple[str, ...]] = {
     "debate_map_verifier": ("initial-screen-model-config.json",),
     "conviction_call": ("initial-screen-model-config.json",),
     "conviction_call_verifier": ("initial-screen-model-config.json",),
+    "scenario_proposal": ("dossier-model-config.json", "initial-screen-model-config.json"),
     "event_judgement": ("event-judgement-model-config.json",),
     "event_judgement_verifier": ("event-verifier-model-config.json",),
+    "event_triage": ("event-judgement-model-config.json",),
     "thesis_reflection": ("event-judgement-model-config.json",),
     "thesis_reflection_verifier": ("event-verifier-model-config.json",),
     "zero_base_review": ("zero-base-review-model-config.json",),
@@ -112,6 +120,15 @@ PURPOSE_MODEL_CONFIGS: dict[str, tuple[str, ...]] = {
     "research_localization": ("research-localization-draft-model-config.json",),
     "research_localization_verifier": ("research-localization-verifier-model-config.json",),
 }
+# ADR-0010: stages whose lane is retired.  Their pins are still read (the
+# config block is the budget anchor and old records name these policies), but
+# nobody maintains them any more: a binding carries ``retired_by`` so a page or
+# a parity report can say "retired" instead of asking the owner to bind it.
+RETIRED_PURPOSES: dict[str, str] = {
+    "agenda_planning": "ADR-0009",
+    "thesis_impact_assessment": "ADR-0010",
+    "thesis_impact_verifier": "ADR-0010",
+}
 _SERVICE_PURPOSE_PINS = {
     "plan": ("bounded_planner", "planner_routing_policy_ref", "planner_model_router_db"),
     "agenda_planning": ("agenda", "routing_policy_ref", "model_router_db"),
@@ -126,6 +143,8 @@ PURPOSE_LABELS: dict[str, str] = {
     "goal": "把目标拆成计划",
     "steer": "调整方向",
     "draft": "起草交付物",
+    "initial_screen": "起草初步研究筛查报告（整份材料包）",
+    "initial_screen_verifier": "核验初步研究筛查报告",
     "plan": "决定下一步做什么",
     "model_spec": "编制公司模型规格",
     "claim_index": "建立研究结论索引",
@@ -140,11 +159,12 @@ PURPOSE_LABELS: dict[str, str] = {
     "mission_directed_document_verifier": "独立核验原文定向回答",
     "human_intent": "解析研究指令",
     "agenda_planning": "历史任务规划",
-    "thesis_impact_assessment": "评估新事实对论点的影响",
-    "thesis_impact_verifier": "核验论点影响评估",
+    "thesis_impact_assessment": "评估新事实对论点的影响（已退役）",
+    "thesis_impact_verifier": "核验论点影响评估（已退役）",
     "quality_verifier": "核验产出评分",
     "event_judgement": "研判新事件",
     "event_judgement_verifier": "核验事件判断",
+    "event_triage": "初筛新事件（只决定是否交给研判）",
     "zero_base_review": "从零复盘研究判断",
     "zero_base_review_verifier": "核验从零复盘",
     "thesis_reflection": "复核投资论点",
@@ -169,29 +189,34 @@ PURPOSE_LABELS: dict[str, str] = {
     "research_localization_verifier": "独立核验研究中文版本",
     "conviction_call": "形成投资判断",
     "conviction_call_verifier": "独立核验投资判断",
-    "street_estimate": "读研报里的目标价",
+    "scenario_proposal": "把档案里的情景整理成可跟踪的触发条件",
+    "street_estimate": "读取券商预测表格",
+    "street_estimate_verifier": "独立核验券商预测表格",
 }
 # The seam the delivery slice attaches to. It is a module-level function rather
-# than a parameter because the point is that the lane never changes: when
-# Discord or Feishu delivery is built, it replaces this body and nothing else.
-# Until then the notice lives in the cockpit, which is why the tick summary
-# says ``notification_channel: "cockpit"`` rather than "none" -- the owner does
-# get told; the telling is a page rather than a push.
+# than a parameter because the point is that the lane never changes.  The
+# notice always lives in the cockpit, which is why the tick summary says
+# ``notification_channel: "cockpit"``; vision-gap #13 adds the push: where the
+# owner approved Feishu delivery, the owner delivery lane sends it (rate
+# limited) from a child process -- never from this writer thread.
 NOTIFICATION_CHANNEL = "cockpit"
 
 
 def notice_delivery(notice: Mapping[str, Any]) -> None:
-    """Push one fallback notice somewhere the owner will see it unprompted.
+    """Ask for one fallback notice to be pushed where the owner will see it.
 
-    A deliberate no-op today.  Delivery (Discord / Feishu) was deferred by the
-    owner to the end of the plan, and a lane that half-built it would be a lane
-    that has to be edited again when the real thing lands.  What this seam
-    guarantees is that the *decision* about what to say, when to say it and how
-    often has already been made and tested: one message per (model, stage),
+    Runs on the writer's store thread, so it sends nothing: it wakes the owner
+    delivery lane (vision-gap #13), whose child reads the notice back from the
+    router ledger, applies the contract, the rate limit and the day cap, and
+    sends it through the OpenClaw host tool.  What to say and how often a
+    (model, stage) is announced was decided here already: one notice per pair,
     written once, deduplicated in the ledger.
     """
 
     del notice
+    from .owner_delivery import request_wake
+
+    request_wake("model_fallback_notice")
 
 
 # The keys that make a policy version a *version* rather than content. Two
@@ -257,6 +282,8 @@ def purpose_policy_bindings(
             "requires_restart": True,
             "editable": True,
         }
+        if purpose in RETIRED_PURPOSES:
+            result[purpose]["retired_by"] = RETIRED_PURPOSES[purpose]
     control = service.get("control") if isinstance(service, Mapping) else None
     control_config = control.get("config") if isinstance(control, Mapping) else None
     intent = (
@@ -284,10 +311,11 @@ def purpose_policy_bindings(
     # The installed consensus lane parses broker notes deterministically.  A
     # registered future model purpose must not make that look like a missing,
     # selectable runtime model today.
-    result["street_estimate"] = {
-        "status": "deterministic", "source": "mission_consensus_lane",
-        "policy_version_ref": None, "model_router_db": None, "editable": False,
-    }
+    if result["street_estimate"]["status"] == "unconfigured":
+        result["street_estimate"] = {
+            "status": "deterministic", "source": "mission_consensus_lane",
+            "policy_version_ref": None, "model_router_db": None, "editable": False,
+        }
     return result
 
 
@@ -465,6 +493,38 @@ def _latest_policy(router: ModelRouter, policy_id: str) -> dict[str, Any]:
     return json.loads(row["policy_json"])
 
 
+def publish_thinking_selection(router: ModelRouter, *, policy_version_ref: str, purpose: str,
+                               level: str, reason: str, actor_ref: str,
+                               now: datetime | None = None) -> dict[str, Any]:
+    """Append a reasoned owner override; predecessors remain the audit trail."""
+    from .call_budget import resolve_thinking_level
+    level = resolve_thinking_level(purpose, requested=level)
+    if (purpose not in purpose_tiers() or not isinstance(actor_ref, str) or not actor_ref.startswith("human:")
+            or not isinstance(reason, str) or not reason.strip() or len(reason) > 300):
+        raise ModelSelectionError("thinking selection requires a known purpose, owner and reason")
+    pinned = router.get_policy(policy_version_ref)
+    latest = _latest_policy(router, pinned["id"])
+    prior = (latest.get("thinking_level_overrides") or {}).get(purpose, {})
+    result = {"policy_id": latest["id"], "purpose": purpose, "thinking_level": level,
+              "reason": reason, "actor_ref": actor_ref}
+    if all(prior.get(key) == value for key, value in {
+            "level": level, "reason": reason, "actor_ref": actor_ref}.items()):
+        return {**result, "status": "duplicate", "policy_version_ref": latest["policy_version_ref"]}
+    if latest["policy_version_ref"] != pinned["policy_version_ref"]:
+        raise ModelSelectionError("thinking policy has moved; read the current version first")
+    at = (now or datetime.now(timezone.utc)).isoformat(timespec="microseconds")
+    wire = {key: value for key, value in latest.items() if key not in _VERSION_KEYS}
+    wire["thinking_level_overrides"] = {**dict(latest.get("thinking_level_overrides") or {}),
+        purpose: {"level": level, "reason": reason, "actor_ref": actor_ref, "created_at": at}}
+    wire.update({"version": int(latest["version"]) + 1, "created_at": at,
+        "prior_version_ref": latest["policy_version_ref"], "policy_version_ref": _next_version_ref(latest)})
+    wire["content_hash"] = content_hash(wire)
+    registered = router.register_policy(wire)
+    if registered["status"] == "conflict":
+        raise ModelSelectionError(registered.get("reason", "thinking policy conflicted"))
+    return {**result, "status": registered["status"], "policy_version_ref": wire["policy_version_ref"]}
+
+
 def publish_selection(
     router: ModelRouter,
     *,
@@ -562,14 +622,14 @@ def publish_tier_selection(
     every high-order reasoning stage, one for batch reading, one for
     independent verification and, since 2026-09-17, one for drafting the
     formal deliverables -- rather than per purpose.  The tier's chain is
-    written into ``fallback_chains.tiers`` and every per-purpose override in
-    that tier is dropped, so a tier edit means exactly what it says: all of
-    the tier's stages follow the new chain.  Validation runs against a
+    written into ``fallback_chains.tiers`` as the shared default. Explicit
+    purpose choices retain priority and unedited direct pins retain their
+    filters. The saved-default marker binds authorization to this exact chain.  Validation runs against a
     representative purpose of the tier so family independence and verifier
     lineage rules keep applying unchanged.
     """
 
-    members = sorted(name for name, held in purpose_tiers().items() if held == tier)
+    members = sorted(name for name, held in purpose_tiers().items() if held == tier and name not in RETIRED_PURPOSES)
     if not members:
         raise ModelSelectionError(f"{tier} is not a model tier this Core knows about")
     links = list(tier_chain(tier)) if mode == "tier" else [str(item) for item in chain]
@@ -578,40 +638,22 @@ def publish_tier_selection(
     )
     pinned = router.get_policy(policy_version_ref)
     latest = _latest_policy(router, pinned["id"])
-    overrides = {
-        name: entry
-        for name, entry in (pinned.get("purpose_overrides") or {}).items()
-        # WP-A/A4b: a tier edit means "all of this tier's stages follow the new
-        # chain", and that is right for every stage whose model is a
-        # preference. It is not right for a stage whose served endpoint is
-        # asserted on downstream: dropping that override does not change a
-        # preference, it breaks a contract, silently, on the next call. The
-        # publication language checker is the live one -- the cheap tier's
-        # cheapest link is not antigravity, so a cheap-tier save would send
-        # every publication back to "language checker served an unexpected
-        # transport or model". Contract pins survive a tier edit; the model
-        # page shows them as pins rather than as the owner's choice.
-        if tier_for(name) != tier or required_transport(name) is not None
-    }
+    # A tier is the shared default. Explicit purpose choices retain priority.
+    overrides = dict(pinned.get("purpose_overrides") or {})
     chains = dict((pinned.get("fallback_chains") or {}).get("tiers") or {})
     chains[tier] = list(links)
+    chains["saved_default_" + tier] = list(links)
     wire = {
         key: value for key, value in pinned.items() if key not in _VERSION_KEYS
     }
-    # The allow-list follows the chains. It was written once, by hand, around
-    # the chains of that day; tier saves kept editing the chains without it,
-    # so a link the owner had just selected -- or a whole other tier's links,
-    # for any purpose pinned to this policy -- read profile_not_allowed and
-    # the route was rejected with no eligible candidate at all. The list is
-    # therefore exactly the models some tier can reach; purpose-explicit
-    # overrides do not need naming here because an explicit chain bypasses
-    # the allow-list by design.
-    filters = dict(pinned.get("filters") or {})
-    if filters.get("allowed_profile_ids"):
-        filters["allowed_profile_ids"] = sorted(
-            {profile for chain in chains.values() for profile in chain}
-        )
-        wire["filters"] = filters
+    # A legacy direct-pin policy has no default tier map. Preserve its exact
+    # filters for every unedited purpose, including the pre-split deliverable
+    # fallback: introducing brain must not convert those old pins to brain.
+    legacy = list((pinned.get("filters") or {}).get("allowed_profile_ids") or [])
+    if not (pinned.get("fallback_chains") or {}).get("tiers") and legacy:
+        chains["legacy_default"] = legacy
+    # Do not reconstruct global filters from the edited tier. Declared policy
+    # chains are authorized within their own purpose/tier by the router.
     # The router refuses an empty overrides object, so the key disappears
     # entirely when a tier edit was the last override standing.
     if overrides:
@@ -709,7 +751,7 @@ def set_tier_selection(
     tier is pinned by a resident service configuration.
     """
 
-    members = sorted(name for name, held in purpose_tiers().items() if held == tier)
+    members = sorted(name for name, held in purpose_tiers().items() if held == tier and name not in RETIRED_PURPOSES)
     if not members:
         raise ModelSelectionError(f"{tier} is not a model tier this Core knows about")
     configs = model_configs(state_dir)
@@ -866,6 +908,8 @@ def set_model_selection(
     chain: Sequence[str] = (),
     actor_ref: str | None = None,
     now: datetime | None = None,
+    thinking_level: str | None = None,
+    reason: str | None = None,
 ) -> dict[str, Any]:
     """Publish one stage's selection and repoint every lane that pins a policy.
 
@@ -881,6 +925,17 @@ def set_model_selection(
     alone rather than rewritten.
     """
 
+    if purpose in RETIRED_PURPOSES:
+        raise ModelSelectionError(f"{purpose} is retired by {RETIRED_PURPOSES[purpose]}; its historical policy is read-only")
+    if thinking_level is not None:
+        from .call_budget import resolve_thinking_level
+        thinking_level = resolve_thinking_level(purpose, requested=thinking_level)
+        if mode != "thinking" or chain:
+            raise ModelSelectionError("thinking edits cannot also change the model chain")
+        if not isinstance(actor_ref, str) or not actor_ref.startswith("human:"):
+            raise ModelSelectionError("only an authenticated owner may change thinking level")
+        if not isinstance(reason, str) or not reason.strip() or len(reason) > 300:
+            raise ModelSelectionError("thinking level changes require a reason of 1–300 characters")
     configs = model_configs(state_dir)
     runtime = _runtime_policy_config(state_dir, purpose)
     if runtime is not None:
@@ -919,8 +974,8 @@ def set_model_selection(
                 continue
             latest = _latest_policy(router, pinned["id"])
             try:
-                validate_selection(
-                    router, purpose=purpose, mode=mode, chain=chain)
+                if thinking_level is None:
+                    validate_selection(router, purpose=purpose, mode=mode, chain=chain)
             except FallbackChainError as exc:
                 raise ModelSelectionError(str(exc)) from exc
         prepared.append((item, router_db, pinned["id"], latest["policy_version_ref"]))
@@ -936,12 +991,14 @@ def set_model_selection(
         if key not in published:
             with ModelRouter(router_db) as router:
                 try:
-                    published[key] = publish_selection(
-                        router,
-                        policy_version_ref=latest_ref,
-                        purpose=purpose, mode=mode, chain=chain,
-                        actor_ref=actor_ref, now=now,
-                    )
+                    if thinking_level is not None:
+                        published[key] = publish_thinking_selection(router,
+                            policy_version_ref=latest_ref, purpose=purpose, level=thinking_level,
+                            reason=reason, actor_ref=actor_ref, now=now)
+                    else:
+                        published[key] = publish_selection(
+                            router, policy_version_ref=latest_ref,
+                            purpose=purpose, mode=mode, chain=chain, actor_ref=actor_ref, now=now)
                 except FallbackChainError as exc:
                     raise ModelSelectionError(str(exc)) from exc
         outcome = published[key]
@@ -951,7 +1008,7 @@ def set_model_selection(
         with ModelRouter(router_db, read_only=True) as router:
             profiles = {row["id"]: row for row in router.latest_profiles()}
         selected_slots = [profiles[profile_id]["credential_slot_ref"]
-                          for profile_id in outcome["chain"]]
+                          for profile_id in outcome.get("chain", [])]
         slots_field = item.get("slots_field", "credential_slot_refs")
         prior_slots = list(config.get(slots_field) or [])
         merged_slots = list(dict.fromkeys([*prior_slots, *selected_slots]))
@@ -976,6 +1033,7 @@ def set_model_selection(
         "mode": mode,
         "model_configs_skipped": skipped,
         "actor_ref": actor_ref,
+        **({"thinking_level": thinking_level, "reason": reason} if thinking_level is not None else {}),
         "chain": list(chain) if mode == "explicit" else [],
         "policy_versions": [
             {"policy_id": policy_id, "policy_version_ref": ref, "publication": status}

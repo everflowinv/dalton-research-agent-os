@@ -1,5 +1,7 @@
 # Thesis-impact verifier 校准基础
 
+历史技术评审：保留当时结论与局限；当前运行状态见 [项目状态](../PROJECT_STATUS.md)。原始操作证据私有保存。
+
 日期：2026-08-21
 状态：冻结 12 个样本和评分标准；新 verifier 合同已收紧；真实候选运行见后续报告
 
@@ -62,4 +64,4 @@ Gate 2 那类“文字先说匹配，随后仍报 mismatch”因此不会再形�
 `docs/review-evidence/thesis-impact-verifier-calibration-baseline-v0.1.json`。
 
 后续已完成 DeepSeek 12/12 和 Claude Fable 的有界候选运行。结果见
-[`thesis-impact-verifier-live-calibration-2026-08-21.md`](thesis-impact-verifier-live-calibration-2026-08-21.md)。
+当时的 live 核验校准报告原件已私有归档。

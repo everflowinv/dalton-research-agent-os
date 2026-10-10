@@ -26,9 +26,19 @@ done
 `scripts/release_switch.py`，它只改 `ProgramArguments[0]`，模板里的其他字段
 （包括 `StandardOutPath` / `StandardErrorPath`）会原样保留。
 
+## 日志在哪
+
+所有常驻进程（legacy 与各 workspace 的 writer / controller / control、发布 worker、
+日志轮转）的 stdout/stderr 都由 launchd 写到 `~/Library/Logs/Dalton/` 下：legacy
+在顶层，workspace 在 `space.lumos.dalton.workspace.<ws>/` 或 `workspaces/<ws>/`
+子目录（以该环境 plist 的 `StandardErrorPath` 为准）。自 2026-09-30 起，writer、
+controller、control 的每一行 stderr 都以 ISO UTC 时间开头
+（`dalton_core.stderr_timestamps`）。`~/.dalton/workspace-logs/` 与
+`~/.dalton/workspaces/<ws>/logs/` 停在 2026-09-16，不要从那里排障。
+
 ## 发布 venv 里的 python 为什么是符号链接（macOS TCC）
 
-服务要读写外接 SSD（`/Volumes/EveSSD`），这受 macOS TCC 的"可移除宗卷"权限
+服务要读写外接 SSD（`/Volumes/<storage-volume>`），这受 macOS TCC 的"可移除宗卷"权限
 管。Homebrew 的 python 只有 adhoc 签名，TCC 对这类程序按**可执行文件的真实路径**
 记授权。发布 venv 以前用 `python -m venv --copies` 建，每个发布都有一个新路径的
 `venv/bin/python`，于是每次部署都要人去点一次授权（TCC 库里攒了十几条
@@ -57,7 +67,7 @@ launchd 仍然执行 `venv/bin/python`（plist 与 `release_switch.py` 都不用
 - 验证部署后不再弹窗：切换后
   `sqlite3 "$HOME/Library/Application Support/com.apple.TCC/TCC.db" "select client, auth_value from access where service='kTCCServiceSystemPolicyRemovableVolumes'"`
   不应出现新发布的 `venv/bin/python` 条目，只有已有的 Cellar 路径条目
-  （auth_value=2）；服务日志里也不应再有访问 `/Volumes/EveSSD` 的
+  （auth_value=2）；服务日志里也不应再有访问 `/Volumes/<storage-volume>` 的
   `Operation not permitted`。
 
 ## 为什么发布 worker 的 plist 要重装一次

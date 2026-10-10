@@ -11,7 +11,7 @@ through the live writer's ephemeral human principal like every other change.
 
     # read-only: show the current block and the version that would be published
     .venv/bin/python scripts/set_mission_budget.py \\
-        --state-dir /Volumes/EveSSD/Dalton/workspaces/<slug>/state/dalton-core \\
+        --state-dir <state-dir> \\
         --set max_daily_paid_calls=100000 --set max_daily_cost_usd=500
 
     # publish for real

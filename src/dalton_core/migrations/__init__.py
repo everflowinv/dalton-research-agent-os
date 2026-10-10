@@ -23,6 +23,7 @@ does in a quiet window before a deploy.
 
 from .projection_indexes import (
     CORE_PROJECTION_INDEXES,
+    MODEL_ROUTER_INDEXES,
     OPEN_BUDGET_SECONDS,
     SCHEDULER_PROJECTION_INDEXES,
     IndexSpec,
@@ -32,6 +33,7 @@ from .projection_indexes import (
 
 __all__ = [
     "CORE_PROJECTION_INDEXES",
+    "MODEL_ROUTER_INDEXES",
     "OPEN_BUDGET_SECONDS",
     "SCHEDULER_PROJECTION_INDEXES",
     "IndexSpec",

@@ -48,7 +48,10 @@ from .openclaw_model_adapter import (
 from .lease_holder_registry import LeaseHolderRegistry, holder_gone
 from .scheduler import LeaseRejected, Scheduler, SchedulerConflict
 from .sqlite_contention import (
+    ADMISSION_BUSY_TIMEOUT_SECONDS,
+    ADMISSION_LOCK_RETRY_SECONDS,
     LEASE_RELEASE_RETRY_SECONDS,
+    retry_admission_on_sqlite_lock,
     is_sqlite_lock_error,
     retry_on_sqlite_lock,
     sqlite_failure_location,
@@ -119,6 +122,12 @@ def validate_setup_planning_context(value: Mapping[str, Any]) -> dict[str, Any]:
 # adapter resolves these opaque allowlisted refs to packaged schemas; callers
 # can never supply a filesystem path or arbitrary JSON schema.
 _VERIFIER_PROVIDER_CONTRACTS = {
+    "street_estimate_verifier": (
+        "street-estimate-verifier-provider-output-0.1",
+        "street-estimate-verifier-provider-output-v0.1.schema.json"),
+    "initial_screen_verifier": (
+        "initial-screen-verifier-provider-output-0.1",
+        "initial-screen-verifier-provider-output-v0.1.schema.json"),
     "dossier_verifier": (
         "dossier-verifier-provider-output-0.1",
         "dossier-verifier-provider-output-v0.1.schema.json"),
@@ -155,9 +164,11 @@ _VERIFIER_PROVIDER_CONTRACTS = {
     "debate_map_verifier": (
         "debate-map-verifier-provider-output-0.1",
         "debate-map-verifier-provider-output-v0.1.schema.json"),
+    # ADR-0013: v0.2 carries the v1 finding codes and the v2 ones, so the
+    # same verifier purpose serves both schemas.
     "conviction_call_verifier": (
-        "conviction-call-verifier-provider-output-0.1",
-        "conviction-call-verifier-provider-output-v0.1.schema.json"),
+        "conviction-call-verifier-provider-output-0.2",
+        "conviction-call-verifier-provider-output-v0.2.schema.json"),
     "research_localization_verifier": (
         "research-localization-verifier-provider-output-0.1",
         "research-localization-verifier-provider-output-v0.1.schema.json"),
@@ -182,6 +193,20 @@ def _verifier_provider_contract(purpose: str) -> tuple[str, str] | None:
     ref, resource = selected
     schema = json.loads(resources.files("dalton_core").joinpath(resource).read_text("utf-8"))
     return ref, content_hash(schema)
+
+
+def verifier_route_capability(purpose: str) -> str:
+    """The Router capability a verifier-tier stage's WorkOrder requests.
+
+    Only the stages with a provider output contract ask for
+    ``provider-controlled-verify`` (see ``build_work``).  Every other
+    verifier-tier stage -- the thesis-impact verifier service, the annual
+    report verifier -- asks for plain ``verify`` and is routed on that alone,
+    so it must not be reported as rejected for lacking provider controls.
+    """
+
+    return ("provider-controlled-verify" if purpose in _VERIFIER_PROVIDER_CONTRACTS
+            else "verify")
 
 
 def verifier_provider_contract_fingerprint(*purposes: str) -> str:
@@ -498,7 +523,8 @@ def _raise_failure(message: str, rejection: Mapping[str, Any] | None, *,
 
     if rejection is not None:
         raise CockpitModelPoolExhausted(message, rejection, failure_trace=failure_trace)
-    if message == "no model route is available right now":
+    if (message == "no model route is available right now"
+            or VERIFIER_NOT_INDEPENDENT in message):
         raise CockpitModelRouteUnavailable(message, failure_trace=failure_trace)
     raise CockpitModelError(message, failure_trace=failure_trace)
 
@@ -520,6 +546,8 @@ def admit_day_ledger(
     route_decision_ref: str,
     reserved_micros: int,
     mission_binding: Mapping[str, Any] | None,
+    purpose: str | None = None,
+    thinking_level: str | None = None,
 ) -> dict[str, Any]:
     """One reservation in the shared day ledger, with C2's pool as the gate.
 
@@ -542,6 +570,8 @@ def admit_day_ledger(
     """
 
     try:
+        from .research_publication_limits import fee_binding
+        publication_binding=fee_binding()
         admission = _admit_through_lock(lambda: budget.admit(
             policy_version_id=policy_version_id,
             day=day,
@@ -551,6 +581,9 @@ def admit_day_ledger(
             route_decision_ref=route_decision_ref,
             reserved_micros=reserved_micros,
             mission_binding=mission_binding,
+            **({"purpose": purpose, "thinking_level": thinking_level}
+               if purpose is not None or thinking_level is not None else {}),
+            **({'publication':publication_binding} if publication_binding is not None else {}),
         ), work_order_ref, budget=budget, attempt_number=attempt_number, phase=phase)
     except ThesisImpactBudgetError as exc:
         return {
@@ -890,12 +923,30 @@ def _admit_through_lock(admit: Callable[[], Any], work_order_ref: str, *,
     leaving it to charge its reservation to every day from now on.
     """
 
+    # 2026-10-07: a longer busy wait per try, and a longer, jittered, bounded
+    # back-off between tries (``retry_admission_on_sqlite_lock``).  The waits
+    # are printed with their durations so the lock hold can be measured from
+    # the log instead of inferred from which lines are missing.
+    connection = getattr(budget, "connection", None)
+    if connection is not None:
+        try:
+            connection.execute(
+                f"PRAGMA busy_timeout = {int(ADMISSION_BUSY_TIMEOUT_SECONDS * 1000)}")
+        except sqlite3.Error:
+            pass
+    started = time.monotonic()
+    tries = [0]
+
+    def on_retry(n: int, exc: BaseException, wait: float) -> None:
+        tries[0] = n
+        print(f"cockpit-model: admitting {work_order_ref} to the day budget hit {exc} "
+              f"after {time.monotonic() - started:.1f}s; retry {n} in {wait:.2f}s",
+              file=sys.stderr)
+
     try:
-        return retry_on_sqlite_lock(
-            admit, deadline_seconds=LEASE_RELEASE_RETRY_SECONDS, sleep=_lock_retry_sleep,
-            on_retry=lambda n, exc, wait: print(
-                f"cockpit-model: admitting {work_order_ref} to the day budget hit {exc}; "
-                f"retry {n} in {wait:.2f}s", file=sys.stderr))
+        admission = retry_admission_on_sqlite_lock(
+            admit, deadline_seconds=ADMISSION_LOCK_RETRY_SECONDS,
+            sleep=_lock_retry_sleep, on_retry=on_retry)
     except sqlite3.OperationalError as exc:
         if (budget is not None and attempt_number is not None and phase is not None
                 and is_sqlite_lock_error(exc)):
@@ -905,10 +956,15 @@ def _admit_through_lock(admit: Callable[[], Any], work_order_ref: str, *,
                 work_order_ref=work_order_ref, attempt_number=attempt_number,
                 phase=phase, reason=f"{type(exc).__name__}: {exc}")
             print(f"cockpit-model: admitting {work_order_ref} attempt {attempt_number} "
-                  f"gave up on {exc}; "
+                  f"gave up on {exc} after {time.monotonic() - started:.1f}s and "
+                  f"{tries[0] + 1} tries (limit {ADMISSION_LOCK_RETRY_SECONDS:.0f}s); "
                   + ("recorded for voiding if it landed" if recorded
                      else "could not record it for voiding"), file=sys.stderr)
         raise
+    if tries[0]:
+        print(f"cockpit-model: admitted {work_order_ref} after "
+              f"{time.monotonic() - started:.1f}s and {tries[0] + 1} tries", file=sys.stderr)
+    return admission
 
 
 def _drain_pending_settlements(budget: Any) -> list[dict[str, Any]]:
@@ -1107,7 +1163,12 @@ def build_work(*, purpose: str, request_id: str, prompt: str, mission_version_re
                                  **({} if transport_retry is None else {
                                      "transport_retry": dict(transport_retry)}),
                                  **({} if verifier_provider_contract is None else {
-                                     "verifier_output_schema_version": "0.1",
+                                     # The contract ref ends in its version
+                                     # ("...-0.1"; ADR-0013's conviction
+                                     # verifier is "...-0.2"), and the
+                                     # adapter checks the two agree.
+                                     "verifier_output_schema_version":
+                                         verifier_provider_contract.rsplit("-", 1)[-1],
                                      "verifier_provider_contract": verifier_provider_contract,
                                      "verifier_provider_schema_hash": verifier_provider_schema_hash,
                                  })},
@@ -1661,7 +1722,8 @@ def _failure(work: WorkOrder, code: str, route_ref: str | None,
              chain_failures: Sequence[Mapping[str, Any]] = (),
              status: str = "failed",
              dispatch_state: str = "not_started",
-             diagnostics: Mapping[str, Any] | None = None) -> ResultEnvelope:
+             diagnostics: Mapping[str, Any] | None = None,
+             chain_refusal: Mapping[str, Any] | None = None) -> ResultEnvelope:
     if dispatch_state not in {"not_started", "unknown"}:
         raise CockpitModelError("failure dispatch state is not recognized")
     identity = {"work_order_ref": work.id, "code": code, "route_ref": route_ref}
@@ -1679,6 +1741,13 @@ def _failure(work: WorkOrder, code: str, route_ref: str | None,
         # ("OperationalError: database is locked") names none of the three
         # SQLite files a cockpit call writes.
         metadata["failure_diagnostics"] = dict(diagnostics)
+    if chain_refusal:
+        # Batch w: a chain refused before any route decision (no model in it
+        # is independent of the producer) leaves no row in the router. This
+        # immutable envelope is its record: which purpose, chain, families
+        # and policy, so an inspection can tabulate it and a changed policy
+        # can recover it (``model_route_recovery``).
+        metadata["chain_refusal"] = dict(chain_refusal)
     return ResultEnvelope(
         schema_version=SCHEMA_VERSION, id=f"result:cockpit-control-{content_hash(identity)[:32]}",
         created_at=_now(), work_order_ref=work.id,
@@ -1901,9 +1970,15 @@ class CockpitModel:
             "timeout_seconds": self.timeout_seconds,
         })
 
-    def _adapter(self, router: ModelRouter, *, timeout_seconds: int) -> Any:
+    def _adapter(self, router: ModelRouter, *, timeout_seconds: int,
+                 provider_cost_admission: Mapping[str, Any] | None = None) -> Any:
         if self.adapter_factory is not None:
-            return self.adapter_factory(router)
+            adapter = self.adapter_factory(router)
+            if isinstance(adapter, OpenClawModelAdapter) and provider_cost_admission is not None:
+                return adapter.with_provider_cost_admission({
+                    key: provider_cost_admission[key] for key in
+                    ("admission_id", "work_order_ref", "reserved_micros", "content_hash")})
+            return adapter
         config = self.config
         return OpenClawModelAdapter(
             config["broker_socket"], route_resolver=router.get_decision, auth_client_id=config["broker_client_id"],
@@ -1912,6 +1987,10 @@ class CockpitModel:
             queue_wait_seconds=float((config.get("transport_retry") or {}).get(
                 "queue_wait_seconds", 0)),
             max_frame_bytes=resolve_broker_max_frame_bytes(config),
+            provider_cost_admission=(
+                {key: provider_cost_admission[key] for key in
+                 ("admission_id", "work_order_ref", "reserved_micros", "content_hash")}
+                if provider_cost_admission is not None else None),
         )
 
     def _execute_with_safe_retry(self, adapter: Any, work: WorkOrder,
@@ -1923,9 +2002,13 @@ class CockpitModel:
         maximum = int((self.config.get("transport_retry") or {}).get(
             "max_definitely_not_sent_retries", 0))
         for retry_number in range(maximum + 1):
+            from .research_publication_limits import reserve_dispatch
+            reserve_dispatch()
             try:
                 return adapter.execute(work, route, profile)
             except BrokerDefinitelyNotSent:
+                from .research_publication_limits import release_dispatch
+                release_dispatch()
                 if retry_number >= maximum:
                     raise
                 backoff = int((self.config.get("transport_retry") or {}).get(
@@ -2112,11 +2195,45 @@ class CockpitModel:
             if outcome.get(_RECLAIMED_LEASE):
                 continue
             if "_provider_retry_backoff_seconds" not in outcome:
+                if outcome.get("replayed") and outcome.get("work_order_ref"):
+                    # A replay costs nothing now, but the answer was paid for
+                    # once: say what and on which day, so a lane that caps
+                    # its daily spend can count it (batch u, conviction).
+                    settled = self._settled_cost(str(outcome["work_order_ref"]))
+                    if settled is not None:
+                        outcome["settled_cost_micros"], outcome["settled_day"] = settled
                 return outcome
             backoff = outcome["_provider_retry_backoff_seconds"]
             if backoff:
                 import time
                 time.sleep(backoff)
+
+    def _settled_cost(self, work_order_ref: str) -> tuple[int, str] | None:
+        """What the budget ledger booked for ``work_order_ref``, and its day.
+
+        Read-only.  An admission without a settlement counts its reservation,
+        as the ledger itself does.  ``None`` when the ledger cannot say.
+        """
+
+        path = self.config.get("budget_db")
+        if not path or not Path(str(path)).expanduser().is_file():
+            return None
+        try:
+            connection = sqlite3.connect(
+                f"file:{Path(str(path)).expanduser()}?mode=ro", uri=True, timeout=5)
+            try:
+                rows = connection.execute(
+                    "SELECT a.day, COALESCE(s.actual_micros, a.reserved_micros) "
+                    "FROM thesis_impact_day_admissions a "
+                    "LEFT JOIN thesis_impact_day_settlements s ON s.admission_id=a.admission_id "
+                    "WHERE a.work_order_ref=?", (work_order_ref,)).fetchall()
+            finally:
+                connection.close()
+        except sqlite3.Error:
+            return None
+        if not rows:
+            return None
+        return sum(int(row[1] or 0) for row in rows), min(str(row[0]) for row in rows)
 
     def call_setup(self, *, request_id: str, prompt: str,
                    planning_context: Mapping[str, Any]) -> dict[str, Any]:
@@ -2386,6 +2503,26 @@ class CockpitModel:
             if scheduler.enqueue(work)["status"] == "conflict":
                 raise CockpitModelError("this request is bound to different content; ask again")
             formal = scheduler.formal_result(work.id)
+            if (purpose == 'plan' and formal is not None and formal.get('terminal_state') == 'failed'
+                    and ((formal.get('result_envelope') or {}).get('error') or {}).get('code') == 'PROVIDER_BUDGET_EXCEEDED'):
+                from .planner_paid_output_recovery import (
+                    recovery_for_work, successor_work, _successor_status, recovery_readers, MARKER)
+                if MARKER not in base_request_id:
+                    with recovery_readers(self.config['model_router_db'], self.config['budget_db'],
+                                          now=self.clock().astimezone(timezone.utc)) as (recovery_router, recovery_budget):
+                        recovery = recovery_for_work(scheduler.connection, recovery_router, recovery_budget,
+                            work_ref=work.id, mission_version_ref=mission['id'],
+                            policy_ref=self.config['routing_policy_ref'], expected_budget=work.budget,
+                            now=self.clock().astimezone(timezone.utc), require_active=False)
+                    if recovery is not None:
+                        child = successor_work(work, recovery)
+                        consumed = _successor_status(scheduler.connection, child)
+                        if recovery['active'] or consumed is not None:
+                            # A new paid Work takes the ordinary route/admission
+                            # path. The original failed Work is never rerun.
+                            return self.call(purpose=purpose,
+                                request_id=base_request_id + recovery['suffix'], prompt=prompt,
+                                mission=mission, producer_route_decision_refs=producer_refs)
             if (
                 purpose in _DOSSIER_PURPOSES
                 and formal is not None
@@ -2739,6 +2876,7 @@ class CockpitModel:
                             work_order_ref=work.id, attempt_number=attempt, phase="assessment",
                             route_decision_ref=route["id"], reserved_micros=reserved,
                             mission_binding=scope,
+                            purpose=purpose, thinking_level=route.get("thinking_level"),
                         )
                         admission = decision.get("admission")
                         if decision["status"] == "refused":
@@ -2756,7 +2894,8 @@ class CockpitModel:
                             try:
                                 invocation, result = self._execute_with_safe_retry(
                                     self._adapter(
-                                        router, timeout_seconds=effective["timeout_seconds"]),
+                                        router, timeout_seconds=effective["timeout_seconds"],
+                                        provider_cost_admission=admission),
                                     work, route, profile,
                                 )
                                 cost_micros, cost_status = _cost_micros(invocation, route, profile, reserved)
@@ -2812,8 +2951,13 @@ class CockpitModel:
                                 else:
                                     cost_micros, cost_status = reserved, "reserved"
                                 failure = f"the model call failed: {exc}"
-                            _settle_without_losing_the_lease(
+                            settled = _settle_without_losing_the_lease(
                                 budget, admission, actual_micros=cost_micros)
+                            if settled is not None and cost_status == 'actual':
+                                from .model_output_contract_hold import record_after_settlement
+                                record_after_settlement(router, work=work, route=route, profile=profile,
+                                    invocation=invocation, result=result, budget_store=budget,
+                                    admission_id=admission['admission_id'])
                     completion = guard.complete(
                         result, idempotency_key=f"cockpit-complete:{work.id}:{attempt}",
                         retry_at=(
@@ -2859,6 +3003,9 @@ class CockpitModel:
             error = envelope.get("error") or {}
             code = error.get("code")
             suffix = f" ({code})" if isinstance(code, str) and code else ""
+            if (isinstance((envelope.get("metadata") or {}).get("chain_refusal"), Mapping)
+                    and isinstance(error.get("message"), str) and error["message"]):
+                suffix += f": {error['message']}"
             error_type = (
                 CockpitModelRouteUnavailable
                 if code == "MODEL_ROUTE_REJECTED" else CockpitModelError
@@ -2921,7 +3068,8 @@ class CockpitModel:
                 or override is not None else None)
 
     def _chain_ceiling(self, router: ModelRouter, tier: str, prompt_bytes: int,
-                       *, purpose: str, call_budget: Mapping[str, Any]) -> int:
+                       *, purpose: str, call_budget: Mapping[str, Any],
+                       producer_route_decision_refs: Sequence[str] = ()) -> int:
         """The most this attempt could cost, whichever link ends up serving.
 
         The day ledger identifies an admission by (work order, attempt, phase),
@@ -2932,7 +3080,7 @@ class CockpitModel:
         the served link's own rate card. Reserve the ceiling, pay what ran.
         """
 
-        from .model_fallback_chain import tier_chain
+        from .model_fallback_chain import tier_chain, served_family
         from .model_router import resolve_chain
 
         profiles = router.latest_profiles()
@@ -2942,9 +3090,14 @@ class CockpitModel:
             profiles={profile["id"]: profile for profile in profiles},
         )
         wanted = set(resolved["chain"] if resolved is not None else tier_chain(tier))
+        # execute_chain cannot dispatch these families. Use the same actual
+        # producer decisions and exact family comparison for its cost bound.
+        producer_families = {served_family(router, ref) for ref in producer_route_decision_refs}
         ceiling = Decimal(0)
         for profile in profiles:
             if profile["id"] not in wanted or profile.get("status") == "retired":
+                continue
+            if profile.get("family") in producer_families:
                 continue
             ceiling = max(ceiling, profile_call_ceiling_usd(
                 profile, prompt_bytes=prompt_bytes,
@@ -2965,7 +3118,8 @@ class CockpitModel:
 
         day = self.clock().astimezone(timezone.utc).date().isoformat()
         ceiling = self._chain_ceiling(
-            router, tier, prompt_bytes, purpose=purpose, call_budget=call_budget)
+            router, tier, prompt_bytes, purpose=purpose, call_budget=call_budget,
+            producer_route_decision_refs=producer_route_decision_refs)
         admission: dict[str, Any] | None = None
         first_route_ref: str | None = None
         spend: dict[str, tuple[int, str]] = {}
@@ -2975,6 +3129,7 @@ class CockpitModel:
         # is never a bare assertion on the ledger side.
         no_charge: dict[str, str] = {}
         uncertain_spend = False
+        budget_violation: tuple[Any, Any, Mapping[str, Any], Mapping[str, Any]] | None = None
         refusal: list[str] = []
         pool_rejection: dict[str, Any] | None = None
 
@@ -2985,11 +3140,15 @@ class CockpitModel:
                 # under the reservation the first one took out.
                 return {"status": "admitted"}
             try:
+                from .research_publication_limits import fee_binding
+                publication_binding=fee_binding()
                 admission = _admit_through_lock(lambda: budget.admit(
                     policy_version_id=self.config["budget_policy_ref"], day=day,
                     work_order_ref=work.id, attempt_number=attempt, phase="assessment",
                     route_decision_ref=route["id"],
                     reserved_micros=max(ceiling, micros), mission_binding=scope,
+                    purpose=purpose, thinking_level=route.get("thinking_level"),
+                    **({'publication':publication_binding} if publication_binding is not None else {}),
                 ), work.id, budget=budget, attempt_number=attempt, phase="assessment")
             except ThesisImpactBudgetError as exc:
                 refusal.append(str(exc))
@@ -3006,10 +3165,11 @@ class CockpitModel:
             return {"status": "admitted"}
 
         def call(route: Mapping[str, Any], profile: Mapping[str, Any]) -> dict[str, Any]:
-            nonlocal uncertain_spend
+            nonlocal uncertain_spend, budget_violation
             try:
                 invocation, envelope = self._execute_with_safe_retry(
-                    self._adapter(router, timeout_seconds=call_budget["timeout_seconds"]),
+                    self._adapter(router, timeout_seconds=call_budget["timeout_seconds"],
+                                  provider_cost_admission=admission),
                     work, route, profile,
                 )
             except OpenClawModelAdapterError as exc:
@@ -3030,11 +3190,24 @@ class CockpitModel:
                     (0, "not_sent") if definitely_not_sent else (ceiling, "reserved")
                 )
                 uncertain_spend = uncertain_spend or not definitely_not_sent
+                from .research_publication_limits import PublicationDispatchParked
                 return {"outcome": "failed",
-                        "failure_class": (classify_model_failure(exc)
+                        "failure_class": ('contract_violation' if isinstance(exc,PublicationDispatchParked) else classify_model_failure(exc)
                                           if definitely_not_sent else "unclassified_failure"),
                         "reason": f"the model call failed: {exc}"}
             if envelope.status != "succeeded":
+                # A provider-control overrun is a paid contract violation, not
+                # missing metering. Retain its actual invocation and full cost
+                # so the ledger records the overrun instead of clipping it to
+                # the smaller reservation.
+                if (envelope.error or {}).get("code") == "PROVIDER_BUDGET_EXCEEDED":
+                    measured = _cost_micros(invocation, route, profile, ceiling)
+                    if measured[1] == "actual":
+                        spend[route["id"]] = measured
+                        budget_violation = (invocation, envelope, route, profile)
+                        return {"outcome": "failed", "failure_class": "contract_violation",
+                                "error_code": "PROVIDER_BUDGET_EXCEEDED",
+                                "reason": (envelope.error or {}).get("message"), "value": envelope}
                 if provider_retry_state is not None:
                     from .provider_retry import returned_provider_failure_proof
 
@@ -3089,8 +3262,9 @@ class CockpitModel:
                 # the classifier gives them instead of being downgraded to a
                 # halt below; halting here left every brain chain dark for a
                 # day on one gateway's quota wall.
-                host_frame_failure = code in {
-                    "HOST_COMPLETION_FAILED", "INVALID_HOST_RESULT"}
+                from .model_profile_health import HOST_FRAME_FAILURE_CODES
+
+                host_frame_failure = code in HOST_FRAME_FAILURE_CODES
                 dispatch_proof = (envelope.metadata or {}).get("dispatch_proof")
                 broker_local_code = code in {
                     "BUSY", "CONCURRENCY_LIMIT", "BROKER_CONCURRENCY_LIMIT",
@@ -3180,16 +3354,35 @@ class CockpitModel:
             ):
                 served_micros, served_status = spend.get(
                     outcome["route_decision_ref"], (0, "failed"))
+            elif budget_violation is not None:
+                # Free fallback links contribute zero. Retain any already
+                # recorded spend as well, instead of replacing the attempt's
+                # total with only its final violating link.
+                served_micros = sum(amount for amount, _status in spend.values())
+                served_status = "actual"
         finally:
             # A proved pre-send failure costs zero. Once bytes may have left,
             # missing telemetry cannot release the reservation: the provider
             # may still have completed and charged the call.
             if admission is not None:
-                settlement = ceiling if uncertain_spend else served_micros
-                _settle_without_losing_the_lease(
+                settlement = (served_micros if budget_violation is not None
+                              else ceiling if uncertain_spend else served_micros)
+                settled = _settle_without_losing_the_lease(
                     budget, admission, actual_micros=settlement)
+                if settled is not None and budget_violation is not None:
+                    from .model_output_contract_hold import record_after_settlement
+                    inv, failed, violated_route, violated_profile = budget_violation
+                    record_after_settlement(router, work=work, route=violated_route,
+                        profile=violated_profile, invocation=inv, result=failed,
+                        budget_store=budget, admission_id=admission['admission_id'])
 
         route_ref = outcome.get("route_decision_ref") or first_route_ref
+        if budget_violation is not None:
+            invocation, envelope, violated_route, violated_profile = budget_violation
+            return {"result": envelope, "failure": (envelope.error or {}).get("message"),
+                    "cost_micros": served_micros, "cost_status": served_status,
+                    "pool_rejection": None, "route": violated_route,
+                    "profile": violated_profile, "invocation": invocation}
         if outcome["status"] == "served" or (
             outcome.get("reason") == "provider_retry"
             and outcome.get("value") is not None
@@ -3226,6 +3419,16 @@ class CockpitModel:
                     "failure": f"today's research budget refused the call: {reason}",
                     "cost_micros": ceiling if uncertain_spend else 0,
                     "cost_status": "reserved" if uncertain_spend else "failed",
+                    "pool_rejection": None}
+        if outcome["status"] == "refused":
+            refusal_record = chain_refusal_record(
+                outcome, policy=router.get_policy(self.config["routing_policy_ref"]),
+                credential_slot_refs=self.config["credential_slot_refs"])
+            message = chain_refusal_message(refusal_record)
+            return {"result": _failure(work, "MODEL_ROUTE_REJECTED", route_ref,
+                                       message=message, chain_refusal=refusal_record),
+                    "failure": message,
+                    "cost_micros": 0, "cost_status": "failed",
                     "pool_rejection": None}
         if not outcome["links"]:
             return {"result": _failure(work, "MODEL_ROUTE_REJECTED", route_ref),
@@ -3288,6 +3491,55 @@ class CockpitModel:
                 "pool_rejection": None}
 
 
+#: The marker every refusal of this kind carries in its text, whatever the
+#: language around it: the publication worker, the UI-text discovery and the
+#: owner's to-do list all key on it.
+VERIFIER_NOT_INDEPENDENT = "verifier_not_independent"
+
+
+def chain_refusal_record(outcome: Mapping[str, Any], *, policy: Mapping[str, Any],
+                         credential_slot_refs: Sequence[str]) -> dict[str, Any]:
+    """The facts of a chain refused before any route decision was made."""
+
+    return {
+        "schema_version": "cockpit-chain-refusal:0.1",
+        "reason": str(outcome.get("reason") or "refused"),
+        "purpose": outcome.get("purpose"),
+        "tier": outcome.get("tier"),
+        "chain": [str(item) for item in outcome.get("chain") or ()],
+        "retired_links": [str(item) for item in outcome.get("retired_links") or ()],
+        "producer_families": sorted(str(item) for item in outcome.get("producer_families") or ()),
+        "policy_version_ref": policy.get("policy_version_ref"),
+        "policy_hash": policy.get("content_hash"),
+        "credential_slot_refs": sorted(str(item) for item in credential_slot_refs),
+    }
+
+
+def _short_profile(profile_id: str) -> str:
+    return profile_id.split(":", 1)[1] if profile_id.startswith("profile:") else profile_id
+
+
+def chain_refusal_message(record: Mapping[str, Any]) -> str:
+    """The owner's sentence for a refused chain, naming every model in it."""
+
+    chain = "、".join(_short_profile(item) for item in record.get("chain") or ()) or "（空）"
+    families = "、".join(record.get("producer_families") or ()) or "未知"
+    purpose = str(record.get("purpose") or "")
+    if record.get("reason") == VERIFIER_NOT_INDEPENDENT:
+        retired = record.get("retired_links") or ()
+        text = (f"独立核验找不到可用模型：环节 {purpose} 的模型链（{chain}）"
+                f"与产出这份内容的模型同属 {families} 家族"
+                + (f"（{'、'.join(_short_profile(item) for item in retired)} 已停用）"
+                   if retired else "")
+                + "，按规则不能自己核验自己。需要在「研究目标与计划」页「模型与预算」改模型选择："
+                "让起草这份内容的环节先用其它家族的模型，或给这个核验环节加一个"
+                "能承担这类核验的其它家族模型。")
+    else:
+        text = (f"模型链被拒绝：环节 {purpose} 的模型链（{chain}）没有可用模型"
+                f"（{record.get('reason')}）。")
+    return f"{text}（{record.get('reason')}）"
+
+
 def unwrap_json_object(text: str) -> dict[str, Any] | None:
     """Best-effort: the first JSON object in a model reply, fence or prose around it tolerated."""
     stripped = text.strip()
@@ -3312,10 +3564,10 @@ def unwrap_json_object(text: str) -> dict[str, Any] | None:
 
 __all__ = [
     "CockpitModel", "CockpitModelError", "CockpitModelPoolExhausted",
-    "CockpitModelRouteUnavailable",
-    "WORKER_REF", "admit_day_ledger", "build_work", "call_cost_micros",
+    "CockpitModelRouteUnavailable", "VERIFIER_NOT_INDEPENDENT",
+    "WORKER_REF", "admit_day_ledger", "chain_refusal_message", "chain_refusal_record", "build_work", "call_cost_micros",
     "dossier_request_identity", "independent_model_call", "lane_status_for",
     "pool_refusal_message", "purposes", "register_purpose",
     "settle_day_ledger", "unwrap_json_object",
-    "validate_dossier_request_identity",
+    "validate_dossier_request_identity", "verifier_route_capability",
 ]

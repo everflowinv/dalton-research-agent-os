@@ -127,6 +127,47 @@ class LauncherTests(unittest.TestCase):
         self.assertEqual(base64.b64decode(record["prior_summary_base64"]), summary)
         self.assertEqual(base64.b64decode(record["prior_log_base64"]), prior_log)
 
+    def _settled_without_summary(self, launcher, digest, status):
+        ticket = launcher.spawn(digest=digest, record={})
+        launcher.wait(timeout=30)
+        path = launcher._ticket_path(ticket["id"])
+        record = json.loads(path.read_text(encoding="utf-8"))
+        record["status"] = status
+        path.write_text(json.dumps(record), encoding="utf-8")
+        path.with_name("summary.json").unlink(missing_ok=True)
+        return ticket, path
+
+    def test_an_orphan_that_died_before_its_summary_can_still_re_enter(self):
+        # Live ws-7d 256f7569: the writer restarted ten seconds into the
+        # child, the ticket was marked orphaned with an empty run.log and no
+        # summary.json, and every re-entry since 2026-09-18 was refused with
+        # ``controlled reentry summary is unavailable``.
+        for status in ("orphaned", "failed"):
+            with self.subTest(status=status):
+                launcher = self.launcher()
+                ticket, path = self._settled_without_summary(
+                    launcher, ("1" if status == "orphaned" else "2") * 24, status)
+                authorization = ":exact-replay:" + status
+                launcher.claim_controlled_reentry(ticket["id"], authorization)
+                marker = next(path.parent.glob("controlled-reentry-*.json"))
+                record = json.loads(marker.read_text(encoding="utf-8"))
+                self.assertIsNone(record["prior_summary_sha256"])
+                self.assertIsNone(record["prior_summary_base64"])
+                # Still one-shot.
+                with self.assertRaises(LaneChildRejected):
+                    launcher.claim_controlled_reentry(ticket["id"], authorization)
+
+    def test_a_missing_summary_is_still_refused_when_it_was_pinned_or_the_run_succeeded(self):
+        launcher = self.launcher()
+        ticket, path = self._settled_without_summary(launcher, "3" * 24, "orphaned")
+        with self.assertRaisesRegex(LaneChildRejected, "summary is unavailable"):
+            launcher.claim_controlled_reentry(
+                ticket["id"], ":pinned", expected_summary_sha256="0" * 64)
+        ticket, path = self._settled_without_summary(launcher, "4" * 24, "succeeded")
+        with self.assertRaisesRegex(LaneChildRejected, "summary is unavailable"):
+            launcher.claim_controlled_reentry(ticket["id"], ":succeeded")
+        self.assertEqual(list(path.parent.glob("controlled-reentry-*.json")), [])
+
     def test_a_running_child_cannot_claim_controlled_reentry(self):
         launcher = self.launcher("import time; time.sleep(10)")
         ticket = launcher.spawn(digest="f" * 24, record={"batch_ref": "group:a"})

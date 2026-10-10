@@ -628,6 +628,79 @@ class CoordinatorTests(unittest.TestCase):
             as_of=self.clock().date(),variant_index=1,missing_periods=search.starts[-1]['missing_periods'])
         self.assertIn('results webcast',compiled['query'])
 
+    def test_v06_quarter_label_renders_the_alphaengine_title_form(self):
+        plan=build_discovery_plan(plan_id='discovery-plan:quarter-label:test',created_at=NOW.isoformat(timespec='microseconds'),
+            mission_ref='coverage-mission:us-it-services',source_ref='source:alphaengine',max_calls_24h=12,
+            companies={ACN:{'name':'Microsoft','ticker':'MSFT','aliases':['Microsoft']}},specs=[{
+                'spec_ref':'earnings-call-transcripts','document_type':'meeting_minutes',
+                'query_variants':[{'query_template':'{name} {quarter_label}','filters':{}},
+                                  {'query_template':'{name} {quarter} earnings call transcript','filters':{}}],
+                'lookback_days':400,'rediscovery_interval_days':7,'retry_interval_days':1}])
+        self.assertEqual(validate_discovery_plan(plan)['content_hash'],plan['content_hash'])
+        def query(index,periods):
+            return build_discovery_parameters(plan,spec_ref='earnings-call-transcripts',company_ref=ACN,
+                as_of=date(2026,10,3),variant_index=index,missing_periods=periods)
+        first=query(0,['FY2026-Q4','FY2026-Q1'])
+        self.assertEqual(first['query'],'Microsoft Q4 2026')
+        self.assertEqual(first['filters']['document_type'],'meeting_minutes')
+        self.assertEqual(query(1,['FY2026-Q4'])['query'],'Microsoft FY2026-Q4 earnings call transcript')
+        self.assertEqual(query(0,[])['query'],'Microsoft')
+
+    def test_v06_sell_side_page_waits_for_selection_before_next_cursor(self):
+        """2026-10-03: sell-side paged on every tick while its candidates sat unselected."""
+        v1=self.create_mission(); mission=self.mission_v2(v1)
+        company_ref=mission['universe'][0]['company_ref']
+        plan=build_discovery_plan(plan_id='discovery-plan:sell-side-paging:test',
+            created_at=NOW.isoformat(timespec='microseconds'),mission_ref=self.plan['mission_ref'],
+            source_ref='source:alphaengine',max_calls_24h=30,
+            companies={company_ref:{'name':'Accenture','ticker':'ACN','aliases':['Accenture']}},specs=[{
+                'spec_ref':'sell-side-reports','document_type':'sell_side_report',
+                'query_variants':[{'query_template':'{ticker} analyst research report','filters':{}}],
+                'lookback_days':180,'rediscovery_interval_days':14,'retry_interval_days':1}])
+        search=FakeSearchLauncher(self.h,self.missions,plan)
+        class Quarantine:
+            refs=[]
+            def active(self,**kwargs): return list(self.refs)
+        class Selection:
+            consumed=[]
+            quarantine=Quarantine()
+            def currently_consumed(self,**kwargs): return list(self.consumed)
+        selection=Selection()
+        coordinator=MissionSourceDiscoveryCoordinator(store=self.h.core,missions=self.missions,plan=plan,
+            search_launcher=search,acquisition_launcher=None,clock=self.clock,selection_launcher=selection)
+        self.assertEqual(coordinator.launch_discovery()['status'],'launched')
+        coordinator.settle_dispatches()
+        discovery=self.missions.source_discoveries(mission['id'],company_ref=company_ref,
+                                                   spec_ref='sell-side-reports')[0]
+        next_page={'cursor':'ae1:next','as_of':self.clock().date().isoformat()}
+        with patch('dalton_core.mission_source_discovery._next_page_binding',return_value=next_page):
+            # Unselected candidates on the last page: no next page, no search.
+            self.assertIsNone(coordinator._continuation_page(
+                mission['id'],company_ref,'sell-side-reports'))
+            searches=len(search.starts)
+            tick=coordinator.launch_discovery()
+            self.assertEqual(tick['status'],'idle',tick)
+            self.assertEqual(len(search.starts),searches)
+            # Consumed by selection: the cursor is followed.
+            selection.consumed=[discovery['id']]
+            self.assertEqual(coordinator._continuation_page(
+                mission['id'],company_ref,'sell-side-reports')['cursor'],'ae1:next')
+            tick=coordinator.launch_discovery()
+            self.assertEqual(tick['status'],'launched',tick)
+            self.assertEqual(search.starts[-1]['cursor'],'ae1:next')
+            coordinator.settle_dispatches()
+            second=self.missions.source_discoveries(mission['id'],company_ref=company_ref,
+                                                    spec_ref='sell-side-reports')[0]
+            self.assertNotEqual(second['id'],discovery['id'])
+            next_page={'cursor':'ae1:third','as_of':self.clock().date().isoformat()}
+        with patch('dalton_core.mission_source_discovery._next_page_binding',return_value=next_page):
+            self.assertIsNone(coordinator._continuation_page(
+                mission['id'],company_ref,'sell-side-reports'))
+            # A page the selector set aside (quarantine) counts as finished.
+            selection.quarantine.refs=[second['id']]
+            self.assertEqual(coordinator._continuation_page(
+                mission['id'],company_ref,'sell-side-reports')['cursor'],'ae1:third')
+
     def test_v06_missing_selector_never_falls_back_to_fetch_all(self):
         v1=self.create_mission(); mission=self.mission_v2(v1)
         company_ref=mission['universe'][0]['company_ref']

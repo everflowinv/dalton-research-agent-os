@@ -6,6 +6,7 @@ import sqlite3
 import tempfile
 from pathlib import Path
 from types import SimpleNamespace
+from unittest.mock import patch
 
 from dalton_core.cockpit_plane import CockpitError, CockpitPlane
 from tests.test_mission_deliverable import ACN, DeliverableHarness
@@ -48,3 +49,17 @@ class ResearchDownloadTests(DeliverableHarness):
     def test_missing_forecast_does_not_download_a_fabricated_model(self):
         with self.assertRaises(CockpitError):
             self.plane.export_research(ACN, "xlsx")
+
+    def test_export_failure_explains_missing_spec_without_internal_identifiers(self):
+        with patch("dalton_core.cockpit_research_export.export_download",
+                   side_effect=ValueError("forecast model's exact specification is unavailable")):
+            with self.assertRaisesRegex(CockpitError, "对应版本的建模假设"):
+                self.plane.export_research(ACN, "xlsx")
+
+    def test_unknown_export_error_does_not_expose_internal_paths(self):
+        with patch("dalton_core.cockpit_research_export.export_download",
+                   side_effect=OSError("permission denied: /private/fixture/core.sqlite")):
+            with self.assertRaises(CockpitError) as error:
+                self.plane.export_research(ACN, "xlsx")
+        self.assertIn("联系管理员", str(error.exception))
+        self.assertNotIn("/private", str(error.exception))

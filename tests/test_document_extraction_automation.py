@@ -569,7 +569,11 @@ class OutputContractTests(unittest.TestCase):
                                "offset": 0, "end": 10, "quotes": [{"quote_id": "q", "raw_text": "t"}]})
         self.assertIn("The subject company is CTSH.", prompt)
         self.assertIn("generic disclaimers", prompt)
-        self.assertIn("revenue recognition", prompt)
+        # 2026-09-29: risk factors and accounting policy are no longer invited
+        # as findings (EPAM's 10-K: 79 Claims, most of them exactly that).
+        self.assertIn("how revenue is recognized", prompt)
+        self.assertIn("are not findings: leave them out", prompt)
+        self.assertNotIn("can be material findings even in legally required sections", prompt)
 
     def test_the_name_of_a_filing_is_not_a_numeric_assertion(self) -> None:
         """Live, four directed-document candidates were refused for "10-K".

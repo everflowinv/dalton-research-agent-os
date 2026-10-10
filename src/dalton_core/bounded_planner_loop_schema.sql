@@ -203,3 +203,26 @@ CREATE TRIGGER IF NOT EXISTS bounded_planner_terminal_events_no_update
 BEFORE UPDATE ON bounded_planner_terminal_events BEGIN SELECT RAISE(ABORT, 'bounded authority is append-only'); END;
 CREATE TRIGGER IF NOT EXISTS bounded_planner_terminal_events_no_delete
 BEFORE DELETE ON bounded_planner_terminal_events BEGIN SELECT RAISE(ABORT, 'bounded authority is append-only'); END;
+
+-- Source reuse parks are additive: preserve the original terminal CHECK and
+-- every legacy row/hash rather than rebuilding historical authority.
+CREATE TABLE IF NOT EXISTS bounded_planner_source_terminal_events (
+    event_id TEXT PRIMARY KEY,
+    loop_version_ref TEXT NOT NULL UNIQUE REFERENCES bounded_planner_loop_versions(version_id),
+    terminal_state TEXT NOT NULL CHECK(terminal_state IN ('source_material_unchanged_waiting_new_material','source_unavailable_waiting_material_request')),
+    record_json TEXT NOT NULL,
+    content_hash TEXT NOT NULL,
+    created_at TEXT NOT NULL
+);
+CREATE TRIGGER IF NOT EXISTS bounded_planner_source_terminal_events_insert_guard
+BEFORE INSERT ON bounded_planner_source_terminal_events WHEN dalton_authorized()=0 BEGIN SELECT RAISE(ABORT,'bounded authority requires DaltonStore'); END;
+CREATE TRIGGER IF NOT EXISTS bounded_planner_source_terminal_events_no_update
+BEFORE UPDATE ON bounded_planner_source_terminal_events BEGIN SELECT RAISE(ABORT,'bounded authority is append-only'); END;
+CREATE TRIGGER IF NOT EXISTS bounded_planner_source_terminal_events_no_delete
+BEFORE DELETE ON bounded_planner_source_terminal_events BEGIN SELECT RAISE(ABORT,'bounded authority is append-only'); END;
+CREATE TRIGGER IF NOT EXISTS bounded_planner_source_terminal_events_unique_loop
+BEFORE INSERT ON bounded_planner_source_terminal_events WHEN EXISTS(SELECT 1 FROM bounded_planner_terminal_events WHERE loop_version_ref=NEW.loop_version_ref) BEGIN SELECT RAISE(ABORT,'loop already has a terminal event'); END;
+CREATE TRIGGER IF NOT EXISTS bounded_planner_terminal_events_unique_loop
+BEFORE INSERT ON bounded_planner_terminal_events WHEN EXISTS(SELECT 1 FROM bounded_planner_source_terminal_events WHERE loop_version_ref=NEW.loop_version_ref) BEGIN SELECT RAISE(ABORT,'loop already has a source terminal event'); END;
+CREATE VIEW IF NOT EXISTS bounded_planner_terminal_event_union AS
+SELECT * FROM bounded_planner_terminal_events UNION ALL SELECT * FROM bounded_planner_source_terminal_events;

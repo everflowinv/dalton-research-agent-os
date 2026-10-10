@@ -55,6 +55,7 @@ from datetime import datetime, timedelta, timezone
 from pathlib import Path
 from typing import Any
 
+from .provider_failure import PROVIDER_AUTH_CODE, is_provider_auth_text
 from .alphaengine_core_acquisition import (
     RESOLVER_REF,
     RUNNER_ACTOR_REF,
@@ -892,6 +893,12 @@ class GuidepointLiveAdapter:
                 ]
                 if parts:
                     message = "\n".join(parts)[:1000]
+            if is_provider_auth_text(message):
+                # Same class as AlphaEngine's session refusal (2026-10-08).
+                return self._failure(
+                    wire, outcome="failed", code=PROVIDER_AUTH_CODE, message=message,
+                    retryable=False, provider_status=401, retry_after_ms=None,
+                )
             lowered = message.lower()
             permission = any(word in lowered for word in ("permission", "login", "auth", "token"))
             return self._failure(

@@ -40,6 +40,7 @@ import re
 from typing import Any, Mapping, Sequence
 
 from .company_model_series import quarterly_series, series_gaps
+from .store import content_hash
 from .driver_template import COST_REGISTRY_HASH, COST_REGISTRY_REF, cost_slot_ids
 
 FILED = "filed"
@@ -229,7 +230,15 @@ def _series_for(
             for cell in series.get(kind) or []:
                 if cell.get("unit") is not None:
                     cell["unit"] = _model_unit(cell["unit"])
+    source_evidence = None
+    if not legacy_replay and any("dimensions" in row or row.get("statement_context_ref") for row in reported):
+        fields = ("line_id", "ingest_id", "ordinal", "statement", "concept", "period_start", "period_end",
+                  "value", "unit", "accession", "filed", "dimensions", "statement_context_ref", "source_unit_ref", "unit_definition_hash")
+        evidence_rows = [{key: row[key] for key in fields if key in row} for row in reported]
+        source_evidence = {"rule_ref": "filed-input-evidence:exact-context-lines:1", "rows": evidence_rows,
+                           "content_hash": content_hash(evidence_rows)}
     return {
+        **({"source_evidence": source_evidence} if source_evidence is not None else {}),
         "status": FILED, "statement": statements[0],
         "label": (reported[-1]["label"] if reported else concept),
         "series": series,
@@ -391,11 +400,64 @@ def _unused_income_lines(
                   key=lambda item: (item["level"], item["concept"]))[:MAX_UNUSED_REPORTED]
 
 
+class _StatementInputRead:
+    """Reuse exact strong statement reads only inside one input-table build.
+
+    The authority still selects and validates each filing/context. No cache is
+    retained by the authority, shared across companies, or used on a later tick.
+    Existing connection/transaction ownership is unchanged.
+    """
+
+    def __init__(self, source: Any, series_reader: Any):
+        self._source = source
+        self._series_reader = series_reader
+        self._filings: dict[Any, list[dict[str, Any]]] = {}
+        self._lines: dict[Any, list[dict[str, Any]]] = {}
+
+    def statement_filings(self, company_ref: str | None = None) -> list[dict[str, Any]]:
+        if company_ref not in self._filings:
+            self._filings[company_ref] = self._source.statement_filings(company_ref)
+        return self._filings[company_ref]
+
+    def statement_lines(self, ingest_id: str, *, statement: str | None = None,
+                        context_version_ref: str | None = None,
+                        latest_context: bool = True) -> list[dict[str, Any]]:
+        key = (ingest_id, context_version_ref, latest_context)
+        if key not in self._lines:
+            self._lines[key] = self._source.statement_lines(
+                ingest_id, context_version_ref=context_version_ref,
+                latest_context=latest_context,
+            )
+        rows = self._lines[key]
+        if statement is not None:
+            from .coverage_mission import _vocabulary
+
+            wanted = _vocabulary(statement, ("income", "balance", "cash"), "statement")
+            return [row for row in rows if row["statement"] == wanted]
+        return rows
+
+    def statement_series_lines(self, company_ref: str, concept: str, *,
+                               statement: str | None = None) -> list[dict[str, Any]]:
+        return self._series_reader(self, company_ref, concept, statement=statement)
+
+
+def _input_statement_reader(missions: Any) -> Any:
+    # Custom readers retain their own semantics. Only the real authority's
+    # known series projection is routed through this request-scoped adapter.
+    from .coverage_mission import CoverageMissionAuthority
+
+    reader = getattr(getattr(missions, "statement_series_lines", None), "__func__", None)
+    if reader is not CoverageMissionAuthority.statement_series_lines:
+        return missions
+    return _StatementInputRead(missions, reader)
+
+
 def build_model_inputs(
     missions: Any, spec: Mapping[str, Any], *, max_periods: int = MAX_PERIODS,
 ) -> dict[str, Any]:
     """One company's model rows, its filed history, and what still has to be estimated."""
 
+    missions = _input_statement_reader(missions)
     company_ref = spec.get("company_ref")
     if not isinstance(company_ref, str) or not company_ref:
         raise ModelInputError("specification carries no company_ref")
@@ -445,10 +507,23 @@ def build_model_inputs(
     structure_definition = spec.get("financial_statement_structure")
     non_additive_duration_policy = (
         isinstance(structure_definition, Mapping)
-        and structure_definition.get("schema_version") in {"0.4", "0.5"}
+        and structure_definition.get("schema_version") in {"0.4", "0.5", "0.6"}
     )
     for concept in statement_structure_concepts:
         concepts.setdefault(concept, [])
+    for component in (spec.get("fcf_definition") or {}).get("components") or []:
+        if isinstance(component, Mapping) and component.get("concept"):
+            concepts.setdefault(str(component["concept"]), [])
+    # Forecast coverage (structure 0.6) may add the diluted share count, a
+    # derived diluted EPS and the first-version cash-flow and balance-sheet
+    # leaves.  Their exact concepts come from a closed table and enter the
+    # table only when filed; an unfiled one is simply not offered.
+    coverage_candidates: set[str] = set()
+    if isinstance(structure_definition, Mapping):
+        from .forecast_coverage import UPGRADEABLE_STRUCTURE_VERSIONS, coverage_concepts
+
+        if structure_definition.get("schema_version") in UPGRADEABLE_STRUCTURE_VERSIONS:
+            coverage_candidates = set(coverage_concepts()) - set(concepts)
 
     filed: dict[str, dict[str, Any]] = {}
     for concept in sorted(concepts):
@@ -460,6 +535,14 @@ def build_model_inputs(
             # were still 0.3, so only inner 0.4 and later opt into this correction.
             non_additive_duration_policy=non_additive_duration_policy,
         )
+    for concept in sorted(coverage_candidates):
+        entry = _series_for(
+            missions, company_ref, concept, legacy_replay=legacy_series,
+            non_additive_duration_policy=non_additive_duration_policy,
+        )
+        if entry["status"] == FILED and entry.get("series"):
+            filed[concept] = entry
+            concepts[concept] = []
 
     cash_required = any(
         item.get("statement") == "cash" and item.get("importance") != "not_material"
@@ -507,6 +590,9 @@ def build_model_inputs(
         }
         if statement_structure_bound:
             line.update({"duration_facts": [], "ambiguous_periods": []})
+            if entry.get("source_evidence") is not None:
+                line["source_evidence"] = entry["source_evidence"]
+                line["source_quarter_ends"] = sorted({str(cell["period_end"]) for cell in (entry.get("series") or {}).get("quarters", [])})
         series = entry.get("series")
         if series:
             # A line is one shape or the other, never both: a balance is an
@@ -594,6 +680,8 @@ def build_model_inputs(
     }
     if cost_template is not None:
         result["cost_driver_template"] = dict(cost_template)
+    identities=identity_input_lines(missions,spec)
+    if identities: result["filed_identity_lines"]=identities
     return result
 
 
@@ -664,3 +752,34 @@ __all__ = [
     "build_model_inputs",
     "readiness",
 ]
+
+
+def validate_statement_identity(value):
+    if not isinstance(value,Mapping) or set(value)!={"statement","dimensions"} or value["statement"] not in {"income","balance","cash"}:
+        raise ModelInputError("statement identity needs exact statement and dimensions")
+    dims=value["dimensions"]
+    if not isinstance(dims,Mapping) or not dims or not all(isinstance(k,str) and k and isinstance(v,str) and v for k,v in dims.items()):
+        raise ModelInputError("statement identity needs full named axis/member dimensions")
+    return {"statement":value["statement"],"dimensions":dict(sorted(dims.items()))}
+
+
+def identity_input_lines(missions,spec):
+    """Independent dimension-specific series; never reuse the consolidated selector."""
+    result=[]
+    for driver in spec.get("revenue_drivers") or []:
+        if driver.get("basis_identity") is None:continue
+        identity=validate_statement_identity(driver["basis_identity"]);concept=driver.get("basis_concept")
+        if not concept:continue
+        rows=[r for r in missions.statement_series_lines(spec["company_ref"],concept,statement=identity["statement"])
+            if r.get("dimensions")==identity["dimensions"]]
+        evidence_fields=("line_id","ingest_id","ordinal","statement","concept","period_start","period_end","value","unit","accession","filed","dimensions","statement_context_ref")
+        evidence=[{k:r[k] for k in evidence_fields if k in r} for r in rows]
+        # Once exact identity is selected, the quarterly arithmetic has no mix of segments.
+        series=quarterly_series([{**r,"is_breakdown":False,"dimension_axis":None,"dimension_member":None} for r in rows])
+        units={_model_unit(c.get("unit")) for c in series["quarters"] if c.get("unit")}
+        cells={c["period_end"]:{**c,"unit":_model_unit(c["unit"])} for c in series["quarters"]}
+        result.append({"driver_ref":driver["ref"],"concept":concept,"statement":identity["statement"],"statement_identity":identity,
+            "label":driver["label"],"status":FILED if cells and len(units)==1 else NOT_FOUND,"cells":cells,
+            "source_evidence":{"rule_ref":"filed-input-evidence:exact-dimensional-context:1","rows":evidence,"content_hash":content_hash(evidence)},
+            "gaps":series.get("ambiguous_periods") or []})
+    return result

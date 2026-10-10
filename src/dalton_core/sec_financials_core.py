@@ -73,23 +73,27 @@ def sec_financials_source_hash() -> str:
     return content_hash(dict(template["source_identity"]))
 
 
-def sec_financials_output_schema(*, version: int = 3) -> dict[str, Any]:
-    """Closed output schema for v2 or v3; v2 remains byte-compatible."""
+def sec_financials_output_schema(*, version: int = 4) -> dict[str, Any]:
+    """Closed output schema; v2 and v3 remain byte-compatible."""
 
-    if version not in {2, 3}:
-        raise SecFinancialsError("financial statements contract version must be 2 or 3")
+    if version not in {2, 3, 4}:
+        raise SecFinancialsError("financial statements contract version must be 2, 3 or 4")
     template, contract = sec_financials_contract()
     document = next(item["document"] for item in template["schema_documents"]
                     if item["schema_ref"] == contract["output_schema_ref"])
     result = copy.deepcopy(document)
+    line = result["properties"]["filings"]["items"]["properties"]["lines"]["items"]
+    if version == 4:
+        line["properties"]["dimensions"] = {"type": ["object", "null"],
+                                              "additionalProperties": {"type": "string"}}
+        line["required"].append("dimensions")
     if version == 2:
-        line = result["properties"]["filings"]["items"]["properties"]["lines"]["items"]
         line["properties"].pop("dimension_count")
         line["required"].remove("dimension_count")
     return result
 
 
-def sec_financials_schema_hash(*, version: int = 3) -> str:
+def sec_financials_schema_hash(*, version: int = 4) -> str:
     """Bound to this operation alone, so the approval cannot widen."""
 
     _, contract = sec_financials_contract()
@@ -113,7 +117,7 @@ def sec_financials_adapter_hash() -> str:
     })
 
 
-def sec_financials_identity(*, version: int = 3) -> dict[str, Any]:
+def sec_financials_identity(*, version: int = 4) -> dict[str, Any]:
     """Source and schema identity of the statements operation."""
 
     template, contract = sec_financials_contract()
@@ -170,7 +174,7 @@ def build_sec_financials_governance_record(
     status: str = "proposed",
     effective_from: str = "2026-09-09T00:00:00+00:00",
     max_lease_seconds: int = 120,
-    version: int = 3,
+    version: int = 4,
 ) -> dict[str, Any]:
     """Closed, hash-bound governance record for the statements capability."""
 

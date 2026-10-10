@@ -914,6 +914,8 @@ def _attribution(value: Any, name: str) -> dict[str, Any] | None:
 def cited_refs(record: Mapping[str, Any]) -> set[str]:
     """Every reference a call stands on."""
 
+    if record.get("schema_version") == "0.2":
+        return cited_refs_v2(record)
     refs: set[str] = set()
     variant = record.get("variant_view") or {}
     for key in ("our_view", "market_view", "where_market_is_wrong",
@@ -944,6 +946,8 @@ def normalise_proposal(value: Mapping[str, Any]) -> dict[str, Any]:
         raise ConvictionCallValidationError("ConvictionCallProposal must be an object")
     wire = dict(value)
     wire.pop("content_hash", None)
+    if wire.get("schema_version") == SCHEMA_VERSION_V2:
+        return _normalise_v2(wire)
     fields = set(_PROPOSAL_FIELDS) - {"content_hash"}
     if set(wire) != fields:
         raise ConvictionCallValidationError(
@@ -1222,6 +1226,571 @@ def conviction_call_artefact(record: Mapping[str, Any]) -> dict[str, Any]:
 
 
 # ---------------------------------------------------------------------------
+# Conviction v2 (ADR-0013): evidence confidence x scenarios x alignment
+# ---------------------------------------------------------------------------
+
+SCHEMA_VERSION_V2 = "0.2"
+PROPOSAL_SCHEMA_VERSIONS: tuple[str, ...] = (SCHEMA_VERSION, SCHEMA_VERSION_V2)
+
+# Where the street stands relative to us.  ``market_view_unavailable`` is the
+# honest third answer and is priced like agreement: a call that cannot say
+# where the market leans has not shown it differs from it.
+ALIGNMENTS: tuple[str, ...] = (
+    "same_direction", "opposite_direction", "market_view_unavailable",
+)
+
+# Why the deterministic v2 precheck did not admit a company.  Each is one
+# mechanical check with one cause, and none of them is "we agree with the
+# market": under v2 agreeing is priced, not refused.
+GATE_REASONS_V2: tuple[str, ...] = (
+    "no_active_thesis",
+    "no_valuation_snapshot",
+    "valuation_not_on_latest_price",
+    "valuation_has_no_metric",
+    "valuation_stale",
+)
+GATE_REASON_LABELS_V2: Mapping[str, str] = MappingProxyType({
+    "no_active_thesis": "没有生效的投资论点",
+    "no_valuation_snapshot": "还没有估值快照",
+    "valuation_not_on_latest_price": "估值快照不是按最新股价算的",
+    "valuation_has_no_metric": "估值快照里没有可用的估值指标",
+    "valuation_stale": "估值快照已过期",
+})
+
+# Why a drafted v2 call is refused by the policy, after drafting and before
+# the verifier is paid for.
+POLICY_REFUSALS: tuple[str, ...] = (
+    "direction_not_allowed",
+    "horizon_not_allowed",
+    "evidence_confidence_below_policy",
+    "too_few_scenarios",
+    "too_few_invalidators",
+    "expected_return_below_threshold",
+    "same_direction_return_below_threshold",
+    "risk_reward_below_threshold",
+    "risk_reward_unavailable",
+)
+POLICY_REFUSAL_LABELS: Mapping[str, str] = MappingProxyType({
+    "direction_not_allowed": "策略不允许这个方向",
+    "horizon_not_allowed": "策略不允许这个投资期限",
+    "evidence_confidence_below_policy": "证据置信度低于策略要求",
+    "too_few_scenarios": "列出的情景少于策略要求",
+    "too_few_invalidators": "失效条件少于策略要求",
+    "expected_return_below_threshold": "期望回报没有达到门槛",
+    "same_direction_return_below_threshold": "与市场同向，期望回报没有达到更高的同向门槛",
+    "risk_reward_below_threshold": "潜在收益／损失比低于策略要求",
+    "risk_reward_unavailable": "没有完整的潜在收益和损失",
+})
+
+MAX_SCENARIOS = 6
+# Probabilities are written to two places; three thirds are 0.99.
+PROBABILITY_TOLERANCE = Decimal("0.01")
+EXPECTED_RETURN_METHOD = "sum(probability * payoff) / sum(probability)"
+
+_EVIDENCE_FIELDS = {"level", "statement", "thesis_refs", "claim_refs"}
+_SCENARIO_FIELDS = {"name", "probability", "payoff", "trigger", "refs", "source_ref"}
+_EXPECTED_FIELDS = {"stock_percent", "position_percent", "probability_total", "method"}
+_ALIGNMENT_FIELDS = {"alignment", "market_view", "where_market_is_wrong"}
+_VALUATION_FIELDS = {"snapshot_ref", "snapshot_hash", "as_of", "price_version_ref", "close"}
+_INVALIDATOR_FIELDS = {"statement", "thesis_version_ref", "falsifier_ref"}
+_GATE_FIELDS = {
+    "status", "reasons", "threshold_kind", "required_percent", "observed_percent",
+    "policy_hash",
+}
+_PROPOSAL_FIELDS_V2 = frozenset({
+    "schema_version", "id", "created_at", "call_ref", "version",
+    "prior_version_ref", "change_reason", "change_evidence_refs",
+    "company_ref", "week_key", "direction", "decision", "time_horizon",
+    "our_view", "evidence_confidence", "scenarios", "expected_return",
+    "market_view_alignment", "consensus_gap", "valuation", "invalidators", "gate",
+    "thesis_refs", "debate_refs", "evidence_fingerprint", "precheck", "rubric",
+    "drafted_by", "verified_by", "policy_ref", "policy_hash", "policy",
+    "mission_version_ref", "mission_version_hash", "checkpoint_kind",
+    "actor_ref", "content_hash",
+})
+
+
+def _probability(value: Any, name: str) -> Decimal:
+    number = _decimal(value, name)
+    if number <= 0 or number > 1:
+        raise ConvictionCallValidationError(f"{name} must be in (0, 1]; got {value!r}")
+    return number
+
+
+def _payoff(value: Any, name: str) -> Decimal:
+    number = _decimal(value, name)
+    if number < -100:
+        # A share price cannot fall by more than all of it.
+        raise ConvictionCallValidationError(f"{name} cannot be below -100%")
+    return number
+
+
+def _scenario(value: Any, name: str) -> dict[str, Any]:
+    wire = _closed(value, set(_SCENARIO_FIELDS), name)
+    return {
+        "name": _text(wire["name"], f"{name}.name", maximum=80),
+        "probability": str(_probability(wire["probability"], f"{name}.probability")),
+        "payoff": str(_payoff(wire["payoff"], f"{name}.payoff")),
+        "trigger": _text(wire["trigger"], f"{name}.trigger"),
+        "refs": _refs(wire["refs"], f"{name}.refs", nonempty=True),
+        # The join point with ADR-0012's ScenarioVersion: when the scenario was
+        # read off a held structured scenario rather than written by the
+        # drafter, this names that version, and the probability and payoff
+        # above are the held object's, not the model's.
+        "source_ref": _optional_text(wire["source_ref"], f"{name}.source_ref", maximum=512),
+    }
+
+
+def validate_scenarios(value: Any, name: str = "scenarios") -> list[dict[str, Any]]:
+    """A small closed table of outcomes whose probabilities add up."""
+
+    if not isinstance(value, list) or len(value) < 2:
+        raise ConvictionCallValidationError(
+            f"{name} must weigh at least two outcomes; one scenario is a forecast")
+    if len(value) > MAX_SCENARIOS:
+        raise ConvictionCallValidationError(f"{name} carries more than {MAX_SCENARIOS} rows")
+    rows = [_scenario(row, f"{name}[{index}]") for index, row in enumerate(value)]
+    if len({row["name"] for row in rows}) != len(rows):
+        raise ConvictionCallValidationError(f"{name} repeats a scenario name")
+    total = sum(Decimal(row["probability"]) for row in rows)
+    if abs(total - 1) > PROBABILITY_TOLERANCE:
+        raise ConvictionCallValidationError(
+            f"{name} probabilities add up to {total}, not 1")
+    return rows
+
+
+def expected_return_of(
+    scenarios: Sequence[Mapping[str, Any]], direction: str,
+) -> dict[str, Any]:
+    """The probability-weighted return, derived and never typed.
+
+    ``stock_percent`` is the share price's expected move over the horizon;
+    ``position_percent`` is what the call's position earns from it -- the same
+    number for a long, its negative for a short, nothing for standing aside.
+    Normalised by the probability total so 0.33 x 3 is not a 1% haircut.
+    """
+
+    total = sum(Decimal(str(row["probability"])) for row in scenarios)
+    if total <= 0:
+        raise ConvictionCallValidationError("scenarios carry no probability")
+    weighted = sum(Decimal(str(row["probability"])) * Decimal(str(row["payoff"]))
+                   for row in scenarios) / total
+    stock = weighted.quantize(Decimal("0.01"))
+    position = (None if direction == "avoid"
+                else str(stock if direction == "long" else -stock))
+    return {"stock_percent": str(stock), "position_percent": position,
+            "probability_total": str(total.quantize(Decimal("0.01"))),
+            "method": EXPECTED_RETURN_METHOD}
+
+
+def evaluate_policy_gate(
+    *,
+    direction: str,
+    time_horizon: str,
+    evidence_level: str,
+    scenario_count: int,
+    invalidator_count: int,
+    alignment: str,
+    position_percent: str | None,
+    policy: Mapping[str, Any],
+    upside_downside_ratio: Any = "legacy_omitted",
+) -> dict[str, Any]:
+    """The owner's v2 thresholds, checked mechanically.  No model, no I/O.
+
+    The change from v1 is the last two lines: a same-direction call is not
+    refused for agreeing, it is held to the higher same-direction threshold.
+    """
+
+    from .conviction_policy import CONFIDENCE_ORDER
+
+    reasons: list[str] = []
+    if direction not in policy["allowed_directions"]:
+        reasons.append("direction_not_allowed")
+    if time_horizon not in policy["allowed_horizons"]:
+        reasons.append("horizon_not_allowed")
+    if CONFIDENCE_ORDER.index(evidence_level) < \
+            CONFIDENCE_ORDER.index(policy["min_evidence_confidence"]):
+        reasons.append("evidence_confidence_below_policy")
+    if scenario_count < int(policy["required_scenarios"]):
+        reasons.append("too_few_scenarios")
+    if invalidator_count < int(policy["min_invalidators"]):
+        reasons.append("too_few_invalidators")
+    threshold_kind, required = "not_applicable", None
+    if direction != "avoid":
+        same = alignment in ("same_direction", "market_view_unavailable")
+        table = (policy["same_direction_min_expected_return_percent"] if same
+                 else policy["min_expected_return_percent"])
+        threshold_kind = "same_direction" if same else "general"
+        required = table.get(time_horizon)
+        if required is not None and (
+                position_percent is None
+                or Decimal(str(position_percent)) < Decimal(str(required))):
+            reasons.append("same_direction_return_below_threshold" if same
+                           else "expected_return_below_threshold")
+    if direction != "avoid" and "min_upside_downside_ratio" in policy and upside_downside_ratio != "legacy_omitted":
+        if upside_downside_ratio is None: reasons.append("risk_reward_unavailable")
+        elif Decimal(str(upside_downside_ratio)) < Decimal(str(policy["min_upside_downside_ratio"])):
+            reasons.append("risk_reward_below_threshold")
+    return {
+        "status": "refused" if reasons else "passed",
+        "reasons": [_one_of(item, POLICY_REFUSALS, "gate.reasons[]") for item in reasons],
+        "threshold_kind": threshold_kind,
+        "required_percent": None if required is None else str(required),
+        "observed_percent": position_percent,
+        "policy_hash": content_hash(dict(policy)),
+    }
+
+
+def precheck_v2(
+    *,
+    company_ref: str,
+    theses: Sequence[Mapping[str, Any]],
+    valuation: Mapping[str, Any] | None,
+    latest_price_ref: str | None,
+    policy_effective: Mapping[str, Any],
+    today: date | None = None,
+) -> dict[str, Any]:
+    """Is this company draftable under v2 today?  Mechanical and free.
+
+    Two questions only: do we hold a view (an active thesis, in the policy's
+    scope), and do we know what the share is worth today (a valuation
+    snapshot on the latest price series, with at least one metric, no older
+    than the policy allows).  Whether we *differ* from the market is no
+    longer a reason to stay silent; it is priced by the policy gate after the
+    call is drafted.
+    """
+
+    company_ref = _text(company_ref, "company_ref", maximum=256)
+    policy = policy_effective["policy"]
+    scope = policy["thesis_scope"]
+    active = [
+        {"thesis_version_ref": str(row.get("thesis_version_ref") or row.get("ref") or ""),
+         "thesis_ref": row.get("thesis_ref"), "statement": row.get("statement"),
+         "confidence": row.get("confidence"),
+         "falsifier_refs": list(row.get("falsifier_refs") or ()),
+         "claim_refs": list(row.get("claim_refs") or ()),
+         "subject_kind": row.get("subject_kind") or "company"}
+        for row in theses or ()
+        if (row.get("thesis_version_ref") or row.get("ref"))
+        and (scope == "company_or_industry"
+             or (row.get("subject_kind") or "company") == "company")
+    ]
+    reasons: list[str] = []
+    if not active:
+        reasons.append("no_active_thesis")
+    valuation_ref = None
+    if not valuation:
+        reasons.append("no_valuation_snapshot")
+    else:
+        valuation_ref = valuation.get("id")
+        price_ref = (valuation.get("price") or {}).get("version_ref")
+        if not latest_price_ref or price_ref != latest_price_ref:
+            reasons.append("valuation_not_on_latest_price")
+        if not any(isinstance(row, Mapping) and row.get("status") == "available"
+                   for row in valuation.get("metrics") or ()):
+            reasons.append("valuation_has_no_metric")
+        try:
+            as_of = date.fromisoformat(str(valuation.get("as_of"))[:10])
+            age = ((today or datetime.now(timezone.utc).date()) - as_of).days
+        except ValueError:
+            age = None
+        if age is None or age > int(policy["max_valuation_age_days"]):
+            reasons.append("valuation_stale")
+    return {
+        "gate": "v2",
+        "company_ref": company_ref,
+        "eligible": not reasons,
+        "reasons": [_one_of(item, GATE_REASONS_V2, "reasons[]") for item in reasons],
+        "reason_labels": [GATE_REASON_LABELS_V2[item] for item in reasons],
+        "theses": active,
+        "valuation_ref": valuation_ref,
+        "latest_price_ref": latest_price_ref,
+        "policy_ref": policy_effective["version_ref"],
+        "policy_hash": policy_effective["policy_hash"],
+    }
+
+
+def _evidence(value: Any, name: str, thesis_refs: Sequence[str]) -> dict[str, Any]:
+    wire = _closed(value, set(_EVIDENCE_FIELDS), name)
+    checked = {
+        "level": _one_of(wire["level"], CONFIDENCES, f"{name}.level"),
+        "statement": _text(wire["statement"], f"{name}.statement"),
+        "thesis_refs": _refs(wire["thesis_refs"], f"{name}.thesis_refs", nonempty=True),
+        "claim_refs": _refs(wire["claim_refs"], f"{name}.claim_refs"),
+    }
+    stray = set(checked["thesis_refs"]) - set(thesis_refs)
+    if stray:
+        raise ConvictionCallValidationError(
+            f"{name} rests on theses this call does not cite: {sorted(stray)}")
+    return checked
+
+
+def _alignment(value: Any, name: str) -> dict[str, Any]:
+    wire = _closed(value, set(_ALIGNMENT_FIELDS), name)
+    alignment = _one_of(wire["alignment"], ALIGNMENTS, f"{name}.alignment")
+    market = _market_view(wire["market_view"], f"{name}.market_view")
+    if (alignment == "market_view_unavailable") == market["available"]:
+        raise ConvictionCallValidationError(
+            f"{name}: market_view_unavailable is the alignment exactly when no "
+            "market view is held")
+    wrong = wire["where_market_is_wrong"]
+    return {
+        "alignment": alignment,
+        "market_view": market,
+        # Optional under v2.  A same-direction call may have nothing to say
+        # about where the street is wrong; it says why it pays anyway.
+        "where_market_is_wrong": None if wrong is None else _statement(
+            wrong, f"{name}.where_market_is_wrong"),
+    }
+
+
+def _valuation_binding(value: Any, name: str = "valuation") -> dict[str, Any]:
+    wire = _closed(value, set(_VALUATION_FIELDS), name)
+    return {
+        "snapshot_ref": _text(wire["snapshot_ref"], f"{name}.snapshot_ref", maximum=512),
+        "snapshot_hash": _hash(wire["snapshot_hash"], f"{name}.snapshot_hash"),
+        "as_of": _iso_date(wire["as_of"], f"{name}.as_of"),
+        "price_version_ref": _optional_text(wire["price_version_ref"],
+                                            f"{name}.price_version_ref", maximum=512),
+        "close": _optional_text(None if wire["close"] is None else str(wire["close"]),
+                                f"{name}.close", maximum=64),
+    }
+
+
+def _invalidator(value: Any, name: str, thesis_refs: Sequence[str]) -> dict[str, Any]:
+    wire = _closed(value, set(_INVALIDATOR_FIELDS), name)
+    thesis = _optional_text(wire["thesis_version_ref"], f"{name}.thesis_version_ref",
+                            maximum=512)
+    if thesis is not None and thesis not in thesis_refs:
+        raise ConvictionCallValidationError(
+            f"{name} names a thesis this call does not cite")
+    return {
+        "statement": _text(wire["statement"], f"{name}.statement"),
+        "thesis_version_ref": thesis,
+        "falsifier_ref": _optional_text(wire["falsifier_ref"], f"{name}.falsifier_ref",
+                                        maximum=512),
+    }
+
+
+def cited_refs_v2(record: Mapping[str, Any]) -> set[str]:
+    refs: set[str] = set((record.get("our_view") or {}).get("refs") or [])
+    evidence = record.get("evidence_confidence") or {}
+    refs.update(evidence.get("thesis_refs") or [])
+    refs.update(evidence.get("claim_refs") or [])
+    for row in record.get("scenarios") or []:
+        refs.update(row.get("refs") or [])
+        if row.get("source_ref"):
+            refs.add(row["source_ref"])
+    alignment = record.get("market_view_alignment") or {}
+    refs.update((alignment.get("market_view") or {}).get("refs") or [])
+    refs.update((alignment.get("where_market_is_wrong") or {}).get("refs") or [])
+    for metric in (record.get("consensus_gap") or {}).get("metrics") or []:
+        refs.update(metric.get("refs") or [])
+    valuation = record.get("valuation") or {}
+    if valuation.get("snapshot_ref"):
+        refs.add(valuation["snapshot_ref"])
+    refs.update(record.get("thesis_refs") or [])
+    return {ref for ref in refs if ref}
+
+
+def rubric_findings_v2(record: Mapping[str, Any]) -> list[str]:
+    """The mechanical half of the v2 rubric: the blocks are there and agree."""
+
+    findings: list[str] = []
+    evidence = record.get("evidence_confidence") or {}
+    if not evidence.get("thesis_refs") or not (evidence.get("statement") or "").strip():
+        findings.append("evidence_confidence_rests_on_refs")
+    scenarios = record.get("scenarios") or []
+    if len(scenarios) < 2 or not all(row.get("refs") and (row.get("trigger") or "").strip()
+                                      for row in scenarios):
+        findings.append("scenarios_have_triggers_and_refs")
+    payoffs = [Decimal(str(row.get("payoff"))) for row in scenarios
+               if row.get("payoff") is not None]
+    if payoffs and (min(payoffs) >= 0 or max(payoffs) <= 0) and \
+            record.get("direction") != "avoid":
+        # A table whose every outcome is a gain (or every one a loss) has
+        # forgotten one side; it is not a distribution.
+        findings.append("scenarios_cover_both_sides")
+    alignment = record.get("market_view_alignment") or {}
+    market = alignment.get("market_view") or {}
+    if market.get("available") and not (market.get("refs") or []):
+        findings.append("market_view_is_sourced")
+    if not record.get("invalidators"):
+        findings.append("invalidators_named")
+    return sorted(dict.fromkeys(findings))
+
+
+def _normalise_v2(wire: dict[str, Any]) -> dict[str, Any]:
+    from .conviction_policy import validate_policy
+
+    fields = set(_PROPOSAL_FIELDS_V2) - {"content_hash"}
+    if set(wire) != fields:
+        raise ConvictionCallValidationError(
+            "ConvictionCallProposal v0.2 has an invalid closed shape; "
+            f"missing={sorted(fields - set(wire))}, unknown={sorted(set(wire) - fields)}")
+    for field in ("id", "created_at", "call_ref", "company_ref", "week_key",
+                  "evidence_fingerprint", "policy_ref", "mission_version_ref",
+                  "actor_ref"):
+        wire[field] = _text(wire[field], field, maximum=512)
+    wire["mission_version_hash"] = _hash(wire["mission_version_hash"], "mission_version_hash")
+    wire["prior_version_ref"] = _optional_text(
+        wire["prior_version_ref"], "prior_version_ref", maximum=512)
+    if isinstance(wire["version"], bool) or not isinstance(wire["version"], int) \
+            or wire["version"] < 1:
+        raise ConvictionCallValidationError("version must be a positive integer")
+    if (wire["version"] == 1) != (wire["prior_version_ref"] is None):
+        raise ConvictionCallValidationError(
+            "a first version has no prior and every later one has exactly one")
+    wire["change_reason"] = _one_of(wire["change_reason"], CHANGE_REASONS, "change_reason")
+    wire["change_evidence_refs"] = _refs(
+        wire["change_evidence_refs"], "change_evidence_refs", nonempty=True)
+    wire["direction"] = _one_of(wire["direction"], DIRECTIONS, "direction")
+    wire["decision"] = _one_of(wire["decision"], DECISION_VOCABULARY, "decision")
+    wire["time_horizon"] = _one_of(wire["time_horizon"], TIME_HORIZONS, "time_horizon")
+    wire["checkpoint_kind"] = _one_of(
+        wire["checkpoint_kind"], (CHECKPOINT_KIND,), "checkpoint_kind")
+    if wire["call_ref"] != call_ref_for(wire["company_ref"]):
+        raise ConvictionCallConflict("call_ref is not derived from the company")
+    if wire["week_key"] != week_key(wire["created_at"]):
+        raise ConvictionCallConflict("week_key is not the week the call was made in")
+    try:
+        wire["policy"] = validate_policy(wire["policy"])
+    except ValueError as exc:
+        raise ConvictionCallValidationError(f"policy: {exc}") from exc
+    wire["policy_hash"] = _hash(wire["policy_hash"], "policy_hash")
+    if content_hash(wire["policy"]) != wire["policy_hash"]:
+        raise ConvictionCallConflict("policy_hash is not the hash of the policy carried")
+
+    wire["thesis_refs"] = _refs(wire["thesis_refs"], "thesis_refs", nonempty=True)
+    wire["debate_refs"] = _refs(wire["debate_refs"], "debate_refs")
+    wire["our_view"] = _statement(wire["our_view"], "our_view")
+    wire["evidence_confidence"] = _evidence(
+        wire["evidence_confidence"], "evidence_confidence", wire["thesis_refs"])
+    wire["scenarios"] = validate_scenarios(wire["scenarios"])
+    derived = expected_return_of(wire["scenarios"], wire["direction"])
+    supplied = wire["expected_return"]
+    if supplied is not None and _closed(supplied, set(_EXPECTED_FIELDS),
+                                        "expected_return") != derived:
+        raise ConvictionCallValidationError(
+            "expected_return is derived from the scenarios and does not match them")
+    wire["expected_return"] = derived
+    wire["market_view_alignment"] = _alignment(
+        wire["market_view_alignment"], "market_view_alignment")
+    wire["consensus_gap"] = validate_consensus_gap(wire["consensus_gap"])
+    wire["valuation"] = _valuation_binding(wire["valuation"])
+    invalidators = wire["invalidators"]
+    if not isinstance(invalidators, list) or not invalidators:
+        raise ConvictionCallValidationError(
+            "invalidators must name at least one thing that would end the call")
+    if len(invalidators) > MAX_FALSIFIERS:
+        raise ConvictionCallValidationError(
+            f"invalidators carries more than {MAX_FALSIFIERS} entries")
+    wire["invalidators"] = [_invalidator(row, f"invalidators[{index}]", wire["thesis_refs"])
+                            for index, row in enumerate(invalidators)]
+    gate = evaluate_policy_gate(
+        direction=wire["direction"], time_horizon=wire["time_horizon"],
+        evidence_level=wire["evidence_confidence"]["level"],
+        scenario_count=len(wire["scenarios"]),
+        invalidator_count=len(wire["invalidators"]),
+        alignment=wire["market_view_alignment"]["alignment"],
+        position_percent=derived["position_percent"], policy=wire["policy"],
+        upside_downside_ratio=upside_downside_ratio_of(wire["scenarios"],wire["direction"]),
+    )
+    if wire["gate"] is not None and _closed(wire["gate"], set(_GATE_FIELDS), "gate") != gate:
+        raise ConvictionCallValidationError(
+            "gate is derived from the policy and does not match what the policy says")
+    if gate["status"] != "passed":
+        raise ConvictionCallValidationError(
+            "a v2 call the policy refuses is not proposed: " + ", ".join(gate["reasons"]))
+    wire["gate"] = gate
+
+    if not isinstance(wire["precheck"], Mapping):
+        raise ConvictionCallValidationError("precheck must be the gate's own record")
+    wire["precheck"] = dict(wire["precheck"])
+    if not wire["precheck"].get("eligible") or wire["precheck"].get("gate") != "v2":
+        raise ConvictionCallValidationError(
+            "a v2 call is only drafted for a company the v2 precheck admitted")
+    rubric = _closed(wire["rubric"], set(_RUBRIC_FIELDS), "rubric")
+    wire["rubric"] = {
+        "rubric_ref": _text(rubric["rubric_ref"], "rubric.rubric_ref", maximum=256),
+        "rubric_hash": _hash(rubric["rubric_hash"], "rubric.rubric_hash"),
+        "findings": _refs(rubric["findings"], "rubric.findings"),
+    }
+    if wire["rubric"]["findings"]:
+        raise ConvictionCallValidationError(
+            "a call with open rubric findings is not proposed; fix or refuse it")
+    wire["drafted_by"] = _attribution(wire["drafted_by"], "drafted_by")
+    wire["verified_by"] = _attribution(wire["verified_by"], "verified_by")
+    unused = set(wire["change_evidence_refs"]) - cited_refs_v2(wire)
+    if unused:
+        raise ConvictionCallValidationError(
+            "change_evidence_refs name refs this call does not cite: "
+            + ", ".join(sorted(unused)))
+    return wire
+
+
+def proposal_columns(record: Mapping[str, Any]) -> dict[str, Any]:
+    """The indexed columns of one proposal, for either schema."""
+
+    if record.get("schema_version") == SCHEMA_VERSION_V2:
+        confidence = record["evidence_confidence"]["level"]
+        status = "not_applicable" if record["direction"] == "avoid" else "met"
+    else:
+        confidence = record["confidence"]
+        status = record["risk_reward"]["standard"]["status"]
+    return {
+        "call_ref": record["call_ref"], "version_number": record["version"],
+        "prior_version_id": record["prior_version_ref"],
+        "change_reason": record["change_reason"], "company_ref": record["company_ref"],
+        "week_key": record["week_key"], "direction": record["direction"],
+        "decision_word": record["decision"], "confidence": confidence,
+        "time_horizon": record["time_horizon"], "risk_reward_status": status,
+        "evidence_fingerprint": record["evidence_fingerprint"],
+        "actor_ref": record["actor_ref"], "created_at": record["created_at"],
+    }
+
+
+def proposal_summary(record: Mapping[str, Any]) -> dict[str, Any]:
+    """One proposal in the words every reader shares, v1 or v2.
+
+    The cockpit, the final-surface check and the weekly brief read a call's
+    view, the street's view and what would move it; this is the one place
+    that knows where each schema keeps them.
+    """
+
+    if record.get("schema_version") == SCHEMA_VERSION_V2:
+        alignment = record.get("market_view_alignment") or {}
+        market = alignment.get("market_view") or {}
+        return {
+            "schema_version": SCHEMA_VERSION_V2,
+            "direction": record.get("direction"),
+            "time_horizon": record.get("time_horizon"),
+            "confidence": (record.get("evidence_confidence") or {}).get("level"),
+            "our_view": (record.get("our_view") or {}).get("statement"),
+            "market_view": market.get("statement") or market.get("reason"),
+            "where_market_is_wrong": (alignment.get("where_market_is_wrong") or {}).get(
+                "statement"),
+            "alignment": alignment.get("alignment"),
+            "signals": [row.get("trigger") for row in record.get("scenarios") or []],
+            "expected_return": record.get("expected_return"),
+        }
+    variant = record.get("variant_view") or {}
+    market = variant.get("market_view") or {}
+    return {
+        "schema_version": record.get("schema_version"),
+        "direction": record.get("direction"),
+        "time_horizon": record.get("time_horizon"),
+        "confidence": record.get("confidence"),
+        "our_view": (variant.get("our_view") or {}).get("statement"),
+        "market_view": market.get("statement") or market.get("reason"),
+        "where_market_is_wrong": (variant.get("where_market_is_wrong") or {}).get("statement"),
+        "alignment": None,
+        "signals": [step.get("signal") for step in record.get("event_pathway") or []],
+        "expected_return": None,
+    }
+
+
+# ---------------------------------------------------------------------------
 # the authority
 # ---------------------------------------------------------------------------
 
@@ -1250,22 +1819,7 @@ def _decode_proposal(row: sqlite3.Row | None, name: str) -> dict[str, Any]:
     record = validate_proposal(wire)
     if record["content_hash"] != row["content_hash"] or record["id"] != row["proposal_id"]:
         raise ConvictionCallConflict(f"{name} identity columns drifted")
-    columns = {
-        "call_ref": record["call_ref"],
-        "version_number": record["version"],
-        "prior_version_id": record["prior_version_ref"],
-        "change_reason": record["change_reason"],
-        "company_ref": record["company_ref"],
-        "week_key": record["week_key"],
-        "direction": record["direction"],
-        "decision_word": record["decision"],
-        "confidence": record["confidence"],
-        "time_horizon": record["time_horizon"],
-        "risk_reward_status": record["risk_reward"]["standard"]["status"],
-        "evidence_fingerprint": record["evidence_fingerprint"],
-        "actor_ref": record["actor_ref"],
-        "created_at": record["created_at"],
-    }
+    columns = proposal_columns(record)
     keys = set(row.keys())
     for column, expected in columns.items():
         if column in keys and row[column] != expected:
@@ -1525,29 +2079,10 @@ class ConvictionCallAuthority:
         company_ref = _text(company_ref, "company_ref", maximum=256)
         created_at = _text(created_at, "created_at", maximum=64)
         fingerprint = _text(evidence_fingerprint, "evidence_fingerprint", maximum=128)
-        allowance = int(CONVICTION_POLICY["max_calls_per_company_per_week"])
-        existing = self.connection.execute(
-            f"SELECT * FROM {PROPOSAL_TABLE} WHERE company_ref=? AND evidence_fingerprint=?",
-            (company_ref, fingerprint),
-        ).fetchone()
-        if existing is not None:
-            return {"status": "duplicate",
-                    "reason": "this company's evidence has already produced a call",
-                    **_decode_proposal(existing, "ConvictionCallProposal")}
-        week = week_key(created_at)
-        already = self.connection.execute(
-            f"SELECT COUNT(*) FROM {PROPOSAL_TABLE} WHERE company_ref=? AND week_key=?",
-            (company_ref, week),
-        ).fetchone()[0]
-        if int(already) >= allowance:
-            return {"status": "rate_limited",
-                    "reason": (f"{company_ref} already has {already} call(s) in "
-                               f"{week}; the allowance is {allowance}"),
-                    "week_key": week, "company_ref": company_ref}
-
-        latest = self._latest_row(call_ref_for(company_ref))
-        prior = None if latest is None else _decode_proposal(
-            latest, f"ConvictionCallProposal for {company_ref}")
+        admitted = self._admit(company_ref, fingerprint, created_at)
+        if "status" in admitted:
+            return admitted
+        prior, week = admitted["prior"], admitted["week"]
         body = {
             "call_ref": call_ref_for(company_ref),
             "version": 1 if prior is None else prior["version"] + 1,
@@ -1579,15 +2114,48 @@ class ConvictionCallAuthority:
             "checkpoint_kind": CHECKPOINT_KIND,
             "actor_ref": _text(actor_ref, "actor_ref", maximum=256),
         }
+        return self._insert(SCHEMA_VERSION, company_ref, fingerprint, week,
+                            created_at, body)
+
+    def _admit(self, company_ref: str, fingerprint: str, created_at: str) -> dict[str, Any]:
+        """The duplicate and weekly-cap refusals, or the chain's head and week."""
+
+        allowance = int(CONVICTION_POLICY["max_calls_per_company_per_week"])
+        existing = self.connection.execute(
+            f"SELECT * FROM {PROPOSAL_TABLE} WHERE company_ref=? AND evidence_fingerprint=?",
+            (company_ref, fingerprint),
+        ).fetchone()
+        if existing is not None:
+            return {"status": "duplicate",
+                    "reason": "this company's evidence has already produced a call",
+                    **_decode_proposal(existing, "ConvictionCallProposal")}
+        week = week_key(created_at)
+        already = self.connection.execute(
+            f"SELECT COUNT(*) FROM {PROPOSAL_TABLE} WHERE company_ref=? AND week_key=?",
+            (company_ref, week),
+        ).fetchone()[0]
+        if int(already) >= allowance:
+            return {"status": "rate_limited",
+                    "reason": (f"{company_ref} already has {already} call(s) in "
+                               f"{week}; the allowance is {allowance}"),
+                    "week_key": week, "company_ref": company_ref}
+        latest = self._latest_row(call_ref_for(company_ref))
+        prior = None if latest is None else _decode_proposal(
+            latest, f"ConvictionCallProposal for {company_ref}")
+        return {"prior": prior, "week": week}
+
+    def _insert(self, schema_version: str, company_ref: str, fingerprint: str,
+                week: str, created_at: str, body: Mapping[str, Any]) -> dict[str, Any]:
         identity = {"company_ref": company_ref, "evidence_fingerprint": fingerprint,
                     "week_key": week}
         wire = normalise_proposal({
-            "schema_version": SCHEMA_VERSION,
+            "schema_version": schema_version,
             "id": "conviction-call-proposal:" + content_hash(identity)[:32],
             "created_at": created_at,
             **body,
         })
         record = {**wire, "content_hash": content_hash(wire)}
+        columns = proposal_columns(record)
         with self.store._transaction() as cur:
             cur.execute(
                 f"INSERT INTO {PROPOSAL_TABLE}(proposal_id,call_ref,version_number,"
@@ -1596,20 +2164,110 @@ class ConvictionCallAuthority:
                 "evidence_fingerprint,record_json,content_hash,actor_ref,created_at) "
                 "VALUES(?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?)",
                 (
-                    record["id"], record["call_ref"], record["version"],
-                    record["prior_version_ref"], record["change_reason"],
-                    record["company_ref"],
-                    record["week_key"], record["direction"], record["decision"],
-                    record["confidence"], record["time_horizon"],
-                    record["risk_reward"]["standard"]["status"],
-                    record["evidence_fingerprint"], canonical_json(record),
-                    record["content_hash"], record["actor_ref"], record["created_at"],
+                    record["id"], columns["call_ref"], columns["version_number"],
+                    columns["prior_version_id"], columns["change_reason"],
+                    columns["company_ref"], columns["week_key"], columns["direction"],
+                    columns["decision_word"], columns["confidence"],
+                    columns["time_horizon"], columns["risk_reward_status"],
+                    columns["evidence_fingerprint"], canonical_json(record),
+                    record["content_hash"], columns["actor_ref"], columns["created_at"],
                 ),
             )
         stored = self.proposal(record["id"])
         if stored["content_hash"] != record["content_hash"]:
             raise ConvictionCallConflict("the stored proposal did not read back")
         return {"status": "fresh", "reason": None, **stored}
+
+    def propose_v2(
+        self,
+        *,
+        company_ref: str,
+        direction: str,
+        decision: str,
+        time_horizon: str,
+        our_view: Mapping[str, Any],
+        evidence_confidence: Mapping[str, Any],
+        scenarios: Sequence[Mapping[str, Any]],
+        market_view_alignment: Mapping[str, Any],
+        consensus_gap: Mapping[str, Any],
+        valuation: Mapping[str, Any],
+        invalidators: Sequence[Mapping[str, Any]],
+        thesis_refs: Sequence[str],
+        debate_refs: Sequence[str] = (),
+        evidence_fingerprint: str,
+        change_reason: str,
+        change_evidence_refs: Sequence[str],
+        precheck_record: Mapping[str, Any],
+        rubric: Mapping[str, Any],
+        policy_effective: Mapping[str, Any],
+        mission: Mapping[str, Any],
+        actor_ref: str,
+        created_at: str,
+        drafted_by: Mapping[str, Any] | None = None,
+        verified_by: Mapping[str, Any] | None = None,
+    ) -> dict[str, Any]:
+        """Append one v0.2 call (ADR-0013), or refuse it.
+
+        Same chain, same week cap, same duplicate rule and same decision path
+        as v1: a v2 call is a different *shape* of the same object, so the
+        owner's accept / reject on it is the decision it always was.  The
+        expected return and the policy gate are derived here from the
+        scenarios and the embedded policy, never accepted from the caller.
+        """
+
+        company_ref = _text(company_ref, "company_ref", maximum=256)
+        from .scenario_version import validate_conviction_sources
+        try: validate_conviction_sources(self.store,company_ref,scenarios)
+        except ValueError as exc: raise ConvictionCallValidationError(str(exc)) from exc
+        if time_horizon != "6_12_months":
+            raise ConvictionCallValidationError("computed scenario valuations use the twelve-month horizon")
+        if direction != "avoid" and "min_upside_downside_ratio" not in policy_effective["policy"]:
+            ratio = upside_downside_ratio_of(scenarios, direction)
+            if ratio is None or Decimal(str(ratio)) < 2:
+                raise ConvictionCallValidationError("new calls require a defined upside/downside ratio of at least 2; the legacy policy remains readable")
+        created_at = _text(created_at, "created_at", maximum=64)
+        fingerprint = _text(evidence_fingerprint, "evidence_fingerprint", maximum=128)
+        admitted = self._admit(company_ref, fingerprint, created_at)
+        if "status" in admitted:
+            return admitted
+        prior, week = admitted["prior"], admitted["week"]
+        body = {
+            "call_ref": call_ref_for(company_ref),
+            "version": 1 if prior is None else prior["version"] + 1,
+            "prior_version_ref": None if prior is None else prior["id"],
+            "change_reason": change_reason,
+            "change_evidence_refs": list(change_evidence_refs),
+            "company_ref": company_ref,
+            "week_key": week,
+            "direction": direction,
+            "decision": decision,
+            "time_horizon": time_horizon,
+            "our_view": dict(our_view),
+            "evidence_confidence": dict(evidence_confidence),
+            "scenarios": [dict(row) for row in scenarios],
+            "expected_return": None,
+            "market_view_alignment": dict(market_view_alignment),
+            "consensus_gap": dict(consensus_gap),
+            "valuation": dict(valuation),
+            "invalidators": [dict(row) for row in invalidators],
+            "gate": None,
+            "thesis_refs": list(thesis_refs),
+            "debate_refs": list(debate_refs),
+            "evidence_fingerprint": fingerprint,
+            "precheck": dict(precheck_record),
+            "rubric": dict(rubric),
+            "drafted_by": None if drafted_by is None else dict(drafted_by),
+            "verified_by": None if verified_by is None else dict(verified_by),
+            "policy_ref": str(policy_effective["version_ref"]),
+            "policy_hash": str(policy_effective["policy_hash"]),
+            "policy": dict(policy_effective["policy"]),
+            "mission_version_ref": mission["id"],
+            "mission_version_hash": mission["content_hash"],
+            "checkpoint_kind": CHECKPOINT_KIND,
+            "actor_ref": _text(actor_ref, "actor_ref", maximum=256),
+        }
+        return self._insert(SCHEMA_VERSION_V2, company_ref, fingerprint, week,
+                            created_at, body)
 
     def decide(
         self,
@@ -1732,7 +2390,8 @@ class ConvictionCallAuthority:
                 "change_reason": record["change_reason"],
                 "direction": record["direction"],
                 "time_horizon": record["time_horizon"],
-                "confidence": record["confidence"],
+                "confidence": proposal_columns(record)["confidence"],
+                "schema_version": record["schema_version"],
                 "status": self.status_of(record["id"]),
                 "decided_at": None if latest is None else latest["created_at"],
                 "decision_reason": None if latest is None else latest["reason"],
@@ -1742,6 +2401,21 @@ class ConvictionCallAuthority:
 
 
 __all__ = [
+    "ALIGNMENTS",
+    "GATE_REASONS_V2",
+    "GATE_REASON_LABELS_V2",
+    "POLICY_REFUSALS",
+    "POLICY_REFUSAL_LABELS",
+    "PROPOSAL_SCHEMA_VERSIONS",
+    "SCHEMA_VERSION_V2",
+    "cited_refs_v2",
+    "evaluate_policy_gate",
+    "expected_return_of",
+    "precheck_v2",
+    "proposal_columns",
+    "proposal_summary",
+    "rubric_findings_v2",
+    "validate_scenarios",
     "CHANGE_REASONS",
     "CHECKPOINT_KIND",
     "CONFIDENCES",
@@ -1787,3 +2461,9 @@ __all__ = [
     "week_key",
     "wide_consensus_gaps",
 ]
+
+
+def upside_downside_ratio_of(scenarios,direction="long"):
+    payoffs=[Decimal(str(r["payoff"]))*(1 if direction=="long" else -1) for r in scenarios]
+    up=max(payoffs);down=min(payoffs)
+    return None if up<=0 or down>=0 else str(up/abs(down))

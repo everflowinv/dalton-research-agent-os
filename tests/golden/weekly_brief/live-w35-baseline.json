@@ -181,7 +181,7 @@
     "status": "pass"
    },
    "required_sections_present": {
-    "count": 1,
+    "count": 2,
     "status": "fail"
    },
    "residual_citation_artefacts": {

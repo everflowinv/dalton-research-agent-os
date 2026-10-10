@@ -214,6 +214,7 @@ class EndToEndTests(P14aHarness):
                 "action": "revise_thesis",
                 "because": "预算解冻这条机制第一次在数字上看得见",
                 "proposed_statement": "IT 服务需求已经触底并开始回升",
+                "proposed_confidence": "high",
                 "refs": [self.claim_ref],
             }],
             "reflection": {
@@ -378,7 +379,10 @@ class EndToEndTests(P14aHarness):
         for end, value in after.items():
             if end == "2026-08-31":
                 continue
-            self.assertEqual(value, before[end])
+            if end in before:
+                self.assertEqual(value, before[end])
+        self.assertEqual(len(self.models.latest(ACN)["forecast_periods"]), 8)
+        self.assertTrue(set(after) - set(before), "rolling adds a new tail quarter")
 
     def test_a_second_run_over_the_same_occurrence_pays_nothing(self):
         self.calendar(expected="2026-09-08", confirmed=True)

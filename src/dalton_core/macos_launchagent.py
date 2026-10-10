@@ -151,7 +151,7 @@ def render(
     config = Path(config_path).expanduser().resolve()
     logs = Path(log_dir).expanduser().resolve()
     # launchd 打不开外置卷上的 stdout/stderr 文件（服务会以 EX_CONFIG 78 退出、
-    # 一个字节都不输出；2026-09-17 把 workspaces 迁到 /Volumes/EveSSD 时撞到）。
+    # 一个字节都不输出；迁移 workspaces 到外置盘时遇到）。
     # 工作区自己的 log_dir 必须留在 workspace_root 之内（manifest 校验），所以
     # 只把 launchd 写的那两个文件放到启动卷上的 ~/Library/Logs/Dalton 下。
     logs = _launchd_log_dir(logs, label_namespace)

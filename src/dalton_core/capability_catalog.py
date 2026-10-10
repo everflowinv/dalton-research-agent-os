@@ -961,6 +961,7 @@ class CapabilityCatalog:
         schema_hash: str,
         permissions: CapabilityPermissions,
         at: datetime,
+        sealed_fixture_manifest_hash: str | None = None,
     ) -> CapabilityApproval:
         if self.approval_resolver is None:
             raise ApprovalRequired("trusted capability approval resolver is required")
@@ -973,6 +974,11 @@ class CapabilityCatalog:
             "requested_permissions": permissions.to_dict(),
             "at": _timestamp(at),
         }
+        if sealed_fixture_manifest_hash is not None:
+            # What the published descriptor sealed, so the resolver can tell a
+            # different spelling of today's fixture evidence from a changed
+            # fixture.  The receipt hash below is still compared in full.
+            query["sealed_fixture_manifest_hash"] = sealed_fixture_manifest_hash
         try:
             raw = self.approval_resolver(query)
         except CatalogError:
@@ -1878,6 +1884,7 @@ class CapabilityCatalog:
             schema_hash=descriptor.schema_hash,
             permissions=descriptor.permissions,
             at=now,
+            sealed_fixture_manifest_hash=descriptor.approval.fixture_manifest_hash,
         )
         if approval.receipt_hash != descriptor.approval.receipt_hash:
             raise LeaseNotUsable("capability approval changed after lease issuance")

@@ -1,0 +1,55 @@
+{
+  "$id": "https://dalton.local/schemas/mission-document-verifier-provider-output-v0.2.schema.json",
+  "title": "MissionDocumentVerifierProviderOutputV0.2",
+  "type": "object",
+  "additionalProperties": false,
+  "required": [
+    "schema_version",
+    "verdict",
+    "candidate_ref",
+    "findings"
+  ],
+  "properties": {
+    "schema_version": {
+      "enum": [
+        "0.2"
+      ]
+    },
+    "verdict": {
+      "enum": [
+        "pass",
+        "reject"
+      ]
+    },
+    "candidate_ref": {
+      "type": "string"
+    },
+    "findings": {
+      "type": "array",
+      "items": {
+        "type": "object",
+        "additionalProperties": false,
+        "required": [
+          "code",
+          "severity",
+          "detail"
+        ],
+        "properties": {
+          "code": {
+            "type": "string"
+          },
+          "severity": {
+            "enum": [
+              "info",
+              "warning",
+              "error"
+            ]
+          },
+          "detail": {
+            "type": "string"
+          }
+        }
+      }
+    }
+  }
+}

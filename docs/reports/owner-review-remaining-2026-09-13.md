@@ -28,7 +28,7 @@ looked for `wiki-index.sqlite`; commit `3715fe1f` corrects that binding and
 retains the legacy fallback, pending a successor deployment. Its list/get
 governance records are still proposed and mission v14 has no wiki source entry.
 Historical research has a prepared owner folder at
-`/Users/everflow/Documents/Dalton 历史研究资料`; actual documents and confirmed
+`$HOME/Documents/Dalton 历史研究资料`; actual documents and confirmed
 date/company manifests remain to be supplied and registered.
 
 ## Answer sufficiency candidate

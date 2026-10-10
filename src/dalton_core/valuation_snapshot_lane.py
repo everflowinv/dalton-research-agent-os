@@ -224,23 +224,24 @@ class ValuationSnapshotLaneCoordinator:
         settled = self._settle_open()
         if self._open is not None:
             return {"status": "busy", "settled": settled,
-                    "reason": "上一个估值快照子进程还在运行"}
+                    "reason": "上一次估值快照计算还在进行中"}
         mission = self.mission()
         if mission is None:
             return {"status": "unconfigured", "settled": settled,
-                    "reason": "这台 Core 上还没有 coverage mission"}
+                    "reason": "本机还没有设定研究目标，估值快照暂不计算"}
         if not may_write_valuation(mission):
             return {
                 "status": "ungranted", "settled": settled,
                 "reason": (
-                    f"这份 mission 的 autonomy.may_write 没有 {WRITE_SCOPE}；"
-                    "没有授权就发布公司值多少钱，不是可以绕过去的事"
+                    # term-ok: the write scope id is the setting an administrator changes
+                    f"研究目标的自动化授权里没有发布估值快照（{WRITE_SCOPE}）；"
+                    "未经授权不发布公司估值"
                 ),
             }
         signature = ledger_signature(self.store.connection)
         if not self._should_scan(signature):
             return {"status": "idle", "settled": settled,
-                    "reason": "三个输入权威自上次组装以来没有新版本"}
+                    "reason": "价格、股本与申报数据自上次计算以来都没有更新"}
         from .valuation_snapshot_cli import scan
 
         try:
@@ -307,8 +308,10 @@ def dispatch(server: Any, params: Mapping[str, Any]) -> dict[str, Any]:
 
     launcher = server.lane_launcher(LAUNCHER_KWARG)
     if launcher is None:
+        from .terminology import label
+
         return {"status": "unconfigured",
-                "reason": "这台 writer 上没有安装估值快照车道"}
+                "reason": label("valuation_reason", "service_unconfigured")}
     coordinator = server.lane_state.get(LAUNCHER_KWARG)
     if coordinator is None:
         from .market_price import MarketPriceSeriesAuthority
@@ -368,6 +371,7 @@ def argv_fragment(context: Any) -> list[str]:
 
 LANE = register_lane(LaneSpec(
     operation="dispatch_valuation_snapshot",
+    failure_ledger="valuation_snapshot",
     # 95 is the driver model, 96 the sensitivity table it projects; 97 is what
     # the shares actually trade at against the filings, which wants the same
     # free-work slot and none of the tick's children.

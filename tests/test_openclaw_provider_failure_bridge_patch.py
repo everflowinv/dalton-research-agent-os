@@ -9,7 +9,7 @@ import unittest
 from unittest.mock import patch
 
 from integrations.openclaw_host_patches.patch_provider_failure_bridge import (
-    ORIGINAL, PREVIOUS, PATCHED, apply, target,
+    ADMISSION, ORIGINAL, PREVIOUS, PATCHED, apply, target,
 )
 
 
@@ -31,6 +31,8 @@ class ProviderFailureBridgePatchTests(unittest.TestCase):
             copied.write_text(wire.replace(PATCHED, ORIGINAL, 1), encoding="utf-8")
         elif wire.count(PREVIOUS) == 1 and not wire.count(ORIGINAL):
             copied.write_text(wire.replace(PREVIOUS, ORIGINAL, 1), encoding="utf-8")
+        elif wire.count(ADMISSION) == 1 and not wire.count(ORIGINAL):
+            copied.write_text(wire.replace(ADMISSION, ORIGINAL, 1), encoding="utf-8")
 
     def tearDown(self):
         self.temp.cleanup()
@@ -89,7 +91,7 @@ class ProviderFailureBridgePatchTests(unittest.TestCase):
 
     def test_bridge_only_accepts_exact_numeric_error_code_from_error_result(self):
         self.assertIn('result.stopReason === "error"', PATCHED)
-        self.assertIn('/^(?:429|5\\d\\d)$/.test(result.errorCode)', PATCHED)
+        self.assertIn('/^(?:402|429|5\\d\\d)$/.test(result.errorCode)', PATCHED)
         self.assertNotIn("errorMessage", PATCHED)
         self.assertNotIn("requestId", PATCHED)
 
@@ -99,7 +101,9 @@ const cases = [
   [{{stopReason:"error",errorCode:"429"}},429],
   [{{stopReason:"error",errorCode:"500"}},500],
   [{{stopReason:"error",errorCode:"599"}},599],
+  [{{stopReason:"error",errorCode:"402"}},402],
   [{{stopReason:"error",errorCode:"401"}},undefined],
+  [{{stopReason:"error",errorCode:"403"}},undefined],
   [{{stopReason:"error",errorCode:429}},undefined],
   [{{stopReason:"stop",errorCode:"429"}},undefined],
   [{{stopReason:"error",errorCode:"x429"}},undefined]
@@ -110,6 +114,21 @@ for (const [input, expected] of cases) {{
         executed = subprocess.run(["node", "--input-type=module", "-e", script],
                                   capture_output=True, text=True, check=False)
         self.assertEqual(executed.returncode, 0, executed.stderr)
+
+    def test_a_host_on_the_2026_09_bridge_is_upgraded_to_forward_402(self):
+        # The live host (2026.9.6) carries the 429/5xx bridge; the 402 one
+        # must apply over it in place, exactly once, and stay valid JS.
+        path = target(self.root)
+        path.write_text(path.read_text(encoding="utf-8").replace(ORIGINAL, ADMISSION, 1),
+                        encoding="utf-8")
+        with self.assertRaisesRegex(ValueError, "missing"):
+            apply(self.root, check=True)
+        self.assertTrue(apply(self.root, check=False))
+        source = path.read_text(encoding="utf-8")
+        self.assertEqual((source.count(PATCHED), source.count(ADMISSION)), (1, 0))
+        self.assertFalse(apply(self.root, check=True))
+        checked = subprocess.run(["node", "--check", str(path)], check=False)
+        self.assertEqual(checked.returncode, 0)
 
     def test_control_proof_guard_precedes_failure_projection(self):
         self.assertLess(

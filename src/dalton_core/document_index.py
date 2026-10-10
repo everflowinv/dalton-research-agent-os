@@ -9,6 +9,12 @@ raw spool is checked against the artifact's hash and size.
 
 The projection does not return document bytes.  Search results carry immutable
 artifact/text refs and hashes for a later, separately authorized materializer.
+
+Batch A (2026-10-09): the same ``document-index.sqlite`` now also holds the
+passage-level evidence index over every acquired document body -- the
+``evidence_*`` tables and ``material_arrivals`` in ``document_index_schema.sql``
+-- built incrementally by :mod:`evidence_index` (the ``document_index`` lane)
+and searched with :func:`evidence_index.evidence_search`.
 """
 
 from __future__ import annotations
@@ -208,7 +214,9 @@ def _company_refs_from_call(
     ):
         issuer = params.get("issuer")
         if type(issuer) is str and re.fullmatch(r"[0-9]{1,10}", issuer):
-            return [f"company:sec-cik:{issuer.zfill(10)}"]
+            from .mission_company_cik import sec_cik_company_ref
+
+            return [sec_cik_company_ref(issuer)]
     return []
 
 

@@ -1,0 +1,123 @@
+{
+  "case_ref": "debate_map-empty_section",
+  "rubric": "debate_map",
+  "source": "Synthetic acceptance fixture; no production company data.",
+  "note": "Exercises empty_section; judgement scores are unmeasured, not a real model rating.",
+  "artefact": {
+    "artefact_kind": "debate_map",
+    "ref": "synthetic:debate_map:empty_section",
+    "hash": "aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa",
+    "title": "",
+    "subject_ref": null,
+    "sections": [
+      {
+        "title": "多方观点",
+        "body": "合成公司披露营业收入为 100 万美元。我们认为客户续约决定后续收入，需结合合同到期安排检验。",
+        "claim_refs": [
+          "claim-version:synthetic"
+        ],
+        "numbers": [
+          {
+            "text": "营业收入 100 万美元",
+            "claim_version_ref": "claim-version:synthetic",
+            "period": null
+          }
+        ],
+        "gaps": []
+      },
+      {
+        "title": "空方观点",
+        "body": "",
+        "claim_refs": [
+          "claim-version:synthetic"
+        ],
+        "numbers": [
+          {
+            "text": "营业收入 100 万美元",
+            "claim_version_ref": "claim-version:synthetic",
+            "period": null
+          }
+        ],
+        "gaps": []
+      },
+      {
+        "title": "本所判断",
+        "body": "我们的判断仍有不确定性；估值暂不可得，因为尚未取得可比口径的盈利与股本数据。",
+        "claim_refs": [
+          "claim-version:synthetic"
+        ],
+        "numbers": [
+          {
+            "text": "营业收入 100 万美元",
+            "claim_version_ref": "claim-version:synthetic",
+            "period": null
+          }
+        ],
+        "gaps": []
+      },
+      {
+        "title": "验证条件",
+        "body": "下一次申报时核对客户留存与现金回款。如果合同取消明显增加，则重新审查原有判断。",
+        "claim_refs": [
+          "claim-version:synthetic"
+        ],
+        "numbers": [
+          {
+            "text": "营业收入 100 万美元",
+            "claim_version_ref": "claim-version:synthetic",
+            "period": null
+          }
+        ],
+        "gaps": []
+      }
+    ],
+    "gaps": [],
+    "expected_sections": [
+      "多方观点",
+      "空方观点",
+      "本所判断",
+      "验证条件"
+    ],
+    "shown_claims": [],
+    "cited_tags": [],
+    "confidence": null,
+    "question": null,
+    "prior": null
+  },
+  "expected": {
+    "rationale": "Pinned deterministic result for empty_section; judgement requires an independent reading.",
+    "score_ranges_are_calibration_only": true,
+    "score_ranges": {
+      "substance": [
+        0,
+        4
+      ],
+      "number_provenance": [
+        0,
+        4
+      ],
+      "reasoning_lint": [
+        0,
+        4
+      ],
+      "decision_usefulness": [
+        0,
+        4
+      ]
+    },
+    "deterministic": {
+      "required_sections_present": {
+        "status": "fail",
+        "count": 1
+      },
+      "numbers_without_refs": {
+        "status": "pass",
+        "count": 0
+      },
+      "reasoning_lint": {
+        "status": "pass",
+        "count": 0
+      }
+    }
+  }
+}

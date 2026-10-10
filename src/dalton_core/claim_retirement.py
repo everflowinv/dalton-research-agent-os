@@ -69,8 +69,16 @@ REASON_CODES: tuple[str, ...] = (
     "boilerplate_disclaimer",
     "human_judgment",
     "citation_support_rejected",
+    "issuer_misattribution",
 )
 DETERMINISTIC_REASONS = frozenset({"subject_absent_from_source", "boilerplate_disclaimer"})
+# 2026-10-09 (P0, research artifact quality review): a Claim about financials
+# whose cited table belongs to another issuer -- ws-7d's MSFT Claims cut from
+# Oracle's model pages.  Deterministic (``claim_issuer_attribution.attribute``
+# over the exact original), but it reads the cited span, the issuer table and
+# the document's title, so it is its own set: the patrol's subject-absent loop
+# never sees it, and ``decide`` re-runs it from ``attribution_inputs``.
+ATTRIBUTION_REASONS = frozenset({"issuer_misattribution"})
 # 2026-09-24: an independent model's recorded verdict (claim_support_verification)
 # that the cited sentences do not support the statement, or that it is about
 # another company.  Not deterministic -- a model said it -- so the authority
@@ -83,7 +91,9 @@ RECORDED_VERDICT_REASONS = frozenset({"citation_support_rejected"})
 # directly gives is supported, and a rejection needs a second family's answer.
 # v4 (2026-09-28): claim-support-verification:v4 -- an absent transcript
 # speaker is unknown, not another party.
-SUPPORT_VERIFIER_REF = "claim-verifier:citation-support:v4"
+# v5 (2026-09-29): claim-support-verification:v5 -- an interviewer's question
+# is not the expert's view (Guidepoint ``Q:``/``A:`` turns).
+SUPPORT_VERIFIER_REF = "claim-verifier:citation-support:v5"
 # v2: span level as well as document level (claim_subject.subject_absent_from_citation).
 # v3 (2026-09-24 audit): the span rule also keeps a Claim whose statement leans
 # on an antecedent just before the span, or names an executive, and a document
@@ -105,7 +115,7 @@ REINSTATEMENT_REASONS: tuple[str, ...] = (
 #: the support check, asked again under its current contract (the document's
 #: date, period and speaker, the whole cited sentences), upholds the Claim.
 #: The authority re-reads that verdict (``recorded_support``) before writing.
-SUPPORT_REREVIEW_RULE_REF = "claim-rereview:citation-support:v4"
+SUPPORT_REREVIEW_RULE_REF = "claim-rereview:citation-support:v5"
 #: The rule an automatic reinstatement re-runs.  v3: the current span
 #: detector no longer fires.  v4 (2026-09-25 audit): and the subject is
 #: positively named -- by the statement, its executive, the antecedent it
@@ -119,16 +129,19 @@ WITHDRAWAL_REASONS: tuple[str, ...] = (
     "subject_not_named_under_strict_rule",
 )
 BOILERPLATE_DETECTOR_REF = "claim-detector:boilerplate-disclaimer:v1"
+ATTRIBUTION_DETECTOR_REF = "claim-detector:issuer-misattribution:v1"
 DETECTOR_REFS = {
     "subject_absent_from_source": SUBJECT_DETECTOR_REF,
     "boilerplate_disclaimer": BOILERPLATE_DETECTOR_REF,
     "citation_support_rejected": SUPPORT_VERIFIER_REF,
+    "issuer_misattribution": ATTRIBUTION_DETECTOR_REF,
 }
 REASON_LABELS = {
     "subject_absent_from_source": "引用的原文（或所引片段及结论本身）没有提到这家公司",
     "boilerplate_disclaimer": "这是免责声明或套话，不是研究结论",
     "human_judgment": "你的判断",
     "citation_support_rejected": "独立模型核验：所引原文不支持这条结论，或它说的是另一家公司",
+    "issuer_misattribution": "所引财务表格/段落属于另一家公司（发行人归属错误）",
 }
 _HUMAN_RE = re.compile(r"^human:[A-Za-z0-9._:-]{1,128}$")
 _AUTOMATION_RE = re.compile(r"^automation:[A-Za-z0-9._:-]{1,128}$")
@@ -585,8 +598,16 @@ class ClaimRetirementAuthority:
         rationale: str,
         actor_ref: str,
         detector_ref: str | None = None,
+        evidence: Mapping[str, Any] | None = None,
     ) -> dict[str, Any]:
-        """Record that a Claim looks wrong.  Nothing is retired by this alone."""
+        """Record that a Claim looks wrong.  Nothing is retired by this alone.
+
+        ``evidence`` (2026-10-09) is what the detector read, kept in the
+        record: for ``issuer_misattribution`` the ``attribution_evidence``
+        (whose table it is, where that was read, the document's primary
+        issuer).  Absent for every other reason, so their records are
+        byte-identical to before.
+        """
 
         import json
 
@@ -596,7 +617,7 @@ class ClaimRetirementAuthority:
         actor = _actor(actor_ref)
         if reason_code not in REASON_CODES:
             raise ClaimRetirementValidationError(f"reason_code must be one of {list(REASON_CODES)}")
-        if reason_code in DETERMINISTIC_REASONS | RECORDED_VERDICT_REASONS:
+        if reason_code in DETERMINISTIC_REASONS | RECORDED_VERDICT_REASONS | ATTRIBUTION_REASONS:
             expected = DETECTOR_REFS[reason_code]
             if detector_ref is not None and detector_ref != expected:
                 raise ClaimRetirementValidationError("detector_ref does not match the reason code")
@@ -618,6 +639,8 @@ class ClaimRetirementAuthority:
             "actor_ref": actor,
             "created_at": self.clock(),
         }
+        if evidence is not None:
+            record["evidence"] = json.loads(json.dumps(dict(evidence), ensure_ascii=False, default=str))
         record["id"] = "claim-retirement-challenge:" + content_hash(
             {"claim": claim_version_ref, "reason": reason_code}
         )[:32]
@@ -657,8 +680,14 @@ class ClaimRetirementAuthority:
         context_before: str | None = None,
         context_after: str | None = None,
         peer_needles: Sequence[str] = (),
+        attribution_inputs: Mapping[str, Any] | None = None,
     ) -> dict[str, Any]:
         """Retire or keep a challenged Claim.
+
+        ``attribution_inputs`` (``issuer_misattribution`` only): the cited
+        span's ``start``/``end``, the ``issuers`` name table, the document
+        ``title`` and ``issuer_document``; with ``source_text`` the rule is
+        re-run here.
 
         A deterministic detector is re-run here rather than trusted: a caller
         saying the check fired is not evidence that it fired.
@@ -681,7 +710,8 @@ class ClaimRetirementAuthority:
         if _AUTOMATION_RE.fullmatch(actor) and decision == "kept":
             raise ClaimRetirementConflict("only a person decides that a challenged Claim stands")
         if _AUTOMATION_RE.fullmatch(actor):
-            if record["reason_code"] not in DETERMINISTIC_REASONS | RECORDED_VERDICT_REASONS:
+            if record["reason_code"] not in (DETERMINISTIC_REASONS | RECORDED_VERDICT_REASONS
+                                             | ATTRIBUTION_REASONS):
                 raise ClaimRetirementConflict(
                     "automation may only retire on a deterministic detector or a recorded verdict"
                 )
@@ -694,6 +724,24 @@ class ClaimRetirementAuthority:
                                       claim=claim) is None:
                     raise ClaimRetirementConflict(
                         "no recorded support verdict rejects this exact Claim version")
+            elif record["reason_code"] in ATTRIBUTION_REASONS:
+                from .claim_issuer_attribution import attribute
+
+                if source_text is None and self.source_text_resolver is not None:
+                    source_text = self.source_text_resolver(record["claim_version_ref"])
+                inputs = dict(attribution_inputs or {})
+                if source_text is None or not inputs:
+                    raise ClaimRetirementConflict(
+                        "the original cannot be read; a Claim is never retired unverified"
+                    )
+                verdict = attribute(
+                    text=source_text, start=int(inputs.get("start", -1)),
+                    end=int(inputs.get("end", -1)),
+                    statement=claim["normalized_statement"], subject_ref=claim["subject_ref"],
+                    issuers=inputs.get("issuers") or {}, title=inputs.get("title"),
+                    issuer_document=bool(inputs.get("issuer_document")))
+                if verdict.get("verdict") != "misattributed":
+                    raise ClaimRetirementConflict("detector no longer fires for this Claim")
             elif record["reason_code"] == "boilerplate_disclaimer":  # noqa: SIM108
                 if not statement_is_boilerplate(claim["normalized_statement"]):
                     raise ClaimRetirementConflict("detector no longer fires for this Claim")
@@ -1060,6 +1108,8 @@ __all__ = [
     "ClaimRetirementError",
     "ClaimRetirementNotFound",
     "ClaimRetirementValidationError",
+    "ATTRIBUTION_DETECTOR_REF",
+    "ATTRIBUTION_REASONS",
     "DETERMINISTIC_REASONS",
     "REASON_CODES",
     "REASON_LABELS",

@@ -35,6 +35,10 @@ from typing import Any, Callable, Mapping, Sequence
 from .launch_drain import _is_zombie, _ticket_process_matches
 
 TICKET_SCHEMA_VERSION = "0.1"
+# Settled ticket states whose child may have died before writing summary.json.
+# A controlled re-entry from one of them archives "no summary" instead of
+# refusing for ever (see ``_claim_controlled_reentry_locked``).
+SUMMARYLESS_REENTRY_STATUSES = frozenset({"orphaned", "failed"})
 
 #: The sentence a launcher uses when a ticket it was asked to read settled
 #: without producing a manifest.  A reader that knows this string apart from a
@@ -58,6 +62,10 @@ class LaneChildRejected(ValueError):
 
 class LaneChildConflict(RuntimeError):
     """A child of this lane is already running."""
+
+
+class LaneChildOwnerPaused(LaneChildConflict):
+    """The owner paused this company or lane, or stopped everything (owner_levers)."""
 
 
 class LaneChildTicketNotFound(LookupError):
@@ -546,11 +554,28 @@ class LaneChildLauncher:
         if ticket.get("status") == "running":
             raise LaneChildConflict(f"{self.TICKET_PREFIX} child is already running")
         summary_path = ticket_path.with_name("summary.json")
+        summary_bytes: bytes | None
         try:
             summary_bytes = summary_path.read_bytes()
+        except FileNotFoundError as exc:
+            # A child that was killed before it could write anything -- the
+            # writer restarted under it and the ticket was marked orphaned --
+            # leaves no summary at all.  Requiring one made that admission
+            # un-re-enterable for ever: live, ws-7d admission 256f7569 has
+            # held ``controlled reentry summary is unavailable`` since
+            # 2026-09-18 with no door.  There is nothing to archive, so the
+            # claim records that it archived nothing.  Only a settled ticket
+            # qualifies, and a caller that pinned a summary still gets the
+            # refusal, because the thing it pinned is gone.
+            if (expected_summary_sha256 is not None
+                    or ticket.get("status") not in SUMMARYLESS_REENTRY_STATUSES):
+                raise LaneChildRejected(
+                    "controlled reentry summary is unavailable") from exc
+            summary_bytes = None
         except OSError as exc:
             raise LaneChildRejected("controlled reentry summary is unavailable") from exc
-        summary_sha256 = hashlib.sha256(summary_bytes).hexdigest()
+        summary_sha256 = (None if summary_bytes is None
+                          else hashlib.sha256(summary_bytes).hexdigest())
         if (expected_summary_sha256 is not None
                 and summary_sha256 != expected_summary_sha256):
             raise LaneChildRejected("controlled reentry summary changed before spawn")
@@ -573,7 +598,10 @@ class LaneChildLauncher:
             "prior_summary_sha256": summary_sha256,
             # The marker is the immutable owner-only archive. Base64 keeps the
             # exact old bytes even after the child replaces summary.json.
-            "prior_summary_base64": base64.b64encode(summary_bytes).decode("ascii"),
+            # ``None`` says, explicitly, that the prior run left no summary.
+            "prior_summary_base64": (
+                None if summary_bytes is None
+                else base64.b64encode(summary_bytes).decode("ascii")),
             "claimed_at": wire_time(self.clock()),
         }
         if prior_log_bytes is not None:
@@ -631,6 +659,15 @@ class LaneChildLauncher:
                     return dict(live)
                 raise LaneChildConflict(
                     f"{self.TICKET_PREFIX} child is already running")
+            # 2026-10-06 (vision-gap #11): no new child for a company or lane
+            # the owner paused, and none at all during an emergency stop.  A
+            # conflict, because that is what every lane already answers
+            # ``busy`` to and comes back from on a later tick.
+            from .owner_levers import spawn_refusal
+
+            refusal = spawn_refusal(self.state_dir, record, command_kwargs)
+            if refusal is not None:
+                raise LaneChildOwnerPaused(refusal)
             # Constructing argv must be pure. Validate its workspace binding
             # before making the per-run directory or truncating its log.
             ticket_dir = self.tickets_dir / digest
@@ -768,6 +805,7 @@ __all__ = [
     "LaneChildConflict",
     "LaneChildError",
     "LaneChildLauncher",
+    "LaneChildOwnerPaused",
     "LaneChildRejected",
     "LaneChildTicketNotFound",
     "TICKET_SCHEMA_VERSION",

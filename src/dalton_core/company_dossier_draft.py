@@ -36,7 +36,7 @@ an independent one.
 
 from __future__ import annotations
 
-from .call_budget import default_call_budget
+from .call_budget import default_call_budget, default_run_budget
 
 from .final_text_contract import final_text_instructions
 
@@ -103,10 +103,15 @@ MODEL_CONFIG_NAME = "initial-screen-model-config.json"
 # prompt SHA already binds every WorkOrder; the exported fingerprint also lets
 # the lane retire a terminal refusal after a reviewed contract repair without
 # pretending that the underlying company evidence changed.
-DRAFT_CONTRACT_VERSION = "company-dossier-draft-contract:0.5"
-VERIFIER_PROMPT_CONTRACT_VERSION = "company-dossier-verifier-prompt-contract:0.3"
+DRAFT_CONTRACT_VERSION = "company-dossier-draft-contract:0.7"
+VERIFIER_PROMPT_CONTRACT_VERSION = "company-dossier-verifier-prompt-contract:0.4"
 LEGACY_VERIFIER_PROMPT_CONTRACT_VERSION = "company-dossier-verifier-prompt-contract:0.2"
-VARIANT_CONCLUSION_RULE_VERSION = "variant-no-investment-conclusion:1"
+#: Batch D: the 0.3 verifier prompt (before the reasoning lint was appended).
+PRE_BATCH_D_VERIFIER_PROMPT_CONTRACT_VERSION = "company-dossier-verifier-prompt-contract:0.3"
+VARIANT_CONCLUSION_RULE_VERSION = "variant-labelled-view:2"
+#: Batch D (owner decision 2026-10-09): views allowed when labelled as ours;
+#: the shared number / gap rules and the reasoning lint are in every prompt.
+BATCH_D_PROMPT_RULE_VERSION = "company-dossier-batch-d:1"
 
 
 def draft_contract_fingerprint() -> str:
@@ -120,6 +125,7 @@ def draft_contract_fingerprint() -> str:
         "section_sentence_cap": SECTION_SENTENCE_CAP,
         "variant_conclusion_rule": VARIANT_CONCLUSION_RULE_VERSION,
         "variant_conclusion_patterns": _CONCLUSION_PATTERNS,
+        "batch_d_rules": BATCH_D_PROMPT_RULE_VERSION,
         "stray_tail_rule": STRAY_TAIL_RULE_VERSION,
         "stray_tail_paths": list(STRAY_TAIL_PATHS),
     })
@@ -135,6 +141,17 @@ def verifier_prompt_contract_fingerprint() -> str:
         "finding_codes": list(VERIFIER_FINDING_CODES),
     })
 
+def pre_batch_d_verifier_prompt_contract_fingerprint() -> str:
+    """Identity of the 0.3 verifier prompt, kept so its verdicts still replay."""
+
+    return content_hash({
+        "version": PRE_BATCH_D_VERIFIER_PROMPT_CONTRACT_VERSION,
+        "source_fields": ["kind", "period", "text"],
+        "max_row_chars": MAX_ROW_CHARS,
+        "finding_codes": list(VERIFIER_FINDING_CODES),
+    })
+
+
 def legacy_verifier_prompt_contract_fingerprint() -> str:
     """Identity of the evidence projection shown to the verifier."""
 
@@ -148,15 +165,17 @@ def legacy_verifier_prompt_contract_fingerprint() -> str:
 # Bounded like ``company_model_cli``'s constants and for the same reason: the
 # router estimates on prompt bytes, so a bound that looks frugal buys nothing
 # but a refusal.  One unit is one section of one company.
-MAX_INPUT_TOKENS = 120_000
-MAX_OUTPUT_TOKENS = 3_000
-MAX_COST_USD = default_call_budget("dossier")["max_cost_usd"]
-TIMEOUT_SECONDS = 180
+_CALL_BUDGET = default_call_budget("dossier")
+MAX_INPUT_TOKENS = _CALL_BUDGET["max_input_tokens"]
+MAX_OUTPUT_TOKENS = _CALL_BUDGET["max_output_tokens"]
+MAX_COST_USD = _CALL_BUDGET["max_cost_usd"]
+TIMEOUT_SECONDS = _CALL_BUDGET["timeout_seconds"]
 # What one tick may spend across all its calls, verifier included.  A dossier
-# is ten sections plus two blocks; drafting all twelve in one tick would be a
-# third of the live mission's daily budget in one lane.
-MAX_RUN_COST_USD = 2.50
-MAX_UNITS_PER_RUN = 3
+# is ten sections plus two blocks; one tick normally drafts three units and
+# verifies them once. The mission's day budget still authorizes admission.
+_RUN_BUDGET = default_run_budget("dossier")
+MAX_RUN_COST_USD = _RUN_BUDGET["max_cost_usd"]
+MAX_UNITS_PER_RUN = _RUN_BUDGET["max_units"]
 
 # What the prompt may carry.
 MAX_CLAIM_ROWS = 40
@@ -309,6 +328,8 @@ def build_unit_prompt(
     _quantitative_priority: bool = True,
     _verbatim_figures_in_chinese: bool = True,
     _figures_as_written: bool = True,
+    _batch_d_contract: bool = True,
+    _historical_context_rule: bool = True,
 ) -> str:
     """One unit's prompt: the slots, the rules, the material, the last version.
 
@@ -346,6 +367,7 @@ def build_unit_prompt(
         "",
         "Hard rules:",
         "- Use ONLY the tagged material below. Cite by tag in the refs array.",
+        *(["- Label older quantitative evidence as 历史对照 and state its actual disclosed year/period. Old segment names describe that historical disclosure only; current segment names require current identity-bound evidence. Never turn an undated number into a current fact."] if _batch_d_contract and _historical_context_rule else []),
         "- NEVER write a C or N tag inside a sentence's text: not as a word, not in",
         "  brackets, not in a source list. The tags travel in refs; a sentence whose",
         "  subject is a tag becomes a sentence with no subject once the tag is gone.",
@@ -398,7 +420,9 @@ def build_unit_prompt(
             "  observable tracking item. Do not hide behind A也可能、B也可能; qualify confidence.",
             "",
         ]
-    if unit == VARIANT_UNIT and _variant_conclusion_rule:
+    if _batch_d_contract:
+        lines += batch_d_prompt_lines(unit)
+    if unit == VARIANT_UNIT and _variant_conclusion_rule and not _batch_d_contract:
         forbidden = ", ".join(_CONCLUSION_PATTERNS)
         lines += [
             "Variant-view boundary:",
@@ -460,7 +484,7 @@ def build_unit_prompt(
 def legacy_unit_prompt_v02(**kwargs: Any) -> str:
     """Rebuild an immutable v0.2 producer question for formal replay only."""
 
-    return build_unit_prompt(**kwargs, _variant_conclusion_rule=False,
+    return build_unit_prompt(**kwargs, _batch_d_contract=False, _variant_conclusion_rule=False,
                              _analytical_contract=False,
                              _positive_research_purpose=False,
                              _quantitative_priority=False,
@@ -471,7 +495,7 @@ def legacy_unit_prompt_v02(**kwargs: Any) -> str:
 def legacy_unit_prompt_v03(**kwargs: Any) -> str:
     """Rebuild an immutable v0.3 producer question for formal replay only."""
 
-    return build_unit_prompt(**kwargs, _analytical_contract=False,
+    return build_unit_prompt(**kwargs, _batch_d_contract=False, _analytical_contract=False,
                              _positive_research_purpose=False,
                              _quantitative_priority=False,
                              _verbatim_figures_in_chinese=False,
@@ -481,7 +505,7 @@ def legacy_unit_prompt_v03(**kwargs: Any) -> str:
 def legacy_unit_prompt_v04(**kwargs: Any) -> str:
     """Rebuild the analytical prompt before final-text rules were appended."""
 
-    return build_unit_prompt(**kwargs, _final_text_contract=False,
+    return build_unit_prompt(**kwargs, _batch_d_contract=False, _final_text_contract=False,
                              _positive_research_purpose=False,
                              _quantitative_priority=False,
                              _verbatim_figures_in_chinese=False,
@@ -491,7 +515,7 @@ def legacy_unit_prompt_v04(**kwargs: Any) -> str:
 def legacy_unit_prompt_v05(**kwargs: Any) -> str:
     """Rebuild the final-text prompt before its research-purpose wording changed."""
 
-    return build_unit_prompt(**kwargs, _positive_research_purpose=False,
+    return build_unit_prompt(**kwargs, _batch_d_contract=False, _positive_research_purpose=False,
                              _quantitative_priority=False,
                              _verbatim_figures_in_chinese=False,
                              _figures_as_written=False)
@@ -508,7 +532,7 @@ def legacy_unit_prompt_v06(**kwargs: Any) -> str:
     sentence that gestures at it.
     """
 
-    return build_unit_prompt(**kwargs, _quantitative_priority=False,
+    return build_unit_prompt(**kwargs, _batch_d_contract=False, _quantitative_priority=False,
                              _verbatim_figures_in_chinese=False,
                              _figures_as_written=False)
 
@@ -523,7 +547,7 @@ def legacy_unit_prompt_v07(**kwargs: Any) -> str:
     which ``numbers_without_refs`` refused as a number no cited row carries.
     """
 
-    return build_unit_prompt(**kwargs, _verbatim_figures_in_chinese=False,
+    return build_unit_prompt(**kwargs, _batch_d_contract=False, _verbatim_figures_in_chinese=False,
                              _figures_as_written=False)
 
 
@@ -536,7 +560,86 @@ def legacy_unit_prompt_v08(**kwargs: Any) -> str:
     that number; the prompt also asks for the row's own wording.
     """
 
-    return build_unit_prompt(**kwargs, _figures_as_written=False)
+    return build_unit_prompt(**kwargs, _batch_d_contract=False, _figures_as_written=False)
+
+
+def pack_material_rows(pack: Mapping[str, Any], *, limit: int = 40) -> list[dict[str, Any]]:
+    """A material pack's P/N/O tags as dossier figure rows (batch D).
+
+    The dossier's number rule is "verbatim in a cited row"; a pack passage, a
+    pack number and our own model row are rows like any other, cited by their
+    pack ref.  Claims (C tags) already reach the dossier through the claim
+    index and are not duplicated.  Each row keeps its text cut to the row cap,
+    which is exactly what the number check later reads.
+    """
+
+    from .product_contract import normalise_pack, tag_entry
+
+    if not isinstance(pack, Mapping):
+        pack = normalise_pack(pack)       # batch C's MaterialPack object
+    rows: list[dict[str, Any]] = []
+    tags = sorted((pack.get("tags") or {}),
+                  key=lambda tag: ("PNO".find(str(tag)[:1]), int(str(tag)[1:] or 0)
+                                   if str(tag)[1:].isdigit() else 0))
+    for tag in tags:
+        entry = tag_entry(pack, str(tag))
+        # Batch C: [O…] is our earlier view -- background, never a source --
+        # so only passages and numbers (our model's included) become rows.
+        if entry is None or entry["kind"] not in ("passage", "number"):
+            continue
+        text = str(entry.get("text") or "").strip()
+        if not text:
+            continue
+        rows.append({
+            "kind": "figure", "ref": entry["ref"], "text": text[:MAX_ROW_CHARS],
+            "period": entry.get("period") or entry.get("as_of"),
+            "importance": "ours" if entry.get("source_kind") == "ours" else str(
+                entry.get("source_kind") or entry["kind"]),
+        })
+        if len(rows) >= limit:
+            break
+    return rows
+
+
+def legacy_unit_prompt_v09(**kwargs: Any) -> str:
+    """Rebuild the prompt before batch D (views allowed, shared number/gap rules,
+    reasoning lint), so a unit drafted under it still replays byte for byte."""
+
+    return build_unit_prompt(**kwargs, _batch_d_contract=False)
+
+
+def legacy_unit_prompt_v10(**kwargs: Any) -> str:
+    return build_unit_prompt(**kwargs, _historical_context_rule=False)
+
+
+def batch_d_prompt_lines(unit: str) -> list[str]:
+    """The batch-D rules every dossier part is drafted under."""
+
+    from .product_contract import GAP_RULES
+    from .research_reasoning_lint import VERIFIER_LINT_INSTRUCTIONS
+
+    lines = [
+        "Batch D contract (shared with every research product):",
+        "- 数字来源：数字只能逐字来自所引的 C/N 行（含材料包的 P 段落、N 数字、O 我们的模型行）。",
+        "  「我们的估计」只能来自 O 行，并在句中写明「我们的估计/我们预计」。本档案的句子没有算式槽，",
+        "  所以不要写自己算出来的数字；需要算式的结论交给初筛与备忘录。",
+        "- 每个数字写清指标、期间与单位。",
+        *[f"- {rule}" for rule in GAP_RULES],
+        "- 缺口（gaps）开头写类别：「公司未披露：…」或「未取得：…」。",
+        "Reasoning rules (a verifier rejects a part on any of these):",
+        *[f"- {rule}" for rule in VERIFIER_LINT_INSTRUCTIONS],
+        "",
+    ]
+    if unit == VARIANT_UNIT:
+        lines += [
+            "Variant view:",
+            "- Say what we think and why, where it differs from the cited market view, and what",
+            "  would settle it. A view, a watch price and a reason are allowed; label each as our",
+            "  judgement (我们认为…/我们的观察价…). Never state a verdict (买入、低估、目标价…) as",
+            "  if the company or the market had said it.",
+            "",
+        ]
+    return lines
 
 
 # ---------------------------------------------------------------------------
@@ -637,6 +740,7 @@ def parse_unit_output(
     market_view_available: bool = True,
     profile: Mapping[str, Any] | None = None,
     classification: Any = None,
+    _historical_context_rule: bool = True,
 ) -> dict[str, Any]:
     """Validate one reply against the closed contract, or refuse it whole.
 
@@ -657,6 +761,10 @@ def parse_unit_output(
             f"{unit}: the reply has keys {sorted(value)}; the contract is "
             f"{sorted(expected)}")
     slots, sources = _resolve_tags(value["slots"], material, unit=unit)
+    if _historical_context_rule:
+        from .historical_research_context import historical_findings
+        findings=historical_findings(slots,sources,material)
+        if findings:raise DossierDraftRefused(f"{unit}: historical_number_without_period: {findings}")
     gaps = list(value.get("gaps") or [])
     _refuse_stray_tails(unit, slots, gaps)
     if slots and all(set(slot) == {"slot_id", "unknown"} for slot in slots):
@@ -883,7 +991,8 @@ def draft_hash(blocks: Mapping[str, Any]) -> str:
 
 
 def build_verifier_prompt(blocks: Mapping[str, Any], *, company: Mapping[str, Any],
-                          _analytical_contract: bool = True) -> str:
+                          _analytical_contract: bool = True,
+                          _batch_d_contract: bool = True) -> str:
     """The verifier reads the draft and the rows it cites, and answers once."""
 
     lines = [
@@ -904,6 +1013,16 @@ def build_verifier_prompt(blocks: Mapping[str, Any], *, company: Mapping[str, An
         "A pass verdict must have no findings; a reject verdict must have at least one.",
         "",
     ]
+    if _batch_d_contract:
+        from .research_reasoning_lint import VERIFIER_LINT_INSTRUCTIONS
+
+        lines += [
+            "Also reject, with code unsupported_sentence, a sentence that breaks one of these",
+            "reasoning rules. A view labelled as our judgement is allowed; use",
+            "conclusion_beyond_evidence only for a verdict stated as fact or not backed by the rows:",
+            *[f"- {rule}" for rule in VERIFIER_LINT_INSTRUCTIONS],
+            "",
+        ]
     for unit in sorted(blocks):
         block = blocks[unit]
         lines.append(f"## {unit}")
@@ -934,7 +1053,14 @@ def build_verifier_prompt(blocks: Mapping[str, Any], *, company: Mapping[str, An
 
 
 def legacy_verifier_prompt_v02(blocks: Mapping[str, Any], *, company: Mapping[str, Any]) -> str:
-    return build_verifier_prompt(blocks, company=company, _analytical_contract=False)
+    return build_verifier_prompt(blocks, company=company, _analytical_contract=False,
+                                 _batch_d_contract=False)
+
+
+def legacy_verifier_prompt_v03(blocks: Mapping[str, Any], *, company: Mapping[str, Any]) -> str:
+    """The verifier prompt before batch D appended the reasoning lint."""
+
+    return build_verifier_prompt(blocks, company=company, _batch_d_contract=False)
 
 
 def validate_verifier_output(value: Any) -> dict[str, Any]:
@@ -1140,6 +1266,11 @@ __all__ = [
     "legacy_unit_prompt_v06",
     "legacy_unit_prompt_v07",
     "legacy_unit_prompt_v08",
+    "legacy_unit_prompt_v09",
+    "legacy_verifier_prompt_v03",
+    "pre_batch_d_verifier_prompt_contract_fingerprint",
+    "batch_d_prompt_lines",
+    "pack_material_rows",
     "unit_contract",
     "unit_contract_reminder",
     "draft_hash",

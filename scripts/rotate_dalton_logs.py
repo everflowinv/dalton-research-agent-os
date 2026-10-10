@@ -13,11 +13,13 @@ StandardOutPath/StandardErrorPath，并且在服务重启之前一直持有那�
 代价是截断和复制之间的极少量新字节可能丢失。对 stderr 日志来说这个代价是对的。
 
 范围：每个 --log-dir（可重复）下递归的全部 *.log，包括各 workspace 子目录
-（~/Library/Logs/Dalton/workspaces/<ws>/、~/.dalton/workspace-logs/<ws>/ 等）。
+（~/Library/Logs/Dalton/space.lumos.dalton.workspace.<ws>/、
+~/Library/Logs/Dalton/workspaces/<ws>/）。launchd 只往 ~/Library/Logs/Dalton 下写，
+缺省的一个目录就够了；~/.dalton/workspace-logs/ 与 ~/.dalton/workspaces/<ws>/logs/
+自 2026-09-16 起不再写入，读那里会读到旧数据。
 过去只扫顶层，workspace 子目录里的日志从来没有轮转过。符号链接（文件或目录）
 一律不跟随，避免轮转到日志目录以外的文件；同一文件经不同目录重复出现只处理一次。
-不存在的目录记入 missing_log_dirs 并跳过（新机器上 workspace-logs 可能还没有），
-只有全部目录都不存在才算失败。
+不存在的目录记入 missing_log_dirs 并跳过，只有全部目录都不存在才算失败。
 
 默认 dry-run：只打印会做什么。--apply 才动文件。
 """

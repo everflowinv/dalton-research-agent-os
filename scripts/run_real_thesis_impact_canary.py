@@ -1184,12 +1184,12 @@ def main() -> int:
     parser.add_argument(
         "--socket-path",
         type=Path,
-        default=Path("/Users/everflow/.openclaw/dalton-model-broker.sock"),
+        default=(Path.home() / ".openclaw/dalton-model-broker.sock"),
     )
     parser.add_argument(
         "--auth-key-path",
         type=Path,
-        default=Path("/Users/everflow/.openclaw/dalton-model-broker.sock.key"),
+        default=(Path.home() / ".openclaw/dalton-model-broker.sock.key"),
     )
     parser.add_argument("--allow-dirty", action="store_true")
     parser.add_argument("--finalize-existing", action="store_true")

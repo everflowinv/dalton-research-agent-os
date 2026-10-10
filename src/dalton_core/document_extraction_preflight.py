@@ -185,7 +185,8 @@ def preflight(service, *, review_id, expected_review_hash, offset, actor_ref,
         try:
             budget.admit(policy_version_id=config["budget_policy_ref"], day=now.date().isoformat(),
                 work_order_ref=work.id, attempt_number=1, phase="assessment", route_decision_ref=route["id"],
-                reserved_micros=int(Decimal(str(work.budget["max_cost_usd"])) * 1000000), mission_binding=scope)
+                reserved_micros=int(Decimal(str(work.budget["max_cost_usd"])) * 1000000), mission_binding=scope,
+                purpose=work.metadata.get("purpose"), thinking_level=route.get("thinking_level"))
         except ThesisImpactDayBudgetExceeded as exc:
             blocked("admission", exc.rejection.get("reason", "owner_budget_exceeded"))
         except errors as exc:

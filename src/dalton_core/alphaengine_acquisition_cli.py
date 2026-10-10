@@ -200,6 +200,17 @@ def run_acquisition(
             "production_activated": False,
             "formal_authority_writes": 0,
         }
+        if manifest["status"] != "complete" and manifest.get("failed_page"):
+            # 2026-10-08: say what AlphaEngine said ("E_UPSTREAM_API: 用户状态
+            # 发生变更，刷新 token"), so the coordinator can tell a lost login
+            # from a bad document.
+            from .provider_failure import attempt_failure, failure_reason_text
+
+            detail = attempt_failure(
+                core.connection, manifest["failed_page"].get("physical_attempt_ref"))
+            summary["failure_detail"] = detail
+            summary["failure_reason"] = failure_reason_text(
+                f"acquisition page {manifest['failed_page'].get('outcome')}", detail)
         _write_owner_only(out / "summary.json", summary)
         _write_owner_only(out / "manifest.json", manifest)
         return summary, manifest

@@ -35,6 +35,7 @@ from typing import Any
 from .bounded_planner_driver import BUDGET_LEDGER_FILENAME
 from .bounded_planner_loop import BoundedPlannerAuthority, BoundedPlannerError
 from .research_question_backlog import ResearchQuestionBacklog, ResearchQuestionError
+from .directed_numeric_research import DirectedNumericError
 from .research_task import (
     ResearchTaskError,
     admit_inquiry,
@@ -139,6 +140,15 @@ def run_admissions(
             # Not a failure: an ungranted lane is a lane the owner has not
             # turned on, and saying so every tick is how it stays visible.
             summary.update({"status": "idle", "failure_reason": "not_granted"})
+            # Batch E: an inquiry no template can bind is a MaterialRequest
+            # whether or not ad-hoc tasks are granted -- the material
+            # acquisition service, not this lane, works it.
+            if not dry_run:
+                summary["material_requests"] = _material_requests_for_gaps(
+                    state_dir, mission, plan, plan_admissions(
+                        authority, mission=mission, plan=plan, templates=templates, day=day,
+                        limit=None, budget_db=budget_db, budget_overrides=task_budget,
+                        planner_cost_usd=planner_cost))
             return summary
         entries = plan_admissions(
             authority, mission=mission, plan=plan, templates=templates, day=day,
@@ -147,6 +157,8 @@ def run_admissions(
             budget_overrides=task_budget, planner_cost_usd=planner_cost,
         )
         summary["considered"] = len(entries)
+        if not dry_run:
+            summary["material_requests"] = _material_requests_for_gaps(state_dir, mission, plan, entries)
         backlog = ResearchQuestionBacklog(store)
         admitted: list[dict[str, Any]] = []
         slots_used = 0
@@ -268,6 +280,7 @@ def run_admissions(
                     except (
                         MissionDocumentAdmissionHostError,
                         MissionDocumentResearchError,
+                        DirectedNumericError,
                         ResearchQuestionError,
                         ResearchTaskError,
                     ) as exc:
@@ -325,6 +338,18 @@ def run_admissions(
     finally:
         _write_owner_only(summary_dir / "summary.json", summary)
         store.close()
+
+
+def _material_requests_for_gaps(state_dir: Path, mission: Any, plan: Any, entries: Any) -> list[dict[str, Any]]:
+    """Batch E: capability-gap refusals become MaterialRequests (never raises)."""
+
+    try:
+        from .research_task import open_material_requests_for_gaps
+
+        return open_material_requests_for_gaps(
+            state_dir, plan, entries, industry_ref=(mission or {}).get("industry_ref"))
+    except Exception as exc:  # noqa: BLE001 - the refusals stay reported as before
+        return [{"error": f"{type(exc).__name__}: {exc}"[:300]}]
 
 
 def build_parser() -> argparse.ArgumentParser:

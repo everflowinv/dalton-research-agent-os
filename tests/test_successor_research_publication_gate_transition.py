@@ -25,7 +25,7 @@ def config(release:str,commit:str)->dict:
       "model_config":"/state/a","verifier_config":"/state/b","checker_config":"/state/c","brain_config":"/state/d",
       "work_dir":"/state/research-publication-work","output_directory":"/state/research-localization",
       "workers":4,"chunk_chars":4500,"max_cost_per_call":1.0,"draft_attempts":2,
-      "publication_gate":{"release_pointer":"/Users/everflow/Projects/dalton-owner-activation-20260910/current-release.json","runtime_pointer":"/Users/everflow/Projects/dalton-owner-activation-20260910/current-runtime-config.json",
+      "publication_gate":{"release_pointer":str(Path.home() / "Projects/dalton-owner-activation-20260910/current-release.json"),"runtime_pointer":str(Path.home() / "Projects/dalton-owner-activation-20260910/current-runtime-config.json"),
         "expected_release_ref":release,"expected_source_commit":commit}}
 
 class GateTransitionTests(unittest.TestCase):

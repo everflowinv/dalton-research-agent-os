@@ -70,9 +70,16 @@ def release_hash(*, wheel_sha256: str, dependency_lock_hash: str) -> str:
     }).encode("utf-8")).hexdigest()
 
 
-def run(command: list[str], *, cwd: Path | None = None) -> str:
+def run(command: list[str], *, cwd: Path | None = None,
+        clean_python_env: bool = False) -> str:
+    options = {}
+    if clean_python_env:
+        # A caller may run this script with PYTHONPATH=src. That editable
+        # project's egg-info must never count as installed in the new venv.
+        options["env"] = {key: value for key, value in os.environ.items()
+                          if key not in {"PYTHONPATH", "PYTHONHOME"}}
     completed = subprocess.run(command, cwd=None if cwd is None else str(cwd),
-                               capture_output=True, text=True, check=False)
+                               capture_output=True, text=True, check=False, **options)
     if completed.returncode != 0:
         raise BuildError(f"命令失败：{' '.join(command)}\n{completed.stderr.strip()[:2000]}")
     return completed.stdout.strip()
@@ -228,7 +235,7 @@ def build(args: argparse.Namespace) -> dict[str, Any]:
             f"{name}=={version}" for name, version in sorted(locked_distributions(lock).items()))
             + "\n", encoding="utf-8")
         run([str(venv / "bin" / "python"), "-m", "pip", "install", "--no-input",
-             str(wheel), "-r", str(pinned)])
+             str(wheel), "-r", str(pinned)], cwd=work, clean_python_env=True)
         dependencies = verify_dependencies(venv, lock)
         if not dependencies["matches"] and not args.allow_dependency_drift:
             shutil.rmtree(release, ignore_errors=True)

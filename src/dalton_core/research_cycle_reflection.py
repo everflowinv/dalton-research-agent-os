@@ -638,7 +638,7 @@ def quality_scores_published(core: sqlite3.Connection, window: Mapping[str, Any]
 
     if not _table_exists(core, "research_quality_score_versions"):
         return _unavailable(
-            "research_quality_score_versions 不在这个 Core 里：Q1 的质量分 authority 还没有部署"
+            "本研究项目尚未启用研究质量评分，请管理员检查评分服务。"
         )
     rows = _rows(core, (
         "SELECT rubric_ref, artefact_kind, judge_status, target_ref, created_at "
@@ -876,6 +876,74 @@ def _share(value: Any) -> str:
     return f"{share:.1%}"
 
 
+# 2026-10-08 inspection (DEFECT-06/07): the owner reads this on a Monday.  The
+# first templates said what the code saw -- ``mission``, ``lane``, ``Claim 层``,
+# ``inquiry``, ``BoundedPlannerLoop``, ``ad-hoc ProbeTemplate``, ``run_once``,
+# ``run/heartbeat.json`` -- which is a developer's log, not a research
+# director's week.  The prose, the candidates and the suggestions below are
+# plain Chinese about research; every identifier and every engineering note
+# moved to ``technical_notes`` (shown under 技术详情), and the metrics, which
+# carry the exact reasons, are unchanged.
+
+#: What each work-order family is, for the owner.  Unknown families are
+#: 「其他研究工作」 with the family under 技术详情.
+WORK_ORDER_FAMILY_LABELS: Mapping[str, str] = {
+    "document-extraction": "文档数据抽取",
+    "document-numeric": "文档数字核对",
+    "metric-discovery": "指标发现",
+    "llm-research-planner": "研究计划",
+    "research-plan": "研究计划",
+    "plan": "研究计划",
+    "mission-document-research": "文档深度研究",
+    "mission-document-authority-rebind": "文档来源重新核对",
+    "mission-document-recovery": "文档补救重试",
+    "alphaengine-doc": "卖方研报与电话会获取",
+    "unattributed": "未归类的模型调用",
+}
+#: The research stages a checkpoint can stop at, as the cockpit names them.
+STAGE_LABELS: Mapping[str, str] = {
+    "initial_screen": "初步筛选", "deep_insight_gate": "深度研究",
+    "industry_model": "行业模型", "company_model": "公司模型",
+    "investment_memo": "投资备忘录", "active_coverage": "持续覆盖",
+}
+FEEDBACK_WORD_LABELS: Mapping[str, str] = {
+    "read": "已读", "useful": "有用", "needs_more_evidence": "需要更多证据",
+    "disagree": "不同意", "revise": "需要修改",
+}
+OWNER_AUTHORITY_NOTE = (
+    "这份复盘只做统计：不会修改任何研究结论、设置或问题清单。"
+    "下面的候选问题和建议要由你或研究规划确认后才会执行。"
+)
+
+
+def pool_label(family: Any) -> str:
+    return WORK_ORDER_FAMILY_LABELS.get(str(family or ""), "其他研究工作")
+
+
+def _company_text(company_ref: Any) -> str:
+    ref = str(company_ref or "")
+    if ref.startswith("company:ticker:"):
+        return ref.rsplit(":", 1)[-1].upper()
+    return "一家公司"
+
+
+def _dispatch_owner_reason(planner: Mapping[str, Any]) -> str | None:
+    """Why no question was sent to research, in the owner's words."""
+
+    if planner.get("dispatched") or not planner.get("inquiries_raised"):
+        return None
+    missing = []
+    if not planner.get("research_task_granted"):
+        missing.append("研究任务还没有授权系统自行开展专项研究")
+    if not planner.get("probe_templates"):
+        missing.append("还没有设置专项研究的模板")
+    if missing:
+        return ("这些问题还没有安排专项研究，因为" + "，并且".join(missing)
+                + ("；两项都需要你在研究任务设置里开启。" if len(missing) > 1
+                   else "；这需要你在研究任务设置里开启。"))
+    return "专项研究已经开启，但本周没有可以安排的问题，或者当天的专项研究预算已经用完。"
+
+
 def narrative(metrics: Mapping[str, Any], window: Mapping[str, Any]) -> dict[str, Any]:
     """Plain prose plus a table, both derived from the metrics and nothing else.
 
@@ -894,12 +962,14 @@ def narrative(metrics: Mapping[str, Any], window: Mapping[str, Any]) -> dict[str
     checkpoints = metrics["human_checkpoints"]
     scores = metrics["quality_scores"]
     journal = metrics["journal"]
+    week = window["iso_week"]
 
     table: list[dict[str, Any]] = []
     if spend.get("available"):
         for pool in spend["pools"]:
             table.append({
                 "pool": pool["pool"],
+                "pool_label": pool_label(pool["pool"]),
                 "lane": pool["lane"] or "—",
                 "cost_usd": pool["cost_usd"],
                 "calls": pool["calls"],
@@ -910,93 +980,83 @@ def narrative(metrics: Mapping[str, Any], window: Mapping[str, Any]) -> dict[str
     lines: list[str] = []
     if spend.get("available"):
         if spend["calls"] == 0:
-            lines.append(
-                f"这一周（{window['iso_week']}）没有任何计价的模型调用。"
-                "系统开着，但没有花钱，也就没有把时间花在任何一条 lane 上。"
-            )
+            lines.append(f"这一周（{week}）没有任何计费的模型调用：系统在运行，但没有花钱。")
         else:
             top = spend["pools"][0]
             share = spend.get("share_of_mission_cap")
             cap_clause = (
                 "" if share is None else
-                f"，占 mission 这一周预算上限（{_usd(spend['mission_window_cap_usd'])}）的{_share(share)}"
+                f"，占本研究任务本周预算上限（{_usd(spend['mission_window_cap_usd'])}）的 {_share(share)}"
             )
             lines.append(
-                f"这一周（{window['iso_week']}）一共花了 {_usd(spend['total_cost_usd'])}、"
-                f"{spend['calls']} 次计价调用{cap_clause}。"
-                f"最大的一池是 {top['pool']}"
-                + (f"（{top['lane']} lane）" if top["lane"] else "（没有已注册 lane 认领它）")
-                + f"，{_usd(top['cost_usd'])}，占本周花费的 {top['share_of_spend']:.0%}。"
+                f"这一周（{week}）模型调用共 {spend['calls']} 次，花费 "
+                f"{_usd(spend['total_cost_usd'])}{cap_clause}。"
+                f"花得最多的是「{pool_label(top['pool'])}」，{_usd(top['cost_usd'])}，"
+                f"占本周花费的 {top['share_of_spend']:.0%}。"
             )
             if spend["pool_count"] == 1:
-                lines.append(
-                    "只有一池在花钱：这一周系统只做了一件事，"
-                    "无论它同时开着几条 lane。"
-                )
+                lines.append("本周的花费全部来自这一项工作。")
     else:
-        lines.append(f"花费不可归集：{spend.get('reason')}")
+        lines.append("本周花费暂时无法统计。")
 
     if backlog.get("available"):
         lines.append(
-            f"问题账本上，本周新登记 {backlog['new_questions']} 条、被回答 {backlog['answered']} 条，"
-            f"周末仍未关闭的有 {backlog['open_at_end']} 条。"
-            + ("新登记多于被回答，未决问题集合在这一周变大了。"
+            f"待研究问题：本周新增 {backlog['new_questions']} 个，回答了 {backlog['answered']} 个，"
+            f"周末仍有 {backlog['open_at_end']} 个没有解决。"
+            + ("未解决的问题比一周前多了。"
                if backlog["new_questions"] > backlog["answered"] else
-               ("被回答的不少于新登记的，未决问题集合没有变大。"
-                if backlog["answered"] else "既没有新问题，也没有问题被回答。"))
+               ("未解决的问题没有增加。"
+                if backlog["answered"] else "本周既没有新增问题，也没有回答问题。"))
         )
     if claims.get("available"):
         lines.append(
-            f"Claim 层退役 {claims['retired']} 条、保留 {claims['kept']} 条，"
-            f"本周新提出 {claims['challenges_raised']} 条挑战，"
-            f"周末还有 {claims['challenges_open_at_end']} 条挑战没有裁决。"
+            f"结论复核：本周有 {claims['retired']} 条早期结论经复核后撤下，"
+            f"{claims['kept']} 条复核后保留；新提出 {claims['challenges_raised']} 项质疑，"
+            f"周末还有 {claims['challenges_open_at_end']} 项待裁定。"
         )
     if planner.get("available"):
         ratio = planner["dispatch_ratio"]
+        reason = _dispatch_owner_reason(planner)
         lines.append(
-            f"规划器本周记录 {planner['plans_recorded']} 份 research plan、"
-            f"提出 {planner['inquiries_raised']} 条 inquiry，其中 {planner['dispatched']} 条被派发"
+            f"研究计划：本周生成了 {planner['plans_recorded']} 份研究计划，"
+            f"提出 {planner['inquiries_raised']} 个待核实的问题，其中 {planner['dispatched']} 个已安排专项研究"
             + ("。" if ratio is None else f"（{ratio:.0%}）。")
-            + (f"{planner['dispatch_reason']}" if planner.get("dispatch_reason") else "")
+            + (reason or "")
         )
     if ticks.get("available"):
         lines.append(
-            f"{ticks['ticks']} 次调度中，{ticks['idle_ticks']} 次所有流程都处于空闲状态。"
-            f"空闲比例为 {ticks['ratio']:.0%}。"
+            f"后台共运行 {ticks['ticks']} 轮，其中 {ticks['idle_ticks']} 轮没有工作可做"
+            f"（{ticks['ratio']:.0%}）。"
         )
     else:
-        lines.append(f"闲置率不可算：{ticks.get('reason')}")
+        lines.append("后台空闲比例暂时无法统计。")
     if checkpoints.get("available") and checkpoints["open"]:
         lines.append(
-            f"有 {checkpoints['open']} 个 stage 停在 entered 等人，"
-            f"最老的一个已经等了 {checkpoints['oldest_age_days']} 天；"
-            f"本周关掉了 {checkpoints['closed_this_week']} 个。"
+            f"有 {checkpoints['open']} 个研究阶段在等你审批，"
+            f"最久的已经等了 {checkpoints['oldest_age_days']} 天；"
+            f"本周处理了 {checkpoints['closed_this_week']} 个。"
         )
-    if scores.get("available"):
+    if scores.get("available") and not scores["published"]:
+        lines.append("质量评分：本周没有为任何研究产出打分。")
+    elif scores.get("available"):
         lines.append(
-            f"本周发布 {scores['published']} 条质量分（{scores['judged']} 条带判读，"
-            f"{scores['deterministic_only']} 条只有确定性层），覆盖 {scores['distinct_targets']} 份产出。"
+            f"质量评分：本周为 {scores['distinct_targets']} 份研究产出打了 {scores['published']} 次分"
+            f"（{scores['judged']} 次含评审意见，{scores['deterministic_only']} 次只有自动检查）。"
         )
     else:
-        lines.append(f"质量分不可读：{scores.get('reason')}")
+        lines.append("质量评分暂时无法读取。")
     if not journal.get("available"):
-        lines.append(f"人类反馈不可读：{journal.get('reason')}")
+        lines.append("你的反馈记录暂时无法读取。")
     elif journal["entries"]:
         words = "、".join(
-            f"{word} {count}" for word, count in journal["by_word"].items() if count
+            f"{FEEDBACK_WORD_LABELS.get(word, word)} {count} 条"
+            for word, count in journal["by_word"].items() if count
         )
-        partial = ("（只数了两处反馈表里的一处，"
-                   + "、".join(journal["missing_sources"]) + " 不在这个 Core 里）"
-                   if journal.get("partial") else "")
-        lines.append(f"人给了 {journal['entries']} 条反馈：{words}{partial}。")
+        partial = "（只统计到两处反馈记录中的一处）" if journal.get("partial") else ""
+        lines.append(f"本周收到你 {journal['entries']} 条反馈{partial}：{words}。")
     else:
-        partial = ("；另一处（" + "、".join(journal["missing_sources"])
-                   + "）不在这个 Core 里，没有数进来"
-                   if journal.get("partial") else "")
-        lines.append(
-            f"这一周没有人给过任何一条反馈{partial}。"
-            "五个词的反馈词表还没有 UI，所以「没有反馈」暂时不能读成「读过而没有意见」。"
-        )
+        partial = "（只统计到两处反馈记录中的一处）" if journal.get("partial") else ""
+        lines.append(f"这一周没有收到你的反馈{partial}。")
     outcomes = metrics.get("judgement_outcomes") or {}
     if outcomes.get("available"):
         # Chem §3.3, in one sentence: 不动也要能被评价. Cumulative rather than
@@ -1004,16 +1064,58 @@ def narrative(metrics: Mapping[str, Any], window: Mapping[str, Any]) -> dict[str
         # in April, and a weekly-only line would report almost always zero.
         to_date = outcomes["to_date"]
         lines.append(
-            f"判断结果台账里有 {outcomes['checked']} 条已评的判断："
-            f"{to_date['should_have_moved']} 条「当时该动没动」候选，"
-            f"{to_date['moved_right']} 条「动对了」，"
-            f"{to_date['held']} 条按兵不动是对的，"
-            f"{to_date['pending'] + to_date['unavailable']} 条还评不出来。"
-            "这是候选，不是绩效考核。"
+            f"历史判断跟踪：已评估 {outcomes['checked']} 条判断，"
+            f"其中 {to_date['should_have_moved']} 条可能是「当时该调整却没有调整」，"
+            f"{to_date['moved_right']} 条调整正确，"
+            f"{to_date['held']} 条维持不变是对的，"
+            f"{to_date['pending'] + to_date['unavailable']} 条暂时还无法评估。"
+            "这些只是复核线索，不是绩效考核。"
         )
     elif outcomes:
-        lines.append(f"判断结果台账读不出来：{outcomes.get('reason')}")
+        lines.append("历史判断跟踪暂时无法读取。")
     return {"title": NARRATIVE_TITLE, "prose": "\n".join(lines), "table": table[:MAX_TABLE_ROWS]}
+
+
+def technical_notes(metrics: Mapping[str, Any]) -> list[str]:
+    """The engineering reasons behind the owner's sentences, for 技术详情.
+
+    Unavailable readings say why in terms of tables and files, and the
+    attribution and scheduling gaps are named here, where a developer will
+    look, instead of in the owner's prose.
+    """
+
+    out: list[str] = []
+    spend = metrics.get("spend") or {}
+    ticks = metrics.get("ticks") or {}
+    scores = metrics.get("quality_scores") or {}
+    planner = metrics.get("planner") or {}
+    for name, value in metrics.items():
+        if isinstance(value, Mapping) and value.get("available") is False and value.get("reason"):
+            out.append(f"{name}: {value['reason']}")
+    if planner.get("dispatch_reason"):
+        out.append(f"planner: {planner['dispatch_reason']}")
+    journal = metrics.get("journal") or {}
+    if journal.get("partial"):
+        out.append("journal: 只数了两处反馈表里的一处，"
+                   + "、".join(journal.get("missing_sources") or []) + " 不在这个 Core 里")
+    if spend.get("available") and spend.get("pool_model") == "work_order_family":
+        out.append(
+            "C2 的 budget_pool 应当被写进 work order 的 id（或它自己的一列），"
+            "否则每一次「这条 lane 花了多少」都是一次对 ref 前缀的解析；"
+            f"今天有 {sum(1 for pool in spend['pools'] if pool['lane'] is None)} 个池认不到 lane。"
+        )
+    if not ticks.get("available"):
+        out.append(
+            "tick 摘要应当落到 Core 的一张 append-only 表（每 tick 一行：状态、各 lane 状态、耗时）。"
+            "现在它只写 run/heartbeat.json 并被下一次 tick 覆盖，所以闲置率、lane 卡顿、"
+            "调度密度这三类问题在事后一个都答不了。"
+        )
+    if scores.get("available") and scores["published"] == 0:
+        out.append(
+            "质量分需要一条 lane 或一个发布前钩子才会被调用；"
+            "Q1 的建议是先把确定性层接进发布前检查（零成本），判读层等第一次真实校准之后再定。"
+        )
+    return out
 
 
 # ---------------------------------------------------------------------------
@@ -1054,103 +1156,107 @@ def backlog_candidates(metrics: Mapping[str, Any], window: Mapping[str, Any]) ->
             and backlog.get("available") and backlog["new_questions"] == 0):
         top = spend["pools"][0] if spend["pools"] else {"pool": "?", "cost_usd": 0}
         out.append(_candidate(
-            f"{window['iso_week']} 花了 {_usd(spend['total_cost_usd'])} 却没有登记任何一条新问题，"
-            f"最大的一池 {top['pool']} 到底买到了什么？",
-            "一周的花费如果没有让未决问题集合变化，那它要么在补已知的证据，要么在重复。"
-            "两种都可能是对的，但要说得出是哪一种。",
+            f"{window['iso_week']} 花了 {_usd(spend['total_cost_usd'])}，却没有新增任何待研究问题，"
+            f"花得最多的「{pool_label(top['pool'])}」带来了什么？",
+            "花费没有带来新问题，要么是在补充已有证据，要么是在重复劳动；"
+            "两种都可能合理，但要说得清是哪一种。",
             [f"pool:{pool['pool']}" for pool in spend["pools"][:3]],
         ))
     if (planner.get("available") and planner["inquiries_raised"] > 0
             and planner["dispatched"] == 0):
         out.append(_candidate(
-            f"规划器这一周提出了 {planner['inquiries_raised']} 条 inquiry 而一条都没有被派发，"
-            "其中哪几条值得先做成 ResearchTask？",
-            planner.get("dispatch_reason")
-            or "inquiry 只有被派发才会变成证据；没有派发路径时它们只是记录。",
+            f"系统本周提出的 {planner['inquiries_raised']} 个待核实问题都还没有安排专项研究，"
+            "哪几个值得优先做？",
+            _dispatch_owner_reason(planner)
+            or "问题只有安排了研究才会变成证据；没有安排时它们只是记录。",
             [],
         ))
     if backlog.get("available") and backlog["new_questions"] > 3 * max(backlog["answered"], 1):
         out.append(_candidate(
-            f"未决问题这一周净增 {backlog['new_questions'] - backlog['answered']} 条，"
-            "哪一条最该先被回答？",
-            "问题登记得比回答快三倍以上时，账本在变成愿望清单。",
+            f"待研究问题本周净增 {backlog['new_questions'] - backlog['answered']} 个，"
+            "哪一个最该先回答？",
+            "新问题增加的速度是回答速度的三倍以上，问题清单正在变成愿望清单。",
             backlog["new_question_refs"][:5],
         ))
     if checkpoints.get("available") and (checkpoints["oldest_age_days"] or 0) >= 14:
         oldest = checkpoints["checkpoints"][0] if checkpoints["checkpoints"] else {}
+        stage = STAGE_LABELS.get(str(oldest.get("stage_ref") or ""), "某个研究阶段")
         out.append(_candidate(
-            f"{oldest.get('stage_ref', '某个 stage')}（{oldest.get('company_ref', '')}）"
-            f"已经在 entered 上等了 {checkpoints['oldest_age_days']} 天，它在等什么？",
-            "人类检查点是设计里的停顿，不是设计里的死锁。等待超过两周说明要么材料没备齐，"
-            "要么这个检查点没人认领。",
+            f"{_company_text(oldest.get('company_ref'))}的「{stage}」阶段已经等待审批 "
+            f"{checkpoints['oldest_age_days']} 天，还缺什么？",
+            "审批是有意设置的停顿，不应变成长期卡住；等待超过两周，"
+            "通常是材料没有备齐，或者没有人处理。",
             [str(oldest.get("stage_ref") or "")],
         ))
     if ticks.get("available") and ticks["ratio"] >= 0.5:
         idle_lanes = [key for key, value in (ticks.get("idle_by_lane") or {}).items() if value >= 0.9]
         out.append(_candidate(
-            f"一半以上的 tick（{ticks['ratio']:.0%}）里每条 lane 都无事可做，"
-            "这些 lane 是真的没有工作，还是选择规则挑不出来？",
-            "闲置本身不是错——五家公司做完规格之后就该安静。但闲置率要能和「有工作但挑不出来」"
-            "分开，否则一条卡住的 lane 和一条完成的 lane 长得一样。",
+            f"后台有 {ticks['ratio']:.0%} 的轮次没有工作可做，"
+            "是真的没有工作，还是挑不出该做的工作？",
+            "研究告一段落后空闲是正常的，但要能和「有工作却挑不出来」区分开，"
+            "否则卡住的环节和已完成的环节看起来一样。",
             [f"lane:{name}" for name in idle_lanes[:5]],
         ))
     if scores.get("available") and scores["published"] == 0:
         out.append(_candidate(
-            "这一周没有为任何一份产出打过质量分，是没有新产出，还是打分没有接进任何一条 lane？",
-            "Q1 建了评分表与打分器但没有建 lane：没有人调用它，它就只是一个能力。",
+            "这一周没有任何研究产出被打质量分，是没有新产出，还是评分还没有接入？",
+            "评分工具已经具备，但没有被调用时它不会产生任何结果。",
             [],
         ))
     if journal.get("available") and journal["entries"] == 0:
-        # Fires even when the count is partial: zero on the table that *is*
-        # installed is still zero, and the missing half is named in the
-        # ``because`` rather than used as a reason to stay quiet.
-        partial = (
-            "（这一周只数得到两处反馈表里的一处，"
-            + "、".join(journal.get("missing_sources") or []) + " 还没有部署）"
-            if journal.get("partial") else ""
-        )
         out.append(_candidate(
-            "这一周没有任何人类反馈落到 AnalystJournal 或周报反馈上，缺的是意见还是入口？",
-            "五个词的反馈词表已经存在两处，两处都还没有 UI。没有入口时的沉默读不出任何东西。"
-            + partial,
+            "这一周没有收到任何反馈，是没有意见，还是不方便反馈？",
+            "没有反馈时，无法判断研究产出是否被阅读和认可。",
             [],
         ))
     return out[:MAX_BACKLOG_CANDIDATES]
 
 
 def policy_suggestions(metrics: Mapping[str, Any]) -> list[str]:
-    """Sentences about policy.  This module never changes any."""
+    """Sentences about policy, for the owner.  This module never changes any.
+
+    Engineering notes (attribution, the tick ledger, the scoring hook) are in
+    ``technical_notes``: they are for whoever builds the system, not for the
+    person deciding the research.
+    """
 
     out: list[str] = []
     spend = metrics["spend"]
-    ticks = metrics["ticks"]
-    scores = metrics["quality_scores"]
-    if spend.get("available") and spend.get("pool_model") == "work_order_family":
-        out.append(
-            "C2 的 budget_pool 应当被写进 work order 的 id（或它自己的一列），"
-            "否则每一次「这条 lane 花了多少」都是一次对 ref 前缀的解析；"
-            f"今天有 {sum(1 for pool in spend['pools'] if pool['lane'] is None)} 个池认不到 lane。"
-        )
-    if not ticks.get("available"):
-        out.append(
-            "tick 摘要应当落到 Core 的一张 append-only 表（每 tick 一行：状态、各 lane 状态、耗时）。"
-            "现在它只写 run/heartbeat.json 并被下一次 tick 覆盖，所以闲置率、lane 卡顿、"
-            "调度密度这三类问题在事后一个都答不了。"
-        )
-    if scores.get("available") and scores["published"] == 0:
-        out.append(
-            "质量分需要一条 lane 或一个发布前钩子才会被调用；"
-            "Q1 的建议是先把确定性层接进发布前检查（零成本），判读层等第一次真实校准之后再定。"
-        )
     if spend.get("available") and spend.get("share_of_mission_cap") is not None:
         share = spend["share_of_mission_cap"]
         if share < 0.05:
             out.append(
-                f"本周实际花费只占 mission 预算上限的{_share(share)}。"
-                "预算不是瓶颈，所以「做得少」的原因要到别处找（选择规则、素材、派发路径），"
-                "提高上限不会让系统做更多事。"
+                f"本周实际花费只占本研究任务预算上限的 {_share(share)}，预算不是限制因素；"
+                "研究做得少的原因在别处（选题规则、资料、研究安排），"
+                "提高预算上限不会让系统多做事。"
             )
     return out[:MAX_POLICY_SUGGESTIONS]
+
+
+def owner_view(record: Mapping[str, Any]) -> dict[str, Any] | None:
+    """The owner's reading of a stored reflection, re-rendered from its metrics.
+
+    A record written before 2026-10-08 carries the developer wording; its
+    metrics are the same facts, so the page renders them again with the
+    templates above.  ``None`` when the record has no metrics to render.
+    """
+
+    metrics = record.get("metrics")
+    window = dict(record.get("window") or {})
+    window.setdefault("iso_week", record.get("iso_week"))
+    if not isinstance(metrics, Mapping) or not window.get("iso_week"):
+        return None
+    try:
+        told = narrative(metrics, window)
+        return {
+            "title": told["title"], "prose": told["prose"], "table": told["table"],
+            "backlog_candidates": backlog_candidates(metrics, window),
+            "policy_suggestions": policy_suggestions(metrics),
+            "authority_note": OWNER_AUTHORITY_NOTE,
+            "technical_notes": technical_notes(metrics),
+        }
+    except (KeyError, TypeError, ValueError):
+        return None
 
 
 # ---------------------------------------------------------------------------
@@ -1187,15 +1293,12 @@ def build_reflection(
         "narrative": narrative(metrics, frame),
         "backlog_candidates": backlog_candidates(metrics, frame),
         "policy_suggestions": policy_suggestions(metrics),
+        "technical_notes": technical_notes(metrics),
         "inputs_hash": inputs_hash(metrics, frame),
         # Said in the record, not only in the docstring: a reader of one row
         # should not have to find this module to learn what it is not allowed
         # to do.
-        "authority_note": (
-            "这条记录只读不写：它不写 Ledger、不改 policy、不登记问题。"
-            "backlog_candidates 是候选，要由 planner 或人经 ResearchQuestionBacklog 的准入路径登记；"
-            "policy_suggestions 是句子。"
-        ),
+        "authority_note": OWNER_AUTHORITY_NOTE,
     }
 
 
@@ -1405,6 +1508,9 @@ __all__ = [
     "judgement_outcomes",
     "narrative",
     "open_human_checkpoints",
+    "owner_view",
+    "pool_label",
+    "technical_notes",
     "planner_inquiries",
     "policy_suggestions",
     "quality_scores_published",

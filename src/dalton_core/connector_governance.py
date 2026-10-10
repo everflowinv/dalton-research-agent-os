@@ -146,6 +146,7 @@ class _KindSpec:
         schema_hash: Callable[[], str],
         permissions: Callable[[], dict[str, Any]],
         fixture_hash: Callable[[], str],
+        sealed_fixture_hashes: Callable[[], tuple[str, ...]] | None = None,
     ) -> None:
         self.capability_id = capability_id
         self.template_key = template_key
@@ -153,6 +154,11 @@ class _KindSpec:
         self.schema_hash = schema_hash
         self.permissions = permissions
         self.fixture_hash = fixture_hash
+        # Other spellings of the *same* current fixture evidence that a
+        # descriptor may have sealed into its receipt.  Each is computed from
+        # today's packaged manifest, so a changed fixture still moves every
+        # one of them and still needs the owner.
+        self.sealed_fixture_hashes = sealed_fixture_hashes
 
 
 def _alpha_source_hash() -> str:
@@ -395,6 +401,25 @@ def _sec_fixture_hash() -> str:
     body["operations"] = [item for item in manifest["operations"] if item["operation"] in keep]
     body["cases"] = [item for item in manifest["cases"] if item["operation"] in keep]
     return content_hash(body)
+
+
+def _sec_sealed_fixture_hashes() -> tuple[str, ...]:
+    """Both ways an SEC approval receipt has bound today's fixture evidence.
+
+    2026-09-29: 485c9ad6 moved the binding from the template's whole manifest
+    to its projection onto the approved operations, which put legacy's
+    descriptors (published 2026-08-26 / 09-09, before S5, sealed 8f88e649...)
+    back in step -- and took ws-7d's filings index out of it.  ws-7d's
+    descriptor was published on 2026-09-16, after S5, so its receipt sealed the
+    whole manifest (2990cae1...); from the deploy on 09-27 every one of its
+    searches was refused at lease use with "capability approval changed after
+    lease issuance".  Neither receipt is stale: each binds exactly the fixture
+    evidence the package carries today.  A descriptor that sealed either one
+    is honoured with that one; one that sealed anything else is still refused.
+    """
+
+    whole = load_packaged_connector_inventory()["templates"]["sec"]["fixture_manifest_hash"]
+    return (_sec_fixture_hash(), whole)
 
 
 def _web_search_source_hash() -> str:
@@ -651,6 +676,7 @@ GOVERNANCE_KIND_REGISTRY: dict[str, _KindSpec] = {
         schema_hash=_sec_filings_index_schema_hash,
         permissions=_sec_permissions,
         fixture_hash=_sec_fixture_hash,
+        sealed_fixture_hashes=_sec_sealed_fixture_hashes,
     ),
     SEC_COMPANY_FACTS_KIND: _KindSpec(
         capability_id=SEC_CAPABILITY_ID,
@@ -659,6 +685,7 @@ GOVERNANCE_KIND_REGISTRY: dict[str, _KindSpec] = {
         schema_hash=_sec_schema_hash,
         permissions=_sec_permissions,
         fixture_hash=_sec_fixture_hash,
+        sealed_fixture_hashes=_sec_sealed_fixture_hashes,
     ),
     # P9d-4a: OpenClaw's host-owned Gemini web_search is its own governed
     # capability (discovery-only public-web source), approved separately.
@@ -1516,6 +1543,24 @@ class ConnectorGovernance:
                 f"connector governance {self.id} is {self.status}; owner approval is required"
             )
 
+    def _fixture_binding(self, query: Mapping[str, Any]) -> str:
+        """The fixture hash this receipt binds.
+
+        A new descriptor seals the kind's current binding.  At lease use the
+        catalog also says what the published descriptor sealed
+        (``sealed_fixture_manifest_hash``); that one is kept only when it is
+        another spelling of today's same fixture evidence (see
+        ``_sec_sealed_fixture_hashes``), never a hash from an older manifest.
+        """
+
+        current = self._spec.fixture_hash()
+        sealed = query.get("sealed_fixture_manifest_hash")
+        alternatives = self._spec.sealed_fixture_hashes
+        if (isinstance(sealed, str) and sealed != current and alternatives is not None
+                and sealed in alternatives()):
+            return sealed
+        return current
+
     def approval(self, query: Mapping[str, Any]) -> dict[str, Any] | None:
         """Resolve a hash-bound approval receipt for the registered kind."""
 
@@ -1534,7 +1579,7 @@ class ConnectorGovernance:
             "artifact_ref": query["source_ref"],
             "artifact_hash": query["source_hash"],
             "schema_hash": query["schema_hash"],
-            "fixture_manifest_hash": self._spec.fixture_hash(),
+            "fixture_manifest_hash": self._fixture_binding(query),
             "attestation_ref": self.wire["attestation_ref"],
             "attestation_hash": content_hash(
                 {"governance_id": self.id, "governance_hash": self.content_hash}

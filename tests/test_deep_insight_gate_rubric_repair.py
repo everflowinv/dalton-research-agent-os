@@ -87,6 +87,11 @@ class TargetTests(unittest.TestCase):
 
 
 class GateRubricRepairTests(unittest.TestCase):
+    """Batch D: owner decision 2026-10-09 allows views and recommendations, so a
+    policy that binds a criterion to ``no_investment_conclusion`` no longer
+    refuses 「买入」 -- there is no banned-word table to repair against.  The
+    repair machinery itself is exercised by the numbers and lint findings."""
+
     def setUp(self):
         self.harness = _gate.Harness()
         self.addCleanup(self.harness.close)
@@ -99,39 +104,16 @@ class GateRubricRepairTests(unittest.TestCase):
             model_factory=lambda: model,
             verifier_model_factory=lambda: _gate.FakeModel(route="route:verify"))
 
-    def test_the_conclusion_is_removed_once_and_the_draft_goes_through(self):
-        model = ConclusionModel(
-            sentence="这一问的判断由所引材料支撑。" + CALL, answer_all=True)
-        summary = self.run_with(model)
-        if summary["gate_status"] in {"nothing_drafted", "classification_conflict"}:
-            self.skipTest(f"fixture stopped earlier: {summary['gate_status']}")
-        self.assertEqual(summary["findings_repair_rounds"],
-                         MAX_FINDINGS_REPAIR_ROUNDS)
-        self.assertTrue(summary["findings_repair"])
-        row = summary["findings_repair"][0]
-        self.assertEqual(row["kind"], "output_rubric")
-        self.assertEqual(row["status"], "repaired")
-        self.assertEqual(row["repair_attempts"], 1)
-        self.assertEqual(row["findings"][0]["code"], "investment_conclusion")
-        self.assertEqual(summary["output_rubric_findings"], [])
-        self.assertNotEqual(summary["gate_status"], "constitution_refused")
-        self.assertIn("买入", model.repair_prompts[0])
-
-    def test_a_repair_that_keeps_the_call_refuses_once_and_stops(self):
+    def test_a_labelled_recommendation_is_not_a_rubric_finding(self):
         model = ConclusionModel(
             sentence="这一问的判断由所引材料支撑。" + CALL, answer_all=True,
             repairable=False)
         summary = self.run_with(model)
         if summary["gate_status"] in {"nothing_drafted", "classification_conflict"}:
             self.skipTest(f"fixture stopped earlier: {summary['gate_status']}")
-        self.assertEqual(summary["gate_status"], "constitution_refused")
-        self.assertEqual(summary["findings_repair_rounds"], 1)
-        self.assertIn("after one repair call", summary["failure_reason"])
-        self.assertTrue(summary["output_rubric_findings"])
-        # One, not a loop.
-        self.assertEqual(
-            len([row for row in summary["findings_repair"]
-                 if row["repair_attempts"]]), len(model.repair_prompts))
+        self.assertNotEqual(summary["gate_status"], "constitution_refused")
+        self.assertEqual(summary.get("output_rubric_findings") or [], [])
+        self.assertEqual(model.repair_prompts, [])
 
 
 if __name__ == "__main__":  # pragma: no cover

@@ -32,18 +32,21 @@ class FoundationResearchPromptContractTests(unittest.TestCase):
         current=_verifier_contract_pairs(digest, blocks, COMPANY, current=True)
         historical=_verifier_contract_pairs(digest, blocks, COMPANY, current=False)
         self.assertEqual(len(current), 1)
-        self.assertEqual(len(historical), 2)
+        # 0.4 (current), 0.2 and 0.3 (before batch D appended the lint).
+        self.assertEqual(len(historical), 3)
         current_pair=next(iter(current))
         legacy_pair=next(pair for pair in historical if pair not in current)
         self.assertNotIn((current_pair[0], legacy_pair[1]), historical)
         self.assertNotIn((legacy_pair[0], current_pair[1]), historical)
 
-    def test_initial_screen_is_decisive_but_not_a_trade_gate(self):
+    def test_initial_screen_is_decisive_and_allows_a_view(self):
         prompt=screen.build_section_prompt(title="核心判断", guidance="判断驱动", company=COMPANY,
             mission={"title":"Coverage","objective":"Understand business","research_questions":[]},
             context={"numbers":[],"claims":[{"tag":"C1","period":"FY2026Q1","statement":"Demand improved."}]})
         self.assertIn("choose the evidence-weighted current case", prompt)
-        self.assertIn("This is analysis, not a trade call", prompt)
+        # Owner decision 2026-10-09: views, watch prices and a trade angle are allowed.
+        self.assertNotIn("not a trade call", prompt)
+        self.assertIn("watch price", prompt)
         self.assertIn("判断/推断", prompt)
         self.assertNotIn("尚未接入", screen.VALUATION_GAP)
 
@@ -59,13 +62,16 @@ class FoundationResearchPromptContractTests(unittest.TestCase):
             self.assertIn("inference", prompt)
         self.assertIn("moat", fp)
 
-    def test_gate_prefers_a_case_without_inventing_a_recommendation(self):
+    def test_gate_prefers_a_case_and_allows_a_labelled_view(self):
         group=gate.GROUPS[0]
         questions={ref:"What is the current case?" for ref in gate.GROUP_QUESTIONS[group]}
         prompt=gate.build_group_prompt(group=group, questions=questions, material=gate.material_rows(RAW),
                                       company=COMPANY)
         self.assertIn("choose the evidence-weighted current case", prompt)
-        self.assertIn("do not turn it into an investment recommendation", prompt)
+        self.assertNotIn("do not turn it into an investment recommendation", prompt)
+        self.assertIn("a view or recommendation is allowed when the cited rows support it", prompt)
+        self.assertIn("q10:", prompt)
+        self.assertIn("[usd_revenue_as_organic]", prompt)
         self.assertIn("existing source or research action", prompt)
 
     def test_model_spec_states_actual_context_boundary(self):

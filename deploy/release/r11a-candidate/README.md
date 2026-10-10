@@ -4,13 +4,9 @@ This directory prepares a review packet for source commit
 `424c22529d5317c4c5c9dc8ba88f37299cea3f49`. It does not contain an accepted
 release manifest and none of its commands mutate live state during staging.
 
-`inputs.template.json` is intentionally incomplete. `inputs.review-candidate.json`
-binds the available R11a evidence: the exact wheel, the native 7,164-test result,
-the copied-state rehearsal, the current 15-config snapshot, web-v6, the provider
-bridge and OpenClaw bytes, Alpha v3, mission authority, and the newest verified
-backup retained by the keep-latest-3 policy.
+`inputs.template.json` is an intentionally incomplete public protocol example. The original machine-bound candidate inputs and provider snapshot are privately archived; use a new reviewed input file for any actual operation. The historical tooling remains because its CAS, rollback and protected-state tests still exercise it, not because it is the current deployment plan.
 
-Run the inert check or stage a candidate packet:
+Run the inert template check or prepare a new packet:
 
 ```sh
 python3 scripts/stage_r11a_ops_candidate.py \
@@ -18,8 +14,8 @@ python3 scripts/stage_r11a_ops_candidate.py \
   --verify-inert-template
 
 python3 scripts/stage_r11a_ops_candidate.py \
-  --inputs deploy/release/r11a-candidate/inputs.review-candidate.json \
-  --output /a/new/review-packet-directory
+  --inputs <reviewed-input.json> \
+  --output <new-review-packet-directory>
 ```
 
 The staged manifest remains `staged_pending_owner_acceptance`.

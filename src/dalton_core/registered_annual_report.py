@@ -18,7 +18,11 @@ from typing import Any
 from urllib.parse import urlsplit
 
 from .store import canonical_json, content_hash
-from .public_web_extraction_source import verified_public_web_source
+from .public_web_extraction_source import (
+    INLINE_XBRL_RENDERER,
+    renderer_is_legacy_for_inline_xbrl,
+    verified_public_web_source,
+)
 
 
 OPERATION = "search_registered_annual_report"
@@ -606,6 +610,10 @@ class RegisteredAnnualReportRegistry:
                 manifest,
                 self.receipt_reader,
                 max_source_chars=normalized["limits"]["max_source_bytes"],
+                # 2026-10-09: a registration made before the inline-XBRL
+                # renderer binds the text it was made from.
+                legacy=renderer_is_legacy_for_inline_xbrl(
+                    normalized.get("source_renderer")),
             )
         except Exception as exc:  # acquisition authorities expose typed conflicts
             raise RegisteredAnnualReportError(
@@ -773,6 +781,25 @@ class RegisteredAnnualReportRegistry:
                 "completed source is not a full bounded SEC accession rendering"
             )
         source_content_hash = source_bytes_hash(rendering["text"].encode("utf-8"))
+        if (
+            completion is not None
+            and completion["verified_source_content_hash"] != source_content_hash
+            and rendering["renderer"].split("|")[-1] == INLINE_XBRL_RENDERER
+        ):
+            # 2026-10-09: a completion proof taken before the inline-XBRL
+            # renderer existed was taken over the legacy rendering.
+            try:
+                manifest, rendering = verified_public_web_source(
+                    self.core, self.spool,
+                    self.manifest_reader(discovered["ticket_ref"], document_ref),
+                    self.receipt_reader,
+                    max_source_chars=limits_copy["max_source_bytes"], legacy=True,
+                )
+            except Exception as exc:  # same typed conflicts as above
+                raise RegisteredAnnualReportError(
+                    f"acquired annual report source verification failed: {exc}"
+                ) from exc
+            source_content_hash = source_bytes_hash(rendering["text"].encode("utf-8"))
         if (
             completion is not None
             and completion["verified_source_content_hash"] != source_content_hash

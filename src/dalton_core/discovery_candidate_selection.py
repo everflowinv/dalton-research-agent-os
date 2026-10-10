@@ -3,7 +3,8 @@ from __future__ import annotations
 
 import json
 import re
-from collections.abc import Mapping
+import unicodedata
+from collections.abc import Mapping, Sequence
 from typing import Any
 
 from .store import canonical_json, content_hash
@@ -17,11 +18,77 @@ register_purpose_tier(PURPOSE, TIER_CHEAP)
 _TEXT_FIELDS = ("title", "publish_time", "rank_date", "document_code", "type_id")
 _LIST_FIELDS = ("companies", "industries", "markets", "sources")
 MAX_PROJECTED_LIST_ITEMS = 5
+#: Tag lists up to this length project exactly as they always have.  Before
+#: 2026-09-29 a longer one refused the whole page ("candidate companies is
+#: invalid"), and one broker's daily-highlights report tagged with 24-193
+#: issuers held every AlphaEngine acquisition behind it on both environments.
+#: A longer list is now truncated deterministically instead (see
+#: ``_project_long_list``); the bound only decides which path a list takes, so
+#: every view persisted before the change keeps its exact bytes and hash.
+MAX_SOURCE_LIST_ITEMS = 20
+#: The most tag values one projected field may carry when mission companies
+#: are pulled forward: every covered company that is tagged is kept.
+MAX_PRIORITY_PROJECTED_ITEMS = 20
+#: Versions the deterministic rules a view is built by.  A discovery
+#: quarantined for a deterministic selection error names the version it failed
+#: under; bumping this after a rule fix releases every such quarantine.
+SELECTION_RULES_VERSION = "discovery-candidate-view-rules:2"
 _QUARTER_WORDS = {"first": 1, "second": 2, "third": 3, "fourth": 4}
 
 
 class CandidateSelectionError(ValueError):
-    pass
+    """A candidate page the selector refuses.
+
+    Every refusal raised while building the view or the prompt is a pure
+    function of the stored search bytes, the plan and the mission, so the same
+    page is refused again on every tick: the coordinator quarantines that one
+    discovery rather than retrying it forever.
+    """
+
+    deterministic = True
+
+
+def _fold(text: str) -> str:
+    return unicodedata.normalize("NFKC", text).casefold().strip()
+
+
+def _priority_terms(terms: Sequence[str] | None) -> tuple[str, ...]:
+    """The mission's company names, folded, de-duplicated and sorted."""
+
+    folded = set()
+    for term in terms or ():
+        if isinstance(term, str):
+            value = _fold(term)
+            if len(value) >= 2:
+                folded.add(value)
+    return tuple(sorted(folded))
+
+
+def _names_covered_company(value: str, terms: Sequence[str]) -> bool:
+    folded = _fold(value)
+    for term in terms:
+        if term.isascii():
+            # Word-boundary, as ``document_subject`` matches names: "IBM" must
+            # not fire inside another token.
+            if re.search(rf"(?<![a-z0-9]){re.escape(term)}(?![a-z0-9])", folded):
+                return True
+        elif term in folded:
+            return True
+    return False
+
+
+def _project_long_list(values: list[str], terms: Sequence[str]) -> tuple[list[str], int]:
+    """Keep the covered companies first, then the rest in source order.
+
+    Deterministic: the same list and the same mission always project the same
+    way.  Returns the projected values and how many covered ones were pulled
+    forward.
+    """
+
+    covered = [x for x in values if terms and _names_covered_company(x, terms)]
+    rest = [x for x in values if not (terms and _names_covered_company(x, terms))]
+    keep = min(max(MAX_PROJECTED_LIST_ITEMS, len(covered)), MAX_PRIORITY_PROJECTED_ITEMS)
+    return (covered + rest)[:keep], len(covered)
 
 
 def _quarter_periods(text: str) -> set[tuple[int, int]]:
@@ -95,9 +162,18 @@ class CockpitDiscoveryCandidateSelector:
                 "recovery_epoch": recovery_epoch}
 
 
-def candidate_view(raw_response: bytes, envelope: Mapping[str, Any]) -> dict[str, Any]:
-    """Project only bounded search metadata from exact raw JSON-RPC bytes."""
+def candidate_view(raw_response: bytes, envelope: Mapping[str, Any], *,
+                   priority_terms: Sequence[str] | None = None) -> dict[str, Any]:
+    """Project only bounded search metadata from exact raw JSON-RPC bytes.
+
+    ``priority_terms`` are the names of the companies the mission covers.  They
+    only matter for a tag list longer than ``MAX_SOURCE_LIST_ITEMS``: that list
+    is truncated with the covered companies first, and the candidate records
+    the original length and the hash of the whole list.
+    """
     import hashlib
+    terms = _priority_terms(priority_terms)
+    long_lists = False
     envelope_wire = dict(envelope)
     claimed_envelope_hash = envelope_wire.pop("content_hash", None)
     if claimed_envelope_hash != content_hash(envelope_wire):
@@ -140,11 +216,19 @@ def candidate_view(raw_response: bytes, envelope: Mapping[str, Any]) -> dict[str
         for field in _LIST_FIELDS:
             values = raw.get(field)
             if values is not None:
-                if (not isinstance(values, list) or len(values) > 20
+                if (not isinstance(values, list)
                         or not all(isinstance(x, str) for x in values)):
                     raise CandidateSelectionError(f"candidate {field} is invalid")
-                item[field] = [x[:120] for x in values[:MAX_PROJECTED_LIST_ITEMS]]
-                item[field + "_truncated"] = len(values) > MAX_PROJECTED_LIST_ITEMS
+                if len(values) > MAX_SOURCE_LIST_ITEMS:
+                    projected, covered = _project_long_list(values, terms)
+                    item[field] = [x[:120] for x in projected]
+                    item[field + "_truncated"] = True
+                    item[field + "_original_count"] = len(values)
+                    item[field + "_covered_kept"] = covered
+                    long_lists = True
+                else:
+                    item[field] = [x[:120] for x in values[:MAX_PROJECTED_LIST_ITEMS]]
+                    item[field + "_truncated"] = len(values) > MAX_PROJECTED_LIST_ITEMS
                 item[field + "_hash"] = hashlib.sha256(
                     json.dumps(values, ensure_ascii=False, separators=(",", ":")).encode()
                 ).hexdigest()
@@ -154,6 +238,16 @@ def candidate_view(raw_response: bytes, envelope: Mapping[str, Any]) -> dict[str
     base = {"schema_version": "0.1", "contract_ref": CONTRACT_REF,
             "source_envelope_ref": envelope["id"],
             "source_envelope_hash": envelope["content_hash"], "candidates": candidates}
+    if long_lists:
+        # Only a view that took the truncation path says so, so every view
+        # built before it existed keeps its exact hash (and its paid selection).
+        base["long_list_projection"] = {
+            "rules_version": SELECTION_RULES_VERSION,
+            "max_source_items": MAX_SOURCE_LIST_ITEMS,
+            "priority_terms_hash": hashlib.sha256(
+                json.dumps(list(terms), ensure_ascii=False, separators=(",", ":")).encode()
+            ).hexdigest(),
+        }
     return {**base, "content_hash": content_hash(base)}
 
 
@@ -193,15 +287,59 @@ def selection_prompt(view: Mapping[str, Any], *, company: Mapping[str, Any],
                 "selection_context": context, "candidate_view": dict(view)}))
 
 
+_FENCE_RE = re.compile(r"```[A-Za-z0-9_-]*[ \t]*\r?\n(.*?)\r?\n?[ \t]*```", re.DOTALL)
+
+
+def _unwrap_reply(text: Any) -> Any:
+    """The one JSON value a model reply carries, without harmless wrapping.
+
+    2026-10-01: models answer the closed shape inside a markdown code fence or
+    after a sentence of prose often enough to matter.  Only *wrapping* is
+    removed: the reply must hold exactly one fenced block, or exactly one
+    top-level JSON object among prose.  Whatever comes out is still held to
+    the strict closed shape by ``validate_selection``; nothing inside the
+    object is repaired, and an ambiguous reply (two objects, two fences) is
+    refused rather than guessed at.  Strict JSON parses exactly as before, so
+    every persisted selection revalidates to the same bytes.
+    """
+
+    if not isinstance(text, str):
+        raise CandidateSelectionError("selection is not JSON")
+    try:
+        return json.loads(text)
+    except json.JSONDecodeError:
+        pass
+    fences = _FENCE_RE.findall(text)
+    if len(fences) == 1:
+        try:
+            return json.loads(fences[0])
+        except json.JSONDecodeError as exc:
+            raise CandidateSelectionError("selection is not JSON") from exc
+    if len(fences) > 1:
+        raise CandidateSelectionError("selection reply is ambiguous")
+    decoder = json.JSONDecoder()
+    found: list[Any] = []
+    index = text.find("{")
+    while index != -1:
+        try:
+            value, end = decoder.raw_decode(text, index)
+        except json.JSONDecodeError:
+            index = text.find("{", index + 1)
+            continue
+        found.append(value)
+        index = text.find("{", end)
+    if len(found) != 1:
+        raise CandidateSelectionError(
+            "selection is not JSON" if not found else "selection reply is ambiguous")
+    return found[0]
+
+
 def validate_selection(
     text: str, view: Mapping[str, Any], *,
     missing_periods: list[str] | None = None,
     selection_context: Mapping[str, Any] | None = None,
 ) -> dict[str, Any]:
-    try:
-        raw = json.loads(text)
-    except json.JSONDecodeError as exc:
-        raise CandidateSelectionError("selection is not JSON") from exc
+    raw = _unwrap_reply(text)
     if not isinstance(raw, Mapping) or set(raw) != {"selected"} or not isinstance(raw["selected"], list):
         raise CandidateSelectionError("selection has an invalid closed shape")
     candidates = {row["document_ref"]: row for row in view["candidates"]}

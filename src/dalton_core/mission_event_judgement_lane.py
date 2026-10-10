@@ -226,12 +226,16 @@ def newest_unjudged(store: Any, mission: Mapping[str, Any]) -> str | None:
     if not isinstance(mission_ref, str) or not mission_ref:
         return None
     placeholders = ",".join("?" for _ in universe)
+    from .event_triage import screened_out_sql, triage_table_exists
+
+    screened = (screened_out_sql("e")
+                if triage_table_exists(store.connection) else "")
     row = store.connection.execute(
         "SELECT e.event_id AS event_id FROM research_events e "
         "JOIN coverage_mission_versions mv "
         "ON mv.mission_version_id=e.mission_version_ref "
         "LEFT JOIN event_judgements j ON j.event_ref = e.event_id "
-        f"WHERE j.event_ref IS NULL AND mv.mission_ref=? "
+        f"WHERE j.event_ref IS NULL AND mv.mission_ref=?{screened} "
         f"AND e.company_ref IN ({placeholders}) "
         "ORDER BY e.occurred_at DESC, e.event_id DESC LIMIT 1",
         [mission_ref, *universe],
@@ -243,7 +247,7 @@ def pending_event_groups(store: Any, missions: Any,
                          mission: Mapping[str, Any]) -> list[dict[str, Any]]:
     """Mission-scoped eligible groups, newest first, with durable identities."""
     from .event_judgement_cli import (
-        buyback_group_key, incremental_group_hash, unjudged_event_groups,
+        buyback_group_key, incremental_group_hash, job_group_hash, result_jobs, unjudged_event_groups,
     )
     from .event_judgement import EventJudgementAuthority
     from .research_event import ResearchEventAuthority
@@ -273,8 +277,38 @@ def pending_event_groups(store: Any, missions: Any,
                 "group_key": identity, "occurred_at": max(
                     str(item["occurred_at"]) for item in group),
             })
+        # Batch F: a result event owes a bounded re-judgement (its body
+        # arrived, or a same-event document within 72 hours), or an unjudged
+        # re-recording of it is recorded against its judgement.
+        state_dir = _state_dir_of(store)
+        try:
+            owed = result_jobs(events, company_ref=company_ref, state_dir=state_dir,
+                               mission_version_refs=tuple(sorted(allowed_versions)))
+        except Exception:  # noqa: BLE001 - the unjudged groups still go ahead
+            owed = []
+        covered = {ref for job in owed for ref in job.get("new_refs") or ()}
+        if covered:
+            candidates = [item for item in candidates
+                          if not covered.intersection(item["event_refs"])]
+        for job in owed:
+            group = job["group"]
+            group_hash = job_group_hash(job)
+            identity = "|".join((mission["id"], company_ref, job["kind"], *job["key"], group_hash))
+            candidates.append({
+                "company_ref": company_ref, "event_ref": group[0]["id"],
+                "event_refs": tuple(sorted(item["id"] for item in group)),
+                "group_hash": group_hash, "group_key": identity,
+                "occurred_at": max(str(item["occurred_at"]) for item in group),
+            })
     return sorted(candidates, key=lambda item: (item["occurred_at"], item["group_key"]),
                   reverse=True)
+
+
+def _state_dir_of(store: Any) -> Path | None:
+    path = getattr(store, "path", None)
+    if not path or path == ":memory:":
+        return None
+    return Path(path).parent
 
 
 def publish_no_change_digests(store: Any, mission: Mapping[str, Any],
@@ -375,6 +409,7 @@ def argv_fragment(context: Any) -> list[str]:
 
 LANE = register_lane(LaneSpec(
     operation="dispatch_event_judgement",
+    failure_ledger="mission_event_judgement",
     order=116,
     driver_key="event_judgement",
     handler=dispatch,

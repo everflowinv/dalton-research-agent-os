@@ -1,9 +1,11 @@
 # P9d-2：获取文档的人工语义抽取队列 v0.1
 
+历史技术评审：保留当时结论与局限；当前运行状态见 [项目状态](../PROJECT_STATUS.md)。原始操作证据私有保存。
+
 日期：2026-09-04
 状态：已部署 live；coordinator 自动登记已生效；1035/1035
 上游：[P9d-1](p9d1-alphaengine-search-driven-source-discovery-v0.1-2026-09-02.md)、
-[激活与首次发现](p9d1-live-activation-and-first-discovery-2026-09-04.md)、[ADR-0003](../adr/0003-transcript-candidate-admission.md)、
+激活与首次发现（历史证据原件已私有归档）、[ADR-0003](../adr/0003-transcript-candidate-admission.md)、
 [ADR-0004](../adr/0004-mission-driven-autonomy-and-automation-write-scope.md)
 
 ## 这一片解决什么

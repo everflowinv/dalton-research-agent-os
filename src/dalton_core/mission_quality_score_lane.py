@@ -167,8 +167,9 @@ def ensure_quality_verifier_config(state_dir: str | Path) -> dict[str, Any]:
 # -- the child ---------------------------------------------------------------
 
 
-def run_digest(target_ref: str, target_hash: str) -> str:
-    payload = "|".join([TICKET_PREFIX, RUBRIC, target_ref, target_hash])
+def run_digest(target_ref: str, target_hash: str, rubric: str = RUBRIC) -> str:
+    from .research_quality_rubrics import rubric as get_rubric
+    payload = "|".join([TICKET_PREFIX, rubric, get_rubric(rubric).content_hash, target_ref, target_hash])
     return hashlib.sha256(payload.encode("utf-8")).hexdigest()[:24]
 
 
@@ -189,11 +190,11 @@ class QualityScoreLauncher(LaneChildLauncher):
         self.scheduler_db = (None if scheduler_db is None
                              else Path(scheduler_db).expanduser().resolve())
 
-    def _command(self, *, ticket_dir: Path, target_ref: str) -> list[str]:
+    def _command(self, *, ticket_dir: Path, target_ref: str, rubric: str = RUBRIC) -> list[str]:
         command = [
             self.python_executable, "-m", self.CHILD_MODULE, "score",
             "--state-dir", str(self.state_dir),
-            "--rubric", RUBRIC, "--target", target_ref,
+            "--rubric", rubric, "--target", target_ref,
             "--model-config", str(self.judge_model_config_path),
             "--verifier-model-config", str(self.verifier_model_config_path),
             "--actor-ref", ACTOR_REF,
@@ -204,16 +205,16 @@ class QualityScoreLauncher(LaneChildLauncher):
         return command
 
     def start(self, *, target_ref: str, target_hash: str,
-              deliverable_ref: str | None = None) -> dict[str, Any]:
+              deliverable_ref: str | None = None, rubric: str = RUBRIC) -> dict[str, Any]:
         if not isinstance(target_ref, str) or not target_ref.strip():
             raise LaneChildRejected("a quality score run needs a target version")
         if not isinstance(target_hash, str) or not target_hash.strip():
             raise LaneChildRejected("a quality score run needs the target's hash")
         return self.spawn(
-            digest=run_digest(target_ref, target_hash),
+            digest=run_digest(target_ref, target_hash, rubric),
             record={"target_ref": target_ref, "target_hash": target_hash,
-                    "deliverable_ref": deliverable_ref, "rubric": RUBRIC},
-            target_ref=target_ref,
+                    "deliverable_ref": deliverable_ref, "rubric": rubric},
+            target_ref=target_ref, rubric=rubric,
         )
 
     def tickets(self) -> list[dict[str, Any]]:
@@ -233,36 +234,53 @@ class QualityScoreLauncher(LaneChildLauncher):
 
 
 def pending_targets(connection: Any) -> list[dict[str, str]]:
-    """Latest Initial Screen versions not yet scored under this rubric."""
+    """Current products lacking a score under the exact current rubric hash."""
 
     from .research_quality_rubrics import rubric as get_rubric
 
-    rubric_ref = get_rubric(RUBRIC).rubric_ref
+    tables = {r[0] for r in connection.execute("SELECT name FROM sqlite_master WHERE type='table'")}
     rows = connection.execute(
         "SELECT p.deliverable_ref AS deliverable_ref, v.version_id AS version_id, "
         "v.record_json AS record_json FROM mission_deliverable_pointer p "
         "JOIN mission_deliverable_versions v ON v.version_id=p.version_id "
-        "WHERE p.deliverable_ref LIKE ? ORDER BY v.created_at, p.deliverable_ref",
-        (DELIVERABLE_PREFIX + "%",),
-    ).fetchall()
+        "WHERE p.deliverable_ref LIKE ? OR p.deliverable_ref LIKE ? ORDER BY v.created_at, p.deliverable_ref",
+        (DELIVERABLE_PREFIX + "%", "mission-deliverable:investment_memo:%"),
+    ).fetchall() if {"mission_deliverable_pointer", "mission_deliverable_versions"} <= tables else []
+    candidates = [(json.loads(row["record_json"]), row["deliverable_ref"]) for row in rows]
+    for table, subject, kind in (("company_dossier_versions", "company_ref", "company_dossier"),
+                                 ("debate_map_versions", "subject_ref", "debate_map"),
+                                 ("event_judgements", "company_ref", "event_judgement")):
+        if table not in tables:
+            continue
+        seen = set()
+        for row in connection.execute(f"SELECT {subject},record_json FROM {table} ORDER BY created_at DESC"):
+            if row[0] in seen:
+                continue
+            seen.add(row[0])
+            record = json.loads(row[1])
+            candidates.append(({**record, "kind": kind}, record.get("id")))
     scored_table = connection.execute(
         "SELECT 1 FROM sqlite_master WHERE type='table' "
         "AND name='research_quality_score_versions'").fetchone() is not None
     pending: list[dict[str, str]] = []
-    for row in rows:
-        record = json.loads(row["record_json"])
-        target_ref = str(record.get("id") or row["version_id"])
+    for record, deliverable_ref in candidates:
+        target_ref = str(record.get("id") or "")
         target_hash = str(record.get("content_hash") or "")
         if not target_hash:
             continue
+        kind = str(record.get("kind") or RUBRIC)
+        if kind == "initial_screen" and str(record.get("template_ref") or "").startswith("contract:initial-screen-contract:strl"):
+            kind = "initial_screen_strl"
+        standard = get_rubric(kind)
         if scored_table and connection.execute(
             "SELECT 1 FROM research_quality_score_versions WHERE target_ref=? "
-            "AND target_hash=? AND rubric_ref=? LIMIT 1",
-            (target_ref, target_hash, rubric_ref),
+            "AND target_hash=? AND rubric_ref=? AND rubric_hash=? "
+            "AND (judge_status IS NULL OR judge_status='scored') LIMIT 1",
+            (target_ref, target_hash, standard.rubric_ref, standard.content_hash),
         ).fetchone() is not None:
             continue
-        pending.append({"deliverable_ref": row["deliverable_ref"],
-                        "target_ref": target_ref, "target_hash": target_hash})
+        pending.append({"deliverable_ref": deliverable_ref,
+                        "target_ref": target_ref, "target_hash": target_hash, "rubric": kind})
     return pending
 
 

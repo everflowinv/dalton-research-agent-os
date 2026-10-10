@@ -180,7 +180,11 @@ class WorkspaceServiceSetupTest(unittest.TestCase):
             "model-routing-policy-version:workspace-planner:9")
         self.assertEqual(installed["thesis_impact"]["config"]["company_thesis_refs"], {})
         self.assertFalse(installed["outbox"]["enabled"])
-        self.assertFalse(installed["weekly_brief"]["enabled"])
+        # d2: the coordinator is on from day one, reading an owner-published
+        # plan file; nothing is sent until a plan exists.
+        self.assertTrue(installed["weekly_brief"]["enabled"])
+        self.assertEqual(installed["weekly_brief"]["config"]["plan_path"],
+                         str(workspace.state_dir / "weekly-brief-plan.json"))
         review = installed["control"]["config"]["research_review"]
         self.assertEqual(review["reconcile_interval_seconds"], 73)
         self.assertEqual(review["candidate_staging_path"],
@@ -214,6 +218,44 @@ class WorkspaceServiceSetupTest(unittest.TestCase):
             tailscale_host="test.tail00000.ts.net", tailscale_executable=self.root / "tailscale")
         self.assertEqual(installed["workspace"],
                          json.loads(workspace.config_path.read_text())["workspace"])
+
+    def test_thesis_impact_runs_on_the_head_of_the_installed_budget_lineage(self):
+        """b3: not the ``budget_policy_version_id`` the template was exported with."""
+
+        from dalton_core.thesis_impact_budget import ThesisImpactBudgetStore
+
+        template = export_service_template(self.source_config, self.template)
+        self.assertEqual(template["operating"]["thesis_impact"]["config"][
+            "budget_policy_version_id"], "budget-policy:default:1")
+        workspace = self._workspace()
+        for name in ("document-extraction-model-config.json",
+                     "discovery-selection-model-config.json",
+                     "claim-index-model-config.json",
+                     "registered-annual-report-draft-model-config.json",
+                     "registered-annual-report-verifier-model-config.json"):
+            (workspace.state_dir / name).touch()
+        (workspace.state_dir / "research-planner-model-config.json").write_text(json.dumps({
+            "routing_policy_ref": "model-routing-policy-version:workspace-planner:9",
+            "credential_slot_refs": ["credential-slot:workspace"],
+            "broker_client_id": "client:dalton-core", "expected_agent_id": "chem"}))
+        with ThesisImpactBudgetStore(workspace.state_dir / "thesis-impact-budget.sqlite") as budget:
+            budget.register_policy(policy_version_id="budget:production:3",
+                                   day_cap_micros=180_000_000)
+            budget.register_policy(policy_version_id="budget:configured:500",
+                                   day_cap_micros=500_000_000,
+                                   prior_version_id="budget:production:3")
+        receipt = install_service_template(workspace.manifest_path, self.template)
+        installed = json.loads(workspace.config_path.read_text())
+        self.assertEqual(installed["thesis_impact"]["config"]["budget_policy_version_id"],
+                         "budget:configured:500")
+        self.assertEqual(receipt["budget_policy_version_id"], "budget:configured:500")
+
+    def test_build_service_template_is_what_export_writes(self):
+        from dalton_core.workspace_service_setup import build_service_template
+
+        written = export_service_template(self.source_config, self.template)
+        self.assertEqual(build_service_template(self.source_config)["content_hash"],
+                         written["content_hash"])
 
     def test_exact_broker_declaration_and_template_hash_are_required(self):
         value = export_service_template(self.source_config, self.template)

@@ -35,6 +35,7 @@ import sqlite3
 from collections.abc import Mapping, Sequence
 from contextlib import contextmanager
 from datetime import datetime, timezone
+from decimal import Decimal, InvalidOperation, ROUND_HALF_UP
 from pathlib import Path
 from types import MappingProxyType
 from typing import Any, Callable, Iterator
@@ -107,7 +108,12 @@ _PERIOD_TOKEN_RE = re.compile(
     r"|(?:19|20)\d{2}\s?Q[1-4]"
     r"|[1-4]Q(?:19|20)?\d{2}"
     r"|H[12]\s?(?:19|20)?\d{0,4}"
-    r"|第?[一二三四1-4]季度",
+    r"|第?[一二三四1-4]季度"
+    # Batch D: a rolling-window label is a period, not a figure -- 「30 日 ADV」,
+    # 「52 周区间」, "30-day ADV". Narrow on purpose: only when a window noun
+    # follows, so 「30 日内上涨 5%」's 30 is still a figure to source.
+    r"|\d{1,3}\s?(?:日|天|周|个交易日)(?=\s?(?:ADV|均量|成交|区间|高点|低点|滚动|移动|平均|波动))"
+    r"|\d{1,3}[-\s]?(?:day|week)(?=\s?(?:ADV|average|moving|volume|range|high|low))",
     re.IGNORECASE,
 )
 # The Playbook's rule is about *timely numbers*: a measurement that has to come
@@ -148,7 +154,7 @@ _DAY_MONTH_RE = re.compile(
     r"Apr(?:il)?|May|Jun(?:e)?|Jul(?:y)?|Aug(?:ust)?|Sep(?:t|tember)?|Oct(?:ober)?|"
     r"Nov(?:ember)?|Dec(?:ember)?)(?![A-Za-z])(?:,?\s+((?:19|20)\d{2})(?!\d))?",
 )
-NUMBER_SOURCE_CONTRACT_VERSION = "number-source-contract:0.7"
+NUMBER_SOURCE_CONTRACT_VERSION = "number-source-contract:0.8"
 
 
 def number_source_contract_fingerprint() -> str:
@@ -159,6 +165,11 @@ def number_source_contract_fingerprint() -> str:
     return content_hash({
         "version": NUMBER_SOURCE_CONTRACT_VERSION,
         "number_source_fields": ["text", "period"],
+        # 0.8 (batch D): a material-pack number (``number_ref``) and a
+        # 「我们的估计」 bound to a model assumption are admissible sources.
+        "admissible_sources": ["claim", "cell", "passage", "derivation", "pack_number",
+                               "our_estimate"],
+        "window_labels": "n-day/week window before ADV/区间/均量/... is a period",
         "bound_period_equivalence": (
             "iso-date-to-english-month-date-or-exact-cited-month-day"
             "+cjk-and-slash-month-day+day-first-month-date"
@@ -216,7 +227,7 @@ def _sha256(value: Any, name: str) -> str:
 _CITATION_TAG_RE = re.compile(r"(?<![A-Za-z0-9])[CN]\d{1,3}(?![A-Za-z0-9])")
 
 
-def value_tokens(text: str) -> list[str]:
+def value_tokens(text: str, *, include_small: bool = False) -> list[str]:
     """Every figure the text asserts, with period labels and citation tags removed."""
 
     without_tags = _CITATION_TAG_RE.sub(" ", text or "")
@@ -225,7 +236,7 @@ def value_tokens(text: str) -> list[str]:
     for match in _VALUE_TOKEN_RE.finditer(without_periods):
         token = match.group(0).strip()
         plain = token.rstrip(".")
-        if plain.isdigit() and int(plain) <= _BARE_SMALL_INTEGER:
+        if not include_small and plain.isdigit() and int(plain) <= _BARE_SMALL_INTEGER:
             continue
         tokens.append(token)
     return tokens
@@ -527,9 +538,37 @@ def unsourced_numbers(body: str, numbers: Sequence[Mapping[str, Any]]) -> list[s
         sourced |= english_number_tokens(text)
     checked_body = _remove_bound_numeric_month_days(
         _remove_bound_month_dates(body, numbers), numbers)
+    # A displayed equation is itself evidence only after replay against an
+    # already-validated derivation. Its constants never source unrelated prose.
+    equations = re.compile(r"(?<![\dA-Za-z])[\d(][\d.\s()+−\-×*/÷]*[\d)]")
+    def proven_equation(match: re.Match[str]) -> str:
+        expression = match.group().strip().replace('−','-').replace('×','*').replace('÷','/')
+        if not any(op in expression for op in ('*','/')):
+            return match.group()
+        for item in numbers:
+            derivation = item.get('derivation')
+            if not isinstance(derivation, Mapping):
+                continue
+            result = str(derivation['result'])
+            try:
+                validate_derived_number({'text':result,'derivation':{'expression':expression,'result':result}},
+                                        numbers, check_stray=False)
+            except MissionDeliverableError:
+                continue
+            return ' ' * len(match.group())
+        return match.group()
+    checked_body = equations.sub(proven_equation, checked_body)
+    def exact_value(token: str) -> tuple[str, bool, Decimal] | None:
+        value = _normalise_number(token)
+        currency = value[:1] if value[:1] in _CURRENCY_SYMBOLS else ''
+        try:
+            return currency, value.endswith('%'), Decimal(_bare(value))
+        except InvalidOperation:
+            return None
+    exact_sources = {value for token in sourced if (value := exact_value(token)) is not None}
     return [
         token for token in value_tokens(checked_body)
-        if _normalise_number(token) not in sourced
+        if _normalise_number(token) not in sourced and exact_value(token) not in exact_sources
     ]
 
 
@@ -639,11 +678,328 @@ def validate_revision(value: Any) -> dict[str, Any] | None:
     }
 
 
+# ---------------------------------------------------------------------------
+# Batch A: figures sourced from a cited passage, or derived from cited figures
+# ---------------------------------------------------------------------------
+
+#: Constants a derivation may use without a citation: a bare small integer
+#: (the same threshold ``value_tokens`` ignores) and powers of ten (scaling and
+#: percent conversion).
+_DERIVATION_CONSTANTS = frozenset({"100", "1000", "10000", "1000000", "1000000000"})
+_DERIVATION_RE = re.compile(r"^[0-9.+\-*/()\s]+$")
+MAX_DERIVATION_CHARS = 200
+
+
+def _sourced_value_set(text: str) -> set[str]:
+    """Every normalised figure a text states, in the forms a body may print it."""
+
+    found: set[str] = set()
+    for token in value_tokens(text, include_small=True):
+        normalised = _normalise_number(token)
+        found.add(normalised)
+        if normalised[:1] in _CURRENCY_SYMBOLS:
+            found.add(normalised[1:])
+    for match in _PERCENT_WORD_RE.finditer(text):
+        found.add(_normalise_number(match.group(1)) + "%")
+    found |= english_number_tokens(text)
+    return found
+
+
+def _bare(token: str) -> str:
+    token = token.lstrip(_CURRENCY_SYMBOLS).rstrip("%").strip()
+    return token
+
+
+def validate_passage_number(item: Mapping[str, Any],
+                            resolve_passage: Callable[[str], str | None] | None) -> dict[str, Any]:
+    """A figure citing a ``doc-passage:`` ref: its values must be in the passage."""
+
+    text = _text(item["text"], "number.text", maximum=MAX_NUMBER_TEXT)
+    ref = _text(item["passage_ref"], "number.passage_ref", maximum=1024)
+    if not ref.startswith("doc-passage:"):
+        raise MissionDeliverableValidationError("number.passage_ref must be a doc-passage: ref")
+    passage_text = resolve_passage(ref) if resolve_passage is not None else None
+    if passage_text is None:
+        raise MissionDeliverableConflict(
+            "a figure cites a passage that does not resolve (or no longer hashes to its ref) "
+            f"in this Core: {ref}")
+    tokens = value_tokens(text, include_small=True)
+    if not tokens:
+        raise MissionDeliverableValidationError(
+            "a passage-cited number entry must state the figure it cites")
+    available = _sourced_value_set(passage_text)
+    missing = [token for token in tokens if _normalise_number(token) not in available
+               and _normalise_number(token).lstrip(_CURRENCY_SYMBOLS) not in available]
+    if missing:
+        raise MissionDeliverableConflict(
+            f"a figure is not in the passage it cites: {missing[:3]} not found in {ref}")
+    return {"text": text, "passage_ref": ref,
+            "period": None if item.get("period") is None else _text(item["period"], "number.period", maximum=120)}
+
+
+def _evaluate(node: Any) -> float:
+    import ast
+
+    if isinstance(node, ast.Expression):
+        return _evaluate(node.body)
+    if isinstance(node, ast.Constant) and type(node.value) in (int, float):
+        return float(node.value)
+    if isinstance(node, ast.UnaryOp) and isinstance(node.op, (ast.USub, ast.UAdd)):
+        value = _evaluate(node.operand)
+        return -value if isinstance(node.op, ast.USub) else value
+    if isinstance(node, ast.BinOp) and isinstance(node.op, (ast.Add, ast.Sub, ast.Mult, ast.Div)):
+        left, right = _evaluate(node.left), _evaluate(node.right)
+        if isinstance(node.op, ast.Add):
+            return left + right
+        if isinstance(node.op, ast.Sub):
+            return left - right
+        if isinstance(node.op, ast.Mult):
+            return left * right
+        if right == 0:
+            raise MissionDeliverableValidationError("a derivation divides by zero")
+        return left / right
+    raise MissionDeliverableValidationError("a derivation is arithmetic over numbers only (+ - * / and parentheses)")
+
+
+def validate_derived_number(item: Mapping[str, Any], cited: Sequence[Mapping[str, Any]], *, check_stray: bool = True) -> dict[str, Any]:
+    """A figure computed from figures this section cites, re-computed here."""
+
+    import ast
+
+    text = _text(item["text"], "number.text", maximum=MAX_NUMBER_TEXT)
+    derivation = item["derivation"]
+    if not isinstance(derivation, Mapping) or set(derivation) != {"expression", "result"}:
+        raise MissionDeliverableValidationError("number.derivation must be exactly {expression, result}")
+    expression = _text(derivation["expression"], "number.derivation.expression", maximum=MAX_DERIVATION_CHARS)
+    result = _text(str(derivation["result"]), "number.derivation.result", maximum=40)
+    if not _DERIVATION_RE.fullmatch(expression):
+        raise MissionDeliverableValidationError(
+            "a derivation is arithmetic over plain numbers (no commas, units or names)")
+    if not re.fullmatch(r"-?\d+(?:\.\d+)?", result):
+        raise MissionDeliverableValidationError("number.derivation.result must be a plain number")
+    sourced: set[str] = set()
+    for entry in cited:
+        for token in _sourced_value_set(str(entry.get("text", ""))):
+            sourced.add(_bare(token))
+        # A verified display retains its exact raw scalar too. Both may be
+        # operands; arbitrary peer prose or an unchecked display is not proof.
+        if entry.get('display') is not None and entry.get('source_text') is not None:
+            display=validate_number_display(entry,str(entry['source_text']))
+            sourced.add(_bare(display['source_value']))
+    exact_operands = set()
+    for token in sourced:
+        try:
+            exact_operands.add(Decimal(token))
+        except InvalidOperation:
+            continue
+    for literal in re.findall(r"\d+(?:\.\d+)?", expression):
+        plain = literal.rstrip("0").rstrip(".") if "." in literal else literal
+        if (literal in sourced or plain in sourced or Decimal(literal) in exact_operands or literal in _DERIVATION_CONSTANTS
+                or (literal.isdigit() and int(literal) <= _BARE_SMALL_INTEGER)):
+            continue
+        raise MissionDeliverableConflict(
+            f"a derivation uses {literal}, which no other figure in this section cites")
+    try:
+        value = _evaluate(ast.parse(expression, mode="eval"))
+    except SyntaxError as exc:
+        raise MissionDeliverableValidationError("a derivation must be a valid arithmetic expression") from exc
+    decimals = len(result.split(".", 1)[1]) if "." in result else 0
+    if abs(value - float(result)) > 0.5 * 10 ** -decimals + 1e-9:
+        raise MissionDeliverableConflict(
+            f"a derivation does not compute: {expression} = {value:.6g}, not {result}")
+    stated = [_bare(_normalise_number(token)) for token in value_tokens(text, include_small=True)]
+    if result.lstrip("-") not in stated:
+        raise MissionDeliverableConflict(
+            f"a derived number entry's text must state its result {result}")
+    stray = [token for token in stated if token != result.lstrip("-") and token not in sourced]
+    if stray and check_stray:
+        raise MissionDeliverableConflict(
+            f"a derived number entry states figures that are neither its result nor cited: {stray[:3]}")
+    return {"text": text, "derivation": {"expression": expression, "result": result},
+            "period": None if item.get("period") is None else _text(item["period"], "number.period", maximum=120)}
+
+
 #: The gap a figure in an imported prior document is recorded as. It is not a
 #: refusal, because an import asserts nothing: the figure rule exists to stop
 #: *this system* writing a number it cannot cite, and a v0 is a record of what
 #: a document said, bound to that document by ref and hash.
 IMPORTED_FIGURE_GAP = "上一版里的数字，未在本系统重新核对"
+
+
+# ---------------------------------------------------------------------------
+# Batch D: pack numbers, our estimates, gap items, contract-strict sections
+# ---------------------------------------------------------------------------
+
+#: Kinds published under the batch-D product contract: a failed (empty,
+#: heading-only, gap-only) section refuses the version, 「材料缺少」 must bind a
+#: MaterialRequest, and indirect placeholders are refused.
+CONTRACT_STRICT_KINDS: tuple[str, ...] = ("initial_screen", "investment_memo")
+#: Prefixes a 「我们的估计」 figure may bind: a model assumption, an ``O`` tag's
+#: our-ref from a material pack, or a forecast cell of our own model.
+ESTIMATE_REF_PREFIXES: tuple[str, ...] = ("assumption:", "our-ref:", "our:", "forecast-cell:",
+                                          "forecast-model-version:", "house-view:",
+                                          # batch C: our model's figures in the pack json
+                                          "pack-json:/our_model")
+
+NUMBER_DISPLAY_RULE_REF = "number-display:same-unit-declared-decimals-half-up:1"
+
+
+def _display_tokens(text: str) -> list[str]:
+    """Signed values for precision proofs; body token rules stay unchanged."""
+    clean = _PERIOD_TOKEN_RE.sub(" ", _CITATION_TAG_RE.sub(" ", text or ""))
+    return [_normalise_number(m.group()) for m in re.finditer(
+        r"[$€£¥]?\s?-?\d[\d,]*(?:\.\d+)?\s?%?", clean)]
+
+
+def number_display(source_text: str, display_value: str) -> dict[str, Any]:
+    """Bind one same-unit rendering (one or two decimals) to an exact value."""
+    shown=_normalise_number(display_value)
+    if not re.fullmatch(r"[$€£¥]?-?\d+\.\d{1,2}%?",shown):
+        raise MissionDeliverableConflict('a number display must use one or two decimals in the source unit')
+    decimals=len(shown.rstrip('%').split('.')[1])
+    currency=shown[:1] if shown[:1] in _CURRENCY_SYMBOLS else ''
+    percent=shown.endswith('%')
+    candidates=[]
+    for token in _display_tokens(source_text):
+        original=_normalise_number(token)
+        if ((original[:1] if original[:1] in _CURRENCY_SYMBOLS else '')!=currency
+                or original.endswith('%')!=percent):continue
+        try:
+            amount=Decimal(_bare(original))
+            rendered=currency+format(amount.quantize(Decimal(1).scaleb(-decimals),rounding=ROUND_HALF_UP),'f')+('%' if percent else '')
+        except InvalidOperation:continue
+        if rendered==shown:candidates.append(original)
+    candidates=sorted(set(candidates))
+    if len(candidates)!=1:
+        raise MissionDeliverableConflict('number display lacks one exact source value under the declared rounding rule')
+    return {'rule_ref':NUMBER_DISPLAY_RULE_REF,'source_value':candidates[0],'display_value':shown,
+            'decimal_places':decimals,'rounding':'ROUND_HALF_UP','source_text_hash':content_hash(source_text)}
+
+
+def validate_number_display(item: Mapping[str,Any], source_text: str) -> dict[str,Any]:
+    display=item.get('display')
+    if not isinstance(display,Mapping) or dict(display)!=number_display(source_text,str(display.get('display_value') or '')):
+        raise MissionDeliverableConflict('number display does not replay its exact source and rounding rule')
+    tokens=_display_tokens(str(item['text']))
+    shown=str(display['display_value'])
+    if shown not in [_normalise_number(t) for t in tokens]:
+        raise MissionDeliverableConflict('number text does not state its declared display value')
+    available=set(_display_tokens(source_text))|{shown,shown.lstrip(_CURRENCY_SYMBOLS)}
+    if any(_normalise_number(t) not in available and _normalise_number(t).lstrip(_CURRENCY_SYMBOLS) not in available for t in tokens):
+        raise MissionDeliverableConflict('number display text contains an unsourced extra figure')
+    return dict(display)
+
+
+def validate_pack_number(item: Mapping[str, Any],
+                         resolve_number: Callable[[str], str | None] | None) -> dict[str, Any]:
+    """A figure citing a material pack ``[N…]`` number: values must be in its text."""
+
+    text = _text(item["text"], "number.text", maximum=MAX_NUMBER_TEXT)
+    ref = _text(item["number_ref"], "number.number_ref", maximum=1024)
+    source_text = resolve_number(ref) if resolve_number is not None else None
+    if source_text is None:
+        raise MissionDeliverableConflict(
+            f"a figure cites a pack number that does not resolve in this publish: {ref}")
+    if item.get('display') is not None:
+        display=validate_number_display(item,source_text)
+        return {"text":text,"number_ref":ref,"source_text":_text(source_text,"number.source_text",maximum=MAX_NUMBER_TEXT),"display":display,
+                "period":None if item.get("period") is None else _text(item["period"],"number.period",maximum=120)}
+    tokens = value_tokens(text, include_small=True)
+    if not tokens:
+        raise MissionDeliverableValidationError("a pack-number entry must state the figure it cites")
+    available = _sourced_value_set(source_text)
+    missing = [token for token in tokens if _normalise_number(token) not in available
+               and _normalise_number(token).lstrip(_CURRENCY_SYMBOLS) not in available]
+    if missing:
+        raise MissionDeliverableConflict(
+            f"a figure is not in the pack number it cites: {missing[:3]} not found in {ref}")
+    return {"text": text, "number_ref": ref, "source_text": _text(source_text, "number.source_text",
+                                                                   maximum=MAX_NUMBER_TEXT),
+            "period": None if item.get("period") is None else _text(item["period"], "number.period", maximum=120)}
+
+
+def validate_estimate_number(item: Mapping[str, Any]) -> dict[str, Any]:
+    """A figure that is 「我们的估计」, bound to a model assumption ref."""
+
+    text = _text(item["text"], "number.text", maximum=MAX_NUMBER_TEXT)
+    estimate = item["estimate"]
+    ref = estimate.get("assumption_ref") if isinstance(estimate, Mapping) else estimate
+    ref = _text(ref, "number.estimate.assumption_ref", maximum=512)
+    if not ref.startswith(ESTIMATE_REF_PREFIXES):
+        raise MissionDeliverableValidationError(
+            "a 「我们的估计」 figure must bind a model assumption ref "
+            f"({', '.join(ESTIMATE_REF_PREFIXES)})")
+    if not value_tokens(text, include_small=True):
+        raise MissionDeliverableValidationError("an estimate entry must state its figure")
+    return {"text": text, "estimate": {"assumption_ref": ref},
+            "period": None if item.get("period") is None else _text(item["period"], "number.period", maximum=120)}
+
+
+def unlabelled_estimates(body: str, numbers: Sequence[Mapping[str, Any]]) -> list[str]:
+    """Estimate figures written in a sentence that does not say 「我们的估计」."""
+
+    from .product_contract import OUR_ESTIMATE_RE, sentences
+
+    estimates: set[str] = set()
+    others: set[str] = set()
+    for item in numbers:
+        target = estimates if item.get("estimate") else others
+        for token in value_tokens(str(item.get("text") or "")):
+            target.add(_normalise_number(token))
+    only_ours = estimates - others
+    stray: list[str] = []
+    for sentence in sentences(body):
+        labelled = bool(OUR_ESTIMATE_RE.search(sentence))
+        for token in value_tokens(sentence):
+            if _normalise_number(token) in only_ours and not labelled:
+                stray.append(token)
+    return stray
+
+
+def contract_findings(title: str, body: str, gap_items: Sequence[Mapping[str, Any]]) -> list[dict[str, Any]]:
+    """The batch-D prose rules a strict section must meet."""
+
+    from .product_contract import material_missing_findings, placeholder_findings
+    from .product_substance import FAILED_STATUSES, section_substance
+
+    findings = [{**item, "section": title} for item in material_missing_findings(body, gap_items)]
+    findings += [{**item, "section": title} for item in placeholder_findings(body)]
+    verdict = section_substance({"title": title, "body": body, "gaps": []})
+    if verdict["status"] in FAILED_STATUSES:
+        findings.append({"code": f"section_{verdict['status']}", "section": title,
+                         "reason": verdict["reason"]})
+    return findings
+
+
+def pack_passage_resolver(
+    index_resolver: Callable[[str], str | None] | None,
+    pack_passages: Mapping[str, str] | None,
+) -> Callable[[str], str | None] | None:
+    """The evidence index first; then a material pack's own passage text, but
+    only when that text still hashes to the ref (``hash12`` is the SHA-256 of
+    the exact cited text), so a pack cannot vouch for words it altered."""
+
+    if not pack_passages:
+        return index_resolver
+    import hashlib
+
+    from .evidence_index import PassageRefInvalid, parse_passage_ref
+
+    def resolve(ref: str) -> str | None:
+        found = index_resolver(ref) if index_resolver is not None else None
+        if found is not None:
+            return found
+        text = pack_passages.get(ref)
+        if text is None:
+            return None
+        try:
+            parts = parse_passage_ref(ref)
+        except PassageRefInvalid:
+            return None
+        digest = hashlib.sha256(str(text).encode("utf-8")).hexdigest()[:12]
+        return str(text) if digest == parts["hash12"] else None
+
+    return resolve
 
 
 def validate_section(
@@ -652,8 +1008,19 @@ def validate_section(
     live_claim_refs: set[str] | None = None,
     resolve_cell: Callable[[Mapping[str, Any]], bool] | None = None,
     imported: bool = False,
+    resolve_passage: Callable[[str], str | None] | None = None,
+    resolve_number: Callable[[str], str | None] | None = None,
+    strict: bool = False,
 ) -> dict[str, Any]:
     """One closed section: a title, a body or a gap, and traceable numbers.
+
+    Batch A: a figure may also cite a ``doc-passage:`` ref (``passage_ref``):
+    every value in its ``text`` must appear in the cited passage's own words
+    (``resolve_passage`` returns that text, or ``None`` when the ref does not
+    resolve or was tampered with -- then the figure is refused).  Or it may be
+    a declared ``derivation`` -- ``{"expression", "result"}`` -- whose every
+    operand is a figure another entry of this section cites and whose result
+    re-computes, to the precision written, to the figure in ``text``.
 
     ``resolve_cell`` answers "does this computed cell still exist in the Core".
     ``None`` means nobody can answer, and a cell citation is then refused
@@ -673,7 +1040,7 @@ def validate_section(
 
     if not isinstance(section, Mapping):
         raise MissionDeliverableValidationError("section must be an object")
-    allowed = {"title", "body", "claim_refs", "numbers", "gaps"}
+    allowed = {"title", "body", "claim_refs", "numbers", "gaps", "gap_items", "source_refs"}
     if set(section) - allowed or "title" not in section:
         raise MissionDeliverableValidationError("section has an invalid closed shape")
     title = _text(section["title"], "section.title", maximum=200)
@@ -684,20 +1051,50 @@ def validate_section(
     if not isinstance(numbers, list) or len(numbers) > 60:
         raise MissionDeliverableValidationError("section.numbers must be a list of at most 60 entries")
     checked: list[dict[str, Any]] = []
+    derived: list[Mapping[str, Any]] = []
     for item in numbers:
         if not isinstance(item, Mapping) or set(item) - {
-            "text", "claim_version_ref", "period", "cell"
+            "text", "claim_version_ref", "period", "cell", "passage_ref", "derivation",
+            "number_ref", "source_text", "estimate", "metric", "unit", "display",
         } or "text" not in item:
             raise MissionDeliverableValidationError(
                 "number entries need text and either claim_version_ref or cell")
         cites_claim = item.get("claim_version_ref") is not None
         cites_cell = item.get("cell") is not None
-        if cites_claim == cites_cell:
+        cites_passage = item.get("passage_ref") is not None
+        derives = item.get("derivation") is not None
+        cites_pack = item.get("number_ref") is not None
+        estimates = item.get("estimate") is not None
+        if item.get("display") is not None and not (cites_pack or estimates):
+            raise MissionDeliverableValidationError("display precision requires an exact held pack number source")
+        if cites_claim + cites_cell + cites_passage + derives + cites_pack + estimates != 1:
             # Both or neither. Neither is the old refusal; both would let a
             # figure claim two provenances and be checked against the more
             # convenient one.
             raise MissionDeliverableValidationError(
-                "a number cites exactly one of claim_version_ref and cell")
+                "a number cites exactly one of claim_version_ref and cell "
+                "(or passage_ref, or a declared derivation)")
+        meta = {key: _text(item[key], f"number.{key}", maximum=120)
+                for key in ("metric", "unit") if item.get(key) is not None}
+        if derives:
+            derived.append(item)
+            continue
+        if cites_passage:
+            checked.append({**validate_passage_number(item, resolve_passage), **meta})
+            continue
+        if cites_pack:
+            checked.append({**validate_pack_number(item, resolve_number), **meta})
+            continue
+        if estimates:
+            estimate=validate_estimate_number(item)
+            if item.get('display') is not None:
+                ref=estimate['estimate']['assumption_ref']
+                source=resolve_number(ref) if resolve_number else None
+                if source is None:raise MissionDeliverableConflict('displayed estimate lacks its exact held number source')
+                estimate['display']=validate_number_display(item,source)
+                estimate['source_text']=source
+            checked.append({**estimate, **meta})
+            continue
         if cites_cell:
             cell = validate_cell_citation(item["cell"])
             if resolve_cell is None or not resolve_cell(cell):
@@ -738,6 +1135,24 @@ def validate_section(
             "claim_version_ref": ref,
             "period": None if item.get("period") is None else _text(item["period"], "number.period", maximum=120),
         })
+    # Prove arithmetic before accepting any peer result in a range's wording.
+    # A peer's unverified prose is never an operand source.
+    pending=list(derived);proven=[]
+    while pending:
+        progress=False;last_error=None
+        for item in list(pending):
+            trusted=[*checked,*({'text':d['derivation']['result']} for d in proven)]
+            try:proof=validate_derived_number(item,trusted,check_stray=False)
+            except MissionDeliverableConflict as exc:
+                if 'a derivation uses ' not in str(exc):raise
+                last_error=exc;continue
+            proven.append(proof);pending.remove(item);progress=True
+        if not progress:raise last_error or MissionDeliverableConflict('derivation sources are unavailable or circular')
+    trusted=[*checked,*({'text':d['derivation']['result']} for d in proven)]
+    for item in derived:
+        meta = {key: _text(item[key], f"number.{key}", maximum=120)
+                for key in ("metric", "unit") if item.get(key) is not None}
+        checked.append({**validate_derived_number(item, trusted), **meta})
     claim_refs = section.get("claim_refs") or []
     if not isinstance(claim_refs, list) or len(claim_refs) > 200 or any(
         not isinstance(ref, str) or not ref for ref in claim_refs
@@ -754,19 +1169,76 @@ def validate_section(
         not isinstance(gap, str) or not gap.strip() for gap in gaps
     ):
         raise MissionDeliverableValidationError("section.gaps must be a list of short strings")
+    from .product_contract import ProductContractError, validate_gap_item
+
+    raw_items = section.get("gap_items") or []
+    if not isinstance(raw_items, list) or len(raw_items) > 20:
+        raise MissionDeliverableValidationError("section.gap_items must be a list of at most 20")
+    try:
+        gap_items = [validate_gap_item(item, f"section「{title}」.gap_items[{index}]")
+                     for index, item in enumerate(raw_items)]
+    except ProductContractError as exc:
+        raise MissionDeliverableValidationError(str(exc)) from exc
     stray = unsourced_numbers(body, checked)
     if stray and not imported:
         raise MissionDeliverableConflict(
             f"section「{title}」carries figures with no source behind them: {stray[:5]}；"
             f"写 {GAP_MARKER} 而不是猜一个数字"
         )
+    unlabelled = unlabelled_estimates(body, checked)
+    if unlabelled and not imported:
+        raise MissionDeliverableConflict(
+            f"section「{title}」writes our estimate {unlabelled[:3]} without saying 「我们的估计」")
+    if strict and not imported:
+        problems = contract_findings(title, body, gap_items)
+        if problems:
+            raise MissionDeliverableConflict(
+                f"section「{title}」breaks the product contract: "
+                + "；".join(f"{item['code']}（{item.get('excerpt') or item.get('matched') or item.get('reason') or ''}）"
+                           for item in problems[:3]))
     recorded = [gap.strip()[:300] for gap in gaps]
     if stray and imported:
         recorded.append(f"{IMPORTED_FIGURE_GAP}：{'、'.join(stray[:5])}")
-    return {
+    out = {
         "title": title, "body": body.strip(), "claim_refs": list(dict.fromkeys(claim_refs)),
         "numbers": checked, "gaps": recorded[:20],
     }
+    if gap_items:
+        out["gap_items"] = gap_items
+    source_refs = section.get("source_refs") or []
+    if not isinstance(source_refs, list) or len(source_refs) > 200:
+        raise MissionDeliverableValidationError("section.source_refs must be a list of at most 200")
+    if source_refs:
+        # Batch D: what the section read and cited beyond figures -- passage,
+        # pack number, our-view refs with their source kind and date -- so the
+        # quality score can count source kinds and find the latest transcript
+        # without the pack.
+        checked_sources = []
+        for index, item in enumerate(source_refs):
+            if not isinstance(item, Mapping) or "ref" not in item or set(item) - {
+                    "ref", "tag", "source_kind", "as_of", "company_ref", "title",
+                    "company_refs", "doc_kind", "document_ref"}:
+                raise MissionDeliverableValidationError(
+                    f"section.source_refs[{index}] must be {{ref, tag?, source_kind?, as_of?, company_ref?, title?, company_refs?, doc_kind?, document_ref?}}")
+            checked_source = {key: _text(str(item[key]), f"section.source_refs[{index}].{key}", maximum=1024)
+                              for key in item if key not in {"company_refs", "doc_kind", "document_ref"}
+                              and item[key] is not None and str(item[key]).strip()}
+            for key in ("doc_kind", "document_ref"):
+                if key in item:
+                    checked_source[key] = _text(item[key], f"section.source_refs[{index}].{key}", maximum=1024)
+            if "company_refs" in item:
+                refs = item["company_refs"]
+                # Resource bound only. These document associations neither
+                # identify a sentence's subject nor authorize an issuer fact.
+                if not isinstance(refs, list) or not 1 <= len(refs) <= 256:
+                    raise MissionDeliverableValidationError(
+                        f"section.source_refs[{index}].company_refs must be a list of 1..256 strings")
+                checked_source["company_refs"] = [
+                    _text(ref, f"section.source_refs[{index}].company_refs[{position}]", maximum=1024)
+                    for position, ref in enumerate(refs)]
+            checked_sources.append(checked_source)
+        out["source_refs"] = checked_sources
+    return out
 
 
 class MissionDeliverableAuthority:
@@ -1038,6 +1510,17 @@ class MissionDeliverableAuthority:
 
         return resolve
 
+    def passage_resolver(self) -> Callable[[str], str | None] | None:
+        """Batch A: ``doc-passage:`` ref -> the cited text, from the evidence index
+        beside this Core (``document-index.sqlite``); ``None`` for an in-memory
+        Core, so a passage citation there is refused rather than believed."""
+
+        if self.store.path == ":memory:":
+            return None
+        from .evidence_index import passage_resolver
+
+        return passage_resolver(Path(self.store.path).parent)
+
     def latest(self, deliverable_ref: str) -> dict[str, Any] | None:
         row = self.connection.execute(
             "SELECT v.record_json AS record_json, v.content_hash AS content_hash "
@@ -1089,6 +1572,10 @@ class MissionDeliverableAuthority:
         revision: Mapping[str, Any] | None = None,
         as_version_zero: bool = False,
         gate: Mapping[str, Any] | None = None,
+        pack_numbers: Mapping[str, str] | None = None,
+        pack_passages: Mapping[str, str] | None = None,
+        contract: Mapping[str, Any] | None = None,
+        material_pack: Mapping[str, Any] | None = None,
     ) -> dict[str, Any]:
         """Store the next version of one deliverable chain.
 
@@ -1131,9 +1618,19 @@ class MissionDeliverableAuthority:
             )
         live = self.live_claim_version_refs()
         resolve_cell = self.cell_resolver()
+        resolve_passage = pack_passage_resolver(self.passage_resolver(), pack_passages)
+        # Batch D: a version drafted under the product contract names it; the
+        # strict prose rules (substance, 「材料缺少」 binding, placeholders) then
+        # apply to every section, and a failed section refuses the version --
+        # an empty section is never a publication channel (ap 1).
+        strict = contract is not None and kind in CONTRACT_STRICT_KINDS and not as_version_zero
+        numbers_by_ref = {str(key): str(value) for key, value in (pack_numbers or {}).items()}
+        resolve_number = (numbers_by_ref.get if pack_numbers is not None else None)
         checked = [
             validate_section(section, live_claim_refs=live,
-                             resolve_cell=resolve_cell, imported=as_version_zero)
+                             resolve_cell=resolve_cell, imported=as_version_zero,
+                             resolve_passage=resolve_passage,
+                             resolve_number=resolve_number, strict=strict)
             for section in sections
         ]
         if not any(section["body"] for section in checked):
@@ -1164,6 +1661,16 @@ class MissionDeliverableAuthority:
             # passed and names the refs that occasioned it.
             "revision": validate_revision(revision),
         }
+        if material_pack is not None:
+            # Batch C's ``MaterialPack.record()``: what redraft_policy reads (its
+            # watermark) to decide whether new material justifies a redraft.
+            record["material_pack"] = json.loads(json.dumps(dict(material_pack), ensure_ascii=False,
+                                                            default=str))
+        if contract is not None:
+            # Which contract, material pack and worksheet this version was
+            # drafted from. In the body hash: a different pack is a different
+            # document even when the prose happens to agree.
+            record["contract"] = json.loads(json.dumps(dict(contract), ensure_ascii=False))
         if gate is not None and as_version_zero and gate.get("passed"):
             # A version zero is a document this system did not write, so no
             # reading of it can be a pass of this system's exit gate. A raise
@@ -1193,7 +1700,8 @@ class MissionDeliverableAuthority:
                 "kind", "subject_ref", "mission_version_ref", "mission_version_hash",
                 "playbook_version_ref", "playbook_version_hash", "template_ref",
                 "summary", "sections", "gaps",
-            )
+            ) + (("contract",) if "contract" in record else ())
+            + (("material_pack",) if "material_pack" in record else ())
         })
         with self._transaction() as cur:
             pointer = cur.execute(
@@ -1396,4 +1904,11 @@ __all__ = [
     "validate_revision",
     "validate_section",
     "value_tokens",
+    "CONTRACT_STRICT_KINDS",
+    "ESTIMATE_REF_PREFIXES",
+    "contract_findings",
+    "unlabelled_estimates",
+    "validate_estimate_number",
+    "validate_pack_number",
+    "pack_passage_resolver",
 ]

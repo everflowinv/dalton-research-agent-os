@@ -108,6 +108,11 @@ class CheckOnlyPreparationTests(unittest.TestCase):
                 response = owner.responses[purpose]
                 if isinstance(response, list):
                     response = response.pop(0)
+                if purpose=='research_localization_verifier' and isinstance(response,dict) and response.get('findings')==['语气改变']:
+                    source=json.loads(kw['prompt'].split('\nSOURCE: ',1)[1].split('\nLOCALIZED: ',1)[0])
+                    target=json.loads(kw['prompt'].split('\nLOCALIZED: ',1)[1])
+                    response={**response,'findings':[{'section_index':0,'source_quote':source['sections'][0]['body'],
+                        'candidate_quote':target['sections'][0]['body'],'code':'changed_fact','reason':'语气改变'}]}
                 return {"text": json.dumps(response), "route_decision_ref": purpose,
                         "cost_micros": 1}
 
@@ -158,10 +163,11 @@ class CheckOnlyPreparationTests(unittest.TestCase):
         self.assertEqual(len(self.calls), 4)
 
     def test_a_rejected_draft_fails_without_buying_a_brain_repair(self):
-        self.responses["research_localization_verifier"] = [FAILED, FAILED]
-        with self.assertRaises(Exception):
+        self.responses["research_localization_verifier"] = [FAILED] * 4
+        with self.assertRaises(prep.PublicationParked):
             self.run_chunk()
         self.assertNotIn(prep.BRAIN_PURPOSE, self.calls)
+        # The six-call cap parks before a fourth verifier dispatch.
         self.assertEqual(self.calls.count("research_localization_verifier"), 2)
 
     def test_an_invalid_draft_is_not_repaired_by_the_brain(self):
@@ -169,12 +175,13 @@ class CheckOnlyPreparationTests(unittest.TestCase):
         self.responses["research_localization"] = bad
         with self.assertRaisesRegex(ValueError, "check-only draft failed validation"):
             self.run_chunk()
-        self.assertEqual(self.calls, ["research_localization"] * 3)
+        # Three attempts, then three for the one fresh draft; never the brain.
+        self.assertEqual(self.calls, ["research_localization"] * 4)
 
     def test_check_only_never_reuses_a_full_stage_and_full_is_unchanged(self):
         self.run_chunk(product=SOURCE, tier="full")
         self.assertEqual(self.calls.count(prep.BRAIN_PURPOSE), 1)
-        self.run_chunk(product=SOURCE, tier="check_only")
+        with self.assertRaises(prep.PublicationParked): self.run_chunk(product=SOURCE, tier="check_only")
         # A new draft and check under its own identity; still no new brain.
         self.assertEqual(self.calls.count(prep.BRAIN_PURPOSE), 1)
         self.assertEqual(self.calls.count("research_localization"), 2)
@@ -268,7 +275,7 @@ class CheckOnlyFallbackTests(unittest.TestCase):
         saved = self.run_chunk(product=ZH)
         self.assertEqual(saved["localized"]["sections"][0]["body"], ZH["sections"][0]["body"])
         self.assertIn("check-only draft failed validation", saved["fallback"]["trigger"])
-        self.assertEqual(self.calls, ["research_localization"] * 3 + [
+        self.assertEqual(self.calls, ["research_localization"] * 2 + [
             prep.CHECKER_PURPOSE, "research_localization_verifier"])
 
     def test_the_fallback_is_used_once_and_then_the_chunk_is_exhausted(self):
@@ -284,9 +291,13 @@ class CheckOnlyFallbackTests(unittest.TestCase):
     def test_a_source_that_is_not_chinese_is_exhausted_without_publishing(self):
         self.responses["research_localization"] = {"sections": [
             {"index": 0, "title": "收入", "body": "收入为 999 美元。", "gaps": []}]}
-        with self.assertRaises(prep.CheckOnlyExhausted):
+        with self.assertRaises(prep.CheckOnlyExhausted) as caught:
             self.run_chunk(product=JUDGEMENT)
-        self.assertEqual(self.calls, ["research_localization"] * 3)
+        # 2026-10-02: the kept-source rule cannot apply, so the one fallback is
+        # a fresh cheap draft (three attempts of its own) -- never the brain.
+        self.assertEqual(self.calls, ["research_localization"] * 4)
+        self.assertIn("check-only fresh draft failed too", str(caught.exception))
+        self.assertIn("not predominantly Simplified Chinese", str(caught.exception))
 
     def test_a_transport_failure_is_not_a_content_failure(self):
         self.responses["research_localization_verifier"] = [FAILED, FAILED, VERDICT]

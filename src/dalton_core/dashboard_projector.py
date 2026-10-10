@@ -8,12 +8,13 @@ row shapes, and delegates the atomic projection replacement to
 
 from __future__ import annotations
 
+import bisect
 import hashlib
 import json
 import os
 import sqlite3
+import sys
 import tempfile
-import threading
 from collections import defaultdict
 from contextlib import ExitStack, closing
 from datetime import datetime, timezone
@@ -22,6 +23,15 @@ from typing import Any, Callable, Mapping, Sequence
 from urllib.parse import quote
 
 from .dashboard import ProjectionWriter, SCHEMA_VERSION
+from .migrations.projection_indexes import WORK_ORDER_FOLD_COVER_INDEX
+from .projection_cancellation import check_cancelled, install_cancel_handler
+from .projection_folds import (
+    _REGISTRY as _FOLD_REGISTRY,
+    AppendOnlyFold,
+    FoldRead,
+    retire_keys,
+    source_identity,
+)
 
 
 class DashboardProjectorError(Exception):
@@ -113,7 +123,9 @@ def _parse_time(value: Any, name: str) -> datetime:
     return parsed.astimezone(timezone.utc)
 
 
-def _open_read_only(path: str | Path) -> sqlite3.Connection:
+def _open_read_only(path: str | Path, *,
+                    cancel_requested: Callable[[], bool] | None = None) -> sqlite3.Connection:
+    check_cancelled(cancel_requested)
     resolved = Path(path).resolve()
     uri = f"file:{quote(resolved.as_posix(), safe='/:')}?mode=ro"
     try:
@@ -122,6 +134,7 @@ def _open_read_only(path: str | Path) -> sqlite3.Connection:
         raise ProjectionSourceError("authority database cannot be opened read-only") from exc
     conn.row_factory = sqlite3.Row
     conn.execute("PRAGMA query_only = ON")
+    install_cancel_handler(conn, cancel_requested)
     return conn
 
 
@@ -174,29 +187,31 @@ def _json_array(value: Any, name: str) -> list[Any]:
     return parsed
 
 
-#: B1-4: what each round has already learned about the scheduler's work
-#: orders, keyed by database path.
+#: B1-4 / 2026-09-29: what each round has already learned about the
+#: authorities, kept per database file as incremental folds (see
+#: ``projection_folds``).
 #:
-#: Reading them used to cost 4.4 s of a 7.5 s round: ``SELECT *`` over 26k
-#: rows whose ``work_order_json`` averages 26 KB -- 660 MB read and parsed --
-#: to reach one field (``requested_capabilities``, which becomes a display
-#: label) and one column (``created_at``).  Narrowing the statement halves
-#: it; not re-reading rows that cannot have changed removes the rest.
+#: Reading the work orders used to cost 4.4 s of a 7.5 s round: ``SELECT *``
+#: over rows whose ``work_order_json`` averages 12-26 KB, to reach one field
+#: (``requested_capabilities``, which becomes a display label) and one column
+#: (``created_at``).  The next fix kept a ``created_at >=`` watermark, but
+#: ``created_at`` is stamped before ``BEGIN IMMEDIATE`` so a writer that waited
+#: out a lock commits behind it, and the same shape of re-read remained for
+#: every other table: every attempt event, lease revision, result envelope and
+#: formal result, every model invocation, usage and cost entry, every
+#: artifact and every connector attempt, per round, while one read
+#: transaction pinned the scheduler WAL for the whole round.  Every one of
+#: those tables is append-only (their schemas refuse UPDATE and DELETE), so a
+#: ``rowid`` high-water mark is exact: a round reads only the rows appended
+#: since the last one, through the primary key.
 #:
-#: A work order is immutable: the schema has triggers that refuse an UPDATE
-#: or a DELETE, so a row this process has read once can only ever be read
-#: again to get the same answer.  The cache is therefore append-only, keyed by
-#: ``created_at`` as a watermark, and validated by row count on every round --
-#: a count that disagrees with the cache is a database that was replaced
-#: underneath us (a restore, a test reusing a path), and the round reloads
-#: from scratch rather than projecting a mixture of two databases.
-_WORK_ORDER_CACHE: dict[str, dict[str, Any]] = {}
-_WORK_ORDER_CACHE_LOCK = threading.Lock()
+#: ``_WORK_ORDER_CACHE`` is the fold registry; clearing it forgets every fold.
+_WORK_ORDER_CACHE = _FOLD_REGISTRY
 
 _WORK_ORDER_COLUMNS = (
-    "SELECT work_order_id, created_at,"
+    "work_order_id, created_at,"
     " json_extract(work_order_json,'$.requested_capabilities')"
-    " AS requested_capabilities FROM scheduler_work_orders"
+    " AS requested_capabilities"
 )
 
 
@@ -211,38 +226,283 @@ def _work_order_entry(row: sqlite3.Row) -> dict[str, Any]:
     }
 
 
+def _keyed(key: Callable[[sqlite3.Row], Any]) -> Callable[[dict, sqlite3.Row], None]:
+    """Reduce to the newest row per key (rowid order: later wins)."""
+
+    def reduce(state: dict, row: sqlite3.Row) -> None:
+        state[key(row)] = row
+
+    return reduce
+
+
+def _keyed_max(
+    key: Callable[[sqlite3.Row], Any], order: Callable[[sqlite3.Row], Any]
+) -> Callable[[dict, sqlite3.Row], None]:
+    """Reduce to the row with the greatest ``order`` per key; ties: later."""
+
+    def reduce(state: dict, row: sqlite3.Row) -> None:
+        group = key(row)
+        current = state.get(group)
+        if current is None or order(row) >= order(current):
+            state[group] = row
+
+    return reduce
+
+
+def _sorted_by(key: Callable[[sqlite3.Row], Any]) -> Callable[[list, sqlite3.Row], None]:
+    """Keep every row, in ``key`` order (a total order on the table)."""
+
+    def reduce(state: list, row: sqlite3.Row) -> None:
+        bisect.insort(state, (key(row), row))
+
+    return reduce
+
+
+def _latest_record_fold(
+    name: str, table: str, id_column: str, group: str, version: str,
+    body: str = "record_json",
+) -> AppendOnlyFold:
+    """``_latest_records`` as a fold: newest version per group, raw JSON kept."""
+
+    def reduce(state: dict, row: sqlite3.Row) -> None:
+        current = state.get(row[group])
+        if current is None or row[version] > current[0]:
+            state[row[group]] = (
+                row[version], row["created_at"], row["fold_rowid"], row[body])
+
+    return AppendOnlyFold(
+        name, table, f"{id_column}, {group}, {version}, created_at, {body}",
+        key=id_column, init=dict, reduce=reduce,
+    )
+
+
+def _ordered_records(state: Mapping[Any, tuple], name: str) -> list[dict[str, Any]]:
+    """A latest-record fold's wires, ``ORDER BY created_at`` as the SQL had it."""
+
+    return [
+        _json(item[3], name)
+        for item in sorted(state.values(), key=lambda item: (item[1], item[2]))
+    ]
+
+
+_WORK_ORDER_FOLD = AppendOnlyFold(
+    "scheduler.work_orders", "scheduler_work_orders", _WORK_ORDER_COLUMNS,
+    key="work_order_id", init=dict,
+    reduce=lambda state, row: state.__setitem__(row["work_order_id"], _work_order_entry(row)),
+    cold_cover_index=WORK_ORDER_FOLD_COVER_INDEX.name,
+    cold_cover_sql=WORK_ORDER_FOLD_COVER_INDEX.statement,
+)
+_ATTEMPT_EVENT_FOLD = AppendOnlyFold(
+    "scheduler.latest_events", "scheduler_attempt_events",
+    "event_seq, work_order_id, state, attempt_number, event_id, created_at",
+    key="event_id", init=dict, reduce=_keyed(lambda row: row["work_order_id"]),
+)
+_FORMAL_RESULT_FOLD = AppendOnlyFold(
+    "scheduler.formal_results", "scheduler_formal_results",
+    "work_order_id, result_record_id, attempt_number, result_envelope_id,"
+    " terminal_state, created_at",
+    key="result_record_id", init=dict, reduce=_keyed(lambda row: row["work_order_id"]),
+)
+_RESULT_ENVELOPE_FOLD = AppendOnlyFold(
+    "scheduler.latest_receipts", "scheduler_result_envelopes",
+    "result_envelope_id, work_order_id, attempt_number, created_at",
+    key="result_envelope_id", init=dict,
+    reduce=_keyed_max(lambda row: row["work_order_id"],
+                      lambda row: (row["attempt_number"], row["created_at"])),
+)
+_LEASE_FOLD = AppendOnlyFold(
+    "scheduler.latest_leases", "scheduler_leases",
+    "lease_revision_id, work_order_id, attempt_number, lease_version, expires_at,"
+    " created_at",
+    key="lease_revision_id", init=dict,
+    reduce=_keyed_max(lambda row: (row["work_order_id"], row["attempt_number"]),
+                      lambda row: (row["lease_version"], row["created_at"])),
+)
+
+_INVOCATION_FOLD = AppendOnlyFold(
+    "core.model_invocations", "model_invocations",
+    "invocation_id, created_at, invocation_json",
+    key="invocation_id", init=list,
+    reduce=_sorted_by(lambda row: (row["created_at"], row["invocation_id"])),
+)
+_LINK_FOLD = AppendOnlyFold(
+    "core.work_order_links", "observability_work_order_links",
+    "link_id, created_at, record_json",
+    key="link_id", init=list,
+    reduce=_sorted_by(lambda row: (row["created_at"], row["link_id"])),
+)
+_WORKFLOW_FOLD = _latest_record_fold(
+    "core.workflow_versions", "observability_workflow_versions",
+    "version_id", "workflow_ref", "version_number",
+)
+_USAGE_FOLD = _latest_record_fold(
+    "core.usage_entries", "observability_usage_entries",
+    "usage_entry_id", "invocation_ref", "revision_number",
+)
+_COST_FOLD = _latest_record_fold(
+    "core.cost_entries", "observability_cost_entries",
+    "cost_entry_id", "usage_entry_ref", "revision_number",
+)
+
+#: The artifact fields any projection reads.  An artifact version's record is
+#: ~1 KB and the dashboard shows eleven of its fields, so the fold keeps those
+#: (and only the ones the record has, so a missing field still fails the way
+#: it did when the whole record was read).
+_ARTIFACT_FIELDS = tuple(sys.intern(name) for name in (
+    "artifact_ref", "work_order_ref", "title", "kind", "media_type",
+    "size_bytes", "artifact_content_hash", "access_class", "preview_status",
+    "producer_execution_ref", "producer_invocation_ref", "created_at",
+))
+
+
+def _artifact_index_reduce(state: dict, row: sqlite3.Row) -> None:
+    current = state.get(row["artifact_ref"])
+    if current is None or row["version_number"] > current[0]:
+        # The record is filled in by ``finish``, in the same transaction.
+        state[row["artifact_ref"]] = (
+            row["version_number"], row["version_id"], row["schema_version"], None)
+
+
+_ARTIFACT_FOLD = AppendOnlyFold(
+    "core.latest_artifacts", "observability_artifact_version_index",
+    "version_id, artifact_ref, version_number, schema_version, created_at",
+    key="version_id", init=dict, reduce=_artifact_index_reduce,
+)
+
+_CONNECTOR_HEALTH_FOLD = AppendOnlyFold(
+    "core.connector_health", "connector_source_health_events",
+    "event_id, connector_profile_ref, state, created_at",
+    key="event_id", init=dict, reduce=_keyed(lambda row: row["connector_profile_ref"]),
+)
+_CONNECTOR_INCIDENT_EVENT_FOLD = AppendOnlyFold(
+    "core.connector_incident_events", "connector_incident_events",
+    "event_id, incident_ref, state, created_at",
+    key="event_id", init=dict, reduce=_keyed(lambda row: row["incident_ref"]),
+)
+_CONNECTOR_INCIDENT_FOLD = AppendOnlyFold(
+    "core.connector_incidents", "connector_incidents",
+    "incident_id, connector_profile_ref, connector_invocation_ref, reservation_ref,"
+    " incident_type, severity, created_at",
+    key="incident_id", init=list,
+    reduce=_sorted_by(lambda row: (row["created_at"], row["incident_id"])),
+)
+_CONNECTOR_USAGE_FOLD = AppendOnlyFold(
+    "core.connector_usage", "connector_usage_entries",
+    "usage_entry_id, physical_attempt_ref, revision_number, measurement_status,"
+    " metering_source, created_at,"
+    " json_extract(record_json,'$.metrics') AS metrics",
+    key="usage_entry_id", init=dict,
+    reduce=_keyed_max(lambda row: row["physical_attempt_ref"],
+                      lambda row: (row["revision_number"], row["created_at"])),
+)
+_CONNECTOR_COST_FOLD = AppendOnlyFold(
+    "core.connector_cost", "connector_cost_entries",
+    "cost_entry_id, usage_entry_ref, revision_number, amount_micros, currency,"
+    " cost_status, created_at",
+    key="cost_entry_id", init=dict,
+    reduce=_keyed_max(lambda row: row["usage_entry_ref"],
+                      lambda row: (row["revision_number"], row["created_at"])),
+    cold_cover_index="connector_cost_entries_projection_fold_cover",
+)
+_CONNECTOR_SETTLEMENT_FOLD = AppendOnlyFold(
+    "core.connector_settlements", "connector_quota_settlements",
+    "settlement_id, reservation_ref, revision_number, state, actual_json, created_at",
+    key="settlement_id", init=dict,
+    reduce=_keyed_max(lambda row: row["reservation_ref"],
+                      lambda row: (row["revision_number"], row["created_at"])),
+)
+_CONNECTOR_INVOCATION_FOLD = AppendOnlyFold(
+    "core.connector_invocations", "connector_invocations",
+    "connector_invocation_id, connector_profile_ref, call_spec_ref, created_at",
+    key="connector_invocation_id", init=dict,
+    reduce=lambda state, row: state.__setitem__(
+        row["connector_invocation_id"],
+        (sys.intern(row["connector_profile_ref"]), row["call_spec_ref"])),
+    cold_cover_index="connector_invocations_projection_fold_cover",
+)
+_CONNECTOR_CALL_SPEC_FOLD = AppendOnlyFold(
+    "core.connector_call_specs", "connector_call_specs",
+    "call_spec_id, operation, created_at",
+    key="call_spec_id", init=dict,
+    reduce=lambda state, row: state.__setitem__(
+        row["call_spec_id"], sys.intern(row["operation"])),
+    cold_cover_index="connector_call_specs_projection_fold_cover",
+)
+_CONNECTOR_ATTEMPT_FOLD = AppendOnlyFold(
+    "core.connector_attempts", "connector_physical_attempts",
+    "physical_attempt_id, connector_invocation_ref, physical_attempt_number,"
+    " reservation_ref, outcome, started_at, completed_at, retry_at, created_at",
+    key="physical_attempt_id", init=list,
+    reduce=_sorted_by(lambda row: (row["started_at"], row["physical_attempt_id"])),
+    cold_cover_index="connector_physical_attempts_projection_fold_cover",
+)
+_CONNECTOR_RESERVATION_FOLD = AppendOnlyFold(
+    "core.connector_reservations", "connector_quota_reservations",
+    "reservation_id, quota_scope_ref, window_started_at, window_ends_at,"
+    " reserved_json, policy_version_ref, created_at",
+    key="reservation_id", init=list,
+    reduce=_sorted_by(lambda row: (row["window_started_at"], row["reservation_id"])),
+)
+
+
 def _scheduled_work_orders(
     scheduler: sqlite3.Connection, scheduler_db: Path | str
 ) -> dict[str, dict[str, Any]]:
     """Every work order, as the projection needs it, read incrementally."""
 
-    key = str(Path(scheduler_db).resolve())
-    total = scheduler.execute(
-        "SELECT COUNT(*) FROM scheduler_work_orders"
-    ).fetchone()[0]
-    with _WORK_ORDER_CACHE_LOCK:
-        cached = dict(_WORK_ORDER_CACHE.get(key, {}))
-    watermark = ""
-    for entry in cached.values():
-        if entry["created_at"] > watermark:
-            watermark = entry["created_at"]
-    if cached and watermark:
-        # ``>=`` and not ``>``: two work orders may share a timestamp, and one
-        # of them arriving after the previous round read the other would be
-        # invisible forever under a strict comparison.
-        rows = scheduler.execute(
-            _WORK_ORDER_COLUMNS + " WHERE created_at >= ?", (watermark,)
-        )
-        for row in rows:
-            cached[row["work_order_id"]] = _work_order_entry(row)
-    if not cached or len(cached) != total:
-        cached = {
-            row["work_order_id"]: _work_order_entry(row)
-            for row in scheduler.execute(_WORK_ORDER_COLUMNS)
-        }
-    with _WORK_ORDER_CACHE_LOCK:
-        _WORK_ORDER_CACHE[key] = cached
-    return cached
+    return _WORK_ORDER_FOLD.read(scheduler, source_identity(scheduler_db)).state
+
+
+def _retire_terminal(formal: Mapping[str, Any]) -> Callable[[dict], None]:
+    """Drop a work order's event/receipt state once it has a formal result.
+
+    A formal result is final and ``_scheduler_state`` answers from it alone,
+    so the latest event, receipt and lease of a finished work order are never
+    read again: keeping them would hold the whole history in memory.
+    """
+
+    def finish(state: dict) -> None:
+        retire_keys(state, formal)
+
+    return finish
+
+
+def _retire_terminal_leases(formal: Mapping[str, Any]) -> Callable[[dict], None]:
+    def finish(state: dict) -> None:
+        doomed = [key for key in state if key[0] in formal]
+        for key in doomed:
+            del state[key]
+
+    return finish
+
+
+def _load_scheduler(
+    scheduler: sqlite3.Connection, identity: tuple[str, int, int]
+) -> dict[str, Any]:
+    """Every scheduler fact the projection needs, from one read snapshot."""
+
+    work_orders = _WORK_ORDER_FOLD.read(scheduler, identity)
+    formal = _FORMAL_RESULT_FOLD.read(scheduler, identity)
+    events = _ATTEMPT_EVENT_FOLD.read(
+        scheduler, identity, finish=_retire_terminal(formal.state))
+    receipts = _RESULT_ENVELOPE_FOLD.read(
+        scheduler, identity, finish=_retire_terminal(formal.state))
+    leases = _LEASE_FOLD.read(
+        scheduler, identity, finish=_retire_terminal_leases(formal.state))
+    return {
+        "scheduled": work_orders.state,
+        "formal_results": formal.state,
+        "latest_events": events.state,
+        "latest_receipts": receipts.state,
+        "latest_leases": leases.state,
+        "watermark": {
+            "scheduler_work_orders": [work_orders.count, work_orders.max_created],
+            "scheduler_attempt_events": [events.count, events.max_created],
+            "scheduler_leases": [leases.count, leases.max_created],
+            "scheduler_formal_results": [formal.count, formal.max_created],
+            "scheduler_result_envelopes": [receipts.count, receipts.max_created],
+        },
+    }
 
 
 def _safe_token(value: Any, fallback: str) -> str:
@@ -304,6 +564,7 @@ class DashboardProjector:
         capability_catalog_db: str | Path | None = None,
         model_router_db: str | Path | None = None,
         clock: Callable[[], datetime] | None = None,
+        cancel_requested: Callable[[], bool] | None = None,
     ) -> None:
         self.core_db = Path(core_db)
         self.scheduler_db = Path(scheduler_db)
@@ -312,6 +573,7 @@ class DashboardProjector:
         )
         self.model_router_db = None if model_router_db is None else Path(model_router_db)
         self.clock = clock or _utc_now
+        self.cancel_requested = cancel_requested
 
     def project(self, projection_db: str | Path) -> dict[str, Any]:
         destination = Path(projection_db).resolve()
@@ -329,6 +591,7 @@ class DashboardProjector:
                 "projection destination cannot be an authority database"
             )
         snapshot = self.build_snapshot()
+        check_cancelled(self.cancel_requested)
         # Do not open the caller-controlled destination for mutation.  A
         # same-UID process could swap it for a hard link to an authority DB
         # after the alias check.  Build a private sibling and atomically replace
@@ -341,13 +604,14 @@ class DashboardProjector:
         os.close(fd)
         temporary = Path(temporary_name)
         try:
-            with ProjectionWriter(temporary) as writer:
+            with ProjectionWriter(temporary, cancel_requested=self.cancel_requested) as writer:
                 writer.replace(snapshot)
             sync_fd = os.open(temporary, os.O_RDONLY)
             try:
                 os.fsync(sync_fd)
             finally:
                 os.close(sync_fd)
+            check_cancelled(self.cancel_requested)
             os.replace(temporary, destination)
             directory_fd = os.open(destination.parent, os.O_RDONLY)
             try:
@@ -357,21 +621,49 @@ class DashboardProjector:
         finally:
             if temporary.exists():
                 temporary.unlink()
+            for suffix in ("-journal", "-wal", "-shm"):
+                temporary.with_name(temporary.name + suffix).unlink(missing_ok=True)
         return snapshot
 
     def build_snapshot(self) -> dict[str, Any]:
+        check_cancelled(self.cancel_requested)
+        try:
+            return self._build_snapshot()
+        except sqlite3.Error:
+            check_cancelled(self.cancel_requested)
+            raise
+
+    def _build_snapshot(self) -> dict[str, Any]:
         as_of_dt = self.clock()
         as_of = _timestamp(as_of_dt)
         as_of_dt = as_of_dt.astimezone(timezone.utc)
-        warnings = _Warnings()
+        # One sink per section, merged at the end in the order the sections
+        # always ran: the reads now finish (and release their snapshots)
+        # before the in-memory sections run, and the owner should not see the
+        # warnings reshuffle because of that.
+        sections = [
+            "sources", "graph", "unowned", "items", "invocations", "costs",
+            "capabilities", "models", "agenda", "metadata", "connectors",
+        ]
+        sink = {name: _Warnings() for name in sections}
 
         with ExitStack() as stack:
-            core = stack.enter_context(closing(_open_read_only(self.core_db)))
-            scheduler = stack.enter_context(closing(_open_read_only(self.scheduler_db)))
+            core = stack.enter_context(closing(_open_read_only(self.core_db, cancel_requested=self.cancel_requested)))
+            scheduler = stack.enter_context(closing(_open_read_only(self.scheduler_db, cancel_requested=self.cancel_requested)))
             _require_tables(core, _CORE_TABLES, "Core/observability")
             _require_tables(scheduler, _SCHEDULER_TABLES, "Scheduler")
-            core.execute("BEGIN")
+            # 2026-09-29: the scheduler snapshot used to stay open until the
+            # whole round finished (25 min on the live controller), and no
+            # checkpoint can pass a reader's snapshot, so the WAL grew and
+            # every scheduler read slowed.  Its facts are read up front, from
+            # one snapshot, and the snapshot ends before anything else runs.
             scheduler.execute("BEGIN")
+            try:
+                loaded = _load_scheduler(scheduler, source_identity(self.scheduler_db))
+            finally:
+                scheduler.execute("COMMIT")
+            core.execute("BEGIN")
+            core_identity = source_identity(self.core_db)
 
             catalog = self._optional_source(
                 stack,
@@ -379,8 +671,9 @@ class DashboardProjector:
                 core,
                 "capability_descriptor_versions",
                 "Capability Catalog 不可用；能力状态仅按实际调用推导",
-                warnings,
+                sink["sources"],
                 partial_tables=_METADATA_SOURCE_AUTHORITY_TABLES,
+                cancel_requested=self.cancel_requested,
             )
             router = self._optional_source(
                 stack,
@@ -388,125 +681,109 @@ class DashboardProjector:
                 core,
                 "model_endpoint_profile_versions",
                 "Model Router 不可用；模型状态仅按实际调用推导",
-                warnings,
+                sink["sources"],
+                cancel_requested=self.cancel_requested,
             )
 
-            workflow_wires = self._latest_records(
-                core,
-                "observability_workflow_versions",
-                "workflow_ref",
-                "version_number",
-            )
+            check_cancelled(self.cancel_requested)
+            folded: dict[str, FoldRead] = {}
+            workflows_read = folded["observability_workflow_versions"] = (
+                _WORKFLOW_FOLD.read(core, core_identity))
+            workflow_wires = _ordered_records(
+                workflows_read.state, "observability_workflow_versions")
+            links_read = folded["observability_work_order_links"] = (
+                _LINK_FOLD.read(core, core_identity))
             link_wires = [
-                _json(row["record_json"], "work-order link")
-                for row in core.execute(
-                    "SELECT record_json FROM observability_work_order_links "
-                    "ORDER BY created_at, link_id"
-                )
+                _json(row["record_json"], "work-order link") for _, row in links_read.state
             ]
-            usage_wires = self._latest_records(
-                core,
-                "observability_usage_entries",
-                "invocation_ref",
-                "revision_number",
-            )
+            usage_read = folded["observability_usage_entries"] = (
+                _USAGE_FOLD.read(core, core_identity))
+            usage_wires = _ordered_records(usage_read.state, "observability_usage_entries")
             latest_usage_ids = {wire["id"] for wire in usage_wires}
+            cost_read = folded["observability_cost_entries"] = (
+                _COST_FOLD.read(core, core_identity))
             cost_wires = [
                 wire
-                for wire in self._latest_records(
-                    core,
-                    "observability_cost_entries",
-                    "usage_entry_ref",
-                    "revision_number",
-                )
+                for wire in _ordered_records(cost_read.state, "observability_cost_entries")
                 if wire["usage_entry_ref"] in latest_usage_ids
             ]
-            artifact_wires = self._latest_artifact_records(core)
+            artifact_wires = self._latest_artifact_records(core, core_identity)
+            invocations_read = folded["model_invocations"] = (
+                _INVOCATION_FOLD.read(core, core_identity))
             invocation_wires = [
                 _json(row["invocation_json"], "model invocation")
-                for row in core.execute(
-                    "SELECT invocation_json FROM model_invocations ORDER BY created_at, invocation_id"
-                )
+                for _, row in invocations_read.state
             ]
 
-            scheduled = _scheduled_work_orders(scheduler, self.scheduler_db)
-            latest_events = self._latest_rows(
-                scheduler, "scheduler_attempt_events", "work_order_id", "event_seq"
-            )
-            # B1-4: the five fields ``_scheduler_state`` reads.  The row also
-            # carries ``result_envelope_json`` and two hashes, which no
-            # projection has ever looked at.
-            formal_results = {
-                row["work_order_id"]: row
-                for row in scheduler.execute(
-                    "SELECT work_order_id, result_record_id, attempt_number,"
-                    " result_envelope_id, terminal_state, created_at"
-                    " FROM scheduler_formal_results"
-                )
-            }
-            latest_receipts = self._latest_rows(
-                scheduler,
-                "scheduler_result_envelopes",
-                "work_order_id",
-                "attempt_number",
-                secondary="created_at",
-                # Only the id is projected; the envelope body stays in the
-                # authority, which is also the only place it is allowed to be
-                # read from.
-                columns=(
-                    "result_envelope_id", "work_order_id", "attempt_number",
-                    "created_at",
-                ),
-            )
-            latest_leases = self._latest_lease_rows(scheduler)
-
+            # Cheap and in memory, but ``_models`` needs the invocation rows
+            # while the router is still open.
+            check_cancelled(self.cancel_requested)
             workflows, membership, parents, sequences = self._workflow_graph(
-                workflow_wires, link_wires, warnings
+                workflow_wires, link_wires, sink["graph"]
             )
-            all_work_refs = set(scheduled)
+            all_work_refs = set(loaded["scheduled"])
             all_work_refs.update(membership)
             all_work_refs.update(wire["work_order_ref"] for wire in invocation_wires)
             all_work_refs.update(wire["work_order_ref"] for wire in artifact_wires)
-            self._assign_unowned_work(all_work_refs, workflows, membership, warnings, as_of)
-
-            work_items, work_state = self._work_items(
-                all_work_refs,
-                workflows,
-                membership,
-                parents,
-                sequences,
-                scheduled,
-                latest_events,
-                formal_results,
-                latest_receipts,
-                latest_leases,
-                invocation_wires,
-                usage_wires,
-                artifact_wires,
-                as_of_dt,
-                warnings,
-            )
+            self._assign_unowned_work(
+                all_work_refs, workflows, membership, sink["unowned"], as_of)
             invocation_rows = self._invocations(
-                invocation_wires, usage_wires, membership, warnings
-            )
-            cost_rows = self._costs(cost_wires, usage_wires, membership, warnings)
-            artifact_rows = self._artifacts(artifact_wires, membership)
-            workflow_rows = self._workflow_summaries(
-                workflows, work_items, work_state, invocation_rows, artifact_rows
+                invocation_wires, usage_wires, membership, sink["invocations"]
             )
             capability_rows = self._capabilities(
-                catalog, invocation_wires, as_of_dt, warnings
+                catalog, invocation_wires, as_of_dt, sink["capabilities"]
             )
-            model_rows = self._models(router, invocation_rows, warnings)
-            agenda_overview, agenda_cycles, agenda_questions = self._agenda(core, warnings)
-            metadata_sources = self._metadata_sources(catalog, warnings)
-            (
-                connector_operations,
-                connector_attempts,
-                connector_quota_windows,
-                connector_incidents,
-            ) = self._connectors(core, warnings)
-            watermark = self._watermark(core, scheduler, catalog, router)
+            model_rows = self._models(router, invocation_rows, sink["models"])
+            agenda_overview, agenda_cycles, agenda_questions = self._agenda(
+                core, sink["agenda"])
+            metadata_sources = self._metadata_sources(catalog, sink["metadata"])
+            connector_sources = self._connector_sources(
+                core, core_identity, sink["connectors"], folded)
+            check_cancelled(self.cancel_requested)
+            watermark = self._watermark(
+                core, loaded["watermark"], folded, catalog, router)
+        # Every authority connection is closed here: what follows reads only
+        # memory, and holds no snapshot while it does.
+
+        (
+            connector_operations,
+            connector_attempts,
+            connector_quota_windows,
+            connector_incidents,
+        ) = self._connector_rows(connector_sources)
+        check_cancelled(self.cancel_requested)
+        work_items, work_state = self._work_items(
+            all_work_refs,
+            workflows,
+            membership,
+            parents,
+            sequences,
+            loaded["scheduled"],
+            loaded["latest_events"],
+            loaded["formal_results"],
+            loaded["latest_receipts"],
+            loaded["latest_leases"],
+            invocation_wires,
+            usage_wires,
+            artifact_wires,
+            as_of_dt,
+            sink["items"],
+        )
+        check_cancelled(self.cancel_requested)
+        cost_rows = self._costs(cost_wires, usage_wires, membership, sink["costs"])
+        check_cancelled(self.cancel_requested)
+        artifact_rows = self._artifacts(artifact_wires, membership)
+        check_cancelled(self.cancel_requested)
+        workflow_rows = self._workflow_summaries(
+            workflows, work_items, work_state, invocation_rows, artifact_rows
+        )
+
+        check_cancelled(self.cancel_requested)
+        warnings = _Warnings()
+        for name in sections:
+            for item in sink[name].items:
+                warnings.add(item, partial=False)
+            warnings.partial = warnings.partial or sink[name].partial
 
         return {
             "metadata": {
@@ -535,7 +812,9 @@ class DashboardProjector:
         }
 
     @staticmethod
-    def _latest_artifact_records(core: sqlite3.Connection) -> list[dict[str, Any]]:
+    def _latest_artifact_records(
+        core: sqlite3.Connection, identity: tuple[str, int, int]
+    ) -> list[dict[str, Any]]:
         """Read the newest immutable artifact across both schema generations."""
 
         tables = _tables(core)
@@ -549,30 +828,33 @@ class DashboardProjector:
                 "artifact_ref",
                 "version_number",
             )
-        rows = core.execute(
-            "SELECT i.version_id,i.schema_version FROM observability_artifact_version_index i "
-            "JOIN (SELECT artifact_ref,MAX(version_number) AS version_number "
-            "      FROM observability_artifact_version_index GROUP BY artifact_ref) latest "
-            "ON latest.artifact_ref=i.artifact_ref AND latest.version_number=i.version_number "
-            "ORDER BY i.artifact_ref"
-        ).fetchall()
-        records: list[dict[str, Any]] = []
-        for row in rows:
-            table = (
-                "observability_artifact_versions"
-                if row["schema_version"] == "0.1"
-                else "observability_artifact_versions_v2"
-            )
-            record = core.execute(
-                f"SELECT record_json FROM {table} WHERE version_id=?",
-                (row["version_id"],),
-            ).fetchone()
-            if record is None:
-                raise ProjectionSourceError(
-                    "artifact generation index points to a missing authority row"
+
+        def fill(state: dict) -> None:
+            # Only versions that became the latest since the last round are
+            # read, by primary key.
+            for artifact_ref, entry in state.items():
+                if entry[3] is not None:
+                    continue
+                table = (
+                    "observability_artifact_versions"
+                    if entry[2] == "0.1"
+                    else "observability_artifact_versions_v2"
                 )
-            records.append(_json(record["record_json"], "artifact version"))
-        return records
+                record = core.execute(
+                    f"SELECT record_json FROM {table} WHERE version_id=?",
+                    (entry[1],),
+                ).fetchone()
+                if record is None:
+                    raise ProjectionSourceError(
+                        "artifact generation index points to a missing authority row"
+                    )
+                wire = _json(record["record_json"], "artifact version")
+                state[artifact_ref] = entry[:3] + (
+                    {name: wire[name] for name in _ARTIFACT_FIELDS if name in wire},
+                )
+
+        read = _ARTIFACT_FOLD.read(core, identity, finish=fill)
+        return [read.state[ref][3] for ref in sorted(read.state)]
 
     @staticmethod
     def _agenda(
@@ -749,6 +1031,7 @@ class DashboardProjector:
         warnings: _Warnings,
         *,
         partial_tables: frozenset[str] | None = None,
+        cancel_requested: Callable[[], bool] | None = None,
     ) -> sqlite3.Connection | None:
         if path is None:
             available = _tables(core)
@@ -762,7 +1045,7 @@ class DashboardProjector:
             warnings.add(warning)
             return None
         try:
-            conn = stack.enter_context(closing(_open_read_only(path)))
+            conn = stack.enter_context(closing(_open_read_only(path, cancel_requested=cancel_requested)))
         except ProjectionSourceError:
             warnings.add(warning)
             return None
@@ -791,49 +1074,6 @@ class DashboardProjector:
             f" ORDER BY source.created_at"
         ).fetchall()
         return [_json(row["record_json"], table) for row in rows]
-
-    @staticmethod
-    def _latest_rows(
-        conn: sqlite3.Connection,
-        table: str,
-        group_field: str,
-        order_field: str,
-        *,
-        secondary: str | None = None,
-        columns: Sequence[str] | None = None,
-    ) -> dict[str, sqlite3.Row]:
-        """The newest row per group, reading only the named columns.
-
-        ``columns`` is a projection, not a filter: every name is a column
-        this module writes literally into the statement, so callers pass
-        identifiers and never caller input.  The default stays ``source.*``
-        because most of these tables are narrow; the ones carrying a JSON
-        envelope name what they need.
-        """
-
-        order = f"{order_field} DESC"
-        if secondary:
-            order += f", {secondary} DESC"
-        selected = (
-            "source.*" if columns is None
-            else ",".join(f"source.{name}" for name in columns)
-        )
-        rows = conn.execute(
-            f"SELECT * FROM (SELECT {selected}, ROW_NUMBER() OVER ("
-            f" PARTITION BY {group_field} ORDER BY {order}) AS projection_rank"
-            f" FROM {table} AS source) WHERE projection_rank=1"
-        ).fetchall()
-        return {row[group_field]: row for row in rows}
-
-    @staticmethod
-    def _latest_lease_rows(conn: sqlite3.Connection) -> dict[tuple[str, int], sqlite3.Row]:
-        rows = conn.execute(
-            "SELECT * FROM (SELECT source.work_order_id,source.attempt_number,"
-            "source.lease_revision_id,source.expires_at, ROW_NUMBER() OVER ("
-            " PARTITION BY work_order_id,attempt_number ORDER BY lease_version DESC,created_at DESC"
-            ") AS projection_rank FROM scheduler_leases AS source) WHERE projection_rank=1"
-        ).fetchall()
-        return {(row["work_order_id"], row["attempt_number"]): row for row in rows}
 
     @staticmethod
     def _workflow_graph(
@@ -1561,50 +1801,75 @@ class DashboardProjector:
         return rows
 
     @staticmethod
-    def _connectors(
-        core: sqlite3.Connection, warnings: _Warnings
+    def _connector_sources(
+        core: sqlite3.Connection,
+        identity: tuple[str, int, int],
+        warnings: _Warnings,
+        folded: dict[str, FoldRead],
+    ) -> dict[str, Any] | None:
+        """Every connector fact the projection needs, read inside the snapshot.
+
+        Each table is an append-only fold; the one small, versioned table
+        (profiles, rate policies) is still read whole.
+        """
+
+        available = _tables(core)
+        present = _CONNECTOR_AUTHORITY_TABLES & available
+        if not present:
+            warnings.add("Connector authority 尚未进入 Core；connector 投影为空")
+            return None
+        missing = _CONNECTOR_AUTHORITY_TABLES - available
+        if missing:
+            raise ProjectionSourceError(
+                f"Connector authority is missing table(s): {sorted(missing)}"
+            )
+        loaded: dict[str, Any] = {}
+        for name, fold in (
+            ("connector_source_health_events", _CONNECTOR_HEALTH_FOLD),
+            ("connector_incident_events", _CONNECTOR_INCIDENT_EVENT_FOLD),
+            ("connector_incidents", _CONNECTOR_INCIDENT_FOLD),
+            ("connector_usage_entries", _CONNECTOR_USAGE_FOLD),
+            ("connector_cost_entries", _CONNECTOR_COST_FOLD),
+            ("connector_quota_settlements", _CONNECTOR_SETTLEMENT_FOLD),
+            ("connector_invocations", _CONNECTOR_INVOCATION_FOLD),
+            ("connector_call_specs", _CONNECTOR_CALL_SPEC_FOLD),
+            ("connector_physical_attempts", _CONNECTOR_ATTEMPT_FOLD),
+            ("connector_quota_reservations", _CONNECTOR_RESERVATION_FOLD),
+        ):
+            read = folded[name] = fold.read(core, identity)
+            loaded[name] = read.state
+        loaded["profiles"] = core.execute(
+            "SELECT source.record_json FROM connector_profile_versions source JOIN ("
+            " SELECT connector_ref,MAX(version_number) AS latest_version "
+            " FROM connector_profile_versions GROUP BY connector_ref"
+            ") latest ON latest.connector_ref=source.connector_ref "
+            "AND latest.latest_version=source.version_number "
+            "ORDER BY source.connector_ref"
+        ).fetchall()
+        loaded["policy_currency"] = {
+            row["policy_version_id"]: row["quota_currency"]
+            for row in core.execute(
+                "SELECT policy_version_id,quota_currency FROM connector_rate_policy_versions"
+            )
+        }
+        return loaded
+
+    @staticmethod
+    def _connector_rows(
+        loaded: dict[str, Any] | None,
     ) -> tuple[
         list[dict[str, Any]],
         list[dict[str, Any]],
         list[dict[str, Any]],
         list[dict[str, Any]],
     ]:
-        available = _tables(core)
-        present = _CONNECTOR_AUTHORITY_TABLES & available
-        if not present:
-            warnings.add("Connector authority 尚未进入 Core；connector 投影为空")
+        if loaded is None:
             return [], [], [], []
-        missing = _CONNECTOR_AUTHORITY_TABLES - available
-        if missing:
-            raise ProjectionSourceError(
-                f"Connector authority is missing table(s): {sorted(missing)}"
-            )
-
-        latest_health = {
-            row["connector_profile_ref"]: row
-            for row in core.execute(
-                "SELECT * FROM (SELECT source.connector_profile_ref,source.state,"
-                "source.created_at,ROW_NUMBER() OVER (PARTITION BY connector_profile_ref "
-                "ORDER BY source.rowid DESC) AS projection_rank "
-                "FROM connector_source_health_events source) WHERE projection_rank=1"
-            )
-        }
-        latest_incident_events = {
-            row["incident_ref"]: row
-            for row in core.execute(
-                "SELECT * FROM (SELECT source.incident_ref,source.state,source.created_at,"
-                "ROW_NUMBER() OVER (PARTITION BY incident_ref ORDER BY source.rowid DESC) "
-                "AS projection_rank FROM connector_incident_events source) "
-                "WHERE projection_rank=1"
-            )
-        }
+        latest_health = loaded["connector_source_health_events"]
+        latest_incident_events = loaded["connector_incident_events"]
         incident_rows: list[dict[str, Any]] = []
         blocking_counts: dict[str, int] = defaultdict(int)
-        for incident in core.execute(
-            "SELECT incident_id,connector_profile_ref,connector_invocation_ref,"
-            "reservation_ref,incident_type,severity,created_at FROM connector_incidents "
-            "ORDER BY created_at,incident_id"
-        ):
+        for _, incident in loaded["connector_incidents"]:
             event = latest_incident_events.get(incident["incident_id"])
             if event is None:
                 raise ProjectionSourceError("connector incident lacks an authority event")
@@ -1624,16 +1889,8 @@ class DashboardProjector:
                 }
             )
 
-        profile_rows = core.execute(
-            "SELECT source.record_json FROM connector_profile_versions source JOIN ("
-            " SELECT connector_ref,MAX(version_number) AS latest_version "
-            " FROM connector_profile_versions GROUP BY connector_ref"
-            ") latest ON latest.connector_ref=source.connector_ref "
-            "AND latest.latest_version=source.version_number "
-            "ORDER BY source.connector_ref"
-        ).fetchall()
         operation_rows: list[dict[str, Any]] = []
-        for row in profile_rows:
+        for row in loaded["profiles"]:
             profile = _json(row["record_json"], "connector profile")
             source = profile["source_identity"]
             health = latest_health.get(profile["id"])
@@ -1668,58 +1925,27 @@ class DashboardProjector:
                     }
                 )
 
-        latest_usage = {
-            row["physical_attempt_ref"]: row
-            for row in core.execute(
-                "SELECT * FROM (SELECT source.*,ROW_NUMBER() OVER ("
-                "PARTITION BY physical_attempt_ref ORDER BY revision_number DESC,"
-                "created_at DESC) AS projection_rank FROM connector_usage_entries source) "
-                "WHERE projection_rank=1"
-            )
-        }
-        latest_cost = {
-            row["usage_entry_ref"]: row
-            for row in core.execute(
-                "SELECT * FROM (SELECT source.*,ROW_NUMBER() OVER ("
-                "PARTITION BY usage_entry_ref ORDER BY revision_number DESC,created_at DESC"
-                ") AS projection_rank FROM connector_cost_entries source) "
-                "WHERE projection_rank=1"
-            )
-        }
-        latest_settlement = {
-            row["reservation_ref"]: row
-            for row in core.execute(
-                "SELECT * FROM (SELECT source.*,ROW_NUMBER() OVER ("
-                "PARTITION BY reservation_ref ORDER BY revision_number DESC,created_at DESC"
-                ") AS projection_rank FROM connector_quota_settlements source) "
-                "WHERE projection_rank=1"
-            )
-        }
-        invocation_authority = {
-            row["connector_invocation_id"]: row
-            for row in core.execute(
-                "SELECT i.connector_invocation_id,i.connector_profile_ref,c.operation "
-                "FROM connector_invocations i JOIN connector_call_specs c "
-                "ON c.call_spec_id=i.call_spec_ref"
-            )
-        }
+        latest_usage = loaded["connector_usage_entries"]
+        latest_cost = loaded["connector_cost_entries"]
+        latest_settlement = loaded["connector_quota_settlements"]
+        connector_invocations = loaded["connector_invocations"]
+        call_specs = loaded["connector_call_specs"]
 
         attempt_rows: list[dict[str, Any]] = []
-        for attempt in core.execute(
-            "SELECT physical_attempt_id,connector_invocation_ref,physical_attempt_number,"
-            "reservation_ref,outcome,started_at,completed_at,retry_at "
-            "FROM connector_physical_attempts ORDER BY started_at,physical_attempt_id"
-        ):
-            authority = invocation_authority.get(attempt["connector_invocation_ref"])
-            if authority is None:
+        for _, attempt in loaded["connector_physical_attempts"]:
+            # The inner join the SQL made: an invocation whose call spec is
+            # missing is no authority at all.
+            invocation = connector_invocations.get(attempt["connector_invocation_ref"])
+            operation = None if invocation is None else call_specs.get(invocation[1])
+            if operation is None:
                 raise ProjectionSourceError("connector attempt lacks invocation authority")
+            authority = {"connector_profile_ref": invocation[0], "operation": operation}
             usage = latest_usage.get(attempt["physical_attempt_id"])
             usage_metrics = None
             cost = None
             if usage is not None:
-                usage_wire = _json(usage["record_json"], "connector usage")
                 usage_metrics = _connector_metrics(
-                    usage_wire["metrics"], "connector usage metrics"
+                    usage["metrics"], "connector usage metrics"
                 )
                 cost = latest_cost.get(usage["usage_entry_id"])
             settlement = latest_settlement.get(attempt["reservation_ref"])
@@ -1770,14 +1996,18 @@ class DashboardProjector:
             )
 
         quota_groups: dict[tuple[str, str], dict[str, Any]] = {}
-        for reservation in core.execute(
-            "SELECT r.reservation_id,r.quota_scope_ref,r.window_started_at,"
-            "r.window_ends_at,r.reserved_json,p.quota_currency "
-            "FROM connector_quota_reservations r "
-            "JOIN connector_rate_policy_versions p "
-            "ON p.policy_version_id=r.policy_version_ref "
-            "ORDER BY r.window_started_at,r.reservation_id"
-        ):
+        policy_currency = loaded["policy_currency"]
+        for _, row in loaded["connector_quota_reservations"]:
+            if row["policy_version_ref"] not in policy_currency:
+                continue  # the inner join the SQL made
+            reservation = {
+                "reservation_id": row["reservation_id"],
+                "quota_scope_ref": row["quota_scope_ref"],
+                "window_started_at": row["window_started_at"],
+                "window_ends_at": row["window_ends_at"],
+                "reserved_json": row["reserved_json"],
+                "quota_currency": policy_currency[row["policy_version_ref"]],
+            }
             key = (reservation["quota_scope_ref"], reservation["window_started_at"])
             group = quota_groups.setdefault(
                 key,
@@ -1834,29 +2064,38 @@ class DashboardProjector:
     @staticmethod
     def _watermark(
         core: sqlite3.Connection,
-        scheduler: sqlite3.Connection,
+        scheduler_sources: Mapping[str, list[Any]],
+        folded: Mapping[str, FoldRead],
         catalog: sqlite3.Connection | None,
         router: sqlite3.Connection | None,
     ) -> str:
+        """A fingerprint of every source: ``[COUNT(*), MAX(created_at)]`` each.
+
+        The folds already know both for the tables they read (and computing
+        them again is what cost ``COUNT(*)`` a walk of every table's index per
+        round); the rest are asked, as before.
+        """
+
         sources: dict[str, Any] = {"core": {}, "scheduler": {}}
         core_tables = _tables(core)
+
+        def fingerprint(table: str) -> list[Any]:
+            read = folded.get(table)
+            if read is not None:
+                return [read.count, read.max_created]
+            row = core.execute(
+                f"SELECT COUNT(*) AS count,MAX(created_at) AS latest FROM {table}"
+            ).fetchone()
+            return [row["count"], row["latest"]]
+
         for table in sorted(_CORE_TABLES | (_AGENDA_TABLES & core_tables)):
             if table.endswith("_pointer"):
                 continue
-            row = core.execute(
-                f"SELECT COUNT(*) AS count,MAX(created_at) AS latest FROM {table}"
-            ).fetchone()
-            sources["core"][table] = [row["count"], row["latest"]]
+            sources["core"][table] = fingerprint(table)
         for table in sorted(_CONNECTOR_PROJECTION_TABLES & core_tables):
-            row = core.execute(
-                f"SELECT COUNT(*) AS count,MAX(created_at) AS latest FROM {table}"
-            ).fetchone()
-            sources["core"][table] = [row["count"], row["latest"]]
+            sources["core"][table] = fingerprint(table)
         for table in sorted(_SCHEDULER_TABLES):
-            row = scheduler.execute(
-                f"SELECT COUNT(*) AS count,MAX(created_at) AS latest FROM {table}"
-            ).fetchone()
-            sources["scheduler"][table] = [row["count"], row["latest"]]
+            sources["scheduler"][table] = list(scheduler_sources[table])
         if catalog is not None and "capability_descriptor_versions" in _tables(catalog):
             row = catalog.execute(
                 "SELECT COUNT(*) AS count,MAX(created_at) AS latest FROM capability_descriptor_versions"
@@ -1893,6 +2132,7 @@ def project_dashboard(
     capability_catalog_db: str | Path | None = None,
     model_router_db: str | Path | None = None,
     clock: Callable[[], datetime] | None = None,
+    cancel_requested: Callable[[], bool] | None = None,
 ) -> dict[str, Any]:
     """Convenience API for one complete read-only rebuild."""
     return DashboardProjector(
@@ -1901,4 +2141,5 @@ def project_dashboard(
         capability_catalog_db=capability_catalog_db,
         model_router_db=model_router_db,
         clock=clock,
+        cancel_requested=cancel_requested,
     ).project(projection_db)

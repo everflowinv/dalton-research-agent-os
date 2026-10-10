@@ -24,6 +24,33 @@ class Model:
                 "work_order_ref":"work:x","result_envelope_ref":"result:x","invocation_ref":"invoke:x","cost_micros":1,"replayed":False}
 
 class RuntimeTests(unittest.TestCase):
+    def test_semantic_rejection_repairs_only_anchored_sentence_and_replays_final(self):
+        with tempfile.TemporaryDirectory() as directory:
+            root=Path(directory);calls=[];counts={'brain':0,'fidelity':0}
+            class RepairModel(Model):
+                def call(self,**kwargs):
+                    calls.append((self.kind,kwargs['prompt']))
+                    if self.kind=='brain':
+                        counts['brain']+=1
+                        payload={'decisions':[],'sections':[{'index':0,'title':'回答','body':
+                            '收入为 10 美元。'+('公司是全球最大。' if counts['brain']==1 else ''),'gaps':[]}]}
+                    elif self.kind=='fidelity':
+                        counts['fidelity']+=1
+                        payload={'verdict':'pass','faithful':True,'no_new_facts':True,'meaning_preserved':True,'findings':[]}
+                        if counts['fidelity']==1:payload.update(verdict='reject',no_new_facts=False,
+                            findings=[{'section_index':0,'source_quote':'','candidate_quote':'公司是全球最大。','code':'new_fact','reason':'原稿未作此判断'}])
+                    else:return super().call(**kwargs)
+                    return {'text':json.dumps(payload,ensure_ascii=False),'route_decision_ref':'decision:'+self.kind,
+                        'work_order_ref':'work:'+self.kind+str(counts[self.kind]),'cost_micros':1}
+            args=self.resumable_args(root,lambda config:RepairModel(config['fixture_kind']))
+            with patch('dalton_core.research_language_runtime.ModelRouter',FakeRouter):
+                first=run(**args);second=run(**{**args,'request_id':'new-random-request'})
+            self.assertEqual(first['status'],'ready_for_publication',first)
+            self.assertEqual(first['review_cost_micros'],5)
+            self.assertEqual([kind for kind,_ in calls],['checker','brain','fidelity','brain','fidelity'])
+            self.assertIn('待修章节',calls[3][1])
+            self.assertTrue(second['artifact_replayed'])
+
     def test_fidelity_purpose_reaches_real_cockpit_model_enqueue_boundary(self):
         self.assertEqual("research_localization_verifier", FIDELITY_PURPOSE)
         captured = {}

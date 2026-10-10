@@ -45,7 +45,7 @@ incomplete quarter sequences.
 Command:
 
 ```text
-PYTHONPATH=src /Users/everflow/Projects/dalton-research-agent-os/.venv/bin/python -m unittest tests.test_cashflow_input_foundation tests.test_company_model_inputs tests.test_model_forecast_driver tests.test_company_model_series tests.test_company_model_forecast tests.test_mission_model_forecast_lane tests.test_forecast_sensitivity tests.test_fund_xlsx_export
+PYTHONPATH=src $HOME/Projects/dalton-research-agent-os/.venv/bin/python -m unittest tests.test_cashflow_input_foundation tests.test_company_model_inputs tests.test_model_forecast_driver tests.test_company_model_series tests.test_company_model_forecast tests.test_mission_model_forecast_lane tests.test_forecast_sensitivity tests.test_fund_xlsx_export
 ```
 
 Result: 214 tests passed in 8.760 seconds. One pre-existing test emitted an

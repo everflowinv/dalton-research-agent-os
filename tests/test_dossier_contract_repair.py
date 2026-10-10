@@ -312,20 +312,14 @@ class DossierRepairTests(unittest.TestCase):
             self.assertEqual(row["status"], "ok")
             self.assertEqual(row["repair_attempts"], 0)
 
-    def test_the_budget_says_which_units_it_gave_up_and_what_is_left(self):
-        # ``run cost bound reached`` eight times on 2026-09-16, in a summary
-        # whose ``failure_reason`` was null.
+    def test_old_run_budget_and_explicit_unit_count_obey_the_product_floor(self):
         self.harness.model_config.write_text(
             json.dumps({"run_budget": {"max_cost_usd": 0.000001}}), encoding="utf-8")
         summary = self.harness.run(max_units=12)
         budget = summary["budget"]
-        self.assertEqual(budget["spent_micros"], 0)
-        self.assertTrue(budget["units_skipped_for_cost"])
-        self.assertIn("成本上限", budget["reason"])
-        self.assertEqual(
-            sorted(budget["units_skipped_for_cost"]),
-            sorted(row["unit"] for row in summary["refused"]
-                   if row["reason"] == "run cost bound reached"))
+        self.assertEqual(budget["run_cost_micros"], 13 * 14_000_000)
+        self.assertGreater(budget["spent_micros"], 0)
+        self.assertEqual(budget["units_skipped_for_cost"], [])
 
     def test_a_run_that_pays_for_everything_reports_no_skips(self):
         summary = self.harness.run(max_units=2)

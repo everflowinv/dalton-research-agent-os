@@ -471,6 +471,159 @@ class TrackingCadenceAuthority:
         return {**written, "status": "published"}
 
 
+#: The interval a prioritised adjustable source is re-read at: a quarter of
+#: its baseline, never under an hour (the owner's 「优先看这家」 lever).
+PRIORITY_FLOOR_SECONDS = 3600
+
+
+def priority_interval(baseline_seconds: int, mode: str) -> int:
+    if mode not in {"prioritize", "normal"}:
+        raise TrackingCadenceValidationError("mode must be prioritize or normal")
+    return baseline_seconds if mode == "normal" else max(
+        PRIORITY_FLOOR_SECONDS, baseline_seconds // 4)
+
+
+def publish_priority(
+    authority: TrackingCadenceAuthority,
+    *,
+    company_ref: str,
+    mode: str,
+    because: str,
+    evidence_refs: Sequence[str],
+    change_reason: str,
+    policy: Mapping[str, Any],
+    mission: Mapping[str, Any],
+    actor_ref: str,
+    decision: str,
+) -> dict[str, Any]:
+    """"Look at this company first" (or back to the baseline), for every adjustable source.
+
+    The one implementation of the owner's 「优先看这家」 lever, shared with the
+    scenario lane (ADR-0012), so a trigger that fires and an owner who presses
+    the button re-time a company the same way: each adjustable source drops
+    to :func:`priority_interval`; fixed sources (prices, filings, the
+    calendar) are never touched -- the authority refuses them by design.
+    Returns ``{"published": [...], "unchanged": [...]}``.
+    """
+
+    published: list[dict[str, Any]] = []
+    unchanged: list[str] = []
+    for source_key, baseline in sorted(policy["cadences"].items()):
+        if not baseline["adjustable"]:
+            continue
+        target = priority_interval(baseline["interval_seconds"], mode)
+        current = authority.cadence(company_ref, source_key, policy=policy)
+        if current["interval_seconds"] == target:
+            unchanged.append(source_key)
+            continue
+        version = authority.propose(
+            company_ref=company_ref, source_key=source_key, interval_seconds=target,
+            because=because[:MAX_BECAUSE_CHARS], evidence_refs=evidence_refs,
+            change_reason=change_reason, policy=policy, mission=mission,
+            actor_ref=actor_ref, decision=decision)
+        if version.get("status") == "published":
+            published.append({"source_key": source_key, "version_ref": version["id"],
+                              "interval_seconds": target})
+        else:
+            unchanged.append(source_key)
+    return {"published": published, "unchanged": unchanged}
+
+
+# ---------------------------------------------------------------------------
+# discovery: the same lever re-times the source-discovery coordinators
+# ---------------------------------------------------------------------------
+
+#: The most a cadence may speed discovery up: the owner's 「优先看这家」 is a
+#: quarter of the baseline, and no cadence version may make a coordinator
+#: search a company more often than that lever would.
+MAX_DISCOVERY_DIVISOR = 4
+#: Discovery intervals are whole days and never fall below one.
+MIN_DISCOVERY_INTERVAL_DAYS = 1
+#: The rule in one sentence, for the plan report, parity and the cockpit.
+DISCOVERY_CADENCE_RULE = (
+    "「优先看这家」生效期间，该公司的重新检索间隔与失败重试间隔按计划值 ÷4（向下取整，"
+    "最少 1 天）；恢复常规频率后回到计划值。其他公司不受影响。"
+)
+
+
+def discovery_cadence_report(spec: Mapping[str, Any]) -> dict[str, int]:
+    """One plan spec's intervals as a prioritised company would run them."""
+
+    return {
+        "priority_rediscovery_interval_days": scaled_interval_days(
+            spec["rediscovery_interval_days"], MAX_DISCOVERY_DIVISOR),
+        "priority_retry_interval_days": scaled_interval_days(
+            spec["retry_interval_days"], MAX_DISCOVERY_DIVISOR),
+    }
+
+
+def discovery_cadence_divisor(store_or_connection: Any, company_ref: str) -> dict[str, Any]:
+    """How much faster this company's discovery runs than its plan says, and why.
+
+    ADR-0009's cadence versions re-time the *tracking* lane per (company,
+    source).  The AlphaEngine, web and SEC discovery coordinators read the
+    same chain: the company's divisor is the largest ``baseline / interval``
+    among the newest version of each of its sources, floored to an integer
+    and clamped to ``[1, MAX_DISCOVERY_DIVISOR]``.  A priority published by
+    :func:`publish_priority` (owner button, scenario trigger or probability
+    move) therefore divides the plan's intervals by 4; the ``normal`` version
+    that settles it puts the interval back on the baseline, the divisor back
+    to 1 and the coordinators back on the plan's own values.  A slowed-down
+    cadence never lengthens discovery -- the plan's intervals are the owner's
+    and only the priority lever shortens them.
+
+    Read-only and defensive: a Core with no cadence table, no versions, or an
+    unreadable row answers divisor 1, which is exactly today's behaviour.
+    """
+
+    connection = getattr(store_or_connection, "connection", store_or_connection)
+    quiet = {"divisor": 1, "version_refs": [], "source_keys": []}
+    if connection is None or not hasattr(connection, "execute") or not company_ref:
+        return quiet
+    try:
+        rows = connection.execute(
+            "SELECT t.version_id, t.source_key, t.interval_seconds, t.record_json "
+            "FROM tracking_cadence_versions t WHERE t.company_ref=? AND t.version_number="
+            "(SELECT MAX(u.version_number) FROM tracking_cadence_versions u "
+            "WHERE u.cadence_ref=t.cadence_ref)",
+            (company_ref,),
+        ).fetchall()
+    except sqlite3.Error:
+        return quiet
+    best = 1
+    refs: list[str] = []
+    keys: list[str] = []
+    for row in rows:
+        try:
+            record = json.loads(row[3])
+            baseline = int(record.get("baseline_interval_seconds") or 0)
+            interval = int(row[2])
+        except (TypeError, ValueError, AttributeError):
+            continue
+        if baseline <= 0 or interval <= 0:
+            continue
+        divisor = max(1, min(MAX_DISCOVERY_DIVISOR, baseline // interval))
+        if divisor <= 1:
+            continue
+        if divisor > best:
+            best = divisor
+        refs.append(str(row[0]))
+        keys.append(str(row[1]))
+    if best <= 1:
+        return quiet
+    return {"divisor": best, "version_refs": sorted(refs), "source_keys": sorted(keys)}
+
+
+def scaled_interval_days(plan_days: int, divisor: int) -> int:
+    """A plan interval under a cadence divisor: ``plan // divisor``, never under a day."""
+
+    days = int(plan_days)
+    divisor = max(1, int(divisor or 1))
+    if divisor == 1:
+        return days
+    return max(MIN_DISCOVERY_INTERVAL_DAYS, days // divisor)
+
+
 # ---------------------------------------------------------------------------
 # next_due: the one line an existing lane adds
 # ---------------------------------------------------------------------------
@@ -590,11 +743,19 @@ __all__ = [
     "TrackingCadenceValidationError",
     "WRITE_SCOPE",
     "active_coverage_metrics",
+    "DISCOVERY_CADENCE_RULE",
+    "MAX_DISCOVERY_DIVISOR",
+    "MIN_DISCOVERY_INTERVAL_DAYS",
     "baseline_cadences",
     "cadence_ref_for",
+    "discovery_cadence_divisor",
+    "discovery_cadence_report",
+    "scaled_interval_days",
     "due_sources",
     "immediate_pull_sources",
     "load_policy",
     "next_due",
+    "priority_interval",
+    "publish_priority",
     "screen_passed_companies",
 ]

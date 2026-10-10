@@ -11,7 +11,7 @@ class CockpitFinalLabelsTests(unittest.TestCase):
                     "cockpit_control.html").read_text("utf-8")
 
     def test_authority_values_keep_clear_user_labels(self):
-        self.assertEqual(MODEL_SELECTION_MODE_LABELS["tier"], "使用系统推荐配置")
+        self.assertEqual(MODEL_SELECTION_MODE_LABELS["tier"], "使用本类任务的默认顺序")
         actions = {row["decision"]: row["label"]
                    for row in CHECKPOINT_ACTIONS["gate_reopen"]}
         self.assertEqual(actions, {
@@ -30,7 +30,7 @@ class CockpitFinalLabelsTests(unittest.TestCase):
             "question,goal,steer,approval": "操作记录", "problem": "运行问题",
         }
         for value, label in expected.items():
-            self.assertIn(f'data-f="{value}">{label}</span>', self.html)
+            self.assertIn(f'data-f="{value}">{label}</button>', self.html)
 
     def test_claim_index_empty_state_uses_product_language(self):
         self.assertIn("结论索引尚未建立，所以没有主题和来源层级。", self.html)

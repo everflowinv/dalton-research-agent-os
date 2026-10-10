@@ -363,6 +363,12 @@ def inquiry_content_hash(inquiry: Mapping[str, Any]) -> str:
             "repair_target_ref": target_ref,
             "repair_target_hash": target_hash,
         })
+    if "canonical_question" in inquiry:
+        from .canonical_document_questions import normalize_binding
+        try:
+            identity["canonical_question"] = normalize_binding(inquiry["canonical_question"])
+        except ValueError as exc:
+            raise ResearchTaskError(str(exc)) from exc
     if "directed_document" in inquiry:
         from .document_research_strategy import strategy_identity, DocumentResearchStrategyError
         try:
@@ -1029,6 +1035,59 @@ def plan_admissions(
             "estimated_micros": estimate,
         })
     return results
+
+
+#: The refusals that used to be dead ends (batch E): an inquiry that is in
+#: scope but that no template can bind.  Each now opens a MaterialRequest for
+#: the material acquisition service; the two templates keep binding what they
+#: can, exactly as before.
+MATERIAL_REQUEST_REASONS: frozenset[str] = frozenset({
+    "no_bindable_template",
+    "repair_target_capability_gap",
+    "directed_document_capability_gap",
+    "industry_inquiry_has_no_company_probe",
+})
+
+
+def open_material_requests_for_gaps(
+    state_dir: str | Path,
+    plan: Mapping[str, Any],
+    entries: Sequence[Mapping[str, Any]],
+    *,
+    industry_ref: str | None = None,
+    now: str | None = None,
+) -> list[dict[str, Any]]:
+    """Turn every capability-gap refusal of ``plan_admissions`` into a MaterialRequest.
+
+    Idempotent: the request's digest is its subject and question, so the same
+    inquiry refused again tomorrow joins the request it already opened.
+    Returns one row per refusal converted (``request_id``, ``write_status``)
+    and never raises -- a ledger that cannot be written leaves the refusal
+    exactly as it was reported before batch E.
+    """
+
+    from .material_acquisition import MaterialAcquisitionError, open_for_inquiry
+
+    out: list[dict[str, Any]] = []
+    inquiries = list(plan.get("inquiries") or ())
+    plan_ref = plan.get("plan_id") or plan.get("id")
+    for entry in entries:
+        reason = entry.get("reason")
+        if entry.get("admissible") or reason not in MATERIAL_REQUEST_REASONS:
+            continue
+        ordinal = entry.get("ordinal")
+        if not isinstance(ordinal, int) or not 0 <= ordinal < len(inquiries):
+            continue
+        try:
+            opened = open_for_inquiry(state_dir, inquiries[ordinal], plan_ref=plan_ref, reason=reason,
+                                      industry_ref=industry_ref, now=now)
+        except (MaterialAcquisitionError, ValueError, OSError) as exc:
+            out.append({"inquiry_ref": entry.get("inquiry_ref"), "reason": reason,
+                        "error": f"{type(exc).__name__}: {exc}"[:300]})
+            continue
+        out.append({"inquiry_ref": entry.get("inquiry_ref"), "reason": reason, "request_id": opened["id"],
+                    "status": opened.get("status"), "write_status": opened.get("write_status")})
+    return out
 
 
 def admit_inquiry(

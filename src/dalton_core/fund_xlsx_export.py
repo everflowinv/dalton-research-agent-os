@@ -20,6 +20,14 @@ from .fund_xlsx_template import (
     apply_fund_xlsx_template,
     build_fund_xlsx_template_plan,
 )
+from .fund_xlsx_template_registry import (
+    VALUATION_BLOCKS,
+    FundXlsxTemplateRegistryError,
+    builtin_version,
+    export_binding,
+    resolve_template,
+    validate_mapping,
+)
 from .model_forecast_driver import (
     STRUCTURED_CASH_SCHEMA_VERSION,
     ForecastModelAuthority,
@@ -175,6 +183,10 @@ def _financial_row_presentation(result: Mapping[str, Any]) -> tuple[int, str]:
 
 def _model_unit_suffix(unit: str, *, role: str | None = None) -> str:
     normalized = str(unit).casefold()
+    if normalized == "count":
+        return "（个）"
+    if normalized == "usd_per_unit":
+        return "（美元/个）"
     if re.fullmatch(r"[a-z]{3}", normalized):
         return ""
     if role == "diluted_weighted_average_shares":
@@ -278,7 +290,13 @@ def _formula_for(
     result: Mapping[str, Any], cell: Mapping[str, Any], period: str,
     result_cells: Mapping[tuple[str, str], str], assumption_cells: Mapping[str, str],
     history_cells: Mapping[tuple[str, str], str],
+    assumption_measures: Mapping[str, str] | None = None,
 ) -> str | None:
+    levels = [ref for ref in cell.get("assumption_refs") or []
+              if (assumption_measures or {}).get(ref) in {"mechanism_amount", "economic_driver_level"}]
+    if len(levels) == 1 and len(cell.get("assumption_refs") or []) == 1:
+        coordinate = assumption_cells.get(levels[0])
+        return None if coordinate is None else "=" + coordinate
     refs = [result_cells.get((r["ref"], r["period_end"]))
             for r in cell.get("result_refs") or []]
     if any(ref is None for ref in refs):
@@ -336,7 +354,16 @@ def _verify_translated_value(
     result_values: Mapping[tuple[str, str], Decimal],
     assumption_values: Mapping[str, Decimal],
     history_values: Mapping[tuple[str, str], Decimal],
+    assumption_measures: Mapping[str, str] | None = None,
 ) -> None:
+    levels = [ref for ref in cell.get("assumption_refs") or []
+              if (assumption_measures or {}).get(ref) in {"mechanism_amount", "economic_driver_level"}]
+    if len(levels) == 1 and len(cell.get("assumption_refs") or []) == 1:
+        expected = assumption_values.get(levels[0])
+        actual = Decimal(str(cell["value"]))
+        if expected is None or abs(expected - actual) > max(Decimal("0.00000001"), abs(actual) * Decimal("1e-12")):
+            raise FundWorkbookExportError("bound mechanism amount differs from result: " + cell["ref"])
+        return
     refs = [result_values.get((item["ref"], item["period_end"]))
             for item in cell.get("result_refs") or []]
     assumptions = [assumption_values.get(item)
@@ -465,6 +492,61 @@ def _inclusive_duration_days(cell: Mapping[str, Any]) -> int:
         return 0
 
 
+_BUILD_SHEET_NAMES = {"valuation": "Valuation", "financials": "Financials", "driver": "Driver"}
+
+
+def _template_binding(template: Mapping[str, Any] | None) -> dict[str, Any]:
+    if template is None:
+        return export_binding({"template": builtin_version(), "basis": "builtin"})
+    binding = dict(template)
+    required = {"version_ref", "version_hash", "display_name", "style_ref", "style_hash",
+                "style_contract", "mapping", "basis"}
+    if not required <= set(binding):
+        raise FundWorkbookExportError("fund template binding has an invalid shape")
+    try:
+        binding["mapping"] = validate_mapping(binding["mapping"])
+    except FundXlsxTemplateRegistryError as exc:
+        raise FundWorkbookExportError(f"fund template mapping is invalid: {exc}") from exc
+    return binding
+
+
+def _unit_labels(mapping: Mapping[str, Any], currency: str) -> dict[str, str]:
+    labels = mapping["unit_labels"]
+    return {
+        "financials": labels["financials"].format(currency=currency),
+        "driver": (labels["driver_usd"] if currency == "USD"
+                   else labels["driver"]).format(currency=currency),
+    }
+
+
+def _rename_model_sheets(sheets: Mapping[str, Any], names: Mapping[str, str],
+                         formula_map: list[dict[str, Any]]) -> None:
+    """Give the model sheets the template's names, references included."""
+
+    renames = {_BUILD_SHEET_NAMES[role]: names[role] for role in _BUILD_SHEET_NAMES
+               if names[role] != _BUILD_SHEET_NAMES[role]}
+    if not renames:
+        return
+    quoted = re.compile(r"'(" + "|".join(map(re.escape, renames)) + r")'!")
+    bare = re.compile(r"^(" + "|".join(map(re.escape, renames)) + r")!")
+
+    def formula(text: str) -> str:
+        return quoted.sub(lambda m: f"'{renames[m.group(1)]}'!", text)
+
+    for sheet in sheets.values():
+        for row in sheet.iter_rows():
+            for cell in row:
+                if isinstance(cell.value, str) and cell.value.startswith("="):
+                    cell.value = formula(cell.value)
+    for item in formula_map:
+        if isinstance(item.get("formula"), str):
+            item["formula"] = formula(item["formula"])
+        if isinstance(item.get("cell"), str):
+            item["cell"] = bare.sub(lambda m: f"{renames[m.group(1)]}!", item["cell"])
+    for role, sheet in sheets.items():
+        sheet.title = names[role]
+
+
 def export_fund_workbook(
     output: Path, *, model: Mapping[str, Any], spec: Mapping[str, Any],
     inputs: Mapping[str, Any], valuation: Mapping[str, Any] | None = None,
@@ -472,8 +554,16 @@ def export_fund_workbook(
     calendar_binding: Mapping[str, Any] | None = None,
     annual_projection: Mapping[str, Any] | None = None,
     mission_binding: Mapping[str, Any] | None = None,
+    template: Mapping[str, Any] | None = None,
 ) -> dict[str, Any]:
-    """Export verified authority records without changing any authority."""
+    """Export verified authority records without changing any authority.
+
+    ``template`` is a registry binding (``fund_xlsx_template_registry.
+    export_binding``); ``None`` is the built-in template, which writes every
+    cell exactly as the exporter did before the registry existed.
+    """
+    template = _template_binding(template)
+    mapping = template["mapping"]
     model_wire = dict(model)
     model_wire.pop("status", None)
     model = validate_forecast_model(model_wire)
@@ -486,9 +576,12 @@ def export_fund_workbook(
     Workbook, _, Font, PatternFill = _xlsx()
     wb = Workbook()
     wb.remove(wb.active)
-    valuation_ws = wb.create_sheet("Valuation")
-    financials = wb.create_sheet("Financials")
-    driver = wb.create_sheet("Driver")
+    # Built under the built-in names (every formula below is written against
+    # them); a template with other names renames the sheets and rewrites the
+    # references once, before the formula map is hashed.
+    valuation_ws = wb.create_sheet(_BUILD_SHEET_NAMES["valuation"])
+    financials = wb.create_sheet(_BUILD_SHEET_NAMES["financials"])
+    driver = wb.create_sheet(_BUILD_SHEET_NAMES["driver"])
     sources = wb.create_sheet("Sources")
     manifest = wb.create_sheet("Formula Map")
     periods = list(dict.fromkeys([*model["history_periods"], *[p["end"] for p in model["realised_periods"] + model["forecast_periods"]]]))
@@ -529,15 +622,10 @@ def export_fund_workbook(
         _quarter_label(period, calendar_binding, set(history)) for period in periods
     ]
     template_plan = build_fund_xlsx_template_plan(
-        sheet_names={"valuation": "Valuation", "financials": "Financials", "driver": "Driver"},
+        sheet_names=_BUILD_SHEET_NAMES,
         annual_periods=displayed_annual_labels, quarterly_periods=quarter_labels,
-        unit_labels={
-            "financials": f"({display_currency} MM)",
-            "driver": (
-                "(US$mm)" if display_currency == "USD"
-                else f"({display_currency} mm)"
-            ),
-        },
+        unit_labels=_unit_labels(mapping, display_currency),
+        style_contract=template["style_contract"],
     )
     annual_columns = {
         original: item["column"]
@@ -651,6 +739,7 @@ def export_fund_workbook(
     row += 1
     assumption_cells: dict[str, str] = {}
     assumption_values: dict[str, Decimal] = {}
+    assumption_measures: dict[str, str] = {}
     driver_labels = {
         item["ref"]: _reader_label(item["label"]) for item in model["drivers"]
     }
@@ -717,7 +806,9 @@ def export_fund_workbook(
                         )
                 driver.cell(
                     row, ci,
-                    actual_share_formula or _number(assumption["value"]),
+                    actual_share_formula or (
+                        _template_value(assumption["value"], unit)
+                        if measure in {"mechanism_amount", "economic_driver_level"} else _number(assumption["value"])),
                 )
                 template_cell_styles["driver"].append({
                     "range": driver.cell(row, ci).coordinate,
@@ -738,6 +829,7 @@ def export_fund_workbook(
                     })
                 assumption_cells[assumption["ref"]] = f"'Driver'!{_col(ci)}{row}"
                 assumption_values[assumption["ref"]] = Decimal(str(assumption["value"]))
+                assumption_measures[assumption["ref"]] = measure
         template_row_styles["driver"].append({
             "row": row, "style": "growth_label", "level": 2,
         })
@@ -912,12 +1004,12 @@ def export_fund_workbook(
                         result_flow_periods.add((result["ref"], period))
             elif cell is not None and cell["status"] == "computed":
                 formula = _formula_for(result, cell, period, result_cells,
-                                       assumption_cells, history_cells)
+                                       assumption_cells, history_cells, assumption_measures)
                 model_cell_ref = cell["ref"]
                 if formula is not None:
                     _verify_translated_value(
                         result, cell, result_values, assumption_values,
-                        history_values)
+                        history_values, assumption_measures)
                     if _duration_quarter_cell(cell, period):
                         result_flow_periods.add((result["ref"], period))
             if formula is None:
@@ -958,9 +1050,9 @@ def export_fund_workbook(
             annual_eps = annual_eps_results.get(label)
             projection_outcome = (
                 annual_line_outcomes.get(label, {}).get(result["ref"])
-                if annual_semantics is not None else None
+                if annual_semantics not in {None, "not_applicable"} else None
             )
-            if annual_semantics is not None:
+            if annual_semantics not in {None, "not_applicable"}:
                 if projection_outcome is None:
                     raise FundWorkbookExportError(
                         f"annual projection lacks result {result['ref']}")
@@ -1003,6 +1095,15 @@ def export_fund_workbook(
                     target.value = f"=SUM({','.join(coordinates)})"
                     model_formula = "projection_sum_quarters"
                     cell_style = "local_formula"
+                elif (structured_role == "diluted_weighted_average_shares"
+                      and projection_outcome.get("method") in {"annual_growth_from_filed", "direct_annual_filing"}):
+                    target.value = _template_value(
+                        projection_outcome["value"], result["unit"], role=str(structured_role))
+                    model_formula = (
+                        f"{projection_outcome['method']}; as_of={projection_outcome['as_of']}; "
+                        f"steps={projection_outcome['steps']}; growth_rate={projection_outcome['growth_rate']}; "
+                        f"source_hash={projection_outcome['source']['content_hash']}")
+                    cell_style = "hardcoded_input"
                 elif annual_semantics == "direct_annual":
                     if len(source_periods) != 1:
                         raise FundWorkbookExportError(
@@ -1081,6 +1182,25 @@ def export_fund_workbook(
                 and annual_share is not None
                 and annual_share.get("status") == "computed"
             ):
+                if annual_share.get("method") in {"annual_growth_from_filed", "direct_annual_filing"}:
+                    target.value = _template_value(
+                        annual_share["value"], result["unit"], role=str(structured_role))
+                    template_cell_styles["financials"].append({
+                        "range": target.coordinate, "style": "hardcoded_input",
+                        "number_kind": _template_number_kind(result["unit"]),
+                    })
+                    result_cells[(result["ref"], label)] = f"'Financials'!{target.coordinate}"
+                    formula_map.append({
+                        "cell": f"Financials!{target.coordinate}",
+                        "model_cell_ref": f"{annual_projection['projection_ref']}:{result['ref']}:{label}",
+                        "formula": str(target.value),
+                        "model_formula": (
+                            f"{annual_share['method']}; as_of={annual_share['as_of']}; "
+                            f"steps={annual_share['steps']}; growth_rate={annual_share['growth_rate']}; "
+                            f"source_hash={annual_share['source']['content_hash']}"),
+                        "model_label": result["label"],
+                    })
+                    continue
                 source_periods = annual_share["source_periods"]
                 coordinates = [
                     result_cells.get((result["ref"], str(cell["period_end"])))
@@ -1299,13 +1419,20 @@ def export_fund_workbook(
     cash = (latest_roles.get("cash_and_equivalents") or {}).get("value")
     debt = (latest_roles.get("total_debt") or {}).get("value")
     scenario_net_cash = (valuation_scenario or {}).get("net_cash")
+    snapshot_cells = {
+        field: valuation_ws[coordinate]
+        for field, coordinate in mapping["valuation_snapshot_cells"].items()
+    }
     summary = [
-        (4, 1, f"Current Price ({display_currency})", price_value, "per_share"),
-        (5, 1, "TSO (MM)", shares_value, "shares"),
-        (2, 4, f"Market Cap ({display_currency} M)", market_cap, "currency"),
-        (3, 4, f"Cash ({display_currency} MM)", cash, "currency"),
-        (4, 4, f"Debt ({display_currency} MM)", debt, "currency"),
-        (5, 4, f"Net Cash ({display_currency} MM)", scenario_net_cash, "currency"),
+        (snapshot_cells[field].row, snapshot_cells[field].column, label, value, kind)
+        for field, label, value, kind in (
+            ("price", f"Current Price ({display_currency})", price_value, "per_share"),
+            ("shares_outstanding", "TSO (MM)", shares_value, "shares"),
+            ("market_cap", f"Market Cap ({display_currency} M)", market_cap, "currency"),
+            ("cash", f"Cash ({display_currency} MM)", cash, "currency"),
+            ("debt", f"Debt ({display_currency} MM)", debt, "currency"),
+            ("net_cash", f"Net Cash ({display_currency} MM)", scenario_net_cash, "currency"),
+        )
     ]
     for row, column, label, value, kind in summary:
         valuation_ws.cell(row, column, label if value is not None else f"{label} — N/A")
@@ -1326,11 +1453,13 @@ def export_fund_workbook(
             _number(market_cap) + _number(debt) - _number(cash)
         ) / FUND_MONETARY_DISPLAY_SCALE
     ev_label = f"EV ({display_currency} MM)"
-    valuation_ws.cell(6, 4, ev_label if ev_value is not None else f"{ev_label} — N/A")
+    ev_cell = snapshot_cells["enterprise_value"]
+    valuation_ws.cell(ev_cell.row, ev_cell.column,
+                      ev_label if ev_value is not None else f"{ev_label} — N/A")
     if ev_value is not None:
-        valuation_ws.cell(6, 5, ev_value)
+        ev_target = valuation_ws.cell(ev_cell.row, ev_cell.column + 1, ev_value)
         template_cell_styles["valuation"].append({
-            "range": "E6", "style": "local_formula", "number_kind": "amount",
+            "range": ev_target.coordinate, "style": "local_formula", "number_kind": "amount",
         })
     else:
         gaps.append(f"valuation summary {ev_label}: authority unavailable")
@@ -1338,12 +1467,12 @@ def export_fund_workbook(
     results_by_role = {
         str(item.get("role") or item.get("ref")): item for item in model["results"]
     }
+    # The template's metric bases, in its order (the built-in: EPS, revenue,
+    # operating profit, net income).
     annual_blocks = [
-        (f"GAAP EPS ({display_currency})", "diluted_eps", "result:diluted_eps", "per_share"),
-        (f"Total Revenue ({display_currency} MM)", "revenue", "result:revenue", "amount"),
-        (f"GAAP Operating Profit ({display_currency} MM)", "operating_income",
-         "result:operating_income", "amount"),
-        (f"GAAP Net Income ({display_currency} MM)", "net_income", "result:net_income", "amount"),
+        (VALUATION_BLOCKS[role][0].format(currency=display_currency), role,
+         VALUATION_BLOCKS[role][1], VALUATION_BLOCKS[role][2])
+        for role in mapping["valuation_annual_blocks"]
     ]
     valuation_period_cells: list[str] = []
     valuation_row = 8
@@ -1510,10 +1639,22 @@ def export_fund_workbook(
             "AnnualModelProjection", annual_projection["projection_ref"],
             annual_projection["content_hash"], calendar_binding["as_of"],
         ])
+        for period in annual_projection["periods"]:
+            shares = period.get("forecast_shares") or {}
+            if shares.get("method") == "annual_growth_from_filed":
+                source_rows.append([
+                    "AnnualShareGrowthAssumption", shares["rule_ref"],
+                    shares["source"]["content_hash"], shares["as_of"],
+                    period["label"], shares["steps"], shares["growth_rate"],
+                    shares["source"]["hypothesis"],
+                ])
     for ci, value in enumerate(["Authority", "Reference", "SHA-256 / binding", "As of"], 1):
         sources.cell(4, ci, value)
     for values in source_rows:
         sources.append(values)
+    _rename_model_sheets(
+        {"valuation": valuation_ws, "financials": financials, "driver": driver},
+        mapping["sheet_names"], formula_map)
     formula_digest = content_hash({"layout_version": LAYOUT_VERSION, "formulas": formula_map})
     for ci, value in enumerate(
             ["Cell", "Model cell", "Excel formula", "Internal formula",
@@ -1534,6 +1675,11 @@ def export_fund_workbook(
         "raw authority retained by immutable references and hashes",
     ])
     manifest.append(["Formula map SHA-256", formula_digest])
+    manifest.append(["Fund template", template["version_ref"]])
+    manifest.append(["Fund template SHA-256", template["version_hash"]])
+    manifest.append(["Fund template style", template["style_ref"]])
+    manifest.append(["Fund template style SHA-256", template["style_hash"]])
+    manifest.append(["Fund template chosen by", template["basis"]])
     manifest.append(["Gaps", len(gaps)])
     for gap in gaps:
         manifest.append(["Gap", gap])
@@ -1559,18 +1705,13 @@ def export_fund_workbook(
         ws.page_setup.fitToHeight = 0
         ws.sheet_properties.pageSetUpPr.autoPageBreaks = False
     template_plan = build_fund_xlsx_template_plan(
-        sheet_names={"valuation": "Valuation", "financials": "Financials", "driver": "Driver"},
+        sheet_names=mapping["sheet_names"],
         annual_periods=displayed_annual_labels, quarterly_periods=quarter_labels,
-        unit_labels={
-            "financials": f"({display_currency} MM)",
-            "driver": (
-                "(US$mm)" if display_currency == "USD"
-                else f"({display_currency} mm)"
-            ),
-        },
+        unit_labels=_unit_labels(mapping, display_currency),
         row_styles=template_row_styles, cell_styles=template_cell_styles,
+        style_contract=template["style_contract"],
     )
-    apply_fund_xlsx_template(wb, template_plan)
+    apply_fund_xlsx_template(wb, template_plan, style_contract=template["style_contract"])
     # Audit sheets contain long immutable references, hashes, and formula text.
     # Wrap them at readable widths so printed/PDF copies retain the full value.
     from openpyxl.styles import Alignment
@@ -1613,6 +1754,14 @@ def export_fund_workbook(
                 None if annual_projection is None else annual_projection["projection_ref"]),
             "annual_projection_hash": (
                 None if annual_projection is None else annual_projection["content_hash"]),
+            "template_version_ref": template["version_ref"],
+            "template_version_hash": template["version_hash"],
+            "template_display_name": template["display_name"],
+            "template_style_ref": template_plan["template_ref"],
+            "template_style_sha256": template_plan["style_resource_sha256"],
+            "template_basis": template["basis"],
+            "template_scope_ref": template.get("scope_ref"),
+            "template_selection_receipt_ref": template.get("receipt_ref"),
             "gaps": gaps}
 
 
@@ -1656,13 +1805,68 @@ def export_company_workbook(
     *, valuation_scenario: Mapping[str, Any] | None = None,
     calendar_binding: Mapping[str, Any] | None = None,
     mission_ref: str | None = None,
+    template_version_ref: str | None = None,
 ) -> dict[str, Any]:
-    """Read one exact Core snapshot and export without opening it writable."""
+    """Export one company's governed model from a consistent read of the Core.
+
+    2026-10-07 (vision-gap #4): the workbook template is chosen from the same
+    read -- ``template_version_ref`` for this export only, else the owner's
+    choice for the company, its industry, the workspace default, or the
+    built-in (``fund_xlsx_template_registry.resolve_template``).
+
+    2026-09-30 (cockpit review P1-2): read the Core in place, through a
+    ``mode=ro`` + ``query_only`` connection holding one read transaction --
+    the same way the HTML export reads it -- instead of ``backup()``-ing the
+    whole database to a temporary file first.  On legacy that copy was 4.2 GB
+    and 5.2 s of a 6.4 s export offline (19 s live, with the copy competing
+    with the writer for the disk).  The read transaction gives the export the
+    same single-snapshot guarantee the copy did: nothing committed after it
+    starts is seen.
+
+    The authorities' constructors re-apply their idempotent schema; on a Core
+    already at this code's schema that writes nothing.  A Core that still
+    needs a migration (this code is newer than the writer that last opened
+    it) cannot be migrated read-only, so only then does the export fall back
+    to the old private full copy.
+    """
     source_path = Path(core_db).expanduser().resolve()
     if not source_path.is_file():
         raise FundWorkbookExportError("Core database does not exist")
     if Path(output).expanduser().resolve() == source_path:
         raise FundWorkbookExportError("output must not replace the Core database")
+    arguments = dict(valuation_scenario=valuation_scenario,
+                     calendar_binding=calendar_binding, mission_ref=mission_ref,
+                     template_version_ref=template_version_ref)
+    source = sqlite3.connect(source_path.as_uri() + "?mode=ro", uri=True,
+                             isolation_level=None)
+    try:
+        source.execute("PRAGMA query_only=ON")
+        try:
+            store = DaltonStore(connection=source)
+            authorities = (ForecastModelAuthority(store),
+                           CoverageMissionAuthority(store),
+                           ValuationSnapshotAuthority(store))
+        except sqlite3.OperationalError:
+            authorities = None
+        if authorities is not None:
+            # One snapshot for every read below, as the copy used to be.
+            source.execute("BEGIN")
+            try:
+                return _export_from_authorities(
+                    store, *authorities, company_ref, output, **arguments)
+            finally:
+                if source.in_transaction:
+                    source.execute("ROLLBACK")
+    finally:
+        source.close()
+    return _export_from_private_copy(source_path, company_ref, output, **arguments)
+
+
+def _export_from_private_copy(
+    source_path: Path, company_ref: str, output: Path, **arguments: Any,
+) -> dict[str, Any]:
+    """The pre-2026-09-30 path: a whole private copy, for a Core whose schema
+    this code would have to migrate and a read-only connection cannot."""
     with tempfile.TemporaryDirectory(prefix="dalton-fund-export-") as temp_dir:
         copied = Path(temp_dir) / "core.sqlite"
         source = sqlite3.connect(f"file:{source_path.as_posix()}?mode=ro", uri=True)
@@ -1673,88 +1877,106 @@ def export_company_workbook(
             target.close()
             source.close()
         with DaltonStore(copied) as store:
-            models = ForecastModelAuthority(store)
-            missions = CoverageMissionAuthority(store)
-            if mission_ref is None:
-                active = []
-                rows = store.connection.execute(
-                    "SELECT mission_ref FROM coverage_mission_pointer "
-                    "ORDER BY mission_ref").fetchall()
-                for row in rows:
-                    candidate = missions.active_mission(row["mission_ref"])
-                    if company_ref in {
-                            member["company_ref"] for member in candidate["universe"]}:
-                        active.append(candidate)
-                if len(active) != 1:
-                    raise FundWorkbookExportError(
-                        "company must belong to exactly one active mission; pass mission_ref")
-                mission = active[0]
-            else:
-                mission = missions.active_mission(mission_ref)
-                if company_ref not in {
-                        member["company_ref"] for member in mission["universe"]}:
-                    raise FundWorkbookExportError(
-                        "company is outside the requested active mission")
-            model = models.latest(company_ref)
-            if model is None:
-                raise FundWorkbookExportError("company has no current model")
-            spec_row = store.connection.execute(
-                "SELECT * FROM coverage_mission_company_model_specs WHERE spec_id=?",
-                (model["spec_ref"],),
-            ).fetchone()
-            if spec_row is None:
-                raise FundWorkbookExportError(
-                    "forecast model's exact specification is unavailable")
-            spec = missions._model_spec_row(spec_row)
-            model_mission = _mission_for_bound_model(
-                missions, mission, spec, company_ref)
-            inputs = build_model_inputs(missions, spec)
-            member = next(
-                item for item in model_mission["universe"]
-                if item["company_ref"] == company_ref
-            )
-            annual_filings = [
-                item for item in missions.statement_filings(company_ref)
-                if item["form"] == "10-K"
-            ]
-            latest_annual = (
-                max(annual_filings,
-                    key=lambda item: (item["report_date"], item["accession"]))
-                if annual_filings else None
-            )
-            if calendar_binding is None:
-                if annual_filings:
-                    filing = latest_annual
-                    _verify_statement_filing(store.connection, filing)
-                    base = {
-                        "calendar_ref": filing["ingest_id"],
-                        "source_hash": filing["content_hash"],
-                        "as_of": filing["report_date"],
-                        "fiscal_year_end_month": int(filing["report_date"][5:7]),
-                    }
-                    calendar_binding = {**base, "content_hash": content_hash(base)}
-            valuation = ValuationSnapshotAuthority(store).latest_version(company_ref)
-            exported = export_fund_workbook(
-                output, model=model, spec=spec, inputs=inputs,
-                valuation=valuation, valuation_scenario=valuation_scenario,
-                calendar_binding=calendar_binding,
-                annual_projection=models.annual_projection(model["id"]),
-                mission_binding={"ref": model_mission["id"],
-                                 "content_hash": model_mission["content_hash"],
-                                 "created_at": model_mission["created_at"],
-                                 "ticker": member["ticker"],
-                                 "entity_name": (
-                                     latest_annual["entity_name"]
-                                     if latest_annual else None
-                                 )})
-            return {**exported,
-                    "model_version_ref": model["id"],
-                    "model_version_hash": model["content_hash"],
-                    "model_mission_version_ref": model_mission["id"],
-                    "model_mission_version_hash": model_mission["content_hash"],
-                    "active_mission_version_ref": mission["id"],
-                    "active_mission_version_hash": mission["content_hash"],
-                    "model_mission_is_current": model_mission["id"] == mission["id"]}
+            return _export_from_authorities(
+                store, ForecastModelAuthority(store), CoverageMissionAuthority(store),
+                ValuationSnapshotAuthority(store), company_ref, output, **arguments)
+
+
+def _export_from_authorities(
+    store: DaltonStore, models: ForecastModelAuthority,
+    missions: CoverageMissionAuthority, valuations: ValuationSnapshotAuthority,
+    company_ref: str, output: Path,
+    *, valuation_scenario: Mapping[str, Any] | None = None,
+    calendar_binding: Mapping[str, Any] | None = None,
+    mission_ref: str | None = None,
+    template_version_ref: str | None = None,
+) -> dict[str, Any]:
+    try:
+        resolved = resolve_template(store.connection, company_ref,
+                                    explicit_version_ref=template_version_ref)
+    except (FundXlsxTemplateRegistryError, RuntimeError) as exc:
+        raise FundWorkbookExportError(f"fund template is unavailable: {exc}") from exc
+    if mission_ref is None:
+        active = []
+        rows = store.connection.execute(
+            "SELECT mission_ref FROM coverage_mission_pointer "
+            "ORDER BY mission_ref").fetchall()
+        for row in rows:
+            candidate = missions.active_mission(row["mission_ref"])
+            if company_ref in {
+                    member["company_ref"] for member in candidate["universe"]}:
+                active.append(candidate)
+        if len(active) != 1:
+            raise FundWorkbookExportError(
+                "company must belong to exactly one active mission; pass mission_ref")
+        mission = active[0]
+    else:
+        mission = missions.active_mission(mission_ref)
+        if company_ref not in {
+                member["company_ref"] for member in mission["universe"]}:
+            raise FundWorkbookExportError(
+                "company is outside the requested active mission")
+    model = models.latest(company_ref)
+    if model is None:
+        raise FundWorkbookExportError("company has no current model")
+    spec_row = store.connection.execute(
+        "SELECT * FROM coverage_mission_company_model_specs WHERE spec_id=?",
+        (model["spec_ref"],),
+    ).fetchone()
+    if spec_row is None:
+        raise FundWorkbookExportError(
+            "forecast model's exact specification is unavailable")
+    spec = missions._model_spec_row(spec_row)
+    model_mission = _mission_for_bound_model(
+        missions, mission, spec, company_ref)
+    inputs = build_model_inputs(missions, spec)
+    member = next(
+        item for item in model_mission["universe"]
+        if item["company_ref"] == company_ref
+    )
+    annual_filings = [
+        item for item in missions.statement_filings(company_ref)
+        if item["form"] == "10-K"
+    ]
+    latest_annual = (
+        max(annual_filings,
+            key=lambda item: (item["report_date"], item["accession"]))
+        if annual_filings else None
+    )
+    if calendar_binding is None:
+        if annual_filings:
+            filing = latest_annual
+            _verify_statement_filing(store.connection, filing)
+            base = {
+                "calendar_ref": filing["ingest_id"],
+                "source_hash": filing["content_hash"],
+                "as_of": filing["report_date"],
+                "fiscal_year_end_month": int(filing["report_date"][5:7]),
+            }
+            calendar_binding = {**base, "content_hash": content_hash(base)}
+    valuation = valuations.latest_version(company_ref)
+    exported = export_fund_workbook(
+        output, model=model, spec=spec, inputs=inputs,
+        valuation=valuation, valuation_scenario=valuation_scenario,
+        calendar_binding=calendar_binding,
+        annual_projection=models.annual_projection(model["id"]),
+        mission_binding={"ref": model_mission["id"],
+                         "content_hash": model_mission["content_hash"],
+                         "created_at": model_mission["created_at"],
+                         "ticker": member["ticker"],
+                         "entity_name": (
+                             latest_annual["entity_name"]
+                             if latest_annual else None
+                         )},
+        template=export_binding(resolved))
+    return {**exported,
+            "model_version_ref": model["id"],
+            "model_version_hash": model["content_hash"],
+            "model_mission_version_ref": model_mission["id"],
+            "model_mission_version_hash": model_mission["content_hash"],
+            "active_mission_version_ref": mission["id"],
+            "active_mission_version_hash": mission["content_hash"],
+            "model_mission_is_current": model_mission["id"] == mission["id"]}
 
 
 def main(argv: Sequence[str] | None = None) -> int:
@@ -1765,6 +1987,8 @@ def main(argv: Sequence[str] | None = None) -> int:
     parser.add_argument("--valuation-scenario", type=Path)
     parser.add_argument("--calendar-binding", type=Path)
     parser.add_argument("--mission-ref")
+    parser.add_argument("--template-version-ref",
+                        help="export with this registered template instead of the chosen one")
     args = parser.parse_args(argv)
     output = args.output.expanduser().resolve()
     protected = {args.state_dir.expanduser().resolve() / "core.sqlite"}
@@ -1782,7 +2006,7 @@ def main(argv: Sequence[str] | None = None) -> int:
     result = export_company_workbook(
         args.state_dir / "core.sqlite", args.company_ref, output,
         valuation_scenario=scenario, calendar_binding=calendar,
-        mission_ref=args.mission_ref)
+        mission_ref=args.mission_ref, template_version_ref=args.template_version_ref)
     print(canonical_json(result))
     return 0
 

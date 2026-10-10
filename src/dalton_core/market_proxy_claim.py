@@ -3,6 +3,7 @@
 from __future__ import annotations
 
 import json
+from decimal import ROUND_HALF_EVEN, Decimal, InvalidOperation
 from pathlib import Path
 from typing import Any, Mapping, Sequence
 
@@ -38,14 +39,28 @@ def validate_mapping(value: Mapping[str, Any]) -> dict[str, str]:
 
 
 def load_mappings(path: str | Path | None) -> list[dict[str, str]]:
+    return load_mapping_config(path)["mappings"]
+
+
+def load_mapping_config(path: str | Path | None) -> dict[str, Any]:
+    """The owner's explicit mappings, and whether catalog mappings are derived.
+
+    ``derive_from_model_drivers`` is optional and defaults to true: a Core
+    whose model specifications declare a currency, rate or infrastructure
+    driver gets the catalog proxy for it without anyone writing a mapping
+    (``market_proxy_catalog``). Setting it false is the owner's off switch.
+    """
+
     if path is None:
-        return []
+        return {"mappings": [], "derive_from_model_drivers": True}
     try:
         raw = json.loads(Path(path).read_text(encoding="utf-8"))
     except (OSError, json.JSONDecodeError) as exc:
         raise MarketProxyClaimError(f"market proxy config is unreadable: {exc}") from exc
-    if not isinstance(raw, dict) or set(raw) != {"schema_version", "mappings"} \
-            or raw["schema_version"] != SCHEMA_VERSION or not isinstance(raw["mappings"], list):
+    if not isinstance(raw, dict) or not {"schema_version", "mappings"} <= set(raw) \
+            or not set(raw) <= {"schema_version", "mappings", "derive_from_model_drivers"} \
+            or raw["schema_version"] != SCHEMA_VERSION or not isinstance(raw["mappings"], list) \
+            or not isinstance(raw.get("derive_from_model_drivers", True), bool):
         raise MarketProxyClaimError("market proxy config must be a 0.1 mappings object")
     mappings = [validate_mapping(item) for item in raw["mappings"]]
     refs = [item["mapping_ref"] for item in mappings]
@@ -58,7 +73,8 @@ def load_mappings(path: str | Path | None) -> list[dict[str, str]]:
         if previous != item["source_ticker"]:
             raise MarketProxyClaimError(
                 "one source_series_company_ref cannot map to multiple tickers")
-    return mappings
+    return {"mappings": mappings,
+            "derive_from_model_drivers": raw.get("derive_from_model_drivers", True)}
 
 
 class MarketProxyClaimAuthority:
@@ -131,6 +147,19 @@ class MarketProxyClaimAuthority:
             return {"status": "duplicate", **json.loads(existing["record_json"])}
 
         bar = source["bars"][-1]
+        # One restatement per mapping per calendar month. A proxy is a model
+        # input; every new Claim version also moves the dossier and DebateMap
+        # fingerprints of its target, so a daily close would buy a redraft a
+        # day for a number nobody models daily.
+        previous_row = self.connection.execute(
+            "SELECT record_json FROM market_proxy_claim_versions WHERE mapping_ref=? "
+            "AND mapping_hash=? ORDER BY version_number DESC LIMIT 1",
+            (spec["mapping_ref"], content_hash(spec))).fetchone()
+        previous = None if previous_row is None else json.loads(previous_row["record_json"])
+        if previous is not None and str(previous.get("as_of") or "")[:7] >= bar["date"][:7]:
+            return {"status": "current", "mapping_ref": spec["mapping_ref"],
+                    "as_of": previous.get("as_of"),
+                    "reason": "本月已更新过该代理数据，每个自然月最多重述一次"}
         created_at = source["created_at"]
         identity = {"mapping": spec,
                     "source_series_version_ref": source["id"],
@@ -159,8 +188,18 @@ class MarketProxyClaimAuthority:
             "independence_group": source["source_ref"], "actor_ref": ACTOR_REF,
         })
         claim_ref = "claim:market-proxy:" + spec["mapping_ref"]
+        change = ""
+        if previous is not None:
+            try:
+                before = Decimal(str(previous["value"]))
+                moved = (Decimal(str(bar["adj_close"])) - before) / before * 100
+                change = (f" ({moved.quantize(Decimal('0.1'), rounding=ROUND_HALF_EVEN):+}% "
+                          f"vs {previous['value']} on {previous['as_of']})")
+            except (InvalidOperation, ZeroDivisionError, KeyError, TypeError):
+                change = ""
         statement = (f"{spec['metric_or_aspect']} proxy {bar['adj_close']} {source['currency']} "
-                     f"from {source['ticker']} on {bar['date']}; proxy gap: {spec['proxy_gap']}")
+                     f"from {source['ticker']} on {bar['date']}{change}; "
+                     f"proxy gap: {spec['proxy_gap']}")
         claim = self.store.register_claim({
             "claim_ref": claim_ref, "subject_ref": spec["target_subject_ref"],
             "metric_or_aspect": spec["metric_or_aspect"], "period": bar["date"],
@@ -229,5 +268,5 @@ class MarketProxyClaimAuthority:
         return [json.loads(row["record_json"]) for row in rows]
 
 
-__all__ = ["MarketProxyClaimAuthority", "MarketProxyClaimError", "load_mappings",
-           "validate_mapping"]
+__all__ = ["MarketProxyClaimAuthority", "MarketProxyClaimError", "load_mapping_config",
+           "load_mappings", "validate_mapping"]

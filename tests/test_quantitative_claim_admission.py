@@ -596,5 +596,59 @@ class TheFiledRowIsAppendOnlyTests(unittest.TestCase):
                 "UPDATE coverage_mission_statement_lines SET value='1'")
 
 
+
+class RenamedLineAdmissionTests(unittest.TestCase):
+    """2026-09-30b: a line once admitted as "segment ..." re-enters under its honest name.
+
+    Before the segment-axis rule, a revenue-mix row was staged and admitted as
+    "segment revenue: <member>" under identities keyed by the row alone.  The
+    renamed candidate must stage and admit as a new Claim -- not collide with
+    those identities -- while a segment row's candidate stays byte-identical.
+    """
+
+    VERTICAL = filed_line(
+        label="Financial Services - Americas", is_breakdown=True,
+        dimension_axis="us-gaap:EquitySecuritiesByIndustryAxis",
+        dimension_member="us-gaap:FinancialServicesSectorMember", value="1200000000")
+
+    def setUp(self):
+        self.h = Harness(lines=[filed_line(), self.VERTICAL])
+        self.addCleanup(self.h.close)
+        self.h.sign(SEC_STATEMENT_LINE_RULE_REF)
+
+    def test_the_renamed_candidate_stages_and_admits_beside_the_old_one(self):
+        from unittest import mock
+
+        with mock.patch("dalton_core.quantitative_claim_promotion.is_segment_line",
+                        return_value=True):
+            # The pre-2026-09-30 promoter: every dimensional row is a segment.
+            old = self.h.stage("segment revenue: Financial Services - Americas")
+            self.assertEqual(old["write_status"], "fresh")
+            self.assertEqual(self.h.commit(old)["status"], "fresh")
+        new = self.h.stage("revenue by industry: Financial Services - Americas")
+        self.assertEqual(new["write_status"], "fresh")
+        self.assertNotEqual(new["claim"]["candidate_claim_ref"],
+                            old["claim"]["candidate_claim_ref"])
+        self.assertNotEqual(new["material"]["id"], old["material"]["id"])
+        self.assertEqual(self.h.commit(new)["status"], "fresh")
+        claims = {json.loads(row[0])["metric_or_aspect"]: json.loads(row[0])
+                  for row in self.h.store.connection.execute(
+                      "SELECT claim_json FROM claim_versions").fetchall()}
+        renamed = claims["revenue by industry: Financial Services - Americas"]
+        self.assertEqual(renamed["version"], 1)
+        self.assertNotEqual(
+            renamed["claim_ref"],
+            claims["segment revenue: Financial Services - Americas"]["claim_ref"])
+        # Replayed, the renamed candidate is a duplicate, not a conflict.
+        again = self.h.stage("revenue by industry: Financial Services - Americas")
+        self.assertEqual(again["write_status"], "duplicate")
+
+    def test_an_undimensioned_row_keeps_its_candidate_identity(self):
+        bundle = self.h.stage("revenue")
+        identity = content_hash({"origin_ref": bundle["proposal"]["origin_ref"],
+                                 "filing_hash": bundle["material"]["source_content_hash"]})[:32]
+        self.assertEqual(bundle["claim"]["candidate_claim_ref"],
+                         "candidate-claim:sec-statement-line:" + identity)
+
 if __name__ == "__main__":  # pragma: no cover
     unittest.main()

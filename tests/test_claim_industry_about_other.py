@@ -269,7 +269,7 @@ class RereviewTests(_AboutOther):
         kept = self.filed(SURVEY)
         self.retire({SURVEY: ("supported", "about_other", "IT Services sector")})
         self.assertEqual(len(self.tick()["reattributed"]), 1)
-        v5 = "claim-support-verification:v5"
+        v5 = "claim-support-verification:v6"  # a contract later than the current one
         with patch.object(verification_module, "CONTRACT_REF", v5), \
                 patch.object(backfill_module, "CONTRACT_REF", v5), \
                 patch.object(backfill_module, "REREVIEW_PASS_REF", "claim-support-rereview:" + v5):

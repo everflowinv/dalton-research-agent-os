@@ -406,6 +406,20 @@ class ForecastReconciliationAuthority:
             self.connection, "dalton_forecast_reconciliation_authorized")
         self.connection.executescript(_SCHEMA_PATH.read_text(encoding="utf-8"))
 
+    @classmethod
+    def read_existing(cls, connection: sqlite3.Connection, *, company_ref: str) -> list[dict[str, Any]]:
+        """Read held results without schema migration or creating reconciliations.
+
+        Planning and runtime health checks must not execute the work whose
+        inputs they are fingerprinting. A Core without this ledger has no
+        held results yet.
+        """
+        if not _table_exists(connection, "forecast_reconciliations"):
+            return []
+        reader = object.__new__(cls)
+        reader.connection = connection
+        return reader.reconciliations(company_ref=company_ref)
+
     @contextmanager
     def _transaction(self) -> Iterator[sqlite3.Cursor]:
         if self._authorized:
@@ -443,14 +457,20 @@ class ForecastReconciliationAuthority:
         return lines
 
     def _latest_claims(self, subject_ref: str, metric_or_aspect: str, period: str) -> list[dict[str, Any]]:
+        # 2026-09-29: this runs once per latest forecast line on every
+        # controller tick.  Joined to a GROUP BY over every Claim it parsed
+        # every Claim's JSON per call (48 lines x 22 MB on the legacy Core);
+        # as a filter on the three expressions ``claim_versions_subject_
+        # metric_period`` indexes (``migrations``), with the latest version
+        # checked per candidate through UNIQUE (claim_ref, version_number),
+        # it is an index seek.  Same rows, same order.
         rows = self.connection.execute(
-            "SELECT c.* FROM claim_versions c JOIN ("
-            "SELECT claim_ref, MAX(version_number) AS version_number FROM claim_versions "
-            "GROUP BY claim_ref) latest ON latest.claim_ref=c.claim_ref "
-            "AND latest.version_number=c.version_number "
+            "SELECT c.* FROM claim_versions c "
             "WHERE json_extract(c.claim_json,'$.subject_ref')=? "
             "AND json_extract(c.claim_json,'$.metric_or_aspect')=? "
             "AND json_extract(c.claim_json,'$.period')=? "
+            "AND c.version_number=(SELECT MAX(x.version_number) FROM claim_versions x "
+            "WHERE x.claim_ref=c.claim_ref) "
             "ORDER BY c.created_at, c.claim_version_id",
             (subject_ref, metric_or_aspect, period),
         ).fetchall()

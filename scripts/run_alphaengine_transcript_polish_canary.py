@@ -67,12 +67,8 @@ REVIEW_MODE_NONE = "none"
 REVIEW_MODES = (REVIEW_MODE_NONE,)
 MAX_BROKER_TIMEOUT_SECONDS = 600
 DEFAULT_MCP_ENDPOINT = "http://127.0.0.1:8950/mcp"
-DEFAULT_BROKER_SOCKET = Path(
-    "/Users/everflow/.openclaw/dalton-model-broker.sock"
-)
-DEFAULT_BROKER_AUTH_KEY = Path(
-    "/Users/everflow/.openclaw/dalton-model-broker.sock.key"
-)
+DEFAULT_BROKER_SOCKET = (Path.home() / ".openclaw/dalton-model-broker.sock")
+DEFAULT_BROKER_AUTH_KEY = (Path.home() / ".openclaw/dalton-model-broker.sock.key")
 
 
 class AlphaEngineTranscriptCanaryError(RuntimeError):

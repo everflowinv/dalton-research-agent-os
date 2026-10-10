@@ -524,6 +524,7 @@ def argv_fragment(context: Any) -> list[str]:
 
 LANE = register_lane(LaneSpec(
     operation="dispatch_deep_insight_gate",
+    failure_ledger="deep_insight_gate",
     # 138, immediately after the dossier at 137 and the debate map at 135: the
     # gate reads both of them, so it runs after both have had their tick.
     order=138,

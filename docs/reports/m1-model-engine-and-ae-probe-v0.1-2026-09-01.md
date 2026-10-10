@@ -1,5 +1,7 @@
 # M1 财务建模引擎与 AE Probe 双线 v0.1
 
+历史技术评审：保留当时结论与局限；当前运行状态见 [项目状态](../PROJECT_STATUS.md)。原始操作证据私有保存。
+
 日期：2026-09-01  
 状态：均已部署 live 并完成首次真实运行；owner 同日裁决「M1 与 AlphaEngine probe 并行，AE 24h/30 次上限」
 
@@ -24,7 +26,7 @@
    增速 assumption 1.15%/季（从已准入 ACN Thesis 的 implied_expectation「中个位数本币年增长」
    ~4.7% 复利换算，rationale 记录推导）。延展产出 4 条 `derived_deterministic` 预测线
    （Q4 FY2026 18,933.40M → Q3 FY2027 19,594.15M）+ model run v1。隔离 canary
-   （`scripts/run_m1_acn_model_canary.py`）先在 live 副本验证全链（fresh→duplicate、公式/场景
+   （隔离模型 canary，脚本原件已私有归档）先在 live 副本验证全链（fresh→duplicate、公式/场景
    绑定、不可变）。
 5. 顺带修复一个 live 卡环：driver 收到 LLM coordinator 的 `core_action`（硬控制态已提交 terminate
    提案）时原来会再次确定性提案 → 永远 `duplicate`，v5 循环因此卡了 40+ 个悬空提案；现在直接

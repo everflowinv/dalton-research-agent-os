@@ -28,7 +28,10 @@
           "question_not_answered",
           "variant_not_compared",
           "anti_thesis_incomplete",
-          "risk_reward_incomplete"
+          "risk_reward_incomplete",
+          "recommendation_missing",
+          "reasoning_lint",
+          "material_missing_unbound"
         ]
       }
     }

@@ -555,6 +555,10 @@ def declared_tier_chain(
     declared = (policy.get("fallback_chains") or {}).get("tiers") or {}
     chain = declared.get(tier)
     if not chain:
+        if "legacy_default" in declared:
+            # New tier edits preserve unedited legacy direct routing; this
+            # marker is not a selectable runtime tier or new authorization.
+            return None
         inherited = TIER_CHAIN_FALLBACKS.get(tier)
         chain = declared.get(inherited) if inherited is not None else None
     return tuple(chain) if chain else None
@@ -686,16 +690,78 @@ def resolve_chain(
     if resolved is None:
         return None
     if resolved["mode"] != "explicit" or live_links(resolved["chain"], profiles):
-        return resolved
+        return _prefer_long_context(resolved, purpose=purpose, profiles=profiles, policy=policy)
     fallback = declared_tier_chain(policy, tier) or ()
     if not fallback or not live_links(fallback, profiles):
         return resolved
-    return {
+    return _prefer_long_context({
         "mode": "tier_after_retirement",
         "tier": tier,
         "chain": fallback,
         "superseded_chain": list(resolved["chain"]),
-    }
+    }, purpose=purpose, profiles=profiles, policy=policy)
+
+
+def long_context_capable(profile: Mapping[str, Any] | None) -> bool:
+    """Whether one profile can carry a whole-material-pack call.
+
+    The *effective* input bound (a measured transport ceiling beats the
+    catalog's claim), the declared output limit and the context window must
+    all hold ``call_budget.LONG_CONTEXT_CALL_FLOOR``.
+    """
+
+    from .call_budget import LONG_CONTEXT_CALL_FLOOR
+    from .model_profile_bounds import effective_input_bound
+
+    if not isinstance(profile, Mapping):
+        return False
+    need_in = int(LONG_CONTEXT_CALL_FLOOR["max_input_tokens"])
+    need_out = int(LONG_CONTEXT_CALL_FLOOR["max_output_tokens"])
+    bound = effective_input_bound(profile).get("bound")
+    limits = profile.get("limits") or {}
+    context = profile.get("context") or {}
+    window = context.get("max_context_tokens")
+    return (isinstance(bound, int) and bound >= need_in
+            and int(limits.get("max_output_tokens") or 0) >= need_out
+            and (window is None or int(window) >= need_in + need_out))
+
+
+def _prefer_long_context(
+    resolved: dict[str, Any], *, purpose: str | None,
+    profiles: Mapping[str, Mapping[str, Any]],
+    policy: Mapping[str, Any],
+) -> dict[str, Any]:
+    """C2 / ar: unselected defaults try the links that can hold the pack first.
+
+    Explicit and saved-default order is preserved. Unselected legacy defaults
+    keep long-context links first, preserving order within each group.  Applied in
+    ``resolve_chain`` because the router's candidate filter, the chain walk
+    and the reservation ceiling all read the chain through it, so the three
+    cannot disagree about the order.  Only ``LONG_CONTEXT_CHAIN_PURPOSES``:
+    a stage whose prompts are small runs the owner's chain unchanged.
+    """
+
+    from .call_budget import LONG_CONTEXT_CHAIN_PURPOSES
+
+    # A legal explicit selection names its first choice first; actor_ref is
+    # optional audit metadata, not ordering authority. A normally saved tier
+    # default similarly binds the exact selected chain. Capacity remains a
+    # candidate rejection in route(), never a silent rewrite of this order.
+    tier = resolved.get("tier")
+    declared = (policy.get("fallback_chains") or {}).get("tiers") or {}
+    marker = declared.get("saved_default_" + tier) if isinstance(tier, str) else None
+    if resolved.get("mode") == "explicit" or (
+        marker and marker == declared.get(tier) and tuple(marker) == tuple(resolved["chain"])
+    ):
+        return resolved
+    if purpose not in LONG_CONTEXT_CHAIN_PURPOSES:
+        return resolved
+    chain = tuple(resolved["chain"])
+    first = [pid for pid in chain if long_context_capable(profiles.get(pid))]
+    ordered = tuple(first + [pid for pid in chain if pid not in first])
+    if ordered == chain:
+        return resolved
+    return {**resolved, "chain": ordered, "long_context_preferred": list(chain)}
 
 
 def _policy_wire(data: Mapping[str, Any]) -> dict[str, Any]:
@@ -715,8 +781,9 @@ def _policy_wire(data: Mapping[str, Any]) -> dict[str, Any]:
         # P14-M2: the owner's per-stage selection.  Same rule -- omitted when
         # absent, so no policy version written before selection existed moves.
         "purpose_overrides",
+        "thinking_level_overrides",
     }
-    required = keys - {"content_hash", "fallback_chains", "purpose_overrides"}
+    required = keys - {"content_hash", "fallback_chains", "purpose_overrides", "thinking_level_overrides"}
     obj = _closed(data, allowed=keys, required=required, name="model routing policy")
     if obj["schema_version"] != SCHEMA_VERSION:
         raise ModelRouterValidationError("policy schema_version is unsupported")
@@ -802,6 +869,28 @@ def _policy_wire(data: Mapping[str, Any]) -> dict[str, Any]:
     overrides = obj.get("purpose_overrides")
     if overrides is not None:
         wire["purpose_overrides"] = _purpose_overrides_wire(overrides)
+    thinking = obj.get("thinking_level_overrides")
+    if thinking is not None:
+        from .call_budget import CallBudgetError, resolve_thinking_level
+        if not isinstance(thinking, Mapping) or not thinking:
+            raise ModelRouterValidationError("thinking_level_overrides must be a nonempty object")
+        checked_thinking = {}
+        for purpose, entry in thinking.items():
+            if not isinstance(purpose, str) or not re.fullmatch(r"[a-z][a-z0-9]*(?:_[a-z0-9]+)*", purpose):
+                raise ModelRouterValidationError("thinking purpose must be canonical")
+            entry = _closed(entry, allowed={"level", "reason", "actor_ref", "created_at"},
+                            required={"level", "reason", "actor_ref", "created_at"}, name="thinking override")
+            try:
+                level = resolve_thinking_level(purpose, requested=entry["level"])
+            except CallBudgetError as exc:
+                raise ModelRouterValidationError(str(exc)) from exc
+            reason = _string(entry["reason"], "thinking override reason")
+            actor = _string(entry["actor_ref"], "thinking override actor")
+            if not reason.strip() or not actor.startswith("human:"):
+                raise ModelRouterValidationError("thinking override requires an owner and a reason")
+            _parse_time(entry["created_at"], "thinking override.created_at")
+            checked_thinking[purpose] = {**entry, "level": level}
+        wire["thinking_level_overrides"] = checked_thinking
     digest = canonical_hash(wire)
     asserted = obj.get("content_hash")
     if asserted is not None and asserted != digest:
@@ -842,6 +931,30 @@ class ModelRouter:
             self.connection, "dalton_model_router_authorized")
         if not read_only:
             self.connection.executescript(_SCHEMA_PATH.read_text(encoding="utf-8"))
+            self._ensure_read_indexes()
+
+    def _ensure_read_indexes(self) -> None:
+        """Build the link-ledger read indexes, and never fail the open over one.
+
+        2026-09-30 (P1-1).  Declared in ``dalton_core.migrations`` rather than
+        in the schema file for the reason given there: a missing index is a
+        slow page, a failed ``CREATE INDEX`` under a busy writer would be a
+        router that does not open.  Budgeted like the Core's: the first
+        writable open after a deploy builds them (about a second on legacy),
+        a build that cannot take the lock is left for the next open.
+        Read-only openers -- the cockpit -- never build; they start using the
+        indexes as soon as a lane has opened the router once.
+        """
+
+        try:
+            from .migrations import (
+                MODEL_ROUTER_INDEXES, OPEN_BUDGET_SECONDS, ensure_indexes,
+            )
+
+            ensure_indexes(self.connection, MODEL_ROUTER_INDEXES,
+                           budget_seconds=OPEN_BUDGET_SECONDS)
+        except Exception:  # noqa: BLE001 - an index is a speed, not a contract
+            pass
 
     def _ensure_wal(self) -> None:
         """Keep concurrent route readers from blocking an immutable link commit."""
@@ -1336,8 +1449,11 @@ class ModelRouter:
         environment with the longest history (35k links, 22 MB of JSON, read
         thirteen times in one request).
 
-        Every question here is a column the table already indexes by, so only
-        the handful of links that actually reach the page are parsed.  The skip
+        Every question here is answered from an index (the three
+        ``model_route_chain_links_served_*`` indexes in
+        ``migrations.MODEL_ROUTER_INDEXES``, 2026-09-30 -- before them the
+        GROUP BY queries scanned the table), so only the handful of links
+        that actually reach the page are parsed.  The skip
         counts are aggregated in SQL rather than dropped, so bounding the list
         does not lose the record of *why* a model was passed over.
         """
@@ -2204,15 +2320,13 @@ class ModelRouter:
                 request["purpose"] = purpose
             request_hash = canonical_hash(request)
             prior_idempotency = cur.execute(
-                "SELECT request_hash, result_json FROM model_route_idempotency "
+                "SELECT request_hash, decision_id, result_json FROM model_route_idempotency "
                 "WHERE idempotency_key=?",
                 (idempotency_key,),
             ).fetchone()
             if prior_idempotency is not None:
                 if prior_idempotency["request_hash"] == request_hash:
-                    result = json.loads(prior_idempotency["result_json"])
-                    result["status"] = "duplicate"
-                    return result
+                    return idempotent_route_replay(cur, prior_idempotency)
                 return {
                     "status": "conflict",
                     "reason": "idempotency key already belongs to another route request",
@@ -2242,6 +2356,15 @@ class ModelRouter:
                 and producer_family is None
             ):
                 global_reasons.append("producer_family_required")
+            declared = (policy.get("fallback_chains") or {}).get("tiers") or {}
+            # Only a validated tier save explicitly authorizes its new default
+            # beyond legacy global pins. Historical tier/filter intersections
+            # remain unchanged; the marker must bind this exact saved chain.
+            saved_default_authorized = (
+                tier is not None and bool(declared.get(tier))
+                and declared.get("saved_default_" + tier) == declared.get(tier)
+                and (not purpose_override or purpose_entry.get("mode") == "tier")
+            )
             chain_positions: dict[str, int] | None = None
             live_chain: list[str] = []
             latest_profiles = self._latest_profiles(cur)
@@ -2266,10 +2389,21 @@ class ModelRouter:
             # no settlement -- and the reason lands in this decision's own
             # candidate snapshot, which is where a route audit reads it.
             cooled = self._active_cooldowns_for_route(cur, now)
+            from .call_budget import resolve_thinking_level
+            from .model_output_contract_hold import active as active_output_hold, SKIP_REASON as OUTPUT_HOLD_REASON
+            output_thinking = resolve_thinking_level(
+                purpose or (wire.get('metadata') or {}).get('purpose'), policy=policy,
+                requested=(wire.get('metadata') or {}).get('thinking_level'),
+                verifier=producer_family is not None)
             candidates: list[dict[str, Any]] = []
             snapshot: list[dict[str, Any]] = []
             for profile in latest_profiles:
                 reasons = list(global_reasons)
+                if active_output_hold(cur, profile, policy_ref=policy_version_ref,
+                        policy_hash=policy['content_hash'],
+                        purpose=purpose or (wire.get('metadata') or {}).get('purpose'),
+                        budget=wire['budget'], thinking_level=output_thinking, now=now_dt):
+                    reasons.append(OUTPUT_HOLD_REASON)
                 if (required_profile_version_ref is not None
                         and profile["profile_version_ref"] != required_profile_version_ref):
                     reasons.append("not_exact_provider_retry_profile_version")
@@ -2303,7 +2437,8 @@ class ModelRouter:
                 if (
                     filters["allowed_profile_ids"]
                     and profile["id"] not in filters["allowed_profile_ids"]
-                    and not (purpose_explicit and chain_positions is not None
+                    and not ((purpose_explicit or saved_default_authorized)
+                             and chain_positions is not None
                              and profile["id"] in chain_positions)
                 ):
                     reasons.append("profile_not_allowed")
@@ -2432,6 +2567,7 @@ class ModelRouter:
             if not snapshot:
                 rejected_reasons.append("model_directory_empty")
             decision_id = f"route-decision:{uuid.uuid4().hex}"
+            from .call_budget import resolve_thinking_level
             decision = {
                 "schema_version": SCHEMA_VERSION,
                 "id": decision_id,
@@ -2444,6 +2580,10 @@ class ModelRouter:
                 "capability": capability,
                 "policy_version_ref": policy_version_ref,
                 "policy_hash": policy["content_hash"],
+                "thinking_level": resolve_thinking_level(
+                    purpose or (wire.get("metadata") or {}).get("purpose"), policy=policy,
+                    requested=(wire.get("metadata") or {}).get("thinking_level"),
+                    verifier=producer_family is not None),
                 "candidate_snapshot_hash": snapshot_hash,
                 "candidate_snapshot": snapshot,
                 "constraints": {
@@ -2509,7 +2649,13 @@ class ModelRouter:
                     idempotency_key,
                     request_hash,
                     decision_id,
-                    canonical_json(result),
+                    # 2026-09-30: a reference, not a second copy.  The row used
+                    # to hold the whole result -- the decision with its full
+                    # candidate snapshot, ~15 KB -- byte-for-byte the
+                    # decision_json already stored immutably one table over:
+                    # 921 MB of legacy's 2.1 GB router database.  A replay
+                    # reads the decision back by decision_id.
+                    canonical_json(idempotency_result_reference(decision_id)),
                     now,
                 ),
             )
@@ -2522,6 +2668,48 @@ class ModelRouter:
     def retry(self, *args: Any, **kwargs: Any) -> dict[str, Any]:
         kwargs["decision_kind"] = "retry"
         return self.route(*args, **kwargs)
+
+
+#: The ``result_json`` shape a route idempotency row has had since 2026-09-30.
+IDEMPOTENCY_RESULT_REFERENCE = "model-route-idempotency-result-ref:v1"
+
+
+def idempotency_result_reference(decision_id: str) -> dict[str, Any]:
+    """What an idempotency row stores instead of a copy of its decision."""
+
+    return {"result": IDEMPOTENCY_RESULT_REFERENCE, "status": "fresh",
+            "decision_ref": decision_id}
+
+
+def idempotent_route_replay(
+    cur: sqlite3.Cursor | sqlite3.Connection, row: Mapping[str, Any]
+) -> dict[str, Any]:
+    """The answer to a repeated route request, from either row shape.
+
+    Rows written before 2026-09-30 carry the whole result inline; newer rows
+    (and old rows an owner has compacted with
+    ``scripts/compact_model_route_idempotency.py``) carry only a reference,
+    and the decision is read back from ``model_route_decisions`` -- the same
+    immutable JSON the inline copy duplicated.  Either way the caller gets
+    exactly ``{"status": "duplicate", "decision": ...}``.
+    """
+
+    stored = json.loads(row["result_json"])
+    if isinstance(stored, Mapping) and stored.get("result") == IDEMPOTENCY_RESULT_REFERENCE:
+        decision_ref = stored.get("decision_ref")
+        if decision_ref != row["decision_id"]:
+            raise ModelRouterValidationError(
+                "route idempotency reference does not match its decision_id")
+        found = cur.execute(
+            "SELECT decision_json FROM model_route_decisions WHERE decision_id=?",
+            (decision_ref,),
+        ).fetchone()
+        if found is None:
+            raise RouteDecisionNotFound(str(decision_ref))
+        return {"status": "duplicate", "decision": json.loads(found[0])}
+    result = dict(stored)
+    result["status"] = "duplicate"
+    return result
 
 
 DeterministicModelRouter = ModelRouter

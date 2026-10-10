@@ -800,14 +800,14 @@ class GateTests(unittest.TestCase):
         self.assertEqual(summary["verification"]["status"], "skipped")
         self.assertEqual(verifier.prompts, [])
 
-    def test_a_run_that_cannot_afford_the_verifier_publishes_nothing(self):
+    def test_old_run_budget_cannot_underfund_the_verifier(self):
         config = json.loads(self.harness.model_config.read_text(encoding="utf-8"))
         config["purpose_run_budgets"] = {"dossier": {"max_cost_usd": 0.001}}
         self.harness.model_config.write_text(json.dumps(config), encoding="utf-8")
         summary = self.harness.run()
-        self.assertEqual(summary["dossier_status"], "unverified")
-        self.assertIn("run cost bound", summary["refused"][0]["reason"])
-        self.assertEqual(self.authority.versions(ACN), [])
+        self.assertEqual(summary["dossier_status"], "partial_published")
+        self.assertEqual(summary["budget"]["run_cost_micros"], 56_000_000)
+        self.assertTrue(self.authority.versions(ACN))
 
     def test_explicit_max_units_overrides_the_configured_run_default(self):
         config = json.loads(self.harness.model_config.read_text(encoding="utf-8"))
@@ -870,10 +870,16 @@ class GateTests(unittest.TestCase):
                          statement="咨询业务占比继续下降。")
         self.harness.tag("d-10", "demand_drivers",
                          statement="客户把预算转向生成式 AI 项目。")
-        # (The classification always leads: it frames the rest.)
+        # Classification was already corrected above. Three new Claims do
+        # not stand in for three new broker/sales originals; the retired empty
+        # business-model unit is still owed its own immediate repair.
+        classification_before = after["industry_classification"]
+        classification_time = after["drafted_at"]["industry_classification"]
         again = self.harness.run(max_units=2)
-        self.assertEqual(sorted(again["units_drafted"]),
-                         ["business_model", "industry_classification"])
+        self.assertEqual(again["units_drafted"], ["business_model"])
+        newest = self.authority.latest(ACN)
+        self.assertEqual(newest["industry_classification"], classification_before)
+        self.assertEqual(newest["drafted_at"]["industry_classification"], classification_time)
         redrafted = next(item for item in self.authority.latest(ACN)["sections"]
                          if item["aspect"] == "business_model")
         self.assertEqual(redrafted["status"], "drafted")
@@ -1674,6 +1680,176 @@ class CoordinatorTests(unittest.TestCase):
         )
         self.assertEqual(finished.returncode, 0, finished.stderr)
         self.assertEqual(finished.stdout.strip(), "")
+
+
+class MaterialProbeCoordinatorTests(unittest.TestCase):
+    def setUp(self):
+        self.harness = Harness()
+        self.addCleanup(self.harness.close)
+        self.connection = self.harness.store.connection
+
+    _published_head = CoordinatorTests._published_head
+
+    def coordinator(self, now, *, summary=None):
+        launcher = CoordinatorTests.Launcher(summary=summary)
+        launcher.state_dir = self.harness.state_dir
+        coordinator = MissionDossierLaneCoordinator(
+            connection=self.connection, launcher=launcher, companies=lambda: [ACN],
+            failure_clock=lambda: now[0])
+        return coordinator, launcher
+
+    @staticmethod
+    def probe(fingerprint, *, urgent=False):
+        return {"fingerprint": fingerprint, "urgent": urgent, "pending_count": 1,
+                "next_review_at": "2026-10-24T00:00:00+00:00", "label": "待消化"}
+
+    def test_required_document_wakes_quiet_before_claim_promotion(self):
+        now = [datetime.now(timezone.utc)]
+        coordinator, launcher = self.coordinator(now)
+        arrived = [False]
+        def probe(*args, **kwargs):
+            return self.probe("arrival-new" if arrived[0] else "arrival-old", urgent=arrived[0])
+        with patch("dalton_core.redraft_policy.lane_probe", side_effect=probe, create=True), patch(
+                "dalton_core.mission_dossier_lane.company_ledger_signature",
+                wraps=company_ledger_signature) as signatures:
+            first = coordinator.dispatch_once()
+            self.assertEqual(coordinator.dispatch_once()["status"], "idle")
+            arrived[0] = True
+            final = coordinator.dispatch_once()
+        self.assertEqual(final["status"], "launched")
+        self.assertNotEqual(first["signature"], final["signature"])
+        self.assertEqual(signatures.call_count, 1)  # memo can stay cheap, arrival cannot stay quiet
+        self.assertEqual(len(launcher.started), 2)
+
+    def test_fourteen_day_due_edge_wakes_with_no_ledger_write(self):
+        row, published = self._published_head()
+        now = [published + timedelta(days=13, hours=23)]
+        coordinator, launcher = self.coordinator(now)
+        def probe(*args, **kwargs):
+            return self.probe("due" if kwargs["now"] >= published + timedelta(days=14) else "pending")
+        before = self.connection.total_changes
+        with patch("dalton_core.redraft_policy.lane_probe", side_effect=probe, create=True):
+            first = coordinator.dispatch_once()
+            self.assertEqual(coordinator.dispatch_once()["status"], "idle")
+            now[0] = published + timedelta(days=14)
+            due = coordinator.dispatch_once()
+        self.assertEqual(due["status"], "launched")
+        self.assertNotEqual(first["signature"], due["signature"])
+        self.assertEqual(self.connection.total_changes, before)
+        self.assertEqual(len(launcher.started), 2)
+
+    def test_ordinary_pending_change_holds_three_hours_but_urgent_passes(self):
+        _, published = self._published_head()
+        now = [published + timedelta(minutes=5)]
+        coordinator, launcher = self.coordinator(now)
+        with patch("dalton_core.redraft_policy.lane_probe", return_value=self.probe("broker"), create=True):
+            self.assertEqual(coordinator.dispatch_once()["status"], "held")
+        self.assertEqual(launcher.started, [])
+        with patch("dalton_core.redraft_policy.lane_probe", return_value=self.probe("required", urgent=True), create=True):
+            self.assertEqual(coordinator.dispatch_once()["status"], "launched")
+        self.assertEqual(len(launcher.started), 1)
+
+    def test_urgent_arrival_does_not_bypass_company_content_cooldown(self):
+        now = [datetime.now(timezone.utc)]
+        coordinator, launcher = self.coordinator(now, summary={"dossier_status": "verification_failed", "verification": {"status": "refused"}})
+        with patch("dalton_core.redraft_policy.lane_probe", return_value=self.probe("required-1", urgent=True), create=True):
+            self.assertEqual(coordinator.dispatch_once()["status"], "launched")
+        with patch("dalton_core.redraft_policy.lane_probe", return_value=self.probe("required-2", urgent=True), create=True):
+            held = coordinator.dispatch_once()
+        self.assertEqual(held["status"], "held")
+        self.assertIn(ACN, held["cooling_down"])
+        self.assertEqual(len(launcher.started), 1)
+
+    def test_probe_receives_full_verified_prior_and_utc_company_scope(self):
+        row, published = self._published_head()
+        now = [published.astimezone(timezone(timedelta(hours=-4)))]
+        coordinator, _ = self.coordinator(now)
+        self.connection.execute("PRAGMA query_only=ON")
+        with patch("dalton_core.redraft_policy.lane_probe", return_value=self.probe("pending"), create=True) as probe:
+            coordinator._material_probe(ACN)
+        args, kwargs = probe.call_args
+        self.assertEqual(args, (self.harness.state_dir, self.connection))
+        self.assertEqual(kwargs["product"], "dossier")
+        self.assertEqual(kwargs["target"], ACN)
+        self.assertEqual(kwargs["company_refs"], [ACN])
+        self.assertEqual(kwargs["prior"]["id"], row["version_id"])
+        self.assertEqual(kwargs["prior"]["content_hash"], json.loads(row["record_json"])["content_hash"])
+        self.assertEqual(kwargs["now"].utcoffset(), timedelta(0))
+
+    def test_real_document_index_pending_becomes_due_without_claim_or_db_change(self):
+        from tests.test_material_pack import Corpus
+        _, published = self._published_head()
+        arrival = published + timedelta(minutes=1)
+        Corpus(self.harness.state_dir).add(
+            "sales_note", "Synthetic company operating check", "Synthetic sales discussion; no new claim.",
+            date=arrival.date().isoformat(), company=ACN,
+            now=arrival.isoformat(), acquired=arrival.isoformat())
+        now = [published + timedelta(days=13, hours=23)]
+        coordinator, launcher = self.coordinator(now)
+        before = self.connection.total_changes
+        first = coordinator.dispatch_once()
+        probe = first["material_probes"][ACN]
+        self.assertEqual(probe["pending_count"], 1)
+        self.assertFalse(probe["urgent"])
+        self.assertEqual(coordinator.dispatch_once()["status"], "idle")
+        now[0] = published + timedelta(days=14, seconds=1)
+        final = coordinator.dispatch_once()
+        self.assertEqual(final["status"], "launched")
+        self.assertNotEqual(first["signature"], final["signature"])
+        self.assertEqual(self.connection.total_changes, before)
+        self.assertEqual(len(launcher.started), 2)
+
+    def test_real_required_document_arrival_is_seen_before_claim_promotion(self):
+        from tests.test_material_pack import Corpus
+        _, published = self._published_head()
+        now = [published + timedelta(seconds=MIN_REDRAFT_SECONDS)]
+        coordinator, launcher = self.coordinator(now)
+        first = coordinator.dispatch_once()
+        self.assertEqual(coordinator.dispatch_once()["status"], "idle")
+        now[0] += timedelta(minutes=1)
+        before = self.connection.total_changes
+        Corpus(self.harness.state_dir).add(
+            "transcript", "ACN synthetic quarter call", "ACN synthetic quarterly earnings discussion.",
+            date=now[0].date().isoformat(), company=ACN, period="FY2027Q1",
+            now=now[0].isoformat(), acquired=now[0].isoformat())
+        final = coordinator.dispatch_once()
+        self.assertEqual(final["status"], "launched")
+        self.assertNotEqual(first["signature"], final["signature"])
+        self.assertIn("required_material", final["material_probes"][ACN]["urgent_reasons"])
+        self.assertEqual(self.connection.total_changes, before)
+        self.assertEqual(len(launcher.started), 2)
+
+    def test_heavy_probe_cache_has_light_edges_and_bounded_ttl_not_paid_tick_churn(self):
+        now = [datetime.now(timezone.utc)]
+        coordinator, launcher = self.coordinator(now)
+        light = ["arrival-old"]
+        heavy = []
+        def probe(*args, **kwargs):
+            if kwargs.get("light_only"):
+                return {"fingerprint": light[0]}
+            heavy.append(kwargs["now"])
+            return self.probe("policy:" + light[0])
+        with patch("dalton_core.redraft_policy.lane_probe", side_effect=probe):
+            coordinator.dispatch_once()
+            self.assertEqual(coordinator.dispatch_once()["status"], "idle")
+            now[0] += timedelta(minutes=10)
+            self.assertEqual(coordinator.dispatch_once()["status"], "idle")
+            self.assertEqual(len(heavy), 1)
+            now[0] += timedelta(minutes=20)
+            self.assertEqual(coordinator.dispatch_once()["status"], "idle")
+            self.assertEqual(len(heavy), 2)  # refresh policy, not the paid occasion
+            light[0] = "arrival-new"
+            self.assertEqual(coordinator.dispatch_once()["status"], "launched")
+            self.assertEqual(len(heavy), 3)
+        self.assertEqual(len(launcher.started), 2)
+
+    def test_unreadable_probe_refuses_without_spending(self):
+        now = [datetime.now(timezone.utc)]
+        coordinator, launcher = self.coordinator(now)
+        with patch("dalton_core.redraft_policy.lane_probe", side_effect=ValueError("source drift"), create=True):
+            result = coordinator.dispatch_once()
+        self.assertEqual(result["status"], "unavailable")
+        self.assertEqual(launcher.started, [])
 
 
 if __name__ == "__main__":

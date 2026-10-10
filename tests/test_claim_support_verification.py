@@ -154,7 +154,7 @@ class SettingsTests(unittest.TestCase):
     def test_defaults_then_an_owner_file_and_a_bad_file_is_refused(self) -> None:
         with tempfile.TemporaryDirectory() as temp:
             root = Path(temp)
-            self.assertEqual(load_settings(root)["daily_cap_usd"], 0.15)
+            self.assertEqual(load_settings(root)["daily_cap_usd"], 0.60)
             # Retirement is append-only: the backfill starts at one call a run.
             self.assertEqual(load_settings(root)["backfill_batches_per_run"], 1)
             (root / "claim-support-verification.json").write_text(
@@ -520,10 +520,26 @@ class ServiceGateTests(unittest.TestCase):
             {"source_ref": "source:sales-notes", "model_binding": {"x": 1}}, MISSION, self._pairs())
         self.assertEqual(result["status"], "deferred")
 
+    def test_web_pages_filings_and_guidepoint_are_checked_before_admission(self) -> None:
+        # 2026-09-29: legacy admitted 129 public-web and 29 Guidepoint
+        # statements in the 1.5 hours after batch g with no second reading.
+        # A paid draft of any of them with no verifier is now deferred, and
+        # with one it is asked.
+        for source_ref in ("source:web-search", "source:sec-edgar", "source:guidepoint"):
+            with self.subTest(source_ref=source_ref):
+                result = self._service().support_verdicts(
+                    {"source_ref": source_ref, "model_binding": {"x": 1}}, MISSION, self._pairs())
+                self.assertEqual(result["status"], "deferred")
+        from dalton_core.claim_support_verification import DEFAULT_SETTINGS, VERIFIED_SOURCE_REFS
+        # The recheck reads the Evidence's source, which is public-web for both.
+        self.assertIn("source:public-web", VERIFIED_SOURCE_REFS)
+        self.assertEqual(DEFAULT_SETTINGS["backfill_claim_sources"],
+                         ["sales_notes", "alphaengine", "public_web", "guidepoint"])
+
     def test_other_sources_held_spans_and_industry_subjects_are_not_asked(self) -> None:
         service = self._service()
         for context, pairs in (
-            ({"source_ref": "source:web-search", "model_binding": {"x": 1}}, self._pairs()),
+            ({"source_ref": "source:company-wiki", "model_binding": {"x": 1}}, self._pairs()),
             ({"source_ref": "source:sales-notes", "model_binding": {"x": 1}}, self._pairs(held="held")),
             ({"source_ref": "source:alphaengine"}, self._pairs()),
         ):
@@ -568,6 +584,49 @@ class AdmissionTests(AutomationDraftingTests):
                 connector_governance=None, web_fetch_governance=None,
                 hermetic_fixture=fixture, candidate_staging=self.root / "staging.sqlite")
         return summary, before
+
+
+    def _scope_statements(self):
+        base = {"metric_or_aspect": "aspect:client-decisions", "period": "FY26",
+                "basis": "fixture management commentary",
+                "excerpt": "Accenture management says client decisions remain cautious"}
+        return [
+            {**base, "normalized_statement": "Accenture management says client decisions remain cautious."},
+            {**base, "normalized_statement": "Accenture management said that client decisions remain cautious."},
+            {**base, "normalized_statement": "Accenture says clients slowed decisions compared with last "
+                                             "quarter, driven by budget reviews."},
+            {**base, "normalized_statement": "Accenture states that cautious clients could adversely "
+                                             "affect results if caution persists."},
+        ]
+
+    def test_restatements_and_the_least_informative_are_kept_out(self) -> None:
+        """2026-09-29 (document_admission_scope): one window, four statements, a cap of two."""
+        self._grant_automation()
+        self._policy_with_document_rule()
+        context = self._active_context()
+        fixture = self.root / "support-fixture.json"
+        fixture.write_text(json.dumps({"schema_version": "0.1", "suggestions": [
+            {**item, "quote_id": context["quotes"][0]["quote_id"]} for item in self._scope_statements()]}),
+            encoding="utf-8")
+        model = FakeModel(_reply(*[("supported", "about_subject", None)] * 2))
+        with patch("dalton_core.document_admission_scope.MAX_CLAIMS_PER_DOCUMENT", 2):
+            summary, before = self._run(model, first=False)
+        statuses = sorted(item["status"] for item in summary["admitted"])
+        self.assertEqual(statuses, ["admitted", "admitted", "scope_duplicate", "truncated"], summary["admitted"])
+        # Only what could be admitted was asked about (and paid for).
+        self.assertEqual(len(model.calls), 1)
+        prompt = model.calls[0]["prompt"]
+        self.assertEqual(len(json.loads(prompt[prompt.rindex("UNTRUSTED_ITEMS=") + 16:])), 2)
+        self.assertEqual(self.h.counts()["claim_versions"], before["claim_versions"] + 2)
+        self.assertEqual(summary["admission_scope"]["truncated"], 1)
+        self.assertEqual(summary["admission_scope"]["duplicates_in_document"], 1)
+        [resolved] = summary["resolved_reviews"]
+        self.assertEqual(resolved["out_of_scope"], {"truncated": 1, "duplicates_in_document": 1})
+        review = next(r for r in self.h.missions.document_reviews(
+            self.h.missions.active_mission("coverage-mission:us-it-services")["id"])
+            if r["review_id"] == resolved["review_id"])
+        self.assertIn("1 over the cap of 2 per document", review["rationale"])
+        self.assertIn("1 restating another statement of this document", review["rationale"])
 
     def test_a_supported_statement_about_the_subject_is_admitted_with_its_verdict(self) -> None:
         model = FakeModel(_reply(("supported", "about_subject", None)))

@@ -21,8 +21,23 @@ rollback is republishing the previous chain.  Nothing writes a row by hand and
 nothing writes another environment's database.
 
 Idempotent: an environment already on the legacy chains is planned as
-``aligned`` and nothing is published.  Safe while the services are running,
-because it talks to the writers rather than around them.
+``aligned`` and nothing is published.
+
+Which lineages are compared (2026-10-02).  Only the lineages that take part in
+a tier or stage (``model_routing_sync.tier_holders`` / ``purpose_holders``) --
+on the target exactly as on the source.  A service-pin lineage that declares no
+chain for a tier (``dalton-openclaw``, ``-assessment``, ``-verifier``) is not
+behind on it, and no writer call could give it one, so counting it made every
+post-apply residual read "还有 N 个环境与源环境不同" forever.  On the source, a
+tier or stage the lineages disagree about is resolved in favour of the lineages
+that made a route decision in the last ``--idle-days`` days (default 14; 0
+turns this off) when those all agree; the lineages set aside are printed and
+listed under ``idle_ignored`` in ``--json``.  A disagreement among lineages
+that do route is still a conflict, printed per lineage with whether it routes
+(``conflict_details``).  Existing ``--json`` keys keep their shape.
+
+Safe while the services are running, because it talks to the writers rather
+than around them.
 
     # look first -- reads only, changes nothing
     scripts/align_model_routing.py
@@ -36,6 +51,7 @@ from __future__ import annotations
 import argparse
 import json
 import sys
+from datetime import datetime, timedelta, timezone
 from pathlib import Path
 from typing import Any, Mapping, Sequence
 
@@ -50,11 +66,17 @@ from dalton_core.model_routing_sync import (  # noqa: E402
     current_purpose_overrides,
     current_tier_chains,
     host_environments,
+    purpose_holders,
+    route_activity,
     selection_params,
+    tier_holders,
 )
 
 DEFAULT_MANAGER_CONFIG = "~/.dalton/manager.json"
 DEFAULT_ACTOR = "human:lumos"
+# A lineage that has routed nothing for this long is not one whose chain the
+# owner is relying on; see ``source_selections``.
+DEFAULT_IDLE_DAYS = 14
 
 
 class AlignmentError(RuntimeError):
@@ -66,7 +88,9 @@ class AlignmentError(RuntimeError):
 # policy lineages.
 
 
-def source_selections(environment: Environment) -> dict[str, Any]:
+def source_selections(
+    environment: Environment, *, idle_days: int = 0, now: datetime | None = None,
+) -> dict[str, Any]:
     """Every tier chain and per-stage override the source environment holds.
 
     The reading itself lives in ``model_routing_sync.agreed_selections`` since
@@ -74,9 +98,25 @@ def source_selections(environment: Environment) -> dict[str, Any]:
     new workspace must read "the source configuration" out of exactly one
     implementation, or the environment the owner creates and the environment
     this script repairs would not be the same environment.
+
+    ``idle_days`` > 0 reads which lineages routed a call in that window and
+    lets a conflict that only idle lineages cause resolve to the routing
+    lineages' value (``idle_ignored``).  If the decision table cannot be read,
+    nothing is resolved that way.  The result also carries ``activity`` (per
+    lineage decision count and last decision) for the report.
     """
 
-    return agreed_selections(environment.router_db)
+    if idle_days <= 0:
+        selections = agreed_selections(environment.router_db)
+        selections["activity"] = None
+        return selections
+    since = (now or datetime.now(timezone.utc)) - timedelta(days=idle_days)
+    activity = route_activity(environment.router_db, since=since)
+    selections = agreed_selections(
+        environment.router_db,
+        active_policy_ids=None if activity is None else set(activity))
+    selections["activity"] = activity
+    return selections
 
 
 def target_selections(environment: Environment) -> dict[str, Any]:
@@ -107,10 +147,13 @@ def plan_environment(
     differences: list[dict[str, Any]] = []
     publish: list[dict[str, Any]] = []
     for tier, wanted in sorted(source["tiers"].items()):
+        # Only the lineages that take part in this tier -- the same rule the
+        # source side applies. A lineage with no chain for it is not behind.
+        holders = tier_holders(held["tier_chains"], tier)
         stale = {
             policy_id: chains.get(tier)
             for policy_id, chains in held["tier_chains"].items()
-            if chains.get(tier) != wanted
+            if policy_id in holders and chains.get(tier) != wanted
         }
         if not stale:
             continue
@@ -120,7 +163,10 @@ def plan_environment(
         publish.append({"kind": "tier", "tier": tier, "chain": list(wanted)})
     for purpose, wanted in sorted(source["purposes"].items()):
         stale = {}
+        holders = purpose_holders(held["tier_chains"], held["purpose_overrides"], purpose)
         for policy_id, overrides in held["purpose_overrides"].items():
+            if policy_id not in holders:
+                continue
             entry = overrides.get(purpose) or {}
             before = list(entry.get("chain") or []) if entry.get("mode") == "explicit" else None
             if before != wanted:
@@ -147,6 +193,8 @@ def plan(
     *,
     source_id: str = LEGACY_ENVIRONMENT_ID,
     legacy_service_path: str | Path | None = None,
+    idle_days: int = DEFAULT_IDLE_DAYS,
+    now: datetime | None = None,
 ) -> dict[str, Any]:
     """Read every environment and say what each would have to publish."""
 
@@ -159,7 +207,7 @@ def plan(
             f"这台机器上找不到源环境 {source_id}；已知的是："
             + "、".join(sorted(by_id)) or "（一个都没有）"
         )
-    selections = source_selections(source)
+    selections = source_selections(source, idle_days=idle_days, now=now)
     targets = [plan_environment(selections, item)
                for item in environments if item.environment_id != source_id]
     return {
@@ -167,6 +215,9 @@ def plan(
                    "state_dir": str(source.state_dir),
                    "tiers": selections["tiers"], "purposes": selections["purposes"]},
         "conflicts": selections["conflicts"],
+        "conflict_details": selections.get("conflict_details", []),
+        "idle_ignored": selections.get("idle_ignored", []),
+        "idle_days": idle_days,
         "environments": targets,
         "environments_differing": sum(1 for item in targets if item["status"] == "differs"),
     }
@@ -259,6 +310,31 @@ def render(plan_result: Mapping[str, Any], *, verbose: bool = False) -> str:
         lines.append(f"  环节 {purpose}：{' → '.join(chain)}")
     for complaint in plan_result["conflicts"]:
         lines.append(f"  ⚠ {complaint}")
+    idle_days = plan_result.get("idle_days") or 0
+    for detail in plan_result.get("conflict_details", []):
+        # Which lineage holds which chain, and whether it routes at all: the
+        # owner deciding a conflict needs to know whether either side is
+        # actually carrying calls.
+        lines.append(f"    「{detail['subject']}」各条策略：")
+        for value in detail["values"]:
+            chain = " → ".join(value["chain"] or []) or "（没有固定）"
+            routing = value.get("routing")
+            if routing is None:
+                state = ""
+            else:
+                state = (f"；近 {idle_days} 天在路由的：{len(routing)} 条"
+                         if routing else f"；近 {idle_days} 天都没有路由过")
+            lines.append(f"      {chain}（{len(value['policy_ids'])} 条策略{state}）")
+            if verbose:
+                lines.append(f"        涉及：{'、'.join(value['policy_ids'])}")
+    for ignored in plan_result.get("idle_ignored", []):
+        label = "类别" if ignored["kind"] == "tier" else "环节"
+        names = "、".join(item["policy_id"].split(":", 1)[-1]
+                         for item in ignored["ignored"])
+        lines.append(
+            f"  ℹ {label}「{ignored['subject']}」按近 {idle_days} 天在路由的策略取值；"
+            f"忽略了 {len(ignored['ignored'])} 条近 {idle_days} 天没有路由过、"
+            f"链不同的策略：{names}")
     if not plan_result["environments"]:
         lines.append("这台机器上没有其它研究环境。")
         return "\n".join(lines)
@@ -313,10 +389,15 @@ def main(argv: Sequence[str] | None = None) -> int:
     parser.add_argument("--json", action="store_true")
     parser.add_argument("--verbose", action="store_true",
                         help="list every policy lineage behind each difference")
+    parser.add_argument("--idle-days", type=int, default=DEFAULT_IDLE_DAYS,
+                        help="on the source, a conflict caused only by lineages "
+                             "with no route decision in this many days is "
+                             "resolved to the routing lineages' chain (0: off)")
     args = parser.parse_args(list(argv) if argv is not None else None)
     try:
         result = plan(args.manager_config, source_id=args.source,
-                      legacy_service_path=args.legacy_service)
+                      legacy_service_path=args.legacy_service,
+                      idle_days=args.idle_days)
     except (AlignmentError, ModelRoutingSyncError) as exc:
         print(str(exc), file=sys.stderr)
         return 2
@@ -340,7 +421,8 @@ def main(argv: Sequence[str] | None = None) -> int:
         # rather than discover it on the model page next week.
         try:
             after = plan(args.manager_config, source_id=args.source,
-                         legacy_service_path=args.legacy_service)
+                         legacy_service_path=args.legacy_service,
+                         idle_days=args.idle_days)
         except (AlignmentError, ModelRoutingSyncError) as exc:
             result["residual"] = {"status": "unreadable", "reason": str(exc)}
         else:

@@ -52,7 +52,7 @@ from dalton_core.mission_sensitivity_lane import (
 from dalton_core.model_forecast_driver import ForecastModelAuthority
 from dalton_core.store import DaltonStore
 from tests.test_company_model_inputs import ACN
-from tests.test_forecast_sensitivity import model
+from tests.test_forecast_sensitivity import new_sensitivity_model as model
 
 OPERATION = "dispatch_forecast_sensitivity"
 DIGEST = "a" * 64

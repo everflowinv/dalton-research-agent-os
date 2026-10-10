@@ -83,13 +83,16 @@ class CliHarness(unittest.TestCase):
                           "period": "2025-09-01..2025-11-30"}]),
             titles[7]: ("应盯住新签订单与利用率两条序列；两条目前都不在账本里。", []),
         }
+        # Batch ap 1: a section that is only a gap note fails substance, so
+        # the other six carry a short substantive paragraph (no figures).
+        filler = ("公司收入来自咨询与托管两类服务，托管合同期限更长、可见度更高，"
+                  "这一判断依据所引已核实结论，后续以新签订单与利用率验证。")
         sections = []
         for title in titles:
-            body, numbers = written.get(title, ("", []))
+            body, numbers = written.get(title, (filler, []))
             sections.append({
                 "title": title, "body": body, "claim_refs": [self.claim_ref] if body else [],
-                "numbers": numbers,
-                "gaps": [] if body else ["这一节的证据还没有进入账本"],
+                "numbers": numbers, "gaps": [],
             })
         return sections
 

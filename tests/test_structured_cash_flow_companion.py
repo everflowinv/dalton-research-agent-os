@@ -64,6 +64,11 @@ def cash_input(role: str, concept: str, values: tuple[str, ...], *, unit: str = 
 
 def authorities(*, cash: bool = True, unit: str = "usd"):
     inputs = financial_inputs()
+    from tests.test_company_financial_statement_structure import input_line
+    debt=input_line("us-gaap:LongTermDebtNoncurrent",(1000,1000,1000,1000),statement="balance")
+    debt["period_basis"]="instant"
+    for cell in debt["cells"].values():cell["period_start"]=None
+    inputs["filed_lines"].append(debt)
     inputs["schema_version"] = "0.3"
     if unit != "usd":
         for line in inputs["filed_lines"]:
@@ -476,10 +481,11 @@ class StructuredCashFlowCompanionTests(unittest.TestCase):
             "interest_income": 10, "interest_expense": 20, "pretax": 270,
             "tax": 60, "net": 210, "nci": 5, "parent": 205,
             "eps_numerator": 205, "shares": 100, "eps": "2.05",
+            "us-gaap:LongTermDebtNoncurrent": 1000,
         }
         for line in current["filed_lines"]:
             line["cells"]["2026-03-31"] = {
-                "period_start": "2026-01-01", "value": str(actuals[line["concept"]]),
+                "period_start": None if line.get("period_basis") == "instant" else "2026-01-01", "value": str(actuals[line["concept"]]),
                 "unit": next(iter(line["cells"].values()))["unit"],
                 "basis": "reported", "source_accessions": [ACCESSION],
             }

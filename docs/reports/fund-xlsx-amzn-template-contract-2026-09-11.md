@@ -34,7 +34,7 @@ the current date, or move financial data into the hierarchy columns.
 
 Validation:
 
-- `PYTHONPATH=/Users/everflow/Projects/dalton-fund-xlsx-template/src /Users/everflow/Projects/dalton-research-agent-os/.venv/bin/python -m unittest tests.test_fund_xlsx_template -v`
+- `PYTHONPATH=$HOME/Projects/dalton-fund-xlsx-template/src $HOME/Projects/dalton-research-agent-os/.venv/bin/python -m unittest tests.test_fund_xlsx_template -v`
 - Four tests pass, covering the source/hash binding, JSON tamper refusal,
   company-specific row application with value/formula preservation, and closed
 mapping refusal.

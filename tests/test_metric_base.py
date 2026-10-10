@@ -76,14 +76,24 @@ class MetricBaseDeclarationTests(unittest.TestCase):
         with self.assertRaises(MetricBaseError):
             metric_spec("initial_screen", ACN, "metric:ebitda")
 
-    def test_deeper_stages_declare_nothing_until_they_are_built(self) -> None:
+    def test_unbuilt_stages_declare_nothing_and_discovery_stays_with_the_screen(self) -> None:
         # An unbuilt stage asking for figures nobody serves would put a
         # permanent gap on the cockpit, and discovery answers the screen's
         # question rather than a deeper stage's.
-        self.assertEqual(metrics_for("company_model", ACN), [])
+        self.assertEqual(metrics_for("deep_insight_gate", ACN), [])
         discovered = [{"metric_ref": "metric:new-bookings", "label": "b",
                        "unit": "currency", "periods": 4, "prompt": "b"}]
-        self.assertEqual(metrics_for("company_model", ACN, discovered), [])
+        refs = [item["metric_ref"] for item in metrics_for("company_model", ACN, discovered)]
+        self.assertNotIn("metric:new-bookings", refs)
+
+    def test_model_stages_declare_what_their_gate_counts(self) -> None:
+        # ADR-0011: the spine is the gate's metric base, not a second definition.
+        self.assertEqual(
+            [(item["metric_ref"], item["periods"]) for item in metrics_for("industry_model", ACN)],
+            [("metric:revenue", 4), ("metric:revenue-yoy-growth", 4), ("metric:gross-margin", 4)])
+        self.assertEqual(
+            [(item["metric_ref"], item["periods"]) for item in metrics_for("company_model", ACN)],
+            [("metric:revenue", 8)])
 
 
 class MissingMetricTests(unittest.TestCase):

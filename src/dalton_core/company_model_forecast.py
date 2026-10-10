@@ -47,6 +47,7 @@ from .model_forecast import (
 )
 from .model_forecast_driver import (
     AUTOMATION_ACTOR,
+    COVERAGE_GENERATOR_REF,
     GENERATOR_REF,
     STRUCTURE_GENERATOR_REF,
     REVENUE,
@@ -61,6 +62,7 @@ from .model_forecast_driver import (
     is_structured_schema,
     realised_ends,
     structure_formula_hash,
+    structure_topology_changed,
     cash_flow_formula_hash,
 )
 from .store import canonical_json, content_hash
@@ -113,6 +115,7 @@ def model_digest(
     spec: Mapping[str, Any], table: Mapping[str, Any], *,
     note_evidence_resolver: Any | None = None,
     financial_note_context: Mapping[str, Any] | None = None,
+    reporting_boundary: Mapping[str, Any] | None = None,
 ) -> str:
     """What a model run is *about*: this specification over these filings.
 
@@ -152,12 +155,17 @@ def model_digest(
         )
     else:
         cash_companion = None
+    from .forecast_financial_execution import RULE_REF as FINANCIAL_EXECUTION_RULE
     digest_body = {
+        "financial_execution_rule": FINANCIAL_EXECUTION_RULE,
         "spec_ref": str(spec.get("spec_id") or ""),
         "spec_hash": str(spec.get("content_hash") or ""),
         "inputs_hash": inputs_hash(table),
         "generator_ref": (
-            STRUCTURE_GENERATOR_REF if statement_binding is not None else GENERATOR_REF
+            GENERATOR_REF if statement_binding is None else
+            COVERAGE_GENERATOR_REF
+            if str(structure.get("schema_version")) == "0.6" else
+            STRUCTURE_GENERATOR_REF
         ),
         "formula_hash": (
             DRIVER_FORMULA_HASH if statement_binding is None else
@@ -168,6 +176,8 @@ def model_digest(
         "forecast_structure_binding": statement_binding,
         "cash_flow_companion": cash_companion,
     }
+    if reporting_boundary is not None:
+        digest_body["forecast_reporting_boundary"] = dict(reporting_boundary)
     # Historical model identities remain byte-for-byte stable.  Only the new
     # note-backed structure adds this authority to its digest.
     if note_context_binding is not None:
@@ -177,23 +187,12 @@ def model_digest(
 
 def pending_action(
     prior: Mapping[str, Any] | None, spec: Mapping[str, Any],
-    table: Mapping[str, Any],
+    table: Mapping[str, Any], *, reporting_boundary: Mapping[str, Any] | None = None,
 ) -> str | None:
-    """What this lane may do for this company on this tick, if anything.
+    """First model, rule migration, or rolling after a newly reported actual.
 
-    A company with no model gets its first one. A newly authorized
-    specification gets its own model identity. A company whose current model
-    estimated a quarter the filings have now covered gets those estimates
-    answered -- the actual written down beside them, the future untouched.
-
-    What this never returns is "the world moved, re-forecast": a new Claim, a
-    news item, a broker note, even a new filing, do not by themselves change
-    what this system thinks the next four quarters look like. That is a
-    judgement, it belongs to the event layer, and it arrives here as an
-    explicit ``revise_assumptions`` call with a reason and the evidence behind
-    it. A lane that quietly re-forecast on every document would leave no
-    record of what it thought and when, which is the only thing that makes a
-    forecast worth grading.
+    The prior version remains immutable. New reported facts move the next
+    forecast's boundary; news and claims still require an explicit revision.
     """
 
     if prior is None:
@@ -203,7 +202,111 @@ def pending_action(
         # new one starts a new model identity; it is not an actualisation of
         # the old specification's model.
         return "new_specification"
+    if "execution_contract" not in prior:
+        return "rules_upgrade"
+    from .model_forecast_driver import validate_new_forecast_rules
+    try:
+        validate_new_forecast_rules(prior)
+    except (ValueError, ForecastModelUnavailable):
+        return "rules_upgrade"
+    if realised_ends(prior, table):
+        return "actualize"
+    if reporting_boundary is not None:
+        from .model_forecast_driver import forecast_policy, revenue_anchor
+        desired = forecast_policy(revenue_anchor(prior["drivers"]), reporting_boundary)
+        if prior.get("forecast_policy") != desired:
+            return "rules_upgrade"
+    if coverage_upgrade_due(prior, spec, table):
+        # The forecast coverage rules (every reported line gets a method,
+        # filed subtotals become tied formulas, EPS, cash roll, source-ranked
+        # assumptions) are a new modelling rule, not a new view of the
+        # company: the lane rebuilds once, on its own, after deploy.
+        return "rules_upgrade"
     return "actualize" if realised_ends(prior, table) else None
+
+
+def coverage_upgrade_due(prior: Mapping[str, Any], spec: Mapping[str, Any],
+                         table: Mapping[str, Any] | None = None) -> bool:
+    """A structured model built before the coverage rules, for a spec they reach.
+
+    Due only when the current spec really materializes as a coverage (0.6)
+    structure against these filings; otherwise a rebuild would reproduce the
+    held model and the company would stay "pending" every tick.
+    """
+
+    from .company_financial_statement_structure import is_coverage_structure
+    from .forecast_coverage import UPGRADEABLE_STRUCTURE_VERSIONS
+
+    definition = spec.get("financial_statement_structure")
+    if not (
+        is_structured_schema(prior.get("schema_version"))
+        and isinstance(definition, Mapping)
+        and definition.get("schema_version") in UPGRADEABLE_STRUCTURE_VERSIONS
+        and prior.get("generator_ref") != COVERAGE_GENERATOR_REF
+    ):
+        return False
+    if table is None or definition.get("note_evidence"):
+        # A note-backed structure needs its note resolver to materialize; the
+        # run itself decides (and an actualisation then rebuilds it).
+        return table is None
+    try:
+        structure, _replay = materialize_financial_statement_structure(spec, table)
+    except Exception:
+        return False
+    return is_coverage_structure(structure.get("schema_version"))
+
+
+def coverage_sources(
+    connection: Any, spec: Mapping[str, Any], table: Mapping[str, Any],
+    structure: Mapping[str, Any] | None, prior: Mapping[str, Any] | None,
+) -> dict[str, Any] | None:
+    """Held preliminary actuals, guidance/consensus and prior judgements."""
+
+    from .company_financial_statement_structure import is_coverage_structure
+
+    if structure is None or not is_coverage_structure(structure.get("schema_version")):
+        return None
+    from .forecast_assumption_sources import load_assumption_sources
+    from .forecast_coverage import filed_values
+
+    anchor = str(spec.get("revenue_anchor_concept") or "")
+    revenue = next((item for item in table.get("filed_lines") or []
+                    if item.get("concept") == anchor), None)
+    history = {} if revenue is None else filed_values(revenue)
+    unit = next((str(line.get("unit")) for line in structure.get("lines") or []
+                 if line.get("role") == "revenue"), "usd")
+    sources = load_assumption_sources(
+        connection, str(spec.get("company_ref")), revenue_history=history,
+        prior=prior, reporting_unit=unit)
+    # 2026-10-09 (P0): the lines the spec itself calls one-off.  A recurring
+    # line so flagged (META's G&A, carrying a legal accrual) keeps its growth
+    # or ratio method on a normalised base instead of compounding the charge.
+    flagged = sorted({
+        str(item.get("basis_concept")) for item in spec.get("expense_lines") or []
+        if isinstance(item, Mapping) and item.get("behaviour") == "one_off"
+        and item.get("basis_concept")})
+    sources["one_offs"] = {**(sources.get("one_offs") or {}), "concepts": flagged}
+    return sources
+
+
+def forecast_reporting_boundary(missions: Any, connection: Any, company_ref: str, *, table: Mapping[str, Any] | None = None) -> dict[str, Any]:
+    """One reporting contract shared by selection, ticket digest and generation."""
+    from .forecast_assumption_sources import preliminary_quarter
+    filings = missions.statement_filings(company_ref)
+    actual_dates = [str(f["report_date"]) for f in filings
+                    if f.get("form") in {"10-Q", "10-K"} and f.get("report_date")]
+    annual_dates = [str(f["report_date"]) for f in filings
+                    if f.get("form") == "10-K" and f.get("report_date")]
+    result = {"latest_actual_end": max(actual_dates) if actual_dates else None,
+              "fiscal_year_end": max(annual_dates) if annual_dates else None}
+    from .model_forecast_driver import CONCEPT_ROLES, REVENUE
+    revenue = next((line for line in (table or {}).get("filed_lines") or []
+                    if CONCEPT_ROLES.get(str(line.get("concept"))) == REVENUE), {})
+    unit = next((str(c.get("unit")).casefold() for c in (revenue.get("cells") or {}).values()
+                 if c.get("unit")), "usd")
+    preliminary = preliminary_quarter(connection, company_ref, reporting_unit=unit)
+    result["preliminary"] = preliminary
+    return result
 
 
 def publish_forecast_lines(
@@ -356,7 +459,22 @@ def run_company_forecast(
         )
         binding = forecast_structure_binding(structure, replay, table)
     prior = models.latest(company_ref)
-    action = pending_action(prior, spec, table)
+    sources = coverage_sources(models.connection, spec, table, structure, prior) or {}
+    boundary = forecast_reporting_boundary(missions, models.connection, company_ref, table=table)
+    sources.update(boundary)
+    import sqlite3
+    from .forecast_company_fcf import load_company_fcf_definition
+    try:
+        sources["fcf_definition"] = load_company_fcf_definition(models.connection, company_ref, table, boundary.get("fiscal_year_end"))
+    except (ValueError, OSError, sqlite3.Error):
+        sources["fcf_definition"] = None
+    action = pending_action(prior, spec, table, reporting_boundary=boundary)
+    if (action == "actualize" and structure is not None
+            and str(structure.get("schema_version")) == "0.6"
+            and structure_topology_changed(prior, structure)):
+        # The completed structure moved (a line reached enough history, a
+        # subtotal became provable): a rebuilt model, not an actualisation.
+        action = "rules_upgrade"
     backfill_proof = (
         action is None and prior is not None
         and models.filing_proof(prior["id"]) is None
@@ -386,18 +504,20 @@ def run_company_forecast(
     if backfill_proof:
         body = prior
         action = "filing_proof_backfill"
-    elif action in {"first", "new_specification"}:
+    elif action in {"first", "new_specification", "rules_upgrade"}:
         builder = (build_forecast_model if structure is None
                    else build_structured_forecast_model)
         structured = ({} if structure is None else {
             "structure": structure, "replay": replay, "binding": binding,
         })
+        structured["assumption_sources"] = sources
         body = builder(
             spec, table, actor_ref=actor_ref,
             mission_version_ref=mission_version_ref,
-            change_reason=("assumption_review" if action == "new_specification"
+            change_reason=("assumption_review"
+                           if action in {"new_specification", "rules_upgrade"}
                            else "evidence_thicker"), **structured)
-        if action == "new_specification":
+        if action in {"new_specification", "rules_upgrade"}:
             # This is a fresh model identity, while the authority still owns
             # one append-only company history. Bind the append to the head we
             # inspected so a concurrent revision cannot be overwritten.
@@ -406,6 +526,7 @@ def run_company_forecast(
         body = actualize_model(
             prior, table, actor_ref=actor_ref, structure=structure,
             replay=replay, binding=binding)
+        body["forecast_policy"]["fiscal_year_end"] = boundary.get("fiscal_year_end")
     # A comparative quarter can occur in several filings.  Segment arithmetic
     # must use one coherent filing's consolidated row and breakdown members;
     # flattening every filing would add repeated members while the normalizer
@@ -425,6 +546,9 @@ def run_company_forecast(
     statement_rows = [line for _filed, rows in chosen.values() for line in rows]
     stored = models.publish(body, statement_rows=statement_rows)
     annual_projection = _annual_projection(missions, models, stored, table)
+    from .research_followup_automation import FollowupAutomationAuthority, binding as redraft_binding
+    if redraft_binding(models.connection, stored["spec_ref"]) is not None:
+        FollowupAutomationAuthority(models.store).complete_model(stored["id"])
     if backfill_proof:
         return {"company_ref": company_ref, "status": "proof_backfilled",
                 "action": action, "lines": [], "lines_refused": None,

@@ -182,6 +182,12 @@ UNKNOWN_REASONS: tuple[str, ...] = (
     "group_refused",
     # the question was not drafted on this run and has no prior answer to carry
     "not_drafted_this_run",
+    # Batch D / ap: an answer was drafted but did not meet the question's
+    # answer standard (Q7 a >=5-year attribution series, Q9 a higher-than-
+    # quarterly indicator with source and threshold, Q10 the full OP -> pretax
+    # -> NI -> EPS -> multiple -> return chain on a model that passed its
+    # invariants); it stays unanswered and a MaterialRequest is opened.
+    "standard_not_met",
 )
 
 # The three decisions a person may make, and only a person.
@@ -362,6 +368,9 @@ _ANSWER_FIELDS = frozenset({
     "sentences", "sources", "gaps",
 })
 _UNKNOWN_FIELDS = frozenset({"reason", "missing", "evidence_that_would_answer"})
+#: Optional on an unknown: the MaterialRequest opened to answer it (batch D).
+#: Optional so every stored 0.1 record still validates byte for byte.
+_UNKNOWN_OPTIONAL = frozenset({"material_request_ref"})
 
 
 def normalise_ref(value: Any, name: str) -> dict[str, Any]:
@@ -419,10 +428,16 @@ def _gaps(value: Any, name: str) -> list[str]:
 
 
 def _unknown(value: Any, name: str) -> dict[str, Any]:
-    if not isinstance(value, Mapping) or set(value) != _UNKNOWN_FIELDS:
+    if not isinstance(value, Mapping) or not _UNKNOWN_FIELDS <= set(value) \
+            or set(value) - _UNKNOWN_FIELDS - _UNKNOWN_OPTIONAL:
         raise DeepInsightGateValidationError(
-            f"{name} must be exactly reason, missing and evidence_that_would_answer")
-    return {
+            f"{name} must be exactly reason, missing and evidence_that_would_answer "
+            "(and optionally material_request_ref)")
+    extra = {}
+    if value.get("material_request_ref") is not None:
+        extra["material_request_ref"] = _text(
+            value["material_request_ref"], f"{name}.material_request_ref", maximum=200)
+    return {**extra,
         "reason": _one_of(value["reason"], UNKNOWN_REASONS, f"{name}.reason"),
         "missing": _text(value["missing"], f"{name}.missing", maximum=MAX_UNKNOWN_CHARS),
         # The point of the whole unknown branch.  "We do not know" is worth
@@ -1203,6 +1218,10 @@ def gate_artefact(
         "sections": sections,
         "gaps": [gap for section in sections for gap in section["gaps"]],
         "expected_sections": list(QUESTION_REFS),
+        # The gate's contract: a question may stay unanswered when the answer
+        # says what would answer it (unknown + MaterialRequest / next step);
+        # every other product fails a gap-only section (batch ap 1).
+        "allows_unanswered": True,
         "shown_claims": [],
         "cited_tags": [],
         "confidence": None,
@@ -1211,13 +1230,12 @@ def gate_artefact(
     }
 
 
-# Words that turn a file into a call.  Same list the dossier refuses: the gate
-# says what is true about a company; the decision about what to do with it is a
-# Thesis, admitted by a person (ADR-0001).
-_CONCLUSION_PATTERNS = (
-    "买入", "卖出", "增持", "减持", "目标价", "低估", "高估",
-    "should buy", "should sell", "price target", "undervalued", "overvalued",
-)
+# Owner decision 2026-10-09 (batch D): views, watch prices and a trade angle
+# are allowed in research products, so the gate no longer carries a table of
+# banned investment-conclusion words.  A policy that still binds a criterion
+# to ``no_investment_conclusion`` gets no findings from it: the sourcing,
+# number and reasoning-lint rules are what a view now has to meet.
+_CONCLUSION_PATTERNS: tuple[str, ...] = ()
 
 
 def output_rubric_findings(

@@ -570,6 +570,49 @@ class MigrationCoverageTests(unittest.TestCase):
             self.assertIsNotNone(store.connection.execute(
                 "SELECT name FROM sqlite_master WHERE type='table' AND name='document_read_completion_proofs'").fetchone())
 
+    def test_weekly_progress_migration_reenters_the_real_owner_without_changing_legacy_history(self) -> None:
+        import sqlite3
+        from scripts.rehearse_deploy import _construct_core_authority
+        from dalton_core.store import DaltonStore
+        from dalton_core.industry_research import IndustryResearchAuthority
+        from dalton_core import weekly_brief
+
+        specs = [spec for spec in CORE_MIGRATIONS
+                 if spec.schema in {"weekly_brief_schema.sql", "weekly_brief_progress_schema.sql"}]
+        self.assertEqual([spec.schema for spec in specs],
+                         ["weekly_brief_schema.sql", "weekly_brief_progress_schema.sql"])
+        with DaltonStore(":memory:") as store:
+            IndustryResearchAuthority(store)
+            connection = store.connection
+            connection.create_function("dalton_weekly_brief_authorized", 0, lambda: 1)
+            connection.executescript(Path(weekly_brief.__file__).with_name(
+                "weekly_brief_schema.sql").read_text(encoding="utf-8"))
+            history = ("synthetic-legacy-request", "publish", "original-request-hash",
+                       '{"status":"fresh","legacy":true}', "2031-01-01T00:00:00+00:00")
+            connection.execute("INSERT INTO weekly_brief_idempotency VALUES(?,?,?,?,?)", history)
+            connection.commit()
+            legacy_tables = dict(connection.execute(
+                "SELECT name,sql FROM sqlite_master WHERE type='table' AND name LIKE 'weekly_brief_%'").fetchall())
+            for spec in specs:
+                symbol = getattr(importlib.import_module(spec.module), spec.symbol)
+                authority = _construct_core_authority(symbol, store, None)
+                self.assertIsInstance(authority, weekly_brief.WeeklyBriefAuthority)
+                self.assertIs(authority.connection, connection)
+            for name, sql in legacy_tables.items():
+                self.assertEqual(connection.execute(
+                    "SELECT sql FROM sqlite_master WHERE name=?", (name,)).fetchone()[0], sql)
+            self.assertEqual(tuple(connection.execute(
+                "SELECT * FROM weekly_brief_idempotency").fetchone()), history)
+            for name in ("weekly_brief_progress_issues", "weekly_brief_progress_cycle_admissions",
+                         "weekly_brief_progress_deliveries", "weekly_brief_progress_slot_unique",
+                         "weekly_brief_research_slot_unique"):
+                self.assertIsNotNone(connection.execute(
+                    "SELECT name FROM sqlite_master WHERE name=?", (name,)).fetchone(), name)
+            self.assertTrue(any(row[2] == "industry_evidence_pack_versions" for row in
+                                connection.execute("PRAGMA foreign_key_list(weekly_brief_issue_versions)")))
+            with self.assertRaisesRegex(sqlite3.IntegrityError, "immutable"):
+                connection.execute("UPDATE weekly_brief_idempotency SET request_hash='changed'")
+
     def test_the_two_migrations_this_deploy_actually_changes_are_present(self) -> None:
         schemas = {spec.schema for spec in CORE_MIGRATIONS + SIDECAR_MIGRATIONS}
         self.assertIn("budget_pools_schema.sql", schemas, "C2's nullable pool column")

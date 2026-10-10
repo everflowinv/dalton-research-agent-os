@@ -309,7 +309,7 @@ class JudgementOnTheCardTests(Int2Case):
     def test_the_decision_is_a_sentence_and_carries_its_because(self) -> None:
         self.judgement(self.price_move())
         latest = self.card()["judgements"]["latest"][0]
-        self.assertEqual(latest["decision_label"], "论点被削弱了")
+        self.assertEqual(latest["decision_label"], "核心论点受损")
         self.assertEqual(latest["action_label"], "记录研究说明")
         self.assertEqual(latest["because"], "定价压力比我们以为的更快出现")
 
@@ -325,7 +325,7 @@ class JudgementOnTheCardTests(Int2Case):
     def test_a_verdict_and_the_absence_of_one_do_not_look_alike(self) -> None:
         self.judgement(self.price_move())
         self.assertEqual(
-            self.card()["judgements"]["latest"][0]["verifier_label"], "独立复核通过")
+            self.card()["judgements"]["latest"][0]["verifier_label"], "独立逻辑交叉质检：通过")
 
     def test_no_change_is_recorded_and_shown(self) -> None:
         # "why did nothing change" is the weekly-meeting question, and the
@@ -333,8 +333,8 @@ class JudgementOnTheCardTests(Int2Case):
         # nothing.
         self.judgement(self.price_move(), decision="NO_CHANGE", action="no_change")
         latest = self.card()["judgements"]["latest"][0]
-        self.assertEqual(latest["decision_label"], "维持现有判断")
-        self.assertEqual(latest["action_label"], "维持现状")
+        self.assertEqual(latest["decision_label"], "维持基准判断")
+        self.assertEqual(latest["action_label"], "不调整基准论点")
 
 
 class ReflectionOnTheCardTests(Int2Case):
@@ -466,7 +466,7 @@ class ApprovalsTests(Int2Case):
         item = next(i for i in self.plane.approvals()["items"]
                     if i["kind"] == "thesis_revision_candidate")
         self.assertEqual(item["title"], "新证据可能影响现有投资论点，待人工决策")
-        self.assertEqual(item["details"]["大脑的判断"], "论点被削弱了")
+        self.assertEqual(item["details"]["大脑的判断"], "核心论点受损")
         # ADR-0007: the candidate and "what we may have missed" are worth the
         # same when a person is deciding, so they arrive together.
         self.assertEqual(item["reflection"]["what_happened"], "这个季度就开始了")
@@ -496,9 +496,113 @@ class ApprovalsTests(Int2Case):
         wired = next(i for i in self.plane.approvals()["items"]
                      if i["kind"] == "thesis_revision_candidate")
         self.assertEqual([a["decision"] for a in wired["actions"]],
-                         ["accept", "reject", "defer"])
-        self.assertTrue(wired["needs_rationale"])
+                         ["reject", "defer"])
+        self.assertIn("尚未建立正式论点", wired["display_reason"])
+        self.assertFalse(wired["needs_rationale"])
         self.assertNotIn("note", wired)
+
+    def empty_candidate(self) -> dict:
+        """The live legacy ACN shape (2026-10-01): nothing proposed."""
+
+        event = self.price_move(company_ref=IBM, close="90")
+        judgement = self.judgement(event, action="note")
+        # Reproduce a pre-TM immutable row to exercise historical display; new
+        # writers correctly refuse this shape (covered by the TM boundary tests).
+        with mock.patch("dalton_core.thesis_question_model.validate_revision_proposal"):
+            return EventJudgementAuthority(self.store).record_thesis_candidate(
+                judgement_ref=judgement["id"],
+                thesis={"id": "thesis-version:1", "content_hash": "a" * 64,
+                        "thesis_ref": "thesis:acn"},
+                company_ref=IBM, decision="THESIS_WEAKENED",
+                because="首选判断是维持低置信度的需求触底尚未确认",
+                evidence_refs=[event["id"]], falsifier_ref="falsifier:1",
+                proposed_statement=None, proposed_confidence=None,
+                mission=self.mission, actor_ref=OWNER,
+            )
+
+    def wire_decisions(self) -> None:
+        with closing(sqlite3.connect(self.c.core_path)) as core:
+            core.execute(
+                "CREATE TABLE thesis_revision_decisions(decision_id TEXT PRIMARY KEY,"
+                "candidate_ref TEXT, terminal INTEGER)")
+            core.commit()
+
+    def test_an_empty_candidate_offers_only_maintain_or_reject(self) -> None:
+        candidate = self.empty_candidate()
+        self.wire_decisions()
+        item = next(i for i in self.plane.approvals()["items"]
+                    if i["kind"] == "thesis_revision_candidate"
+                    and i["ref"] == candidate["id"])
+        self.assertEqual([a["decision"] for a in item["actions"]], ["maintain", "reject"])
+        self.assertEqual(item["actions"][0]["label"], "确认维持现有论点")
+        self.assertIn("不提供「接受」", item["display_reason"])
+        # The note is optional: one click closes it, with a recorded reason.
+        self.assertTrue(item["needs_rationale"])
+        self.assertIn("自动记录", item["rationale_hint"])
+        # A concrete proposal still needs an admitted thesis before acceptance.
+        self.candidate()
+        proposing = [i for i in self.plane.approvals()["items"]
+                     if i["kind"] == "thesis_revision_candidate"
+                     and i["ref"] != candidate["id"]]
+        self.assertEqual([a["decision"] for a in proposing[0]["actions"]],
+                         ["reject", "defer"])
+
+    def test_maintain_closes_an_empty_candidate_and_accept_is_refused_before_the_writer(
+            self) -> None:
+        from dalton_core.cockpit_plane import CockpitError, MAINTAIN_THESIS_REASON
+
+        candidate = self.empty_candidate()
+        calls = []
+
+        def governance(*args, operation, params, **kwargs):
+            calls.append((operation, params))
+            return {"status": "fresh"}
+
+        self.plane.governance_call = governance
+        login = "owner@example.com"
+        with self.assertRaisesRegex(CockpitError, "确认维持现有论点"):
+            self.plane.decide(login, {
+                "kind": "thesis_revision_candidate", "ref": candidate["id"],
+                "hash": candidate["content_hash"], "decision": "accept",
+                "rationale": "", "request_id": "accept-empty"})
+        self.assertEqual(calls, [])
+        out = self.plane.decide(login, {
+            "kind": "thesis_revision_candidate", "ref": candidate["id"],
+            "hash": candidate["content_hash"], "decision": "maintain",
+            "rationale": "", "request_id": "maintain-empty"})
+        self.assertEqual(out["status"], "decided")
+        operation, params = calls[-1]
+        self.assertEqual(operation, "decide_thesis_revision_candidate")
+        self.assertEqual(params["verdict"], "reject")
+        self.assertEqual(params["reason"], MAINTAIN_THESIS_REASON)
+        self.plane.decide(login, {
+            "kind": "thesis_revision_candidate", "ref": candidate["id"],
+            "hash": candidate["content_hash"], "decision": "maintain",
+            "rationale": "同意维持", "request_id": "maintain-note"})
+        self.assertEqual(calls[-1][1]["reason"],
+                         MAINTAIN_THESIS_REASON + "。补充说明：同意维持")
+        # A proposing candidate cannot be "maintained" -- it has three answers.
+        proposing = self.candidate()
+        with self.assertRaisesRegex(CockpitError, "提出了具体修订"):
+            self.plane.decide(login, {
+                "kind": "thesis_revision_candidate", "ref": proposing["id"],
+                "hash": proposing["content_hash"], "decision": "maintain",
+                "rationale": "", "request_id": "maintain-proposing"})
+
+    def test_a_maintained_candidate_is_confirmed_after_a_lost_response(self) -> None:
+        connection = self.store.connection
+        connection.execute(
+            "CREATE TABLE thesis_revision_decisions("
+            "decision_id TEXT PRIMARY KEY,candidate_ref TEXT,candidate_hash TEXT,"
+            "verdict TEXT,terminal INTEGER,resulting_thesis_version_ref TEXT,"
+            "content_hash TEXT)")
+        connection.execute(
+            "INSERT INTO thesis_revision_decisions VALUES(?,?,?,?,?,?,?)",
+            ("decision:m", "candidate:m", "a" * 64, "reject", 1, None, "b" * 64))
+        status = self.plane.decision_status({
+            "kind": "thesis_revision_candidate", "ref": "candidate:m",
+            "hash": "a" * 64, "decision": "maintain"})
+        self.assertTrue(status["decided"])
 
     def test_a_deferred_candidate_stays_and_a_terminal_one_does_not(self) -> None:
         # P14b: deferring is a decision about *when*, not about *whether*, so

@@ -1,5 +1,7 @@
 # Fable 5 对 Dalton Research Agent OS v0.1 的独立架构审阅
 
+历史技术评审：保留当时结论与局限；当前运行状态见 [项目状态](../PROJECT_STATUS.md)。原始操作证据私有保存。
+
 > 日期：2026-08-13  
 > 性质：只读独立审阅；未修改 Dalton live 系统  
 > 输入：愿景与架构规划 v0.1、Dalton Coverage OS 架构说明、AGENTS、coverage 配置、核心脚本与 SQLite schema  

@@ -33,6 +33,9 @@ from __future__ import annotations
 
 from .call_budget import default_call_budget
 
+from .deep_insight_gate_standards import STANDARD_TEXT
+from .product_contract import GAP_RULES
+from .research_reasoning_lint import VERIFIER_LINT_INSTRUCTIONS
 from .final_text_contract import final_text_instructions
 
 from collections.abc import Mapping, Sequence
@@ -364,8 +367,8 @@ def build_group_prompt(
         "screen and full coverage: a portfolio manager reads your answers and",
         "decides whether this company is worth covering deeply. Write in Chinese.",
         *final_text_instructions(),
-        "You are not advising and not recommending: the gate says what is true",
-        "about a company; the decision about what to do with it is made elsewhere.",
+        "A view is allowed: when the cited rows carry the premises you may state our",
+        "judgement, a valuation view or a direction, labelled as 我们的判断.",
         "",
         f"Company: {company.get('ticker') or ''} ({company.get('company_ref')})",
         f"Part: {group} -- {GROUP_PURPOSE.get(group, group)}",
@@ -389,8 +392,18 @@ def build_group_prompt(
         "  whose subject is a tag becomes a sentence with no subject once the tag",
         "  is gone.",
         "- Every sentence must cite at least one tag. A judgement is allowed only when",
-        "  its cited rows contain the premises; label it as 判断/推断, state uncertainty,",
-        "  and do not turn it into an investment recommendation.",
+        "  its cited rows contain the premises; label it as 判断/推断 and state uncertainty;",
+        "  a view or recommendation is allowed when the cited rows support it.",
+        "- Copy a figure verbatim from its tag, or write a declared arithmetic over cited",
+        "  figures, or label it 我们的估计 citing our model forecast cell.",
+        *[f"- {rule}" for rule in GAP_RULES],
+        "- Answer standards (an answer that misses its standard is published as unknown",
+        "  and a MaterialRequest is opened): " + "；".join(
+            f"{ref}: {text}" for ref, text in STANDARD_TEXT.items()) + ".",
+        "- Confidence high needs a decomposition: at least two kinds of source and a",
+        "  figure or forecast cell, or an explicit 拆分/分解; otherwise it is lowered.",
+        "- Reasoning rules:",
+        *[f"  - {rule}" for rule in VERIFIER_LINT_INSTRUCTIONS],
         "- Copy any figure verbatim from the tag that carries it. Do not convert",
         "  units or scales, do not round, do not recompute a percentage.",
         f"- At most {SENTENCES_PER_ANSWER} sentences per question.",
@@ -760,6 +773,9 @@ def build_verifier_prompt(
         '   "code": "' + "|".join(VERIFIER_FINDING_CODES) + '", "detail": "<one sentence>"}]}',
         "A pass verdict must have no findings; a reject verdict must have at least one.",
         "An unknown answer is never a finding: refusing to answer is allowed.",
+        "A labelled view or recommendation is allowed when its premises are cited.",
+        "Treat a broken reasoning rule below as an unsupported answer:",
+        *[f"- {rule}" for rule in VERIFIER_LINT_INSTRUCTIONS],
         "",
     ]
     for ref in QUESTION_REFS:

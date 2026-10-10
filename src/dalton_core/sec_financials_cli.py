@@ -59,7 +59,7 @@ def _write_owner_only(path: Path, value: Any) -> None:
 
 def _contract_version(governance: ConnectorGovernance) -> int:
     suffix = governance.id.rsplit(":v", 1)
-    if len(suffix) != 2 or suffix[1] not in {"2", "3"}:
+    if len(suffix) != 2 or suffix[1] not in {"2", "3", "4"}:
         raise SecFinancialsRunError("unsupported SEC financial-statements governance version")
     return int(suffix[1])
 
@@ -94,7 +94,7 @@ def _load_governance(path: Path) -> tuple[ConnectorGovernance, int]:
     return governance, version
 
 
-def _output_schema(version: int = 3) -> dict[str, Any]:
+def _output_schema(version: int = 4) -> dict[str, Any]:
     return sec_financials_output_schema(version=version)
 
 
@@ -260,9 +260,11 @@ def run(args: argparse.Namespace) -> dict[str, Any]:
             cik=raw["cik"], entity_name=raw["entity_name"], filings=filings,
             source_record_refs=[f"raw-sink:{artifact.content_hash}"],
         )
-        if contract_version == 2:
-            for filing in wire["filings"]:
-                for line in filing["lines"]:
+        for filing in wire["filings"]:
+            for line in filing["lines"]:
+                if contract_version < 4:
+                    line.pop("dimensions", None)
+                if contract_version == 2:
                     line.pop("dimension_count", None)
         # Validate before recording: an observation the frozen contract cannot
         # describe is refused, not stored and explained later.

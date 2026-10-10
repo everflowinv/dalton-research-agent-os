@@ -34,7 +34,7 @@
 
 **公司 Wiki 原文、skill 和向量索引均已存在。** `~/.openclaw/workspace/skills/company-wiki/SKILL.md` 对应 `workspace/wiki/vectors.db`，只读清点为 1,022 documents、8,720 chunks。原安装器误找 `workspace/wiki-index.sqlite`。修复 `3715fe1f` 使用实际索引并兼容旧路径，corpus root 保持 workspace，232 项相关测试通过；待后续版本部署。两项 Wiki governance 当前 proposed，mission 尚缺 source entry，启用状态仍需如实登记。
 
-**历史资料目录已建好：** `/Users/everflow/Documents/Dalton 历史研究资料`，含「待整理」「公司/STRL」「行业/美国电商」。桌面 `STRL_Initial Screen_20260612.docx` 与 `US eCommerce_Model_20260801.xlsx` 仅只读查看结构，未移动、修改或自动入库。ecommerce 是跨公司行业模型样例，不是新电商 API 需求。既有 prior-research 读取器按 company manifest 明确列举材料；待资料放入并确认日期/归属后登记，行业多公司文件不能全部归到一家企业。
+**历史资料目录已建好：** `$HOME/Documents/Dalton 历史研究资料`，含「待整理」「公司/STRL」「行业/美国电商」。桌面 `STRL_Initial Screen_20260612.docx` 与 `US eCommerce_Model_20260801.xlsx` 仅只读查看结构，未移动、修改或自动入库。ecommerce 是跨公司行业模型样例，不是新电商 API 需求。既有 prior-research 读取器按 company manifest 明确列举材料；待资料放入并确认日期/归属后登记，行业多公司文件不能全部归到一家企业。
 
 Sales notes、IR、yfinance 和 Ask 的现有治理/策略状态分别核验；不把普通部署授权写成新来源审批。具体待审项目见 `owner-review-remaining-2026-09-13.md`。
 

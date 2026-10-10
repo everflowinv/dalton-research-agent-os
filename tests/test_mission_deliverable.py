@@ -224,18 +224,21 @@ class NumberDisciplineTests(unittest.TestCase):
     def test_the_number_contract_moved_so_held_rounds_are_asked_again(self) -> None:
         from dalton_core.mission_deliverable import NUMBER_SOURCE_CONTRACT_VERSION
 
-        self.assertEqual(NUMBER_SOURCE_CONTRACT_VERSION, "number-source-contract:0.7")
+        self.assertEqual(NUMBER_SOURCE_CONTRACT_VERSION, "number-source-contract:0.8")
 
     def test_the_drafting_prompt_asks_for_the_row_s_own_wording(self) -> None:
         from dalton_core.company_dossier_draft import (
-            build_unit_prompt, legacy_unit_prompt_v08,
+            build_unit_prompt, legacy_unit_prompt_v08, legacy_unit_prompt_v09,
         )
 
         args = {"unit": "business_model",
                 "structure": [{"slot_id": "s1", "prompt": "What it sells"}],
                 "material": [], "company": {"ticker": "CTSH",
                                             "company_ref": "company:ctsh"}}
-        current = build_unit_prompt(**args)
+        self.assertIn("'five thousand employees' is written five thousand",
+                      build_unit_prompt(**args))
+        # Compared against the prompt just before batch D appended its rules.
+        current = legacy_unit_prompt_v09(**args)
         self.assertIn("'five thousand employees' is written five thousand", current)
         previous = legacy_unit_prompt_v08(**args)
         self.assertNotIn("five thousand", previous)

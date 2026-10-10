@@ -89,7 +89,7 @@ class OpenClawProviderCatalogPlanTests(unittest.TestCase):
             "id": profile_id,
             "model": "openai/gpt-main",
             "maxTokens": 8_000,
-            "timeoutMs": 600_000,
+            "timeoutMs": 900_000,
         }])
         expected = copy.deepcopy(before)
         expected_broker = _broker(expected)
@@ -207,6 +207,19 @@ class OpenClawProviderCatalogPlanTests(unittest.TestCase):
         self.assertEqual(plan.receipt["provider_model_count"], 0)
 
 
+    def test_retired_default_timeout_is_upgraded_but_custom_deadline_is_kept(self):
+        source = _config()
+        _broker(source)["config"]["profiles"] = [
+            {"id": "old-default", "model": "openai/gpt-main", "maxTokens": 1000, "timeoutMs": 600000},
+            {"id": "custom-short", "model": "openai/gpt-main", "maxTokens": 1000, "timeoutMs": 12345},
+        ]
+        plan = plan_openclaw_provider_catalog_sync(source)
+        profiles = _broker(plan.config)["config"]["profiles"]
+        self.assertEqual([p["timeoutMs"] for p in profiles], [900000, 12345])
+        self.assertIn("old-default", plan.receipt["updated_profile_ids"])
+        self.assertFalse(plan_openclaw_provider_catalog_sync(plan.config).receipt["changed"])
+
+
 class OpenClawProviderCatalogApplyTests(unittest.TestCase):
     def setUp(self) -> None:
         temporary = tempfile.TemporaryDirectory()
@@ -283,9 +296,12 @@ class OpenClawProviderCatalogApplyTests(unittest.TestCase):
         for worker in workers:
             worker.start()
         start.set()
-        results = [output.get(timeout=10) for _ in workers]
+        # Bounded but generous: under a loaded full-suite run three forked
+        # processes may each wait seconds for a CPU.  What is proved (one
+        # change, one backup, no errors, converged bytes) is unchanged.
+        results = [output.get(timeout=120) for _ in workers]
         for worker in workers:
-            worker.join(timeout=10)
+            worker.join(timeout=120)
             self.assertEqual(worker.exitcode, 0)
         errors = [value for state, value in results if state == "error"]
         self.assertEqual(errors, [])
@@ -298,6 +314,38 @@ class OpenClawProviderCatalogApplyTests(unittest.TestCase):
         self.assertFalse(
             plan_openclaw_provider_catalog_sync(landed).receipt["changed"]
         )
+
+    def test_a_writer_waits_out_another_writers_publish_window(self) -> None:
+        # Batch u: the live name is absent for an instant while the lock
+        # holder publishes; a second writer used to look before taking the
+        # lock and fail "cannot inspect OpenClaw config".
+        import fcntl
+        import threading
+
+        self._write(_config())
+        lock_path = self.path.with_name(self.path.name + ".dalton-catalog-sync.lock")
+        aside = self.root / ".openclaw.json.held.test"
+        result: dict = {}
+        with open(lock_path, "a+") as lock:
+            fcntl.flock(lock.fileno(), fcntl.LOCK_EX)
+            os.rename(self.path, aside)
+
+            def apply() -> None:
+                try:
+                    result["receipt"] = apply_openclaw_provider_catalog_sync(self.path)
+                except BaseException as exc:  # asserted below
+                    result["error"] = exc
+
+            thread = threading.Thread(target=apply)
+            thread.start()
+            thread.join(0.3)
+            self.assertTrue(thread.is_alive(), result)  # waiting on the lock
+            os.rename(aside, self.path)
+            fcntl.flock(lock.fileno(), fcntl.LOCK_UN)
+        thread.join(60)
+        self.assertFalse(thread.is_alive())
+        self.assertNotIn("error", result)
+        self.assertTrue(result["receipt"]["changed"])
 
     def test_noncooperating_writer_during_publish_wins_without_restore(self) -> None:
         original = self._write(_config())

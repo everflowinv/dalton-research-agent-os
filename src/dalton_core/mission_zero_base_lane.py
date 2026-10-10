@@ -427,6 +427,7 @@ def argv_fragment(context: Any) -> list[str]:
 
 LANE = register_lane(LaneSpec(
     operation="dispatch_zero_base_review",
+    failure_ledger="zero_base_review",
     # Between the research-task lane (150) and the weekly reflection (160).
     # After everything that writes what it reads -- the judgement ledger, the
     # deliverable chain, the price series -- and *before* the reflection,

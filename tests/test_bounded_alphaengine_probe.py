@@ -259,7 +259,10 @@ class BoundedAlphaEngineProbeTests(unittest.TestCase):
             return_value={"status": "succeeded"},
         ) as execute:
             server._op_bounded_alphaengine_probe({"work_order": work})
-        self.assertEqual(execute.call_args.kwargs["max_calls_per_window"], 45)
+        # 2026-10-07: the mission cap bounds every call, the probe cap only
+        # the probes' own calls -- no longer folded into one number.
+        self.assertEqual(execute.call_args.kwargs["max_calls_per_window"], 130)
+        self.assertEqual(execute.call_args.kwargs["max_probe_calls_per_window"], 45)
 
         mission["budget"] = {"max_alphaengine_calls_24h": 20}
         with patch(
@@ -268,6 +271,8 @@ class BoundedAlphaEngineProbeTests(unittest.TestCase):
         ) as execute:
             server._op_bounded_alphaengine_probe({"work_order": work})
         self.assertEqual(execute.call_args.kwargs["max_calls_per_window"], 20)
+        self.assertEqual(execute.call_args.kwargs["max_probe_calls_per_window"],
+                         MAX_CALLS_PER_WINDOW)
 
         work["metadata"]["mission_version_hash"] = "b" * 64
         with self.assertRaisesRegex(WriterServerError, "re-admit"):
@@ -311,7 +316,51 @@ class BoundedAlphaEngineProbeTests(unittest.TestCase):
             return_value={"status": "succeeded"},
         ) as execute:
             server._op_bounded_alphaengine_probe({"work_order": work})
-        self.assertEqual(execute.call_args.kwargs["max_calls_per_window"], 30)
+        self.assertEqual(execute.call_args.kwargs["max_calls_per_window"], 130)
+        self.assertEqual(execute.call_args.kwargs["max_probe_calls_per_window"], 30)
+
+    def test_discovery_calls_do_not_count_against_the_probe_cap(self) -> None:
+        # batch r: the probe cap (10) was compared with every AlphaEngine
+        # call, so probes were blocked once discovery had searched.
+        import json
+        import tempfile
+        from pathlib import Path
+
+        seed_invocation(self.conn, hours_ago=1, count=12)
+        with tempfile.TemporaryDirectory() as directory:
+            launcher = FakeLauncher(final_status="failed")
+            launcher.tickets_dir = Path(directory)
+            admitted = execute_alphaengine_probe(
+                work_order("alphaengine-doc:3"), launcher=launcher,
+                connection=self.conn, as_of=NOW, max_calls_per_window=130,
+                max_probe_calls_per_window=10)
+            self.assertEqual(admitted["error"]["code"], "SOURCE_UNAVAILABLE")
+            self.assertEqual(len(launcher.calls), 1)
+            # Ten probe tickets in the window are ten probe calls: refused.
+            for index in range(10):
+                ticket = Path(directory) / f"t{index}"
+                ticket.mkdir()
+                (ticket / "ticket.json").write_text(json.dumps({
+                    "actor_ref": "automation:bounded-planner",
+                    "document_ref": f"alphaengine-doc:{100 + index}",
+                    "started_at": (NOW - timedelta(hours=2)).isoformat()}))
+            # A discovery acquisition's ticket does not count.
+            other = Path(directory) / "discovery"
+            other.mkdir()
+            (other / "ticket.json").write_text(json.dumps({
+                "actor_ref": "automation:coverage-mission",
+                "document_ref": "alphaengine-doc:999",
+                "started_at": (NOW - timedelta(hours=2)).isoformat()}))
+            from dalton_core.bounded_alphaengine_probe import count_recent_probe_calls
+
+            self.assertEqual(count_recent_probe_calls(self.conn, launcher, as_of=NOW), 10)
+            refused = execute_alphaengine_probe(
+                work_order("alphaengine-doc:4"), launcher=launcher,
+                connection=self.conn, as_of=NOW, max_calls_per_window=130,
+                max_probe_calls_per_window=10)
+            self.assertEqual(refused["error"]["code"], "ALPHAENGINE_PROBE_BUDGET_EXCEEDED")
+            self.assertIn("probe calls", refused["error"]["message"])
+            self.assertEqual(len(launcher.calls), 1)
 
     def test_old_calls_outside_window_do_not_count(self) -> None:
         seed_invocation(self.conn, hours_ago=25, count=MAX_CALLS_PER_WINDOW)

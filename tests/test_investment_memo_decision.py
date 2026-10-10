@@ -271,3 +271,57 @@ class InvestmentMemoDecisionTests(unittest.TestCase):
 
 
 if __name__ == "__main__": unittest.main()
+
+
+class MemoDecisionAcrossMissionRollTests(unittest.TestCase):
+    """ADR-0011: a memo waiting for its owner survives a budget signing."""
+
+    @patch("dalton_core.model_router.ModelRouter", return_value=Router())
+    @patch("dalton_core.model_fallback_chain.served_family",
+           side_effect=lambda router, ref: "verifier" if ref == "route-decision:v" else "producer")
+    def test_memo_drafted_under_v14_is_decided_under_active_v15(self, family, router):
+        record = memo()
+
+        class RolledConnection(Connection):
+            def execute(self, query, params=()):
+                if "coverage_mission_pointer" in query:
+                    return Result(Row(mission_version_id="mission:v15"))
+                return super().execute(query, params)
+
+        server = InvestmentMemoDecisionTests.server(None, record)
+        server._store = type("Store", (), {"connection": RolledConnection(record)})()
+        result = WriterServer._op_decide_investment_memo(server, {
+            "memo_version_ref": record["id"], "memo_version_hash": record["content_hash"],
+            "decision": "approve", "reason": "approved", "actor_ref": "human:owner"})
+        self.assertEqual(result["status"], "decided")
+        written = [row for row in server.coverage_mission.rows if row["id"] != "company-pass"]
+        # Stage records bind the active version; the model work was verified
+        # against v14 (the Scheduler fake refuses any other binding).
+        self.assertEqual({row["mission_version_ref"] for row in written}, {"mission:v15"})
+        self.assertEqual([row["stage_ref"] for row in written],
+                         ["investment_memo", "investment_memo", "active_coverage"])
+
+    def test_memo_of_another_mission_is_refused(self):
+        record = memo()
+
+        class Foreign(Missions):
+            def mission(self, ref):
+                value = super().mission(ref)
+                if ref == "mission:v14":
+                    value["mission_ref"] = "mission:other"
+                return value
+
+        class RolledConnection(Connection):
+            def execute(self, query, params=()):
+                if "coverage_mission_pointer" in query:
+                    return Result(Row(mission_version_id="mission:v15"))
+                return super().execute(query, params)
+
+        server = InvestmentMemoDecisionTests.server(None, record)
+        server._store = type("Store", (), {"connection": RolledConnection(record)})()
+        server._coverage_mission = Foreign()
+        with self.assertRaisesRegex(WriterServerError, "not bound to the active mission"):
+            WriterServer._op_decide_investment_memo(server, {
+                "memo_version_ref": record["id"], "memo_version_hash": record["content_hash"],
+                "decision": "approve", "reason": "approved", "actor_ref": "human:owner"})
+        self.assertEqual(len(server._coverage_mission.rows), 1)

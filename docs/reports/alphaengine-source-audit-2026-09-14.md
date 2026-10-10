@@ -28,14 +28,14 @@
 
 - Guidepoint 本机代理确实安装且运行：LaunchAgent `ai.openclaw.guidepoint-mcp-proxy`，PID 54745，脚本读取既有环境后启动Python代理；两条治理文件 `guidepoint-search-library-v1.json` 与 `guidepoint-get-transcript-v1.json` 均为 `approved`。但当前 mission v14 的 `source:guidepoint` 仍明确为 `not_connected`，因此“代理在线/治理批准”没有转化为该mission可调度来源。最小修复是按既有批准把mission/lane接线落实并验证，不需要重复索取批准，也不能仅凭8943在线宣称已接通。
 - 销售快报：`sales-notes-list-notes-v1.json` 与 `sales-notes-get-note-v1.json` 的真实 `status` 均为 `proposed`；字段里的 `approved_by`/`approval_ref` 是提案模板身份，不把状态提升为approved。现运行态明确报 `list_notes governance record is not approved`，因此确实在等现有治理决定。
-- 公司 Wiki：没有 Dalton company-wiki LaunchAgent，也没有当前writer的 `source:company-wiki` lane；激活演练明确为 `company_wiki_feed unconfigured`，且期望的 `/Users/everflow/.openclaw/workspace/wiki-index.sqlite` 不存在。与此同时 OpenClaw 的 skill、资料和向量资产分别存在：`workspace/skills/company-wiki/wiki.db`、`workspace/wiki/vectors.db` 与 `workspace/wiki/`。这证明“资料/skill已安装”，不证明 Dalton runtime connector 已启用。最小修复是建立既有资料索引所需的明确 runtime connector/lane并通过治理门禁；不能把OpenClaw本地资产直接当成已连接来源。
+- 公司 Wiki：没有 Dalton company-wiki LaunchAgent，也没有当前writer的 `source:company-wiki` lane；激活演练明确为 `company_wiki_feed unconfigured`，且期望的 `$HOME/.openclaw/workspace/wiki-index.sqlite` 不存在。与此同时 OpenClaw 的 skill、资料和向量资产分别存在：`workspace/skills/company-wiki/wiki.db`、`workspace/wiki/vectors.db` 与 `workspace/wiki/`。这证明“资料/skill已安装”，不证明 Dalton runtime connector 已启用。最小修复是建立既有资料索引所需的明确 runtime connector/lane并通过治理门禁；不能把OpenClaw本地资产直接当成已连接来源。
 
 ## 证据位置
 
-- Core: `/Users/everflow/Library/Application Support/Dalton/state/dalton-core/core.sqlite`
+- Core: `<state-dir>/core.sqlite`
 - Mission v14: `coverage-mission-version:us-it-services:14`, hash `0bae07a75bf1a7685d3dc9896317502aa3468eaa187e84ba9108c957983e6bb5`
-- Guidepoint LaunchAgent: `/Users/everflow/Library/LaunchAgents/ai.openclaw.guidepoint-mcp-proxy.plist`
-- Governance: `/Users/everflow/Library/Application Support/Dalton/state/dalton-core/connector-governance/`
+- Guidepoint LaunchAgent: `$HOME/Library/LaunchAgents/ai.openclaw.guidepoint-mcp-proxy.plist`
+- Governance: `<state-dir>/connector-governance/`
 - Existing accepted quota audit: `docs/reports/ctsh-alphaengine-rolling-quota-audit-2026-09-10.md`
 - Source status: `docs/PROJECT_STATUS.md`（电话会有效季度与Guidepoint/Wiki边界）
 # 2026-09-14 v16 运行更新

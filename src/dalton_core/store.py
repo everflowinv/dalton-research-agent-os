@@ -984,14 +984,18 @@ class DaltonStore:
             content = dataclasses.asdict(content)
         if not isinstance(content, Mapping):
             raise ValidationError("thesis content must be a mapping")
-        unknown = set(content) - _THESIS_FIELDS
-        missing = _THESIS_FIELDS - set(content)
+        from .thesis_question_model import QUESTION_FIELDS, validate_question_fields
+        fields = _THESIS_FIELDS | QUESTION_FIELDS if "question_ref" in content else _THESIS_FIELDS
+        unknown = set(content) - fields
+        missing = fields - set(content)
         if unknown:
             raise ValidationError(f"thesis content has unknown fields: {sorted(unknown)}")
         if missing:
             raise ValidationError(f"thesis content is missing fields: {sorted(missing)}")
         if content.get("confidence") not in _THESIS_CONFIDENCE_LEVELS:
             raise ValidationError("thesis confidence must be low, medium, or high")
+        if "question_ref" in content:
+            validate_question_fields(content)
         encoded = canonical_json(content)
         now = _now()
         with self._transaction() as cur:
@@ -1233,6 +1237,8 @@ class DaltonStore:
             now = _now()
             actor_ref = actor_id or "system:dalton-core"
             thesis_payload = json.loads(stage["content_json"])
+            if current and cur.execute("SELECT 1 FROM sqlite_master WHERE type='table' AND name='thesis_admission_candidates'").fetchone() and cur.execute("SELECT 1 FROM thesis_admission_candidates WHERE thesis_ref=? LIMIT 1", (stage["thesis_id"],)).fetchone():
+                raise GateRejected("admitted thesis revisions require the human thesis revision decision path")
             claim_refs = thesis_payload.get("claim_refs", [])
             for claim_ref in claim_refs:
                 if not isinstance(claim_ref, str) or not claim_ref:
@@ -1242,8 +1248,16 @@ class DaltonStore:
                     raise GateRejected(f"thesis claim_ref does not resolve to a ClaimVersion: {claim_ref}")
                 if not cur.execute("SELECT 1 FROM evidence_relations WHERE claim_version_id=? LIMIT 1", (claim_ref,)).fetchone():
                     raise GateRejected(f"thesis ClaimVersion has no EvidenceRelation: {claim_ref}")
+            from .thesis_question_model import require_current_question, require_evidence, record_disagreement
+            if "question_ref" in thesis_payload:
+                if current:
+                    raise GateRejected("question-bound revisions require the human thesis revision decision path")
+                require_current_question(self.connection, thesis_payload, thesis_ref=stage["thesis_id"])
+                require_evidence(self, thesis_payload)
+            elif current and json.loads(cur.execute("SELECT content_json FROM thesis_versions WHERE version_id=?", (prior_id,)).fetchone()[0]).get("schema_version") == "0.3":
+                raise GateRejected("a question-bound thesis cannot be downgraded to the legacy contract")
             thesis_wire = {
-                "schema_version": "0.2", "id": version_id, "created_at": now,
+                "schema_version": "0.3" if "question_ref" in thesis_payload else "0.2", "id": version_id, "created_at": now,
                 "thesis_ref": stage["thesis_id"], "version": version_number,
                 **thesis_payload, "prior_version_ref": prior_id,
                 "authority_kind": "verification", "authority_ref": verification_id,
@@ -1259,6 +1273,7 @@ class DaltonStore:
                 "INSERT INTO thesis_versions(version_id,thesis_id,version_number,content_json,content_hash,prior_version_id,change_id,verification_id,admission_decision_id,authority_kind,authority_ref,committed_by,created_at) VALUES(?,?,?,?,?,?,?,?,?,?,?,?,?)",
                 (version_id, stage["thesis_id"], version_number, thesis_encoded, stage["content_hash"], prior_id, change_id, verification_id, None, "verification", verification_id, actor_ref, now),
             )
+            record_disagreement(self, cur, thesis_wire)
             if fault_at == "after_version":
                 raise RuntimeError("injected commit failure after version insert")
             event_id = self._insert_event(cur, "committed", "thesis", stage["thesis_id"], {"version_id": version_id, "content_hash": stage["content_hash"], "policy_version_id": policy_row[0], "policy_content_hash": policy_row[2]}, change_id=change_id, verification_id=verification_id, version_id=version_id, content_hash=stage["content_hash"], actor_id=actor_id, idempotency_key=idempotency_key)

@@ -18,7 +18,8 @@ CREATE TABLE IF NOT EXISTS claim_retirement_challenges (
         'subject_absent_from_source',
         'boilerplate_disclaimer',
         'human_judgment',
-        'citation_support_rejected'
+        'citation_support_rejected',
+        'issuer_misattribution'
     )),
     detector_ref TEXT,
     detector_hash TEXT,

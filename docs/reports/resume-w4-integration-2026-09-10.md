@@ -83,7 +83,7 @@ connector inventory `--check` 通过，`git diff --check` 通过。此前两次�
 
 ```
 PYTHONPATH=src .venv/bin/python scripts/rehearse_deploy.py \
-  --live-root '/Users/everflow/Library/Application Support/Dalton' \
+  --live-root '$HOME/Library/Application Support/Dalton' \
   --temp-root /tmp/dalton-resume-current-live-rehearsal-20260910 \
   --report /tmp/dalton-resume-current-live-rehearsal-20260910.md
 ```

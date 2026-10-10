@@ -1,0 +1,237 @@
+{
+  "case_ref": "review-bc-reasoning-qualified",
+  "rubric": "initial_screen_strl",
+  "note": "B/C评审九类推理错误的合成规则回放；仅校准reasoning_lint，其他维度不在本例评分范围。真实18份回放只保留审计结果，不作通用公司夹具。",
+  "artefact": {
+    "artefact_kind": "initial_screen",
+    "ref": "synthetic:review-bc:qualified",
+    "hash": "1a21298647b38b59d4b073fecd5f3931d1b70d43c2a7d6908cc489d7943ea6e0",
+    "title": "",
+    "subject_ref": "company:ticker:synw",
+    "sections": [
+      {
+        "title": "backlog_as_near_term_revenue",
+        "body": "RPO 中约 45% 在 12 个月内确认，对应未来 12 个月收入。",
+        "claim_refs": [],
+        "numbers": [],
+        "gaps": []
+      },
+      {
+        "title": "consensus_without_authority",
+        "body": "某券商认为 FY2027 EPS 为 4.70 美元。",
+        "claim_refs": [],
+        "numbers": [],
+        "gaps": []
+      },
+      {
+        "title": "fixed_lag_uncalibrated",
+        "body": "新签订单领先收入 2-4 个季度（未校准假设）。",
+        "claim_refs": [],
+        "numbers": [],
+        "gaps": []
+      },
+      {
+        "title": "classification_without_counter_check",
+        "body": "这是一家合同型 compounder；反例是 2020 年续约率下滑。",
+        "claim_refs": [],
+        "numbers": [],
+        "gaps": []
+      },
+      {
+        "title": "management_share_gain_as_fact",
+        "body": "管理层称公司正在赢得份额。",
+        "claim_refs": [],
+        "numbers": [],
+        "gaps": []
+      },
+      {
+        "title": "survey_intent_as_realisation",
+        "body": "CIO 调研显示 AI 支出意愿上升，兑现要看下季度订单。",
+        "claim_refs": [],
+        "numbers": [],
+        "gaps": []
+      },
+      {
+        "title": "price_move_without_benchmark",
+        "body": "股价上涨 6%，同期行业指数上涨 1%，超额部分反映订单超预期。",
+        "claim_refs": [],
+        "numbers": [],
+        "gaps": []
+      },
+      {
+        "title": "product_to_roi_without_economics",
+        "body": "产品升级带来的增量利润与资本开支之比决定 ROI 提升幅度。",
+        "claim_refs": [],
+        "numbers": [],
+        "gaps": []
+      },
+      {
+        "title": "usd_revenue_as_organic",
+        "body": "美元收入增长 8%，剔除汇率与并购后本币有机增长 5%。",
+        "claim_refs": [],
+        "numbers": [],
+        "gaps": []
+      }
+    ],
+    "gaps": [],
+    "expected_sections": [],
+    "shown_claims": [],
+    "cited_tags": [],
+    "confidence": null,
+    "question": null,
+    "prior": null
+  },
+  "expected": {
+    "deterministic": {
+      "stance_and_watch_price": {
+        "status": "fail",
+        "count": 2
+      },
+      "sourced_quantitative_statements": {
+        "status": "fail",
+        "count": 4
+      },
+      "ours_vs_consensus": {
+        "status": "fail",
+        "count": 2
+      },
+      "valuation_six_elements": {
+        "status": "fail",
+        "count": 6
+      },
+      "source_kind_diversity": {
+        "status": "fail",
+        "count": 1
+      },
+      "latest_transcript_and_release_cited": {
+        "status": "fail",
+        "count": 2
+      },
+      "material_missing_bound": {
+        "status": "pass",
+        "count": 0
+      },
+      "gap_classification": {
+        "status": "pass",
+        "count": 0
+      },
+      "fact_repetition": {
+        "status": "pass",
+        "count": 0
+      },
+      "required_sections_present": {
+        "status": "skipped",
+        "count": 0
+      },
+      "numbers_without_refs": {
+        "status": "fail",
+        "count": 6
+      },
+      "residual_citation_artefacts": {
+        "status": "pass",
+        "count": 0
+      },
+      "indirect_placeholders": {
+        "status": "pass",
+        "count": 0
+      },
+      "number_display_rounding": {
+        "status": "pass",
+        "count": 0
+      },
+      "number_metadata": {
+        "status": "pass",
+        "count": 0
+      },
+      "reasoning_lint": {
+        "status": "pass",
+        "count": 0
+      },
+      "issuer_attribution": {
+        "status": "skipped",
+        "count": 0
+      },
+      "actual_vs_estimate_labelling": {
+        "status": "pass",
+        "count": 0
+      },
+      "one_off_normalisation": {
+        "status": "pass",
+        "count": 0
+      },
+      "cash_bridge_consistency": {
+        "status": "skipped",
+        "count": 0
+      },
+      "cross_product_consistency": {
+        "status": "skipped",
+        "count": 0
+      }
+    },
+    "score_ranges": {
+      "view_and_watch_price": [
+        0,
+        4
+      ],
+      "quantitative_density": [
+        0,
+        4
+      ],
+      "ours_vs_consensus": [
+        0,
+        4
+      ],
+      "valuation_six_elements": [
+        0,
+        4
+      ],
+      "source_breadth": [
+        0,
+        4
+      ],
+      "gaps_bound": [
+        0,
+        4
+      ],
+      "no_restatement": [
+        0,
+        4
+      ],
+      "substance_and_hygiene": [
+        0,
+        4
+      ],
+      "reasoning_lint": [
+        4,
+        4
+      ],
+      "issuer_attribution": [
+        0,
+        4
+      ],
+      "actual_vs_estimate": [
+        0,
+        4
+      ],
+      "one_off_normalisation": [
+        0,
+        4
+      ],
+      "cash_bridge_consistency": [
+        0,
+        4
+      ],
+      "cross_product_consistency": [
+        0,
+        4
+      ],
+      "judgement_quality": [
+        0,
+        4
+      ]
+    },
+    "score_ranges_are_calibration_only": true,
+    "rationale": "只断言九类推理规则命中数；本片段不是完整初筛，其他维度不设质量分数下限。"
+  },
+  "source": "2026-10-09 研究产物质量评审 B/C 推理纪律；合成九类断言与合格改写。"
+}

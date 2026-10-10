@@ -21,6 +21,7 @@ outcome back.
 from __future__ import annotations
 
 import argparse
+from collections.abc import Mapping
 import json
 import sqlite3
 import sys
@@ -44,6 +45,7 @@ from .research_quality_score import (
     ResearchQualityError,
     TIMEOUT_SECONDS,
     artefact_from_deliverable,
+    artefact_from_ask_answer,
     artefact_from_weekly_brief,
     run_deterministic,
     score_artefact,
@@ -99,6 +101,37 @@ def _resolve_deliverable(core: sqlite3.Connection, target: str) -> dict[str, Any
     if row is None:
         raise ResearchQualityError(f"no deliverable found for {target!r}")
     return json.loads(row["record_json"])
+
+
+def _resolve_ask_answer(journal_path: str | None, target: str) -> dict[str, Any]:
+    """Resolve a completed held Ask job, without treating it as a deliverable."""
+    if not journal_path:
+        raise ResearchQualityError("ask_answer scoring requires --ask-journal pointing to the held cockpit jobs database")
+    path = Path(journal_path).expanduser().resolve()
+    if not path.is_file(): raise ResearchQualityError("Ask journal does not exist")
+    connection = sqlite3.connect(path.as_uri()+"?mode=ro", uri=True)
+    connection.row_factory = sqlite3.Row
+    try:
+        rows = connection.execute("SELECT * FROM cockpit_jobs WHERE kind='ask' AND status='done'").fetchall()
+        matches = []
+        for row in rows:
+            request = json.loads(row["request_json"])
+            ref = "cockpit-ask:" + str(request.get("request_id") or row["job_id"])
+            if target not in {ref, row["job_id"]}: continue
+            result = json.loads(row["result_json"])
+            if not isinstance(result, Mapping) or not isinstance(result.get("answer"), str):
+                raise ResearchQualityError("held Ask result is not an answer")
+            art = artefact_from_ask_answer(result, shown_claims=result.get("citations") or [], ref=ref)
+            feedback = result.get("feedback") or {}
+            if feedback and (feedback.get("target_ref") != ref or feedback.get("target_hash") != art["hash"] or feedback.get("target_kind") != "ask_answer"):
+                raise ResearchQualityError("held Ask answer feedback/hash binding differs")
+            matches.append(art)
+        if len(matches) != 1:
+            raise ResearchQualityError("Ask target must resolve to one exact completed job")
+        return matches[0]
+    except sqlite3.OperationalError as exc:
+        raise ResearchQualityError("Ask journal has no readable held jobs table") from exc
+    finally: connection.close()
 
 
 def _resolve_weekly_brief(store: DaltonStore, target: str) -> dict[str, Any]:
@@ -163,6 +196,18 @@ def run_score(args: argparse.Namespace) -> dict[str, Any]:
         rubric = get_rubric(args.rubric)
         if rubric.rubric_ref == "rubric:weekly-brief":
             art = _resolve_weekly_brief(store, args.target)
+        elif rubric.rubric_ref == "rubric:ask-answer":
+            art = _resolve_ask_answer(getattr(args, "ask_journal", None), args.target)
+        elif args.rubric in {"company_dossier", "debate_map", "event_judgement"}:
+            from .research_product_quality import held_claim_sources, product_artefact
+            table, key = {"company_dossier": ("company_dossier_versions", "version_id"),
+                          "debate_map": ("debate_map_versions", "version_id"),
+                          "event_judgement": ("event_judgements", "judgement_id")}[args.rubric]
+            row = core.execute(f"SELECT record_json FROM {table} WHERE {key}=?", (args.target,)).fetchone()
+            if row is None:
+                raise ResearchQualityError(f"no {args.rubric} version found for {args.target!r}")
+            record = json.loads(row[0])
+            art = product_artefact(args.rubric, record, sources=held_claim_sources(core, record))
         else:
             art = artefact_from_deliverable(_resolve_deliverable(core, args.target))
         model = None
@@ -327,6 +372,7 @@ def build_parser() -> argparse.ArgumentParser:
     score = subparsers.add_parser("score", help="score one artefact against a rubric")
     score.add_argument("--state-dir", required=True)
     score.add_argument("--rubric", required=True, choices=sorted(RUBRIC_ALIASES))
+    score.add_argument("--ask-journal", help="held cockpit jobs SQLite database; required for ask_answer targets")
     score.add_argument("--target", required=True,
                        help="a deliverable or weekly-brief-issue version id, "
                             "or a deliverable / brief ref for its latest version")

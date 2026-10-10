@@ -276,7 +276,8 @@ class OutcomeAuthorityTests(unittest.TestCase):
     def test_the_pass_is_replayable_and_the_second_write_is_a_duplicate(self) -> None:
         checks = self.build()
         self.assertEqual(len(checks), 1)
-        self.assertEqual(checks[0]["outcome"], "should_have_moved")
+        self.assertEqual(checks[0]["outcome"], "unavailable")
+        self.assertEqual(checks[0]["reason"], "coverage_gap_no_formal_thesis")
         first = self.outcomes.record_all(checks, actor_ref="automation:coverage-mission")
         self.assertEqual((first["fresh"], first["duplicate"]), (1, 0))
         again = self.build()
@@ -301,17 +302,15 @@ class OutcomeAuthorityTests(unittest.TestCase):
             DAYS[:3], subject="company:ACN", subject_closes=[100.0, 98.0, 96.0],
         )
         pending = self.build(short)
-        self.assertEqual(pending[0]["outcome"], "pending")
+        self.assertEqual(pending[0]["outcome"], "unavailable")
         self.outcomes.record_all(pending, actor_ref="automation:coverage-mission")
         settled = self.build()
         self.outcomes.record_all(settled, actor_ref="automation:coverage-mission")
         chain = self.outcomes.versions(pending[0]["check_ref"])
-        self.assertEqual([row["version"] for row in chain], [1, 2])
-        self.assertEqual([row["outcome"] for row in chain],
-                         ["pending", "should_have_moved"])
-        self.assertEqual(chain[1]["prior_version_ref"], chain[0]["id"])
-        # The pointer follows, so the counts a reader sees are the newest word.
-        self.assertEqual(self.outcomes.counts()["should_have_moved"], 1)
+        self.assertEqual([row["version"] for row in chain], [1])
+        self.assertEqual([row["outcome"] for row in chain], ["unavailable"])
+        # Changing prices cannot retroactively make an unregistered view decidable.
+        self.assertEqual(self.outcomes.counts()["should_have_moved"], 0)
         self.assertEqual(self.outcomes.counts()["pending"], 0)
 
     def test_the_ledger_reads_back_by_content_hash(self) -> None:
@@ -386,8 +385,9 @@ class OutcomeAuthorityTests(unittest.TestCase):
             series_by_company=self.universe, thresholds=THRESHOLDS, stances=STANCES,
         )
         counts = count_outcomes(checks)
-        self.assertEqual(counts["moved_right"], 1)
-        self.assertEqual(counts["should_have_moved"], 1)
+        self.assertEqual(counts["moved_right"], 0)
+        self.assertEqual(counts["should_have_moved"], 0)
+        self.assertEqual(counts["unavailable"], 2)
 
     def test_a_core_with_no_judgement_table_yields_no_checks(self) -> None:
         bare = DaltonStore(":memory:")

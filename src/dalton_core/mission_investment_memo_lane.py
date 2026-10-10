@@ -18,6 +18,8 @@ LEGACY_VERIFIER_CONFIG = "dossier-verifier-model-config.json"
 QUIET = frozenset({"no_company", "nothing_new"})
 TERMINAL = frozenset({"draft_refused", "authority_validation_failed",
                       "deterministic_gate_failed"})
+CONTENT_REFUSAL_HOLD_SECONDS = 24 * 60 * 60
+REASON_LIMIT = 200
 
 
 def ledger_signature(connection: Any, launcher: Any) -> str:
@@ -43,6 +45,8 @@ def company_signature(frozen: Mapping[str, Any], launcher: Any) -> str:
     """Bind a memo attempt to its exact frozen company input and model pair."""
 
     from .cockpit_model import verifier_provider_contract_fingerprint
+    from .investment_memo_cli import anchor_bindings
+    from .investment_memo_draft import MEMO_PROMPT_CONTRACT_VERSION
     from .store import content_hash
 
     mission = frozen["mission"]
@@ -52,7 +56,15 @@ def company_signature(frozen: Mapping[str, Any], launcher: Any) -> str:
         "company_ref": frozen["company"]["company_ref"],
         "mission": {"ref": mission["id"], "hash": mission["content_hash"]},
         "playbook": {"ref": playbook["id"], "hash": playbook["content_hash"]},
-        "input_bindings": frozen["input_bindings"],
+        # The anchors only (ADR-0011): new claims, prices and events arrive
+        # daily and must not make yesterday's refusal look like new work.
+        "input_bindings": [
+            {"kind": kind, "ref": ref, "hash": digest}
+            for kind, ref, digest in anchor_bindings(frozen["input_bindings"])],
+        # The drafting rules too: a draft refused under an old prompt contract
+        # must not stay held for a day after the contract that refused it is
+        # fixed (same rule as the gate's GATE_DRAFTING_CONTRACT).
+        "drafting_contract": MEMO_PROMPT_CONTRACT_VERSION,
     }
     parts = [content_hash(payload), verifier_provider_contract_fingerprint(
         "investment_memo_verifier")]
@@ -89,7 +101,11 @@ class MissionInvestmentMemoLaneCoordinator:
         self.frozen_input = frozen_input
         self.open_ticket: str | None = None
         self.quiet_signatures: set[str] = set()
-        self.budget = lane_budget("investment_memo", state_dir=launcher.state_dir)
+        # A content refusal holds the company for a day, not for ever: the
+        # signature binds only the memo's anchors, so without a bound a refused
+        # memo would wait for the next filing to be tried again.
+        self.budget = lane_budget("investment_memo", state_dir=launcher.state_dir,
+                                  block_ttl_seconds=CONTENT_REFUSAL_HOLD_SECONDS)
 
     def dispatch_once(self) -> dict[str, Any]:
         settled = None
@@ -155,9 +171,15 @@ class MissionInvestmentMemoLaneCoordinator:
             return {"status": "held", "held": held_companies, "settled": settled,
                     "reason": "; ".join(f"{key}: {value}"
                                          for key, value in held_companies.items())}
+        reason = "no eligible company memo input changed"
+        if skipped:
+            # Say what each company is waiting on, in the owner's words: the
+            # stage it is still in, or the input its memo still lacks.
+            waits = list(dict.fromkeys(str(value) for value in skipped.values()))
+            reason = ("投资备忘录等待：" + "；".join(waits))[:REASON_LIMIT]
         return {"status": "idle", "settled": settled,
                 "skipped": skipped if self.companies is not None else {},
-                "reason": "no eligible company memo input changed"}
+                "reason": reason}
 
 
 def dispatch(server: Any, params: Mapping[str, Any]) -> dict[str, Any]:
@@ -213,6 +235,7 @@ def argv_fragment(context: Any) -> list[str]:
 
 
 LANE = register_lane(LaneSpec(operation="dispatch_investment_memo", order=143,
+    failure_ledger="investment_memo",
     driver_key="investment_memo", handler=dispatch, init_kwarg=LAUNCHER_KWARG,
     argparse=add_arguments, launcher_factory=build_launcher, argv_fragment=argv_fragment,
     note="Four-group Investment Memo draft plus complete independent verification."))

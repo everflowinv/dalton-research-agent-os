@@ -223,24 +223,112 @@ def validate_inventory_config(value: Any) -> dict[str, Any]:
     return {**dict(value), "policy": policy, "source_reading_limits": dict(limits)}
 
 
+def _required_numeric_originals(*, core: Any, mission: Mapping[str, Any],
+                               registry: Any, purpose: str) -> tuple[list[tuple[str, dict[str, Any]]], list[dict[str, Any]]]:
+    """Strongly replay old registrations still required by exact numeric feedback.
+
+    A current rendering is an additional capability, not a substitute for an
+    immutable registration named by an unresolved rejection.
+    """
+    from .document_research_feedback import read_document_research_feedback
+    from .directed_numeric_research import numeric_rejection
+    from .planner_numeric_requirements import numeric_requirements
+    from .document_research import validate_registration
+    from .store import canonical_json
+
+    feedback = read_document_research_feedback(core, mission)
+    if feedback.get("status") != "available":
+        return [], []  # The existing state feedback separately discloses this failure.
+    allowed = {entry["company_ref"] for entry in mission["universe"]}
+    originals = []
+    failures = []
+    replayed: set[tuple[str, str]] = set()
+    for company, observations in feedback.get("by_company", {}).items():
+        if company not in allowed:
+            raise ValueError("numeric original feedback escaped mission coverage")
+        for requirement in numeric_requirements(observations, limit=None)["requirements"]:
+            binding = requirement["replaces_numeric_rejection"]
+            try:
+                proof = numeric_rejection(core.connection, binding["admission_ref"])
+                if proof is None or any(proof[key] != binding[key] for key in binding):
+                    raise ValueError("numeric original lacks exact rejection binding")
+                row = core.connection.execute(
+                    "SELECT record_json,content_hash,company_ref,mission_version_ref FROM "
+                    "mission_document_research_admissions WHERE admission_id=?",
+                    (binding["admission_ref"],)).fetchone()
+                if row is None:
+                    raise ValueError("numeric original parent is absent")
+                admission = json.loads(row["record_json"])
+                if (canonical_json(admission) != row["record_json"]
+                        or admission.get("id") != binding["admission_ref"]
+                        or admission.get("content_hash") != binding["admission_hash"]
+                        or row["content_hash"] != binding["admission_hash"]
+                        or content_hash({key: value for key, value in admission.items()
+                                         if key != "content_hash"}) != binding["admission_hash"]
+                        or row["company_ref"] != company or admission.get("company_ref") != company
+                        or row["mission_version_ref"] != mission["id"]
+                        or admission.get("mission_version_ref") != mission["id"]):
+                    raise ValueError("numeric original admission ownership/hash differs")
+                registration = validate_registration(admission["request"]["registration"])
+                if (registration["document_ref"] != requirement["document_ref"]
+                        or registration["content_hash"] != requirement["document_version_hash"]
+                        or registration["source_authority"]["company_ref"] != company):
+                    raise ValueError("numeric original registration identity differs")
+                key = (company, registration["content_hash"])
+                if key in replayed:
+                    continue
+                actual, _ = registry._reresolve(registration, purpose=purpose)
+                if actual != registration:
+                    raise ValueError("numeric original no longer strongly replays")
+                originals.append((company, registration))
+                replayed.add(key)
+            except (ValueError, RuntimeError, OSError, KeyError, TypeError) as exc:
+                # Refuse this exact old version; keep other verified/current
+                # originals and expose the refusal rather than silently aliasing.
+                failures.append({"company_ref": company, "document_ref": requirement["document_ref"],
+                                 "document_version_hash": requirement["document_version_hash"],
+                                 "readable": False, "reason": "numeric_required_original_unavailable",
+                                 "detail": f"{type(exc).__name__}: {exc}"})
+    return originals, failures
+
+
 def inventory_with_registry(*, core: Any, mission: Mapping[str, Any],
                             registry: Any, purpose: str,
-                            preview_chars: int = 0) -> dict[str, Any]:
+                            preview_chars: int = 0,
+                            selected_document_refs: tuple[str, ...] | None = None) -> dict[str, Any]:
     """Verify every acquired row in the active mission without a hidden cap."""
+    if selected_document_refs is not None and (not isinstance(selected_document_refs, tuple)
+            or len(selected_document_refs) > 6 or any(not isinstance(ref, str) or not ref for ref in selected_document_refs)):
+        raise ValueError("selected inventory must contain at most six exact document refs")
     companies = {entry["company_ref"] for entry in mission["universe"]}
     readable: dict[str, list[dict[str, Any]]] = {ref: [] for ref in sorted(companies)}
     unavailable: dict[str, list[dict[str, Any]]] = {ref: [] for ref in sorted(companies)}
     registrations: dict[str, dict[str, Any]] = {}
     seen: set[tuple[str, str, str]] = set()
-    rows = core.connection.execute(
-        "SELECT record_id,company_ref,source_ref,document_ref,ticket_ref "
-        "FROM coverage_mission_discovered_documents "
-        "WHERE mission_version_ref=? AND status='acquired' "
-        "ORDER BY company_ref,source_ref,document_ref,record_id", (mission["id"],))
-    for row in rows:
-        row = dict(row)
+    from .document_mission_lineage import document_mission_versions
+    versions = document_mission_versions(core.connection, mission)
+    # The newest row speaks for a document, including a newer unfinished row.
+    # Reading inheritance does not copy acquisitions or reopen closed reviews.
+    latest: dict[str, dict[str, Any]] = {}
+    for version in versions:
+        sql = ("SELECT record_id,mission_version_ref,company_ref,source_ref,document_ref,ticket_ref,status "
+               "FROM coverage_mission_discovered_documents WHERE mission_version_ref=? ")
+        parameters = (version,)
+        if selected_document_refs is not None:
+            if not selected_document_refs:
+                continue
+            sql += "AND document_ref IN (" + ",".join("?" for _ in selected_document_refs) + ") "
+            parameters += selected_document_refs
+        sql += "ORDER BY company_ref,source_ref,document_ref,record_id"
+        for row in core.connection.execute(sql, parameters):
+            latest.setdefault(row["document_ref"], dict(row))
+    connected = {item["source_ref"] for item in mission.get("source_plan", ())
+                 if item.get("status") == "connected"}
+    for row in latest.values():
         company = row["company_ref"]
-        if company not in companies:
+        if company not in companies or row["status"] != "acquired":
+            continue
+        if row["mission_version_ref"] != mission["id"] and row["source_ref"] not in connected:
             continue
         availability = registry.inspect_acquired_document(record_id=row["record_id"], purpose=purpose)
         registration = availability.get("registration")
@@ -254,13 +342,16 @@ def inventory_with_registry(*, core: Any, mission: Mapping[str, Any],
         authority = registration.get("source_authority", {})
         if (authority.get("kind") != "coverage-mission-acquired-document"
                 or authority.get("ref") != row["record_id"]
-                or authority.get("mission_version_ref") != mission["id"]
+                or authority.get("mission_version_ref") != row["mission_version_ref"]
                 or authority.get("company_ref") != company
                 or registration.get("document_ref") != row["document_ref"]
                 or registration.get("source_ref") != row["source_ref"]
                 or (row["ticket_ref"] is not None
                     and registration.get("acquisition_ticket_ref") != row["ticket_ref"])):
             raise ValueError("verified document registration differs from its Core ownership")
+        if selected_document_refs is not None:
+            registrations[registration["content_hash"]] = dict(registration)
+            continue  # exact read-only registration proof, no optional financial projections
         projected = inventory_document(registration=registration, company_ref=company)
         projected.update({"doc_kind": registration["doc_kind"],
                           "doc_date": registration["doc_date"]})
@@ -304,6 +395,19 @@ def inventory_with_registry(*, core: Any, mission: Mapping[str, Any],
             readable[company].append(projected)
             seen.add(key)
         registrations[registration["content_hash"]] = dict(registration)
+    originals, failures = ([], []) if selected_document_refs is not None else _required_numeric_originals(
+        core=core, mission=mission, registry=registry, purpose=purpose)
+    for company, registration in originals:
+        projected = inventory_document(registration=registration, company_ref=company)
+        projected.update({"doc_kind": registration["doc_kind"], "doc_date": registration["doc_date"]})
+        key = (company, projected["document_ref"], projected["document_version_hash"])
+        if key not in seen:
+            readable[company].append(projected)
+            seen.add(key)
+        registrations[registration["content_hash"]] = dict(registration)
+    for failure in failures:
+        company = failure.pop("company_ref")
+        unavailable[company].append(failure)
     return {"readable_documents_by_company": readable,
             "unavailable_documents_by_company": unavailable,
             "registration_by_hash": registrations,
@@ -377,7 +481,8 @@ def automatic_unproved_send_retry_cap(config_path: Path | None) -> int:
 
 
 def load_document_inventory_authority(*, core: Any, mission: Mapping[str, Any],
-                                      state_dir: Path, config_path: Path | None = None) -> dict[str, Any]:
+                                      state_dir: Path, config_path: Path | None = None,
+                                      selected_document_refs: tuple[str, ...] | None = None) -> dict[str, Any]:
     """Compose only read capabilities; absent configuration grants no reads."""
     from .alphaengine_acquisition_launcher import ReadOnlyAlphaEngineManifestReader
     from .connector_authority_port import ReadOnlyConnectorReceiptReader
@@ -425,7 +530,8 @@ def load_document_inventory_authority(*, core: Any, mission: Mapping[str, Any],
         source_reading_limits=config["source_reading_limits"],
     )
     result = inventory_with_registry(core=core, mission=mission, registry=registry,
-                                     purpose=config["purpose"], preview_chars=config["inventory_preview_chars"])
+                                     purpose=config["purpose"], preview_chars=config["inventory_preview_chars"],
+                                     selected_document_refs=selected_document_refs)
     return {**result, "status": "configured", "config_hash": content_hash(config),
             "unavailable_sources": missing, "registry": registry}
 
@@ -434,11 +540,23 @@ def document_inventory_signature(core: Any, state_dir: Path) -> str:
     """Wake planning on a changed exact ticket even when row counts match."""
     path = state_dir / CONFIG_FILENAME
     config = path.read_bytes().hex() if path.is_file() and not path.is_symlink() else None
-    rows = core.connection.execute(
-        "SELECT d.record_id,d.mission_version_ref,d.company_ref,d.source_ref,d.document_ref,"
-        "d.status,d.ticket_ref FROM coverage_mission_discovered_documents d "
-        "JOIN coverage_mission_pointer p ON p.mission_version_id=d.mission_version_ref "
-        "ORDER BY d.record_id")
+    from .document_mission_lineage import RULE_REF, document_mission_versions
+    from .coverage_mission import CoverageMissionAuthority
+    reader = object.__new__(CoverageMissionAuthority)
+    reader.connection = core.connection
+    has_versions = core.connection.execute(
+        "SELECT 1 FROM sqlite_master WHERE type='table' AND name='coverage_mission_versions'"
+    ).fetchone() is not None
+    version_refs = set()
+    for pointer in core.connection.execute("SELECT mission_version_id FROM coverage_mission_pointer"):
+        ref = pointer["mission_version_id"]
+        version_refs.update(document_mission_versions(core.connection, reader._mission_record(ref))
+                            if has_versions else [ref])
+    rows = []
+    for ref in sorted(version_refs):
+        rows.extend(dict(row) for row in core.connection.execute(
+            "SELECT record_id,mission_version_ref,company_ref,source_ref,document_ref,status,ticket_ref "
+            "FROM coverage_mission_discovered_documents WHERE mission_version_ref=? ORDER BY record_id", (ref,)))
     tables = {row[0] for row in core.connection.execute(
         "SELECT name FROM sqlite_master WHERE type='table' AND name IN "
         "('coverage_mission_statement_filings','coverage_mission_statement_dispatches')"
@@ -452,5 +570,5 @@ def document_inventory_signature(core: Any, state_dir: Path) -> str:
             "ON d.dispatch_id=f.dispatch_id JOIN coverage_mission_pointer p "
             "ON p.mission_version_id=d.mission_version_ref ORDER BY f.ingest_id"
         )]
-    return content_hash({"config": config, "acquisitions": [dict(row) for row in rows],
+    return content_hash({"rule_ref": RULE_REF, "config": config, "acquisitions": rows,
                          "statement_filings": statement_filings})

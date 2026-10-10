@@ -26,7 +26,7 @@ from typing import Any
 BROKER_PLUGIN_ID = "dalton-openclaw-model-broker"
 AUTO_PROFILE_PREFIX = "profile:auto-"
 AUTO_PROFILE_HASH_LENGTH = 12
-AUTO_PROFILE_TIMEOUT_MS = 600_000
+AUTO_PROFILE_TIMEOUT_MS = 900_000
 BROKER_MAX_TOKENS = 1_000_000
 
 _TOKEN = re.compile(r"^[A-Za-z0-9][A-Za-z0-9._:/+-]*$")
@@ -245,6 +245,15 @@ def plan_openclaw_provider_catalog_sync(
                 preserved_profile_ids.append(profile_id)
         else:
             preserved_profile_ids.append(profile_id)
+        # The retired generated default predates C2's 900-second long-context
+        # calls. Preserve deliberately smaller custom timeouts, but upgrade
+        # that known default so an admitted request is dispatchable.
+        if kept.get("timeoutMs") == 600_000:
+            kept["timeoutMs"] = AUTO_PROFILE_TIMEOUT_MS
+            if profile_id not in updated_profile_ids:
+                updated_profile_ids.append(profile_id)
+            if profile_id in preserved_profile_ids:
+                preserved_profile_ids.remove(profile_id)
         kept_profiles.append(kept)
         existing_refs.add(model_ref)
 
@@ -487,14 +496,6 @@ def apply_openclaw_provider_catalog_sync(
     config_path = Path(os.path.abspath(os.fspath(Path(path).expanduser())))
     _need(config_path.parent.is_dir(), "OpenClaw config parent is unavailable")
     _need(not config_path.parent.is_symlink(), "OpenClaw config parent is unsafe")
-    try:
-        initial_path_stat = config_path.lstat()
-    except OSError as exc:
-        raise CatalogSyncError(f"cannot inspect OpenClaw config: {exc}") from exc
-    _need(
-        stat.S_ISREG(initial_path_stat.st_mode),
-        "OpenClaw config must be a regular file, not a symlink",
-    )
     lock_path = config_path.with_name(config_path.name + ".dalton-catalog-sync.lock")
     lock_flags = os.O_CREAT | os.O_RDWR
     if hasattr(os, "O_NOFOLLOW"):
@@ -511,6 +512,19 @@ def apply_openclaw_provider_catalog_sync(
     with os.fdopen(lock_descriptor, "a+") as lock:
         fcntl.flock(lock.fileno(), fcntl.LOCK_EX)
         try:
+            # Inspected under the lock: a cooperating writer that holds it
+            # moves the live name aside for an instant while it publishes
+            # (``_install_without_overwrite``), and an unlocked look then saw
+            # "No such file" -- the three-process test failed that way
+            # under load (batch u).
+            try:
+                initial_path_stat = config_path.lstat()
+            except OSError as exc:
+                raise CatalogSyncError(f"cannot inspect OpenClaw config: {exc}") from exc
+            _need(
+                stat.S_ISREG(initial_path_stat.st_mode),
+                "OpenClaw config must be a regular file, not a symlink",
+            )
             snapshot = _read_snapshot(config_path)
             parsed = _parse_config(snapshot.data)
             plan = plan_openclaw_provider_catalog_sync(parsed)

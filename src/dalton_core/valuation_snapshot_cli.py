@@ -43,6 +43,7 @@ from __future__ import annotations
 import argparse
 import json
 import os
+import re
 import sqlite3
 import sys
 from datetime import date, datetime, timedelta, timezone
@@ -80,10 +81,10 @@ MAX_PRICE_TRADING_DAY_LAG = 3
 # the percentile resting on more than one set of figures, which is the
 # difference between ``price_and_filed_fundamentals`` and ``price_only``.
 MAX_WINDOWS = 8
-# Three years of settled bars. The percentile wants a history; the record does
-# not want an unbounded one, and a bar from five years ago is being compared
-# with fundamentals nobody has filed since.
-MAX_PRICE_HISTORY_BARS = 756
+# Ten years of settled bars (batch B; three before). The percentile wants a
+# history; bars older than the first fundamental window are still left out of
+# it by ``compute_metrics``, so a longer series only helps where filings reach.
+MAX_PRICE_HISTORY_BARS = 2520  # ten years (batch B); was 756
 
 # Which filed concept answers each role, in the order they are tried. The
 # first candidate that yields a usable figure wins, which is why the list is
@@ -95,7 +96,9 @@ MAX_PRICE_HISTORY_BARS = 756
 # of the five covered companies and is *not* total debt: it excludes the
 # current portion and the finance leases. Reading it as total debt would make
 # every enterprise value too small with nothing on the record to say so, so it
-# is not on this list and EV/EBITDA is unavailable instead.
+# is not on this list.  Batch B: when no combined concept is filed, total debt
+# is the declared composite current + non-current from the same balance sheet
+# (``_fallback_role``) -- complete, and named as such in its concept.
 ROLE_CANDIDATES: Mapping[str, tuple[tuple[str, str], ...]] = {
     # The cash-flow rows are the same XBRL facts, tried only after the income
     # statement: edgartools files Amazon's ``NetIncomeLoss`` on the cash-flow
@@ -353,8 +356,145 @@ def latest_instant(
     }], amount, None
 
 
+# Batch B (2026-10-09): total debt as a declared composite when no combined
+# concept is filed -- current debt + non-current debt (incl. finance leases),
+# both read off the same balance sheet of the same filing.  Every covered
+# filer reports its debt this way; "the filings carry no total debt" was a
+# mapping gap, not a disclosure gap.  Operating lease liabilities are not debt.
+CURRENT_DEBT_CONCEPTS = ("us-gaap:DebtCurrent", "us-gaap:LongTermDebtAndCapitalLeaseObligationsCurrent",
+                         "us-gaap:LongTermDebtCurrent", "us-gaap:ShortTermBorrowings")
+NONCURRENT_DEBT_CONCEPTS = ("us-gaap:LongTermDebtAndCapitalLeaseObligations",
+                            "us-gaap:LongTermDebtNoncurrent",
+                            "us-gaap:LongTermDebtAndFinanceLeaseLiabilitiesNoncurrent")
+# A filer's own D&A line (Accenture: ``acn:DepreciationAmortizationAndOther``)
+# when it files no us-gaap one; admitted under its own concept name.
+_EXTENSION_DA_RE = re.compile(r"^(?!us-gaap:)[a-z0-9]+:Depreciation\w*Amortization\w*$")
+# The share count each filing states for its own newest quarter.
+SHARE_HISTORY_CONCEPTS = ("us-gaap:WeightedAverageNumberOfDilutedSharesOutstanding",)
+
+
+def _fallback_role(missions: Any, company_ref: str, role: str, *, as_of: str, currency: str,
+                   lines: Any) -> tuple[dict[str, Any], Decimal] | None:
+    """The batch B fallbacks for ``total_debt`` and ``depreciation_amortisation``."""
+
+    if role == "total_debt":
+        found: list[tuple[str, dict[str, Any], Decimal]] = []
+        for group in (CURRENT_DEBT_CONCEPTS, NONCURRENT_DEBT_CONCEPTS):
+            best: tuple[str, dict[str, Any], Decimal] | None = None
+            for concept in group:
+                rows = _usable_rows(lines("balance", concept), as_of=as_of)
+                if not rows:
+                    continue
+                components, total, _why = latest_instant(rows, currency=currency)
+                # The newest balance in the group, not the first concept: a
+                # filer that stopped using one tag must not pair a stale
+                # current figure with today's non-current one.
+                if components and (best is None or components[0]["period_end"] > best[1]["period_end"]):
+                    best = (concept, components[0], total or Decimal(0))
+            if best is not None:
+                found.append(best)
+        if len(found) != 2:
+            return None
+        (c1, p1, v1), (c2, p2, v2) = found
+        if p1["period_end"] != p2["period_end"] or p1["accession"] != p2["accession"]:
+            return None
+        total = v1 + v2
+        if total < 0:
+            return None
+        return {
+            "concept": f"{c1} + {c2}", "statement": "balance", "unit": currency,
+            "source_ref": FUNDAMENTAL_SOURCE_REF,
+            "components": [{"period_start": None, "period_end": p1["period_end"],
+                            "value": _plain(total), "accession": p1["accession"]}],
+        }, total
+    if role == "depreciation_amortisation":
+        try:
+            concepts = [row[0] for row in missions.connection.execute(
+                "SELECT DISTINCT l.concept FROM coverage_mission_statement_lines l JOIN "
+                "coverage_mission_statement_filings f ON f.ingest_id=l.ingest_id "
+                "WHERE f.company_ref=? AND l.statement='cash'", (company_ref,))]
+        except Exception:  # noqa: BLE001 - no listing, no fallback
+            return None
+        for concept in sorted(c for c in concepts if _EXTENSION_DA_RE.match(str(c))):
+            rows = _usable_rows(lines("cash", concept), as_of=as_of)
+            if not rows:
+                continue
+            components, total, _why = trailing_year(rows, currency=currency)
+            if components and total is not None and total >= 0:
+                return {"concept": concept, "statement": "cash", "unit": currency,
+                        "source_ref": FUNDAMENTAL_SOURCE_REF, "components": components}, total
+    return None
+
+
+class _CompanyStatementRows:
+    """One validated filing read per company calculation, never a process cache."""
+
+    def __init__(self, missions: Any, company_ref: str) -> None:
+        self.missions = missions
+        self.company_ref = company_ref
+        self._filings: list[dict[str, Any]] | None = None
+        self._grouped: dict[tuple[str, str], list[dict[str, Any]]] | None = None
+
+    def filings(self) -> list[dict[str, Any]]:
+        if self._filings is None:
+            self._filings = self.missions.statement_filings(self.company_ref)
+        return self._filings
+
+    def series(self, statement: str, concept: str) -> list[dict[str, Any]]:
+        if self._grouped is None:
+            grouped: dict[tuple[str, str], list[dict[str, Any]]] = {}
+            for filing in sorted(self.filings(), key=lambda f: (f["filed"], f["accession"])):
+                # This remains the authority's full context/source-proof read.
+                # Keep the complete row identity; filter only after verification.
+                for row in self.missions.statement_lines(filing["ingest_id"]):
+                    item = {**row, "accession": filing["accession"], "filed": filing["filed"],
+                            "report_date": filing["report_date"], "filing_form": filing["form"]}
+                    grouped.setdefault((row["statement"], row["concept"]), []).append(item)
+            self._grouped = grouped  # No partial snapshot survives a refusal.
+        return list(self._grouped.get((statement, concept), ()))
+
+
+def share_history_from_filings(missions: Any, company_ref: str, *,
+                              _statements: _CompanyStatementRows | None = None) -> list[dict[str, str]]:
+    """Dated share counts: each filing's diluted weighted-average shares for its
+    own newest quarter, effective from the day it was filed.
+
+    Replaces "today's share count applied to three years of prices" for every
+    bar after the first filing held; a company retiring stock no longer has
+    its past market caps overstated.  One row per filing date.
+    """
+
+    statements = _statements or _CompanyStatementRows(missions, company_ref)
+    out: dict[str, str] = {}
+    for concept in SHARE_HISTORY_CONCEPTS:
+        try:
+            rows = statements.series("income", concept)
+        except Exception:  # noqa: BLE001
+            continue
+        for row in rows:
+            if row.get("is_breakdown") or row.get("dimension_axis") is not None or row.get("value") is None:
+                continue
+            start, end, filed = row.get("period_start"), row.get("period_end"), row.get("filed")
+            if not (start and end and filed) or str(end) != str(row.get("report_date")):
+                continue
+            try:
+                days = (date.fromisoformat(str(end)) - date.fromisoformat(str(start))).days
+            except ValueError:
+                continue
+            if not 80 <= days <= 100:
+                continue
+            value = _decimal(row["value"])
+            if value is None or value <= 0:
+                continue
+            out[str(filed)[:10]] = _plain(value)
+        if out:
+            break
+    return [{"as_of": day, "shares_outstanding": value} for day, value in sorted(out.items())]
+
+
 def build_windows(
     missions: CoverageMissionAuthority, company_ref: str, *, currency: str,
+    _statements: _CompanyStatementRows | None = None,
 ) -> tuple[list[dict[str, Any]], list[dict[str, Any]], dict[str, str]]:
     """One fundamental window per filing date, and what each role cost.
 
@@ -364,15 +504,15 @@ def build_windows(
     filing nobody had yet.
     """
 
-    filings = missions.statement_filings(company_ref)
+    statements = _statements or _CompanyStatementRows(missions, company_ref)
+    filings = statements.filings()
     filed_dates = sorted({str(row["filed"]) for row in filings})[-MAX_WINDOWS:]
     cache: dict[tuple[str, str], list[dict[str, Any]]] = {}
 
     def lines(statement: str, concept: str) -> list[dict[str, Any]]:
         key = (statement, concept)
         if key not in cache:
-            cache[key] = list(missions.statement_series_lines(
-                company_ref, concept, statement=statement))
+            cache[key] = statements.series(statement, concept)
         return cache[key]
 
     windows: list[dict[str, Any]] = []
@@ -415,7 +555,13 @@ def build_windows(
                 totals[role] = _plain(total or Decimal(0))
                 break
             else:
-                notes[role] = "；".join(refusals) or "没有为这个角色配置候选科目"
+                extra = _fallback_role(missions, company_ref, role, as_of=as_of,
+                                       currency=currency, lines=lines)
+                if extra is not None:
+                    roles[role] = extra[0]
+                    totals[role] = _plain(extra[1])
+                else:
+                    notes[role] = "；".join(refusals) or "没有为这个角色配置候选科目"
         if roles:
             windows.append({"as_of": as_of, "roles": roles})
             digest.append({"as_of": as_of, "roles": dict(sorted(totals.items()))})
@@ -496,7 +642,7 @@ def build_inputs(
             f"{lag} 个交易日，超过 {MAX_PRICE_TRADING_DAY_LAG} 个的新鲜度门槛")
     observation = prices.latest_observation(company_ref, "shares_outstanding")
     if observation is None:
-        return refused("价格序列里没有 shares_outstanding 观测，市值无从算起")
+        return refused("价格数据里没有「流通股数」观测，无法计算市值")
     currency = str(series["currency"])
     price = {
         "version_ref": series["version_ref"],
@@ -515,8 +661,9 @@ def build_inputs(
         "invocation_ref": str(observation["invocation_ref"]),
         "artifact_hash": str(observation["artifact_hash"]),
     }
+    statements = _CompanyStatementRows(missions, company_ref)
     windows, digest, notes = build_windows(
-        missions, company_ref, currency=currency)
+        missions, company_ref, currency=currency, _statements=statements)
     if not windows:
         return refused(
             "这家公司没有一个申报日能凑出可用的财务角色，估值快照没有分母")
@@ -524,6 +671,7 @@ def build_inputs(
     coverage = input_coverage(notes, held)
     history = [{"date": str(bar["date"]), "close": str(bar["close"])}
                for bar in settled[-MAX_PRICE_HISTORY_BARS:]]
+    share_history = share_history_from_filings(missions, company_ref, _statements=statements)
     return {
         "company_ref": company_ref,
         "refusal": None,
@@ -533,9 +681,10 @@ def build_inputs(
         "price_history": history,
         "input_coverage": coverage,
         "price_lag_trading_days": lag,
+        "share_history": share_history,
         "fingerprint": snapshot_fingerprint(
             price=price, shares=shares, window_digest=digest,
-            coverage=coverage, bar_count=len(history)),
+            coverage=coverage, bar_count=len(history), share_history=share_history),
     }
 
 
@@ -546,6 +695,7 @@ def snapshot_fingerprint(
     window_digest: Sequence[Mapping[str, Any]],
     coverage: Sequence[Mapping[str, Any]],
     bar_count: int,
+    share_history: Sequence[Mapping[str, Any]] = (),
 ) -> str:
     """What this snapshot would be *of*, computable from both sides.
 
@@ -559,7 +709,7 @@ def snapshot_fingerprint(
     restatement that leaves the periods alone still counts as new.
     """
 
-    return content_hash({
+    body = {
         "schema_version": FINGERPRINT_VERSION,
         "price": {key: price[key] for key in
                   ("version_ref", "version_hash", "bar_date", "close")},
@@ -568,7 +718,13 @@ def snapshot_fingerprint(
         "windows": [dict(row) for row in window_digest],
         "input_coverage": [dict(row) for row in coverage],
         "price_history_bars": int(bar_count),
-    })
+    }
+    if share_history:
+        # Only when present, so a snapshot published without dated shares
+        # keeps the fingerprint it was published under.
+        body["share_history"] = [{"as_of": row["as_of"], "shares_outstanding": row["shares_outstanding"]}
+                                 for row in share_history]
+    return content_hash(body)
 
 
 def held_fingerprint(snapshot: Mapping[str, Any]) -> str:
@@ -586,6 +742,7 @@ def held_fingerprint(snapshot: Mapping[str, Any]) -> str:
         price=price, shares=shares, window_digest=digest,
         coverage=snapshot.get("input_coverage") or (),
         bar_count=int((snapshot.get("basis") or {}).get("price_history_bars") or 0),
+        share_history=snapshot.get("share_history") or (),
     )
 
 
@@ -789,6 +946,7 @@ def run_valuation_snapshot(
                 fundamental_windows=inputs["fundamental_windows"],
                 price_history=inputs["price_history"],
                 input_coverage=inputs["input_coverage"],
+                share_history=inputs.get("share_history") or (),
                 actor_ref=mission["autonomy"]["automation_principal"],
             )
         except ValuationSnapshotError as exc:

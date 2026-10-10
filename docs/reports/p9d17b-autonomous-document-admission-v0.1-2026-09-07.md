@@ -61,7 +61,7 @@ does it, rebinding only what changed (the mandate already carries the budget
 and is left alone):
 
 ```
-cd /Users/everflow/Projects/dalton-research-agent-os
+cd $HOME/Projects/dalton-research-agent-os
 .venv/bin/python scripts/publish_extraction_authority_chain.py --live \
   --add-auto-commit-rule research-auto-commit:mission-document-qualitative:v1
 ```

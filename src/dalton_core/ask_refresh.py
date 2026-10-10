@@ -1,4 +1,17 @@
-"""P15a: one bounded look, when the answer says the shelf was empty.
+"""P15a / batch G: one bounded look, and resuming an answer over new material.
+
+Batch G (2026-10-09) reworked the second half of this module.  The first pass
+used to add the new documents' *titles* to the prompt and ask again -- the
+answer could only say "a document with this title exists".  Now the second
+pass re-runs retrieval (:func:`ask_context.build_context`) over the evidence
+index, and a second model call is made only when that retrieval returns
+passages the first answer did not see (:func:`new_passages`).  Nothing new
+means no second call and no second bill.
+
+The same rule drives **resume** (:func:`resume_state`): an answer whose window
+had no first-hand material opened a MaterialRequest; when the acquisition
+service resolves it, the owner can resume the answer once per request.  The
+resume re-runs retrieval; if no passage is new it says so and charges nothing.
 
 ``answer_after_refresh`` has been a route in :mod:`answer_routing` since S5 and
 has run zero times live.  The reason is not that the machinery is missing --
@@ -8,12 +21,12 @@ the owner never uses, and the surface the owner does use had no way to reach
 it.  This module is that way, and it is deliberately the smallest one that is
 still honest.
 
-**One search, then answer again, then stop.**  A refresh is one discovery call
-against one source for one company, followed by a second model call that sees
-the new documents' *headers* and nothing else.  Reading them is the extraction
-lane's job and takes hours; pretending the headers are their contents would be
-the panel inventing evidence at exactly the moment the owner was told it had
-gone to look.  There is no second refresh, ever, for the same request.
+**One search, then retrieve again, then stop.**  A refresh is one discovery
+call against one source for one company, followed by a second retrieval over
+the evidence index.  A document's title is never shown as if it were its
+contents: the second answer happens only when the index already holds new
+passages (:func:`new_passages`).  There is no second refresh, ever, for the
+same request.
 
 **The cockpit does not get to invent a search string.**  ``run_mission_source_
 discovery`` compiles its query from the owner's published discovery plan --
@@ -43,7 +56,7 @@ import time
 from collections.abc import Mapping, Sequence
 from typing import Any, Callable
 
-from .ask_context import BLOCK_LABELS, BLOCK_TAGS, context_identity
+from .ask_context import passage_refs
 from .source_capability_map import CAPABILITIES
 
 SCHEMA_VERSION = "0.1"
@@ -101,7 +114,7 @@ MAX_TITLE_CHARS = 240
 # saying so beats showing whatever happened to be in the ledger already.
 REFRESH_OUTCOMES: tuple[str, ...] = ("found", "empty", "pending", "failed")
 OUTCOME_LABELS: Mapping[str, str] = {
-    "found": "补搜到了新文件，但只有标题",
+    "found": "补搜到了新文件",
     "empty": "补搜跑完了，这个来源没有新的东西",
     "pending": "补搜还在跑，这次先按账本上已有的材料回答",
     "failed": "补搜没有跑成",
@@ -114,9 +127,17 @@ OUTCOME_LABELS: Mapping[str, str] = {
 STATUS_POLLS = 20
 STATUS_POLL_SECONDS = 0.5
 
-# The block the second pass adds.  Registered in the context module's tables so
-# that the renderer, the tag letters and the labels stay in one place.
-REFRESH_BLOCK = "refreshed"
+# How a resume stands.  Closed, because the page prints one sentence per word.
+RESUME_STATES: tuple[str, ...] = ("not_needed", "waiting", "ready", "already_resumed", "exhausted")
+RESUME_LABELS: Mapping[str, str] = {
+    "not_needed": "这条回答没有登记材料请求，不需要续答",
+    "waiting": "材料还在获取中，取到后可以用新材料续答",
+    "ready": "材料已取到，可以用新材料续答",
+    "already_resumed": "这些材料请求已经续答过一次",
+    "exhausted": "材料来源已用尽，没有取到新材料",
+}
+#: Request statuses after which a resume can find something.
+RESOLVED_STATUSES: frozenset[str] = frozenset({"found", "partial"})
 
 
 class AskRefreshError(RuntimeError):
@@ -463,8 +484,8 @@ def _outcome(
         "reason": reason,
         # Said in every place the refresh appears, because it is the one thing
         # a reader will assume otherwise: nobody has read these yet.
-        "note": ("只拿到了这些文件的标题，正文还没有被读；抽取是流水线的活，不是这次问答的"
-                 if status == "found" else OUTCOME_LABELS[status]),
+        "note": ("补搜到了新文件；回答会在这些文件的正文进入全文索引后重新检索，"
+                 "只有检索到新段落时才再答一次" if status == "found" else OUTCOME_LABELS[status]),
     }
 
 
@@ -502,50 +523,49 @@ def document_headers(
     return out
 
 
-def with_headers(
-    context: Mapping[str, Any], headers: Sequence[Mapping[str, Any]],
-) -> dict[str, Any]:
-    """The same context plus one block of headers, tagged ``H1``…
+def new_passages(before: Mapping[str, Any], after: Mapping[str, Any]) -> list[dict[str, Any]]:
+    """The passages ``after`` shows that ``before`` did not (by passage ref).
 
-    Appended rather than rebuilt, so the second answer is grounded in exactly
-    the material the first one was plus the headers, and a reader comparing the
-    two is looking at one change.  The identity is recomputed: a context that
-    kept the first pass's hash after gaining a block would be claiming the two
-    answers were built from the same material.
+    ``before`` may be a context or a stored result (``context.passage_refs``).
+    This is the whole of the no-re-billing rule: an empty list means the
+    second model call is not made.
     """
 
-    rows = []
-    shown = [dict(row) for row in context.get("shown") or ()]
-    for index, header in enumerate(headers):
-        tag = f"{BLOCK_TAGS[REFRESH_BLOCK]}{index + 1}"
-        text = header.get("title") or header["document_ref"]
-        period = (header.get("discovered_at") or "")[:10] or None
-        rows.append({
-            "tag": tag, "ref": header["document_ref"], "text": text,
-            "period": period,
-            "detail": {"host": header.get("host"), "source": header.get("source_ref")},
-        })
-        shown.append({
-            "tag": tag, "block": REFRESH_BLOCK, "ref": header["document_ref"],
-            "statement": text, "period": period,
-            "company": "", "at": period or "",
-        })
-    block = {
-        "block": REFRESH_BLOCK, "label": BLOCK_LABELS[REFRESH_BLOCK],
-        "tag_letter": BLOCK_TAGS[REFRESH_BLOCK], "available": bool(rows),
-        "reason": None if rows else "no_record_for_this_company",
-        "note": ("这些文件是刚刚补搜到的，只有标题；它们的正文还没有被读过，"
-                 "所以只能说「存在这样一份材料」，不能引用其中的内容"),
-        "rows": rows,
-    }
-    again = {
-        **dict(context),
-        "blocks": [*(context.get("blocks") or ()), block],
-        "shown": shown,
-        "refreshed": True,
-    }
-    again["context_hash"] = context_identity(again)
-    return again
+    seen = set(passage_refs(before)) if before.get("shown") is not None else set(
+        (before.get("context") or {}).get("passage_refs") or before.get("passage_refs") or ())
+    return [dict(row) for row in after.get("shown") or ()
+            if row.get("block") == "passages" and str(row.get("ref")) not in seen]
+
+
+def resume_state(result: Mapping[str, Any], requests: Mapping[str, Mapping[str, Any] | None], *,
+                 resumed: Sequence[str] = ()) -> dict[str, Any]:
+    """Whether a finished answer can be resumed over newly acquired material.
+
+    ``requests`` maps each MaterialRequest id the answer opened to its current
+    view (``material_requests.request``) or ``None`` when unreadable;
+    ``resumed`` are the request ids an earlier resume already consumed.  One
+    resume per request: a request is offered again only if it was not
+    consumed.
+    """
+
+    ids = [str(item.get("id")) for item in result.get("material_requests") or () if item.get("id")]
+    if not ids:
+        return {"state": "not_needed", "label": RESUME_LABELS["not_needed"], "ready": [], "waiting": []}
+    consumed = set(resumed)
+    fresh = [rid for rid in ids if rid not in consumed]
+    if not fresh:
+        return {"state": "already_resumed", "label": RESUME_LABELS["already_resumed"], "ready": [], "waiting": []}
+    ready = [rid for rid in fresh if (requests.get(rid) or {}).get("status") in RESOLVED_STATUSES]
+    waiting = [rid for rid in fresh if (requests.get(rid) or {}).get("status") in (None, "open")
+               or requests.get(rid) is None]
+    if ready:
+        state = "ready"
+    elif waiting:
+        state = "waiting"
+    else:
+        state = "exhausted"
+    return {"state": state, "label": RESUME_LABELS[state], "ready": ready, "waiting": waiting,
+            "statuses": {rid: (requests.get(rid) or {}).get("status") for rid in ids}}
 
 
 __all__ = [
@@ -553,7 +573,9 @@ __all__ = [
     "GRANT_LABELS",
     "GRANT_REASONS",
     "MAX_HEADERS",
-    "REFRESH_BLOCK",
+    "RESOLVED_STATUSES",
+    "RESUME_LABELS",
+    "RESUME_STATES",
     "REFRESH_SOURCE_REFS",
     "SCHEMA_VERSION",
     "OUTCOME_LABELS",
@@ -565,6 +587,7 @@ __all__ = [
     "pool_balance",
     "known_specs",
     "plan_refresh",
+    "new_passages",
+    "resume_state",
     "run_refresh",
-    "with_headers",
 ]

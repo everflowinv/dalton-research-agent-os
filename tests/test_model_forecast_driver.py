@@ -420,8 +420,8 @@ class DriverTests(unittest.TestCase):
 
     def test_the_forecast_columns_follow_the_last_filed_quarter(self):
         drivers = build_drivers(build_model_inputs(ledger(), spec()))
-        periods = forecast_periods(revenue_anchor(drivers), 4)
-        self.assertEqual([item["end"] for item in periods],
+        periods = forecast_periods(revenue_anchor(drivers), 8)
+        self.assertEqual([item["end"] for item in periods[:4]],
                          ["2026-08-31", "2026-11-30", "2027-02-28", "2027-05-31"])
         self.assertEqual(periods[0]["start"], "2026-06-01")
         self.assertEqual(periods[0]["kind"], "quarter")
@@ -458,12 +458,12 @@ class AssumptionTests(unittest.TestCase):
 
     def test_there_is_one_assumption_per_driver_per_forecast_quarter(self):
         record = model(specification=spec(quarters=6))
-        self.assertEqual(len(record["forecast_periods"]), 6)
+        self.assertEqual(len(record["forecast_periods"]), 8)
         for driver in (REVENUE_CONCEPT, COST_CONCEPT, SGA_CONCEPT, TAX_CONCEPT):
             rows = [item for item in record["assumptions"]
                     if item["driver_ref"] == f"concept:{driver}"]
-            self.assertEqual(len(rows), 6, driver)
-            self.assertEqual(len({item["period"]["end"] for item in rows}), 6)
+            self.assertEqual(len(rows), 8, driver)
+            self.assertEqual(len({item["period"]["end"] for item in rows}), 8)
 
     def test_a_hole_in_the_history_is_not_treated_as_a_consecutive_quarter(self):
         # A company whose history comes from 10-Qs is missing every fourth
@@ -476,7 +476,7 @@ class AssumptionTests(unittest.TestCase):
             _line(REVENUE_CONCEPT, "2026-03-01", "2026-05-31", "1500000000"),
         ])
         drivers = build_drivers(build_model_inputs(missions, spec(expenses=[])))
-        periods = forecast_periods(revenue_anchor(drivers), 2)
+        periods = forecast_periods(revenue_anchor(drivers), 8)
         assumptions = default_assumptions(drivers, periods)
         self.assertEqual(Decimal(assumptions[0]["value"]), Decimal("0.1"))
 
@@ -495,7 +495,7 @@ class AssumptionTests(unittest.TestCase):
 
     def test_a_drafted_assumption_that_cites_an_unfiled_quarter_is_refused(self):
         drivers = build_drivers(build_model_inputs(ledger(), spec()))
-        periods = forecast_periods(revenue_anchor(drivers), 2)
+        periods = forecast_periods(revenue_anchor(drivers), 8)
 
         def drafter(_drivers, _periods):
             return [{
@@ -514,7 +514,7 @@ class AssumptionTests(unittest.TestCase):
 
     def test_a_drafted_assumption_may_never_claim_a_human_decided_it(self):
         drivers = build_drivers(build_model_inputs(ledger(), spec()))
-        periods = forecast_periods(revenue_anchor(drivers), 1)
+        periods = forecast_periods(revenue_anchor(drivers), 8)
         with self.assertRaises(AssumptionRefused):
             draft_assumptions(
                 drivers, periods, decided_by="automation:drafter",
@@ -696,7 +696,7 @@ class ResultTests(unittest.TestCase):
         readiness = model_readiness(self.record)
         self.assertEqual(readiness["drivers"], 4)
         self.assertEqual(readiness["drivers_with_assumptions"], 4)
-        self.assertEqual(readiness["forecast_quarters"], 4)
+        self.assertEqual(readiness["forecast_quarters"], 8)
         self.assertIn("result:revenue", readiness["results_computed"])
         self.assertEqual(readiness["assumption_kinds"]["human"], 0)
         self.assertNotIn("score", readiness)
@@ -729,10 +729,10 @@ class VersionTests(unittest.TestCase):
             [{"driver": f"concept:{REVENUE_CONCEPT}", "period": "2026-08-31",
               "value": "0.03",
               "because": "Bookings rolled over; growth halves from here.",
-              "refs": [{"kind": "human_decision", "ref": "human:analyst",
+              "refs": [{"kind": "doc_passage", "ref": "doc-passage:bookings-note:0-100:aaaaaaaaaaaa",
                         "concept": None, "period_end": None, "accession": None}]}],
             change_reason="human_revision", actor_ref="human:analyst",
-            evidence_refs=[{"kind": "human_decision", "ref": "human:analyst",
+            evidence_refs=[{"kind": "doc_passage", "ref": "doc-passage:bookings-note:0-100:aaaaaaaaaaaa",
                             "concept": None, "period_end": None,
                             "accession": None}]))
         self.assertEqual(second["status"], "fresh")
@@ -956,17 +956,13 @@ class ActualisationTests(unittest.TestCase):
         self.assertEqual([ref["accession"] for ref in second["evidence_refs"]],
                          ["0001467373-26-000099"] * len(second["evidence_refs"]))
 
-    def test_the_quarters_still_ahead_are_not_touched(self):
+    def test_future_quarters_roll_while_preserving_existing_estimates(self):
         second = self.actualized()
-        before = cells_of(self.first, "result:revenue")
         after = cells_of(second, "result:revenue")
-        for end in ("2026-11-30", "2027-02-28", "2027-05-31"):
-            self.assertEqual(after[end]["value"], before[end]["value"], end)
-            self.assertEqual(after[end]["kind"], "estimate")
-        self.assertEqual([item["end"] for item in second["forecast_periods"]],
-                         ["2026-11-30", "2027-02-28", "2027-05-31"])
-        self.assertEqual([item["end"] for item in second["realised_periods"]],
-                         ["2026-08-31"])
+        self.assertEqual(Decimal(after["2026-11-30"]["value"]), Decimal("1610510000"))
+        self.assertEqual(len(second["forecast_periods"]), 8)
+        self.assertEqual(second["forecast_periods"][0]["end"], "2026-11-30")
+        self.assertEqual([item["end"] for item in second["realised_periods"]], ["2026-08-31"])
 
     def test_a_derived_line_is_actual_only_when_its_components_are(self):
         second = self.actualized()
@@ -1026,7 +1022,7 @@ class RevisionTests(unittest.TestCase):
         self.addCleanup(self.store.close)
         self.authority = ForecastModelAuthority(self.store)
         self.first = self.authority.publish(model())
-        self.claim = {"kind": "claim", "ref": "claim-version:contract-win",
+        self.claim = {"kind": "doc_passage", "ref": "doc-passage:contract-win:0-100:aaaaaaaaaaaa",
                       "concept": None, "period_end": None, "accession": None}
 
     def revise(self, **kwargs):
@@ -1049,7 +1045,7 @@ class RevisionTests(unittest.TestCase):
         self.assertEqual(second["version"], 2)
         self.assertEqual(second["change_reason"], "driver_event")
         self.assertEqual(second["decision"], "update_estimates")
-        self.assertEqual(second["evidence_refs"][0]["ref"], "claim-version:contract-win")
+        self.assertEqual(second["evidence_refs"][0]["ref"], "doc-passage:contract-win:0-100:aaaaaaaaaaaa")
         # 1,331.0 * 1.2, and the cost line follows it at eighty percent.
         self.assertEqual(Decimal(cells_of(second, "result:revenue")["2026-08-31"]["value"]),
                          Decimal("1597200000"))
@@ -1164,7 +1160,7 @@ class LostUpdateTests(unittest.TestCase):
         self.addCleanup(self.store.close)
         self.authority = ForecastModelAuthority(self.store)
         self.first = self.authority.publish(model())
-        self.claim = {"kind": "claim", "ref": "claim-version:x", "concept": None,
+        self.claim = {"kind": "doc_passage", "ref": "doc-passage:x:0-100:aaaaaaaaaaaa", "concept": None,
                       "period_end": None, "accession": None}
 
     def revision(self, prior, period, value, reason="assumption_review"):
@@ -1249,11 +1245,11 @@ class AgedOutRealisedTests(unittest.TestCase):
                       "outside_band": {
                           "reason": "the renewal cohort behind the filed range "
                                     "does not repeat in this quarter"},
-                      "refs": [{"kind": "claim", "ref": "claim-version:x",
+                      "refs": [{"kind": "doc_passage", "ref": "doc-passage:x:0-100:aaaaaaaaaaaa",
                                 "concept": None, "period_end": None,
                                 "accession": None}]}],
             change_reason="assumption_review",
-            evidence_refs=[{"kind": "claim", "ref": "claim-version:x",
+            evidence_refs=[{"kind": "doc_passage", "ref": "doc-passage:x:0-100:aaaaaaaaaaaa",
                             "concept": None, "period_end": None,
                             "accession": None}],
             actor_ref="human:analyst"))

@@ -119,7 +119,7 @@ class ModelDisplayTest(unittest.TestCase):
         }]}
         shown = readiness_labels(record, {'results_unavailable': ['result:diluted_eps']},
                                   lambda value: value)
-        self.assertEqual(['摊薄每股收益'], shown['results_unavailable_labels'])
+        self.assertEqual(['稀释每股收益'], shown['results_unavailable_labels'])
 
     def test_real_dxc_missing_result_labels_are_compact_and_keep_distinctions(self):
         labels = [

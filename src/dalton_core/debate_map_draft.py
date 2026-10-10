@@ -100,8 +100,9 @@ _FIT_LADDER: tuple[tuple[int, int], ...] = (
     (18, 180),
     (12, 160),
 )
-MAX_COST_USD = default_call_budget("debate_map")["max_cost_usd"]
-MAX_INPUT_TOKENS = 80_000
+_CALL_BUDGET = default_call_budget("debate_map")
+MAX_COST_USD = _CALL_BUDGET["max_cost_usd"]
+MAX_INPUT_TOKENS = _CALL_BUDGET["max_input_tokens"]
 # 2026-09-25: 4,000 was short of what a map is.  266 verified drafts (both
 # environments, 09-11..09-25) replied in up to 16.4 KB -- p50 9.0 KB, p95 14.4
 # KB -- and the claude gateway spends ~0.42-0.47 tokens a byte on this
@@ -111,8 +112,8 @@ MAX_INPUT_TOKENS = 80_000
 # clears every draft seen at the claude rate; at 20 USD/M the extra ceiling
 # is 0.08 USD of reservation.  The packaged default (call_budget_defaults)
 # says the same, and it is the one CockpitModel reads.
-MAX_OUTPUT_TOKENS = 8_000
-TIMEOUT_SECONDS = 240
+MAX_OUTPUT_TOKENS = _CALL_BUDGET["max_output_tokens"]
+TIMEOUT_SECONDS = _CALL_BUDGET["timeout_seconds"]
 
 MAX_QUESTION_CHARS = 300
 MAX_STATEMENT_OUT_CHARS = 600
@@ -140,7 +141,7 @@ _RESOLUTION_KEYS = frozenset({"reason", "refs"})
 # Versioned separately from the DebateMap authority.  This is the exact model
 # output boundary; changing it must release a persisted lane hold and create a
 # new WorkOrder identity without pretending the underlying evidence changed.
-DRAFT_CONTRACT_VERSION = "debate-map-draft-output-0.3"
+DRAFT_CONTRACT_VERSION = "debate-map-draft-output-0.4"
 DRAFT_CONTRACT_HASH = content_hash({
     "version": DRAFT_CONTRACT_VERSION,
     "top_level": ["debates"],
@@ -179,6 +180,38 @@ class DebateDraftRefused(DebateDraftError):
 # the input table
 # ---------------------------------------------------------------------------
 
+#: Batch D: the Initial Screen's closed stance vocabulary, as debate sides.
+HOUSE_STANCE_SIDES: Mapping[str, str] = {
+    "看多": "bull", "看空": "bear", "中性": "neither", "观察": "neither",
+}
+
+
+def house_position(table: Mapping[str, Any]) -> dict[str, Any] | None:
+    """Our position as the current house view states it, or ``None``.
+
+    The house view (the latest Initial Screen's stance) decides the side; an
+    admitted thesis with no stance beside it is held as ``neither`` with the
+    thesis as the statement.  Refs are the rows' own refs.
+    """
+
+    house = list(table.get("house_rows") or [])
+    thesis = list(table.get("thesis_rows") or [])
+    if not house and not thesis:
+        return None
+    rows = house + thesis
+    side = house[0]["side"] if house else "neither"
+    lead = house[0] if house else thesis[0]
+    statement = str(lead.get("statement") or "").strip()
+    if house:
+        statement = f"本所观点：{house[0]['stance']}。{statement}".strip()
+    return {
+        "side": side,
+        "statement": statement[:MAX_STATEMENT_OUT_CHARS] or "本所观点见所引行",
+        "row_ids": [row["row_id"] for row in rows],
+        "refs": [row["ref"] for row in rows],
+    }
+
+
 def build_input_table(
     *,
     subject_ref: str,
@@ -193,8 +226,13 @@ def build_input_table(
     max_statement_chars: int = MAX_STATEMENT_CHARS,
     industry_classification: Any = None,
     pinned_refs: Collection[str] = (),
+    house_view: Mapping[str, Any] | None = None,
 ) -> dict[str, Any]:
     """Everything one drafting call may look at, and the ids it may cite.
+
+    ``house_view`` (batch D) is the current house view when one exists -- the
+    latest Initial Screen's contract stance and core judgement -- shown as row
+    ``H1`` and used to set ``our_position`` (see :func:`house_position`).
 
     Claims are ordered by the deterministic pre-pass first: an aspect the
     evidence already disagrees about is where a debate is, and putting those
@@ -259,6 +297,17 @@ def build_input_table(
             "driver_refs": list(thesis.get("driver_refs") or []),
         })
 
+    house_rows: list[dict[str, Any]] = []
+    if house_view and house_view.get("ref") and house_view.get("stance") in HOUSE_STANCE_SIDES:
+        house_rows.append({
+            "row_id": "H1",
+            "ref": str(house_view["ref"]),
+            "stance": str(house_view["stance"]),
+            "side": HOUSE_STANCE_SIDES[str(house_view["stance"])],
+            "statement": str(house_view.get("statement") or "").strip()[:max_statement_chars],
+            "as_of": str(house_view.get("as_of") or ""),
+        })
+
     previous_debates: list[dict[str, Any]] = []
     for debate in (previous or {}).get("debates", [])[:MAX_PREVIOUS_DEBATES]:
         previous_debates.append({
@@ -271,7 +320,12 @@ def build_input_table(
 
     citable = {row["row_id"]: row["claim_version_ref"] for row in rows}
     citable.update({row["row_id"]: row["ref"] for row in thesis_rows})
+    citable.update({row["row_id"]: row["ref"] for row in house_rows})
+    # Only present when there is a house view, so a table built without one
+    # (and the prompt rendered from it) is byte-identical to before batch D.
+    table_extra = {"house_rows": house_rows} if house_rows else {}
     return {
+        **table_extra,
         "subject_ref": subject_ref,
         "subject_kind": subject_kind,
         "claims": rows,
@@ -328,6 +382,11 @@ def build_prompt(table: Mapping[str, Any]) -> str:
         f"  {row['debate_ref']}\t{row['status']}\t{row['question']}"
         for row in table["previous_debates"]
     ) or "  (no previous map)"
+    house_block = ""
+    if table.get("house_rows"):
+        house_block = "OUR HOUSE VIEW -- <row id>\\t<stance>\\t<statement>:\n" + "\n".join(
+            f"  {row['row_id']}\t{row['stance']} ({row['side']})\t{row['statement']}"
+            for row in table["house_rows"]) + "\n\n"
     return (
         "\n".join(final_text_instructions()) + "\n\n" +
         "You keep the map of what is contested about one research subject.\n"
@@ -352,6 +411,7 @@ def build_prompt(table: Mapping[str, Any]) -> str:
         f"{_numbered(table['causal_chain'])}\n\n"
         "OUR THESIS -- <row id>\\t<statement>:\n"
         f"{thesis}\n\n"
+        f"{house_block}"
         "PREVIOUS DEBATES -- <debate_ref>\\t<status>\\t<question>:\n"
         f"{previous}\n\n"
         f"{table.get('driver_template') or ''}\n\n"
@@ -374,6 +434,12 @@ def build_prompt(table: Mapping[str, Any]) -> str:
         "rows do not establish an external view, say available:false.\n"
         "* our_position is what OUR THESIS commits us to. If we have no view, "
         "say none_yet. Do not copy the market into it.\n"
+        + ("* We hold a house view (OUR HOUSE VIEW / OUR THESIS above): ours is "
+           "held, never none_yet. Take the side the house view states on this "
+           "question, cite the H/T row, and say in one sentence how the house "
+           "view bears on this debate. A none_yet reply is filled from the "
+           "house view.\n" if house_position(table) is not None else "")
+        + 
         "* gaining says which side has been gaining ground since PREVIOUS "
         "DEBATES; use 'neither' when nothing moved or there is no previous "
         "map.\n"
@@ -571,7 +637,15 @@ def parse_draft(text: Any, table: Mapping[str, Any]) -> list[dict[str, Any]]:
                 "refs": _shown_refs(ours["refs"], f"{name}.ours.refs", citable, nonempty=True),
             }
         else:
-            ours_wire = {"state": "none_yet", "side": None, "statement": None, "refs": []}
+            house = house_position(table)
+            if house is not None:
+                # Batch D: a house view exists, so we have a position on every
+                # debate. The live ACN map carried none_yet on all four debates
+                # while a view was held; a none_yet reply is filled from it.
+                ours_wire = {"state": "held", "side": house["side"],
+                             "statement": house["statement"], "refs": list(house["refs"])}
+            else:
+                ours_wire = {"state": "none_yet", "side": None, "statement": None, "refs": []}
 
         if raw["gaining"] not in ("bull", "bear", "neither"):
             raise DebateDraftRefused(f"{name}.gaining must be bull, bear or neither")
@@ -698,6 +772,8 @@ def build_verifier_prompt(
 ) -> str:
     """The verifier sees the same table and answers one question."""
 
+    from .research_reasoning_lint import VERIFIER_LINT_INSTRUCTIONS
+
     by_ref = {ref: row_id for row_id, ref in table["citable"].items()}
     claims = "\n".join(
         f"  {row['row_id']}\t{row['tier']}\t{row['publisher']}\t{row['statement']}"
@@ -713,6 +789,8 @@ def build_verifier_prompt(
         "an observed market view. Check that management framing, sell-side opinion,",
         "desk observations and crowd attention are described as their actual source",
         "classes; none alone establishes buy-side consensus or positioning.",
+        "Research reasoning rules (use position_not_supported_by_cited_claims for violations):",
+        *VERIFIER_LINT_INSTRUCTIONS,
         "",
         f"SUBJECT: {table['subject_ref']}",
         "",
@@ -725,6 +803,13 @@ def build_verifier_prompt(
         "CLAIMS -- <row id>\\t<tier>\\t<publisher>\\t<statement>:",
         claims,
         "",
+        *([
+            "OUR HOUSE VIEW / THESIS (our_position is set from these by construction;",
+            "do not reject a debate because ours repeats the house view):",
+            *[f"  {row['row_id']}\t{row.get('stance') or 'thesis'}\t{row['statement']}"
+              for row in [*(table.get("house_rows") or []), *(table.get("thesis_rows") or [])]],
+            "",
+        ] if house_position(table) is not None else []),
         "DEBATES under review:",
     ]
     for debate in debates:
@@ -775,6 +860,21 @@ def build_verifier_prompt(
             f"over the {MAX_PROMPT_BYTES} bound"
         )
     return prompt
+
+
+def reasoning_findings(debates: Sequence[Mapping[str, Any]]) -> list[dict[str, Any]]:
+    """Every asserted position is checked; the question and quoted inputs are not."""
+    from .research_reasoning_lint import lint_text, source_kinds_for_refs
+
+    findings = []
+    for debate in debates:
+        for key in ("bull_position", "bear_position", "market_position", "our_position"):
+            position = debate.get(key) or {}
+            refs = position.get("claim_refs") or position.get("refs") or ()
+            for finding in lint_text(str(position.get("statement") or ""),
+                                     source_kinds=source_kinds_for_refs(refs), section=key):
+                findings.append({**finding, "debate_ref": debate.get("debate_ref")})
+    return findings
 
 
 def parse_verdict(text: Any, debates: Sequence[Mapping[str, Any]]) -> dict[str, Any]:
@@ -989,6 +1089,14 @@ def draft_debate_map(
         })
         return result
     debates = assemble_debates(screened["admitted"], previous=previous, created_at=created_at)
+    from .research_product_quality import product_quality
+    result["quality"] = product_quality("debate_map", {"debates": debates,
+        "subject_ref": table["subject_ref"]}, sources=table["claim_index"])
+    lint = reasoning_findings(debates)
+    if lint:
+        result.update({"status": "unverified", "reason": "reasoning_lint",
+                       "reasoning_findings": lint})
+        return result
     try:
         verifier_prompt = build_verifier_prompt(table, debates)
     except DebateDraftError as exc:
@@ -1020,16 +1128,44 @@ def draft_debate_map(
         result.update({"status": "unverified", "reason": f"{type(exc).__name__}: {exc}"})
         return result
     if verdict["verdict"] != "pass":
-        result.update({
-            "status": "verifier_rejected",
-            "reason": "; ".join(
-                f"{item['debate_ref']}: {item['code']}" for item in verdict["findings"]
-            ),
-            "findings": verdict["findings"],
-        })
+        reason = "; ".join(
+            f"{item['debate_ref']}: {item['code']}" for item in verdict["findings"]
+        )
+        kept, dropped = split_by_findings(debates, verdict["findings"])
+        if not kept:
+            result.update({"status": "verifier_rejected", "reason": reason,
+                           "findings": verdict["findings"]})
+            return result
+        # 2026-10-08 (ws-7d META): every finding names one debate under review
+        # (``parse_verdict`` refuses any other), so a reject is a judgement
+        # about those debates, not about the ones the verifier read and found
+        # nothing wrong with.  META's map drafted seven debates six times and
+        # published nothing because one of them was unsupported; the six it
+        # passed were thrown away each time.  The faulted debates are dropped
+        # and named; the rest publish under the same verdict.
+        result.update({"status": "verified", "debates": kept, "reason": None,
+                       "verifier_dropped": [
+                           {"debate_ref": item["debate_ref"], "codes": sorted({
+                               finding["code"] for finding in verdict["findings"]
+                               if finding["debate_ref"] == item["debate_ref"]})}
+                           for item in dropped],
+                       "findings": verdict["findings"]})
+        result["quality"] = product_quality("debate_map", {"debates": kept,
+            "subject_ref": table["subject_ref"]}, sources=table["claim_index"])
         return result
     result.update({"status": "verified", "debates": debates, "reason": None})
     return result
+
+
+def split_by_findings(
+    debates: Sequence[Mapping[str, Any]], findings: Sequence[Mapping[str, Any]],
+) -> tuple[list[dict[str, Any]], list[dict[str, Any]]]:
+    """(debates no finding names, debates a finding names), in map order."""
+
+    named = {str(item.get("debate_ref")) for item in findings}
+    kept = [dict(item) for item in debates if item["debate_ref"] not in named]
+    dropped = [dict(item) for item in debates if item["debate_ref"] in named]
+    return kept, dropped
 
 
 def change_evidence(
@@ -1453,12 +1589,15 @@ __all__ = [
     "TASK_REF",
     "TIMEOUT_SECONDS",
     "VERIFIER_FINDING_CODES",
+    "split_by_findings",
     "VERIFIER_VERDICTS",
     "DebateDraftError",
     "DebateDraftRefused",
     "assemble_debates",
     "DRAFT_CONTRACT_HASH",
     "DRAFT_CONTRACT_VERSION",
+    "HOUSE_STANCE_SIDES",
+    "house_position",
     "build_input_table",
     "build_prompt",
     "build_verifier_prompt",

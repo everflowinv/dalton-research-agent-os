@@ -146,10 +146,43 @@ class WorkerExitCodeTests(unittest.TestCase):
 
     def test_a_pending_backlog_is_reported_but_not_a_failure(self):
         from dalton_core import research_output_preparation as rop
-        source = Path(rop.__file__).read_text(encoding="utf-8")
-        self.assertIn(
-            "return 0 if result['status'] in {'healthy','no_current_mission','pending'} else 1",
-            source)
+        from contextlib import redirect_stdout
+        from io import StringIO
+        with tempfile.TemporaryDirectory() as temp:
+            root = Path(temp)
+            cfg = {name: str(root / name) for name in (
+                "core_db", "scheduler_db", "model_config", "verifier_config",
+                "checker_config", "brain_config", "work_dir", "output_directory")}
+            cfg.update(schema_version="research-publication-worker-config:0.1",
+                       workers=1, chunk_chars=4500, max_cost_per_call=1.0,
+                       draft_attempts=2, publication_gate={})
+            config = root / "worker.json"
+            config.write_text(json.dumps(cfg))
+            Path(cfg["brain_config"]).write_text(json.dumps({
+                "budget_db": str(root / "budget.sqlite")}))
+            with sqlite3.connect(cfg["core_db"]) as connection:
+                connection.executescript(
+                    "CREATE TABLE coverage_mission_pointer(mission_ref, mission_version_id);"
+                    "CREATE TABLE coverage_mission_versions(mission_version_id, record_json);")
+                connection.execute("INSERT INTO coverage_mission_pointer VALUES(?,?)",
+                                   ("mission:test", "v1"))
+                connection.execute("INSERT INTO coverage_mission_versions VALUES(?,?)",
+                                   ("v1", json.dumps({"id": "v1"})))
+            with patch("dalton_core.research_publication_authority.published_runtime_gate",
+                       return_value={"status": "active"}), \
+                 patch.object(rop, "ledger_gate", return_value=object()), \
+                 patch("dalton_core.research_publication_worker.poll_once",
+                       return_value={"status": "pending", "pending": 3}), \
+                 patch("dalton_core.research_localization_store.load_ui_texts", return_value={}), \
+                 patch("dalton_core.ui_text_discovery.poll_ui_texts",
+                       return_value={"status": "pending", "pending": 4}), \
+                 patch.object(rop, "CockpitModel", side_effect=AssertionError("model called")), \
+                 redirect_stdout(StringIO()) as stdout:
+                self.assertEqual(rop.run_worker(config), 0)
+            checkpoint = json.loads((Path(cfg["work_dir"]) / "worker-last-run.json").read_text())
+            self.assertEqual(checkpoint["status"], "pending")
+            self.assertEqual(checkpoint["pending"], 7)
+            self.assertEqual(json.loads(stdout.getvalue())["status"], "pending")
 
     def test_optional_batch_bounds_are_accepted_and_checked(self):
         from dalton_core.research_output_preparation import validate_worker_config

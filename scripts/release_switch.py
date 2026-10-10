@@ -27,6 +27,7 @@ import plistlib
 import re
 import shutil
 import socket
+import stat
 import subprocess
 import sys
 import time
@@ -152,8 +153,14 @@ def build_plan(args: argparse.Namespace) -> dict[str, Any]:
     agents = discover_agents(agents_dir)
     if not agents:
         raise SwitchError("没有发现任何 Dalton LaunchAgent")
+    inactive_slugs = {record.get("slug") for path in (args.host_root.expanduser().resolve() / "workspaces").glob("*/workspace.json")
+                      if (record := read_json(path)).get("lifecycle", "active") != "active"}
     agent_rows = []
+    skipped_agents = []
     for plist_path in agents:
+        if any(f"workspace.{slug}." in plist_path.name for slug in inactive_slugs):
+            skipped_agents.append(plist_path.stem)
+            continue
         current, data = agent_release(plist_path)
         agent_rows.append({
             "label": data.get("Label") or plist_path.stem,
@@ -173,7 +180,9 @@ def build_plan(args: argparse.Namespace) -> dict[str, Any]:
         workspace_rows.append({
             "path": str(path), "slug": record.get("slug"),
             "current_release": release_of(record.get("release_path", "")),
-            "needs_change": record.get("release_ref") != release_ref,
+            "lifecycle": record.get("lifecycle", "active"),
+            "skipped": record.get("lifecycle", "active") != "active",
+            "needs_change": record.get("lifecycle", "active") == "active" and record.get("release_ref") != release_ref,
         })
 
     worker_config_path = args.worker_config.expanduser().resolve()
@@ -186,6 +195,8 @@ def build_plan(args: argparse.Namespace) -> dict[str, Any]:
         raise SwitchError("发布指针路径必须是绝对路径（取自 worker 配置或命令行）")
 
     return {
+        **({"publication_resumes": publication_resume_plan(args, agent_rows)}
+           if getattr(args, "publication_stop_receipt", None) is not None else {}),
         "schema_version": SCHEMA,
         "writes_performed": False,
         "release_hash": digest,
@@ -195,6 +206,7 @@ def build_plan(args: argparse.Namespace) -> dict[str, Any]:
         "candidate_manifest_sha256": candidate_manifest_sha256,
         "release_manifest": str(manifest_path) if manifest else None,
         "launch_agents": agent_rows,
+        "skipped_launch_agents": skipped_agents,
         "launch_agents_without_log_paths": [
             row["label"] for row in agent_rows if not row["has_stderr_path"]],
         "manager": {
@@ -219,6 +231,101 @@ def build_plan(args: argparse.Namespace) -> dict[str, Any]:
                if release_of(manager.get("release_path", "")) else []),
         }),
     }
+
+
+
+def _private_json(path: Path) -> dict[str, Any]:
+    info = path.lstat()
+    if (not stat.S_ISREG(info.st_mode) or info.st_uid != os.getuid()
+            or stat.S_IMODE(info.st_mode) & 0o077 or info.st_nlink != 1):
+        raise SwitchError("publication stop proof must be owned, private and regular")
+    return read_json(path)
+
+
+def publication_resume_plan(args: argparse.Namespace, agents: list[dict[str, Any]]) -> list[dict[str, Any]]:
+    """Exact stopped-worker proof; no service or quiesce mutation in preview."""
+    path = getattr(args, "publication_stop_receipt", None)
+    if path is None:
+        return []
+    receipt = _private_json(path.expanduser().absolute())
+    if (receipt.get("schema_version") != "dalton-publication-worker-quiesce-1"
+            or receipt.get("status") != "workers_quiesced_unloaded_after_whole_pass"
+            or receipt.get("apply") is not True or not isinstance(receipt.get("workers"), list)):
+        raise SwitchError("publication stop receipt is not complete")
+    rows = {row["label"]: row for row in agents if "publication-worker" in row["label"]}
+    seen = set()
+    result = []
+    for worker in receipt["workers"]:
+        label = worker.get("label")
+        if (label not in rows or label in seen or worker.get("unloaded_under_lock") is not True
+                or worker.get("whole_pass_completed_before_bootout") is not True):
+            raise SwitchError("publication stop scope does not match active release labels")
+        seen.add(label)
+        request = worker.get("cooperative_request")
+        plist = Path(rows[label]["plist"])
+        with plist.open("rb") as stream:
+            argv = plistlib.load(stream).get("ProgramArguments") or []
+        if ("dalton_core.research_output_preparation" not in argv
+                or "run-worker" not in argv or "--config" not in argv):
+            raise SwitchError("publication worker command is not exact")
+        config = Path(argv[argv.index("--config") + 1]).resolve()
+        cfg = read_json(config)
+        work = Path(cfg["work_dir"]).resolve()
+        if not work.is_relative_to(Path(cfg["core_db"]).resolve().parent):
+            raise SwitchError("publication work directory is outside its Core namespace")
+        if request is None:  # Old installations used the existing whole-pass lock.
+            if (work / "quiesce-request.json").exists() or (work / "quiesce-request.json").is_symlink():
+                raise SwitchError("publication stop receipt omits a current quiesce request")
+            continue
+        lock = work / ".worker.lock"
+        info = lock.lstat()
+        if (not stat.S_ISREG(info.st_mode) or info.st_uid != os.getuid()
+                or [info.st_dev, info.st_ino] != worker.get("lock_identity")
+                or Path(worker["config"]).resolve() != config
+                or Path(worker["lock"]).resolve() != lock):
+            raise SwitchError("publication stop lock/config identity drifted")
+        actual = _private_json(work / "quiesce-request.json")
+        fields = {"schema_version", "request_id", "config_path", "work_dir", "config_sha256", "created_at", "content_hash"}
+        if (set(actual) != fields or actual != request
+                or actual.get("schema_version") != "research-publication-quiesce:0.1"
+                or actual.get("content_hash") != content_hash({k:v for k,v in actual.items() if k != "content_hash"})
+                or actual.get("config_path") != str(config) or actual.get("work_dir") != str(work)):
+            raise SwitchError("publication quiesce request proof drifted")
+        loaded = subprocess.run(["launchctl", "print", f"gui/{os.getuid()}/{label}"],
+                                capture_output=True, text=True, check=False)
+        if loaded.returncode == 0:
+            raise SwitchError("publication worker must remain unloaded before release switch")
+        result.append({"label":label, "config":str(config), "lock":str(lock),
+                       "lock_identity":[info.st_dev, info.st_ino],
+                       "request_hash":actual["content_hash"]})
+    if set(rows) != seen:
+        raise SwitchError("publication stop receipt omits active workers")
+    return result
+
+
+def resume_publications_before_bootstrap(plan: dict[str, Any]) -> list[dict[str, Any]]:
+    results = []
+    for row in plan.get("publication_resumes") or []:
+        # Called after old labels are stopped and every plist/gate was updated,
+        # before the first bootstrap. The installed helper also takes the exact
+        # existing worker lock and checks CAS: no in-flight pass can be resumed.
+        loaded = subprocess.run(["launchctl", "print", f"gui/{os.getuid()}/{row['label']}"],
+                                capture_output=True, text=True, check=False)
+        if loaded.returncode == 0:
+            raise SwitchError("publication worker reloaded before exact resume")
+        environment = {k:v for k,v in os.environ.items() if k not in {"PYTHONPATH", "PYTHONHOME"}}
+        command = [str(Path(plan["release_path"]) / "bin" / "python"), "-m",
+                   "dalton_core.research_publication_quiesce", "resume", "--config", row["config"],
+                   "--request-hash", row["request_hash"]]
+        response = subprocess.run(command, capture_output=True, text=True, check=False,
+                                  env=environment, timeout=15)
+        if response.returncode != 0:
+            raise SwitchError("installed publication CAS resume refused; no labels bootstrapped")
+        value = json.loads(response.stdout)
+        if value != {"status":"resumed", "request_hash":row["request_hash"]}:
+            raise SwitchError("installed publication resume receipt drifted; no labels bootstrapped")
+        results.append({**value, "label":row["label"]})
+    return results
 
 
 # ------------------------------------------------------------------ writes
@@ -316,19 +423,87 @@ def write_pointers(plan: dict[str, Any], *, release_pointer: Path,
     return {"runtime_pointer_sha256": runtime_sha, "release_pointer_sha256": release_sha}
 
 
+def startup_groups(labels: list[tuple[str, Path]]) -> list[list[tuple[str, Path, Path | None]]]:
+    """Validate each writer's exact socket before any switch mutation."""
+    groups: list[list[tuple[str, Path, Path | None]]] = [[] for _ in range(5)]
+    for label, path in labels:
+        socket_path = None
+        if label.endswith(".writer"):
+            _, data = agent_release(path)
+            arguments = list(data.get("ProgramArguments") or [])
+            if data.get("Label", label) != label or arguments[1:3] != ["-m", "dalton_core.writer_server"]:
+                raise SwitchError(f"writer command does not match its label: {label}")
+            options = [arguments[i + 1] for i, token in enumerate(arguments[:-1]) if token == "--socket"]
+            if len(options) != 1 or not Path(options[0]).is_absolute():
+                raise SwitchError(f"writer requires one exact absolute --socket: {label}")
+            socket_path = Path(options[0]).resolve()
+            position = 0
+        elif label.endswith(".control"):
+            position = 1
+        elif label.endswith(".controller"):
+            position = 2
+        elif "publication-worker" in label:
+            position = 4
+        else:
+            position = 3
+        groups[position].append((label, path, socket_path))
+    return groups
+
+
+def bootstrap_group(rows: list[tuple[str, Path, Path | None]], actions: list[str]) -> None:
+    """Keep the existing one bounded bootstrap retry within each dependency stage."""
+    failed = []
+    for label, path, _ in rows:
+        line = launchctl("start", label, path)
+        actions.append(line)
+        if re.search(r" -> 0(?:\s|$)", line) is None:
+            failed.append((label, path))
+    if failed:
+        time.sleep(6)
+        for label, path in failed:
+            actions.append(launchctl("stop", label, path))
+        time.sleep(3)
+        for label, path in failed:
+            line = launchctl("start", label, path)
+            actions.append("retry " + line)
+            if re.search(r" -> 0(?:\s|$)", line) is None:
+                raise SwitchError(f"bootstrap retry failed; dependent agents were not started: {label}")
+
+
+def wait_writer_sockets(rows: list[tuple[str, Path, Path | None]], seconds: float) -> list[dict[str, Any]]:
+    """All new writers must accept a Unix connection before any dependent starts."""
+    deadline = time.monotonic() + seconds
+    while True:
+        state = [{"label": label, "socket": str(path),
+                  "readable": writer_socket_readable(path)} for label, _, path in rows]
+        if all(row["readable"] for row in state):
+            return state
+        if time.monotonic() >= deadline:
+            missing = ", ".join(row["label"] for row in state if not row["readable"])
+            raise SwitchError(f"writer sockets did not become ready; dependent agents were not started: {missing}")
+        time.sleep(min(0.2, max(0, deadline - time.monotonic())))
+
+
 def apply_switch(args: argparse.Namespace, plan: dict[str, Any]) -> dict[str, Any]:
+    if getattr(args, "publication_stop_receipt", None) is not None:
+        fresh = publication_resume_plan(args, plan["launch_agents"])
+        if fresh != plan.get("publication_resumes"):
+            raise SwitchError("publication resume plan changed before any switch write")
+    labels = [(row["label"], Path(row["plist"])) for row in plan["launch_agents"]]
+    groups = startup_groups(labels)
+    writer_ready_seconds = float(getattr(args, "writer_ready_seconds", 120))
+    if not 0 <= writer_ready_seconds <= 600:
+        raise SwitchError("writer readiness timeout must be finite and within 0..600 seconds")
     venv = Path(plan["release_path"])
     backup_dir = args.backup_dir.expanduser().resolve()
     actions: list[str] = []
 
     # 1) plist
-    labels: list[tuple[str, Path]] = []
     for row in plan["launch_agents"]:
         path = Path(row["plist"])
         _backup(path, backup_dir)
         if repoint_agent(path, venv):
             actions.append(f"repointed {row['label']}")
-        labels.append((row["label"], path))
 
     # 2) manager.json
     manager_path = Path(plan["manager"]["path"])
@@ -343,6 +518,9 @@ def apply_switch(args: argparse.Namespace, plan: dict[str, Any]) -> dict[str, An
 
     # 3) workspace.json（content_hash 是对除它自身以外的全部字段算的）
     for row in plan["workspaces"]:
+        if row.get("skipped"):
+            actions.append(f"skipped {row['slug']} ({row.get('lifecycle')})")
+            continue
         path = Path(row["path"])
         _backup(path, backup_dir)
         record = read_json(path)
@@ -390,28 +568,24 @@ def apply_switch(args: argparse.Namespace, plan: dict[str, Any]) -> dict[str, An
     for label, path in labels:
         actions.append(launchctl("stop", label, path))
     time.sleep(3)
-    for label, path in labels:
-        actions.append(launchctl("start", label, path))
-    # launchd 在 bootout 之后的几秒里仍持有旧标签（"Bootstrap failed: 5: Input/output
-    # error"），legacy 的 writer/controller 两次发布都撞到。等一会儿再对失败的
-    # 标签重试，而不是把它们留给下一轮巡检。
-    retry_labels = [(label, path) for (label, path), line in zip(labels, actions[-len(labels):])
-                    if "-> 0" not in line]
-    if retry_labels:
-        time.sleep(6)
-        for label, path in retry_labels:
-            launchctl("stop", label, path)
-        time.sleep(3)
-        for label, path in retry_labels:
-            actions.append("retry " + launchctl("start", label, path))
+    publication_resumes = resume_publications_before_bootstrap(plan)
+    for row in publication_resumes:
+        actions.append(f"resumed publication {row['label']} by exact stop receipt")
+    bootstrap_group(groups[0], actions)
+    writer_readiness = wait_writer_sockets(groups[0], writer_ready_seconds)
+    for row in writer_readiness:
+        actions.append(f"writer ready {row['label']} ({row['socket']})")
+    for group in groups[1:]:
+        bootstrap_group(group, actions)
     time.sleep(args.settle_seconds)
-    return {"actions": actions, **pointers}
+    return {"actions": actions, "writer_readiness": writer_readiness, **pointers,
+            **({"publication_resumes":publication_resumes} if publication_resumes else {})}
 
 
 # ------------------------------------------------------------------ health
 
 def controller_heartbeat(state_dir: Path) -> str | None:
-    """控制器最后一次投影的时间；它前进就说明 tick 循环还活着。"""
+    """控制器最后一次 tick（旧记录退回投影时间）；必须实际前进。"""
 
     path = state_dir / "run" / "heartbeat.json"
     if not path.is_file():
@@ -420,7 +594,7 @@ def controller_heartbeat(state_dir: Path) -> str | None:
         value = read_json(path)
     except (OSError, ValueError, SwitchError):
         return None
-    for key in ("last_projection_at", "at", "updated_at"):
+    for key in ("last_tick_at", "last_projection_at", "at", "updated_at"):
         if isinstance(value.get(key), str):
             return value[key]
     return None
@@ -444,9 +618,13 @@ def health(args: argparse.Namespace, plan: dict[str, Any]) -> dict[str, Any]:
     digest = plan["release_hash"]
     agents_dir = args.launch_agents_dir.expanduser().resolve()
     agent_state = []
+    skipped_labels = set(plan.get("skipped_launch_agents") or [])
     for path in discover_agents(agents_dir):
         current, data = agent_release(path)
-        agent_state.append({"label": data.get("Label") or path.stem,
+        label = data.get("Label") or path.stem
+        if label in skipped_labels:
+            continue
+        agent_state.append({"label": label,
                             "release": current, "on_target": current == digest})
     manager = read_json(Path(plan["manager"]["path"]))
     before = controller_heartbeat(args.state_dir.expanduser().resolve())
@@ -462,12 +640,13 @@ def health(args: argparse.Namespace, plan: dict[str, Any]) -> dict[str, Any]:
         "writer_socket_readable": writer_socket_readable(
             args.writer_socket.expanduser().resolve()),
         "agents": agent_state,
+        "intentionally_stopped_agents": sorted(skipped_labels),
         "heartbeat_before": before,
         "heartbeat_after": after,
     }
     checks["ok"] = bool(checks["every_agent_on_target"] and checks["manager_matches"]
                         and checks["writer_socket_readable"]
-                        and checks["controller_heartbeat_advanced"] is not False)
+                        and checks["controller_heartbeat_advanced"] is True)
     return checks
 
 
@@ -493,8 +672,12 @@ def main(argv: list[str] | None = None) -> int:
     parser.add_argument("--runtime-pointer", type=Path, default=None)
     parser.add_argument("--source-commit", default=None)
     parser.add_argument("--candidate-manifest-sha256", default=None)
+    parser.add_argument("--publication-stop-receipt", type=Path, default=None,
+                        help="可选：合作式停派收据；切换后、启动任何标签前自动按精确CAS恢复")
     parser.add_argument("--backup-dir", type=Path,
                         default=HOME / ".dalton" / "release-switch-backups")
+    parser.add_argument("--writer-ready-seconds", type=float, default=120.0,
+                        help="启动所有 writer 后等待真实 socket 连通，再启动依赖服务；最长600秒")
     parser.add_argument("--settle-seconds", type=float, default=15.0)
     parser.add_argument("--heartbeat-wait-seconds", type=float, default=20.0)
     parser.add_argument("--health-only", action="store_true",
@@ -509,7 +692,7 @@ def main(argv: list[str] | None = None) -> int:
             plan["applied"] = apply_switch(args, plan)
             plan["writes_performed"] = True
             plan["health"] = health(args, plan)
-    except (SwitchError, OSError, ValueError) as exc:
+    except (SwitchError, OSError, ValueError, subprocess.TimeoutExpired) as exc:
         print(f"STOP: {exc}", file=sys.stderr)
         return 2
     print(json.dumps(plan, ensure_ascii=False, indent=2, sort_keys=True))

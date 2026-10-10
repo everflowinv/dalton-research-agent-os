@@ -414,6 +414,7 @@ def argv_fragment(context: Any) -> list[str]:
 
 LANE = register_lane(LaneSpec(
     operation="dispatch_claim_index",
+    failure_ledger="mission_claim_index",
     # After the research plan (100) and before the Initial Screen (110): the
     # screen drafts from Claims, and drafting from an indexed set is what stops
     # it citing the same quarter's revenue three times in one paragraph.

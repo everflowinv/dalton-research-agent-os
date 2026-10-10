@@ -123,10 +123,21 @@ def _publication_receipt_valid(root: Path, product: Mapping[str,Any], candidate:
     except (OSError,ValueError,KeyError,TypeError):return False
 
 
-def has_reviewed_attachment(directory: str | Path, product: Mapping[str,Any]) -> bool:
+def reviewed_index_entries(directory: str | Path) -> dict[str, Any]:
+    """``index.json``'s entries, read once for a batch of lookups ({} if unreadable)."""
+    try:
+        entries=_read_json(Path(directory)/'index.json').get('entries')
+    except (OSError,ValueError):
+        return {}
+    return entries if isinstance(entries,dict) else {}
+
+
+def has_reviewed_attachment(directory: str | Path, product: Mapping[str,Any], *,
+                            entries: Mapping[str, Any] | None = None) -> bool:
     root=Path(directory)
     try:
-        key=_read_json(root/'index.json')['entries'][source_content_hash(product)]
+        index=entries if entries is not None else _read_json(root/'index.json')['entries']
+        key=index[source_content_hash(product)]
         if not isinstance(key,str) or not _SHA.fullmatch(key):return False
         candidate=_read_json(root/'records'/(key+'.json'))
         validate_localization(product,candidate)
@@ -134,7 +145,22 @@ def has_reviewed_attachment(directory: str | Path, product: Mapping[str,Any]) ->
     except (OSError,ValueError,KeyError,TypeError):return False
 
 
-def localize_library(connection: sqlite3.Connection, library: Mapping[str, Any]) -> dict[str, Any]:
+def localize_library(connection: sqlite3.Connection, library: Mapping[str, Any], *,
+                     now: Any = None) -> dict[str, Any]:
+    """Overlay reviewed Chinese, or say which state each product is in.
+
+    2026-10-07: a product with no reviewed attachment is no longer always
+    emptied.  ``final_text_state`` decides from the publication ledger: while
+    a review can still be under way it is ``pending`` (sections hidden, as
+    before); once the worker has given up on it, or it has waited past the
+    draft window, it is ``draft`` -- the drafted sections are kept, the
+    product is marked ``publication_status='draft'`` with the watermark
+    「草稿，文字表达尚未校对」, and the page and the HTML export show them as
+    such instead of an empty placeholder.  Every product carries the state as
+    ``final_text``.
+    """
+    from .final_text_state import DRAFT, DRAFT_LABEL, final_text_state
+
     root=directory_for_connection(connection)
     if root is None:return dict(library)
     required=_review_required(root)
@@ -148,6 +174,7 @@ def localize_library(connection: sqlite3.Connection, library: Mapping[str, Any])
         if not isinstance(entries,dict):raise ValueError('invalid display index entries')
     except (OSError,ValueError,KeyError):entries={}
     for i,product in enumerate(result.get('products')or[]):
+        pristine=copy.deepcopy(product)
         key=entries.get(source_content_hash(product))
         ready=False
         if isinstance(key,str) and _SHA.fullmatch(key):
@@ -159,13 +186,29 @@ def localize_library(connection: sqlite3.Connection, library: Mapping[str, Any])
                     raise ValueError('language review receipt is missing')
                 result['products'][i]=select_localized(product,candidate)
                 result['products'][i]['publication_status']='ready'
+                result['products'][i]['final_text']={'status':'ready'}
                 ready=True
             except (OSError,ValueError,KeyError,TypeError):
                 product['localization_status']='原文已更新，中文版本待同步'
         if required and not ready and product.get('status')=='available':
-            product['sections']=[]
-            product['publication_status']='pending_language_review'
-            product['display_reason']='正文正在进行语言检查，完成后会在这里显示。'
+            state=final_text_state(root.parent,pristine,reviewed=False,
+                                   since=pristine.get('created_at'),now=now)
+            product['final_text']=state
+            if state['status']==DRAFT:
+                product['publication_status']='draft'
+                product['draft_label']=DRAFT_LABEL
+                product['display_reason']=f"{DRAFT_LABEL}。{state.get('reason') or ''}".strip()
+            elif state.get('show_draft'):
+                # 2026-10-09 (analyst UX reviews, 痛点 5): the draft stays
+                # readable under a badge while the Chinese review runs.
+                badge=str(state.get('badge') or '初稿 · 文字未经审校')
+                product['publication_status']='pending_language_review'
+                product['draft_label']=badge
+                product['display_reason']=f'{badge}。中文定稿生成后会自动替换。'
+            else:
+                product['sections']=[]
+                product['publication_status']='pending_language_review'
+                product['display_reason']='正文正在进行语言检查，完成后会在这里显示。'
     return result
 
 

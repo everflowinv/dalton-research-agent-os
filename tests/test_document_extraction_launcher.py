@@ -324,6 +324,8 @@ class _OneAwaiting:
                     return [1]
                 @staticmethod
                 def fetchall():
+                    if 'annual-report-10k' in _args[0]:
+                        return []  # This prose-review fixture has no SEC parents.
                     return [("review:one", "then", "acquired", "ticket:one", "then")]
             return Row()
 
@@ -338,6 +340,8 @@ class _OneHundredOneAwaiting(_OneAwaiting):
                     return [101]
                 @staticmethod
                 def fetchall():
+                    if 'annual-report-10k' in _args[0]:
+                        return []
                     return [(f"review:{index}", "then", "acquired", f"ticket:{index}", "then")
                             for index in range(101)]
             return Row()

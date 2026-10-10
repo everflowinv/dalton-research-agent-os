@@ -145,6 +145,7 @@ def _spec(**overrides):
             "Accenture is a people business: revenue is billable heads times "
             "realised rate, and margin turns on utilisation."
         ),
+        "driver_formulas": [{"output_ref": "revenue", "operator": "product", "driver_refs": ["billable-headcount", "realised-rate"], "because": "Synthetic quantity times price mechanism."}],
         "revenue_drivers": [
             {
                 "ref": "billable-headcount", "label": "Billable headcount",
@@ -249,7 +250,8 @@ class CompanyModelSpecTests(unittest.TestCase):
         self.assertEqual(json.loads(pretty), json.loads(compact))
         self.assertEqual(
             TASK_HASH,
-            "fb20823061aebdea59bba9130d8afc0984577e143bbfed3409da984657246848",
+            # Complete driver formulas change the proposal task; historical specs remain readable.
+            "6cbcf38fe0a5b774cbc098606c36998169e870d637b72fe5ff4f2f4e79387d94",
         )
         self.assertNotEqual(
             TASK_HASH,
@@ -498,7 +500,7 @@ class CompanyModelSpecTests(unittest.TestCase):
             self.verify(_spec(schema_version="0.1"))
 
     def test_the_calculation_anchor_is_separate_from_economic_drivers(self):
-        body = _spec(revenue_drivers=[{
+        body = _spec(driver_formulas=[{"output_ref": "revenue", "operator": "sum", "driver_refs": ["heads"], "because": "Explicit planned quantity basis remains unavailable."}], revenue_drivers=[{
             "ref": "heads", "label": "Billable heads", "kind": "volume",
             "basis_concept": None, "unit": "headcount",
             "because": "Capacity moves delivered revenue.",
@@ -565,80 +567,50 @@ class CompanyModelSpecTests(unittest.TestCase):
         )
 
     def test_prompt_prefers_filed_subtotals_and_requires_exact_derived_ties(self):
+        # Forecast coverage (structure 0.6): filed subtotals stay tie authority,
+        # but every reported line gets a method and a subtotal is forecast as
+        # its tied sum of components rather than left as a gap.
         prompt = build_prompt(STATE)
-        self.assertIn(
-            "Prefer an exact filed line when GrossProfit or another standard "
-            "subtotal is available",
-            prompt,
-        )
-        self.assertIn(
-            "Derive a subtotal only when its formula ties exactly in every "
-            "applicable source period",
-            prompt,
-        )
-        self.assertIn("A filed pretax-income line is one of those standard subtotals", prompt)
-        self.assertIn(
+        for sentence in (
+            "Every filed line with at least eight quarters of history needs a "
+            "forecast method",
+            "zero_one_off for a line whose behaviour is one_off",
+            "unavailable only for a line with less history",
+            "is tie authority only and never a formula term and never given "
+            "independent growth or shares",
+            "forecast it as a derived line whose sum formula adds its filed "
+            "components and ties to the filed total",
+            "Pretax income is operating income plus every non-operating item; tax "
+            "is a rate of pretax income",
+            "Every formula term must itself be forecastable.",
             "A result tied to income including noncontrolling interests uses "
             "net_income",
-            prompt,
-        )
-        self.assertIn(
-            "A filed standard subtotal is historical/tie authority and uses "
-            "unavailable, not independent growth or shares",
-            prompt,
-        )
-        self.assertIn("otherwise retain the unavailable forecast gap", prompt)
-        self.assertIn(
-            "When a company-specific total is itself filed, use a filed "
-            "company_presented_component with unavailable",
-            prompt,
-        )
-        self.assertIn(
             "Choose the structure backward from a final earnings bridge that ties "
-            "exactly in every applicable source period",
-            prompt,
-        )
-        self.assertIn(
+            "in every applicable source period",
+            "a structure whose earnings chain still cannot be computed is refused",
             "A historically replay-ready formula does not make unavailable inputs "
             "forecastable",
-            prompt,
-        )
-        self.assertIn(
-            "Presentation rounding does not permit arbitrary or global tie "
-            "tolerance, rewriting a filed amount, or inventing a balancing term",
-            prompt,
-        )
-        self.assertIn(
+            "The only tie tolerance is the filed presentation rounding of a period",
             "per-share division uses each period's disclosed filed precision",
-            prompt,
-        )
-        self.assertIn(
+            "Include diluted_weighted_average_shares and a derived diluted_eps when "
+            "the company files them",
             "Prefer filed when an exact standard subtotal such as GrossProfit is "
             "available, except where the contract requires a final earnings formula.",
-            prompt,
-        )
-        self.assertIn(
-            "A derived sum must tie exactly in every applicable source period",
-            prompt,
-        )
-        self.assertIn(
+            "A derived sum must tie in every applicable source period. The only "
+            "tolerance is the filed presentation rounding",
             "A per-share divide ties using each source period's disclosed filed precision",
-            prompt,
-        )
-        self.assertIn(
-            "A filed standard subtotal is historical/tie authority and must use "
-            "unavailable. Forecasting a subtotal requires an explicit derived formula "
-            "that ties in every applicable source period.",
-            prompt,
-        )
-        self.assertIn(
-            "when that company-specific total is filed, keep it filed and unavailable",
-            prompt,
-        )
-        self.assertIn(
-            "Historical replay readiness does not mean unavailable inputs have forecasts",
-            prompt,
-        )
+            "A filed standard subtotal is tie authority only: forecast it as a "
+            "derived formula line instead",
+            "never use a filed total as a formula term",
+        ):
+            with self.subTest(sentence=sentence[:40]):
+                self.assertIn(sentence, prompt)
+        for retired in (
+            "otherwise retain the unavailable forecast gap",
+            "When a company-specific total is itself filed, use a filed "
+            "company_presented_component with unavailable",
+        ):
+            self.assertNotIn(retired, prompt)
 
     def test_source_per_share_and_share_rows_cannot_be_currency_components(self):
         for concept, unit in (

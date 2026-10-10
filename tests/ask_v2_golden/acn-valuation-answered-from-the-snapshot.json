@@ -2,8 +2,8 @@
  "case_ref": "acn-valuation-answered-from-the-snapshot",
  "expected": {
   "cited_tags": [
-   "V1",
-   "P1"
+   "N1",
+   "M1"
   ],
   "confidence": "medium",
   "quality": {
@@ -15,13 +15,19 @@
   "rationale": "每个数字都在被引的行里逐字出现；分位的口径与数字同句，所以读者能判断它是不是价格自己的分位。",
   "refused": false,
   "verification": {
+   "citations_resolve": "skipped",
    "cites_only_shown_rows": "pass",
    "confidence_in_vocabulary": "pass",
    "market_vs_us_present": "skipped",
-   "numeric_sentences_cite": "pass",
+   "material_gap_has_request": "skipped",
+   "numbers_sourced": "pass",
+   "our_view_not_used_as_evidence": "pass",
+   "reasoning_lint": "pass",
    "refresh_names_a_capable_source": "skipped",
    "refusal_states_why": "pass",
-   "unknowns_typed": "pass"
+   "structure_present": "pass",
+   "unknowns_typed": "pass",
+   "what_happened_cites_evidence": "pass"
   },
   "wants_market_vs_us": false
  },
@@ -29,58 +35,88 @@
  "question": "ACN 的估值现在贵不贵？",
  "reply": {
   "confidence": "medium",
+  "market_expected": [
+   {
+    "refs": [],
+    "text": "展示的材料里没有卖方对明年每股收益的预测，无法给出前瞻倍数。"
+   }
+  ],
   "market_vs_us": null,
+  "our_view": {
+   "change": "no_change",
+   "house_view": "估值处在历史中上部，本身构不成买入理由。",
+   "sentences": [
+    {
+     "refs": [],
+     "text": "我们认为估值需要盈利预期上修才有空间。"
+    }
+   ]
+  },
   "refresh_suggested": null,
   "refusal_detail": null,
   "refusal_reason": null,
   "refused": false,
-  "sentences": [
+  "uncertainties": [
+   {
+    "refs": [],
+    "text": "缺卖方对明年每股收益的一致预期。"
+   }
+  ],
+  "unknowns": [
+   {
+    "content_kind": "sell_side_report",
+    "source": "alphaengine",
+    "what": "缺卖方对 2027 年 EPS 的一致预期，没法给 forward 倍数"
+   }
+  ],
+  "what_happened": [
    {
     "refs": [
-     "V1"
+     "N1"
     ],
     "text": "按 trailing P/E 看，ACN 现在处在自己历史的 72 分位，不便宜但也谈不上极端。"
    },
    {
     "refs": [
-     "V1"
+     "N1"
     ],
-    "text": "这个分位是股价与已报基本面一起算出来的，不是只反映股价高低。"
+    "text": "这个分位是股价与已报基本面一起算出来的，不只反映股价高低。"
    },
    {
     "refs": [
-     "P1"
+     "M1"
     ],
     "text": "最新收盘是 331.20 美元。"
-   }
-  ],
-  "unknowns": [
-   {
-    "content_kind": "consensus",
-    "source": "yfinance",
-    "what": "缺卖方对 2027 年 EPS 的一致预期，没法给 forward 倍数"
    }
   ]
  },
  "shown": [
   {
-   "block": "valuation",
+   "block": "numbers",
+   "evidence": true,
    "period": "2026-09-08",
    "ref": "valuation-snapshot-version:acn:4",
+   "source": "valuation",
+   "source_text": "trailing P/E = 24.1x，历史分位 72",
    "statement": "trailing P/E = 24.1x，历史分位 72",
-   "tag": "V1"
+   "tag": "N1"
   },
   {
-   "block": "market_price",
+   "block": "move",
+   "evidence": true,
+   "first_hand": true,
    "period": "2026-09-08",
    "ref": "market-price-series-version:acn:31",
+   "source_text": "ACN 最新收盘 331.20 USD（2026-09-08）",
    "statement": "ACN 最新收盘 331.20 USD（2026-09-08）",
-   "tag": "P1"
+   "tag": "M1"
   },
   {
    "block": "claims",
+   "evidence": true,
    "period": "2026-03-01..2026-05-31",
    "ref": "claim-version:1c4f31d84d431ac4aa2cfd5e10624ed9f0ddff0f17844392bc7a76a339adfa05",
+   "source_text": "Accenture plc reported Revenues of USD 18718144000 for 2026-03-01..2026-05-31, up 5.59% year over year from USD 17727871000 in the comparable quarter.",
    "statement": "Accenture plc reported Revenues of USD 18718144000 for 2026-03-01..2026-05-31, up 5.59% year over year from USD 17727871000 in the comparable quarter.",
    "tag": "C1"
   }

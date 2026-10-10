@@ -69,7 +69,7 @@ ACTOR_REF = "core:valuation-snapshot-worker"
 # comparing a 0.1 record with a 0.2 record is comparing two input contracts,
 # and the version string is what tells them so. Nothing was published under
 # 0.1 on any Core, so nothing is being reinterpreted.
-FORMULA_VERSION = "valuation-formula:p11c:0.2"
+FORMULA_VERSION = "valuation-formula:gaap-core-pit:0.3"
 
 # Where a filed figure may come from. Yahoo is not on this list and will not be:
 # see the module docstring.
@@ -85,6 +85,7 @@ TRAILING_QUARTERS = 4
 # most common way a multiple comes out wrong by a factor of four.
 ROLE_AGGREGATION: Mapping[str, str] = {
     "net_income": "trailing_sum",
+    "core_tax_expense": "trailing_sum",
     "revenue": "trailing_sum",
     "operating_income": "trailing_sum",
     "depreciation_amortisation": "trailing_sum",
@@ -108,6 +109,12 @@ METRIC_DEFINITIONS: tuple[dict[str, Any], ...] = (
         "unit": "ratio",
         "roles": ("net_income",),
         "formula": "market_cap / net_income_ttm",
+        "quantum": "0.0001",
+    },
+    {
+        "metric": "core_pe", "label": "price / core operating earnings after tax",
+        "unit": "ratio", "roles": ("operating_income", "core_tax_expense"),
+        "formula": "market_cap / (operating_income_ttm - explicitly_disclosed_core_tax_expense_ttm)",
         "quantum": "0.0001",
     },
     {
@@ -145,10 +152,31 @@ METRICS = tuple(item["metric"] for item in METRIC_DEFINITIONS)
 # Metrics whose denominator has to be positive for the ratio to mean anything.
 # A negative P/E is not a cheap company; it is a loss-making one, and printing
 # "-14.2x" invites a reader to compare it with 14.2x.
+# 2026-10-09 (batch B follow-up): the reasons are written in the registry's
+# Chinese at the source, naming the line item (``terminology``
+# ``valuation_reason`` / ``valuation_input``), not translated at display time.
+def _input_label(role: str) -> str:
+    from .terminology import label
+
+    return label("valuation_input", role, default=role.replace("_", " "))
+
+
+def _reason_text(key: str, **values: Any) -> str:
+    from .terminology import label
+
+    return label("valuation_reason", key, **values)
+
+
+def _missing_lines(roles: Sequence[str]) -> str:
+    return "、".join(f"「{_input_label(role)}」" for role in roles)
+
+
 _POSITIVE_DENOMINATOR_REASON = {
-    "trailing_pe": "trailing net income is not positive, so a P/E would not be a multiple",
-    "price_to_sales": "trailing revenue is not positive",
-    "ev_to_ebitda": "trailing EBITDA is not positive, so EV/EBITDA would not be a multiple",
+    "core_pe": "核心营业税后盈利不为正，核心市盈率不可用",
+    "trailing_pe": _reason_text("not_positive", line="净利润", metric="市盈率"),
+    "price_to_sales": _reason_text("not_positive", line="营业收入", metric="市销率"),
+    "ev_to_ebitda": _reason_text("not_positive", line="EBITDA（营业利润 + 折旧与摊销）",
+                            metric="EV/EBITDA"),
 }
 
 # The percentile, frozen. "What share of the stored history sat at or below
@@ -380,9 +408,11 @@ def _shares_binding(value: Any) -> tuple[dict[str, Any], Decimal]:
         {
             "version_ref", "version_hash", "as_of", "shares_outstanding",
             "invocation_ref", "artifact_hash",
-        },
+        } | ({"share_class_ref"} if isinstance(value, Mapping) and "share_class_ref" in value else set()),
         "shares",
     )
+    if "share_class_ref" in wire:
+        wire["share_class_ref"] = _text(wire["share_class_ref"], "shares.share_class_ref")
     wire["version_ref"] = _text(wire["version_ref"], "shares.version_ref")
     wire["version_hash"] = _hash(wire["version_hash"], "shares.version_hash")
     wire["as_of"] = _iso_date(wire["as_of"], "shares.as_of")
@@ -495,6 +525,9 @@ def _role_input(
         {"concept", "statement", "unit", "source_ref", "components"},
         name,
     )
+    if role == "core_tax_expense" and wire["concept"] in {
+            "us-gaap:IncomeTaxExpenseBenefit", "us-gaap:IncomeTaxesPaidNet"}:
+        raise ValuationSnapshotConflict("GAAP total tax cannot masquerade as normalised core operating tax")
     aggregation = ROLE_AGGREGATION[role]
     # Every role here is money, and the market capitalisation it will be
     # divided into is in the price's currency. A filer reporting in thousands,
@@ -667,6 +700,8 @@ def _metric_value(
     metric = definition["metric"]
     if metric == "trailing_pe":
         denominator = totals["net_income"]
+    elif metric == "core_pe":
+        denominator = totals["operating_income"] - totals["core_tax_expense"]
     elif metric == "price_to_sales":
         denominator = totals["revenue"]
     elif metric == "ev_to_ebitda":
@@ -723,22 +758,14 @@ def compute_metrics(
                 chosen = window["_totals"]
         return chosen
 
-    def shares_for(bar_date: str) -> Decimal:
-        """The share count that was known on that day, or today's if none is.
-
-        Falling back to today's count is a real distortion for a company that
-        has been retiring stock -- its past market caps come out too large and
-        its past multiples too high. It is done anyway because the alternative
-        is no history at all, and it is labelled rather than absorbed.
-        """
-
-        chosen = shares
+    def shares_for(bar_date: str) -> Decimal | None:
+        chosen = None
         for observed_on, count in dated_shares:
             if observed_on <= bar_date:
                 chosen = count
         return chosen
 
-    shares_basis = "dated_shares" if dated_shares else "current_shares_applied_to_history"
+    shares_basis = "dated_shares" if dated_shares else "historical_shares_not_collected"
 
     # Every window dated after the bar being valued means nothing was filed
     # yet. Valuing today's price against next quarter's filing would be the
@@ -750,6 +777,7 @@ def compute_metrics(
         current_totals = {}
 
     metrics: list[dict[str, Any]] = []
+    sample_windows: dict[str, dict[str, Any]] = {}
     for definition in METRIC_DEFINITIONS:
         roles = definition["roles"]
         missing = [role for role in roles if role not in current_totals]
@@ -762,13 +790,9 @@ def compute_metrics(
                 "status": "unavailable",
                 "value": None,
                 "reason": (
-                    "no filing was on hand as of "
-                    f"{as_of}; the earliest fundamentals held are dated "
-                    f"{windows[0]['as_of']}"
+                    _reason_text("no_filing_yet", as_of=as_of, earliest=windows[0]["as_of"])
                     if no_window_yet else
-                    "the filings held carry no "
-                    + ", ".join(role.replace("_", " ") for role in missing)
-                    + " for this company"
+                    _reason_text("missing_lines", lines=_missing_lines(missing))
                 ),
                 "inputs": [],
                 "percentile": None,
@@ -789,6 +813,7 @@ def compute_metrics(
             })
             continue
         sample: list[Decimal] = []
+        sample_dates: list[str] = []
         # Which windows the sample actually rested on, not how many were
         # supplied. Handing in eight quarters and then valuing a history that
         # only reaches back into the newest of them is a price-driven
@@ -798,13 +823,20 @@ def compute_metrics(
             totals = window_for(bar["date"])
             if totals is None or any(role not in totals for role in roles):
                 continue
+            historical_count = shares_for(bar["date"])
+            if historical_count is None:
+                continue
             for window in windows:
                 if window["_totals"] is totals:
                     windows_used.add(window["as_of"])
-            bar_cap = Decimal(bar["close"]) * shares_for(bar["date"])
+            bar_cap = Decimal(bar["close"]) * historical_count
             historical, _reason = _metric_value(definition, bar_cap, totals)
             if historical is not None:
                 sample.append(historical)
+                sample_dates.append(bar["date"])
+        sample_windows[definition["metric"]] = {"start": min(sample_dates, default=None),
+                                               "end": max(sample_dates, default=None),
+                                               "sample_size": len(sample)}
         percentile: dict[str, Any] | None
         if len(sample) < MIN_PERCENTILE_SAMPLE:
             percentile = {
@@ -814,10 +846,8 @@ def compute_metrics(
                 "basis": None,
                 "shares_basis": None,
                 "windows_used": len(windows_used),
-                "reason": (
-                    f"{len(sample)} bars of history behind this metric; a "
-                    f"percentile needs at least {MIN_PERCENTILE_SAMPLE}"
-                ),
+                "reason": _reason_text("percentile_sample", n=len(sample),
+                                  min=MIN_PERCENTILE_SAMPLE),
             }
         else:
             percentile = {
@@ -847,6 +877,18 @@ def compute_metrics(
             "inputs": list(roles),
             "percentile": percentile,
         })
+    for metric in metrics:
+        if metric["metric"] in {"trailing_pe", "core_pe"}:
+            metric["earnings_basis"] = "gaap" if metric["metric"] == "trailing_pe" else "core_operating_after_tax"
+            metric["core_method"] = None if metric["metric"] == "trailing_pe" else "operating_income_minus_disclosed_core_tax"
+            metric["tax_basis"] = None if metric["metric"] == "trailing_pe" else "explicit_core_tax_authority_required"
+            metric["limitations"] = [] if metric["metric"] == "trailing_pe" else [
+                "核心营业税后盈利不含融资成本，不能与GAAP普通股EPS视为严格同口径",
+                "GAAP有效税率未经一次性税项审查不用于核心税额"]
+            metric["sample_window"] = {**sample_windows.get(metric["metric"], {"start": None, "end": None, "sample_size": 0}),
+                                       "shares_basis": shares_basis}
+
+    core_operating = current_totals.get("operating_income")
     # Enterprise value sits in the basis rather than in ``metrics`` because it
     # is not a multiple: it is the other side of the market capitalisation,
     # and a reader who wants EV/EBITDA already has it below. It is stated
@@ -862,16 +904,13 @@ def compute_metrics(
         enterprise_value_reason = None
     else:
         enterprise_value = None
-        enterprise_value_reason = (
-            "the filings held carry no "
-            + " and no ".join(
-                role.replace("_", " ") for role in
-                ("total_debt", "cash_and_equivalents")
-                if role not in current_totals)
-            + ", so this company's enterprise value is not something we know"
-        )
+        enterprise_value_reason = _reason_text(
+            "enterprise_value_missing", lines=_missing_lines([
+                role for role in ("total_debt", "cash_and_equivalents")
+                if role not in current_totals]))
     basis = {
         "market_cap": _quantise(market_cap, "0.01"),
+        "core_operating_income": None if core_operating is None else _format(core_operating),
         "market_cap_formula": "close * shares_outstanding",
         "enterprise_value": enterprise_value,
         "enterprise_value_formula": (

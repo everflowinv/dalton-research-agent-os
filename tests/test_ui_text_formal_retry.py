@@ -212,12 +212,12 @@ class RedraftGenerationTests(unittest.TestCase):
         self.assertEqual(self.run_one(), first)
         self.assertEqual(len(self.calls), 4)
         ids = list(self.request_ids)
-        redrafted = prep.run_chunk((0, 0, SOURCE), **self.args, redraft_generation=1)[2]
-        self.assertEqual(len(self.calls), 8)
-        self.assertEqual(self.calls[4:], self.calls[:4])
-        # Every paid call is a new request, so no work order is replayed.
+        from dalton_core.research_publication_limits import PublicationParked
+        with self.assertRaisesRegex(PublicationParked, "publication_call_24h_limit"):
+            prep.run_chunk((0, 0, SOURCE), **self.args, redraft_generation=1)
+        self.assertEqual(len(self.calls), 6)
+        # Redraft cannot bypass the artifact-wide six-call allowance.
         self.assertFalse(set(self.request_ids[4:]) & set(ids))
-        self.assertNotEqual(redrafted["pipeline_identity"], first["pipeline_identity"])
         self.assertEqual(prep.redraft_identity("abc", 0), "abc")
         with self.assertRaises(ValueError):
             prep.redraft_identity("abc", -1)

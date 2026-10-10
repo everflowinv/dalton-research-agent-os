@@ -858,9 +858,9 @@ def repair_group_numbers(
 # The extra rules a rubric repair is reminded of.  Deliberately short and
 # deliberately only about what the Constitution's criteria actually refuse.
 _RUBRIC_REMINDER_LINES = (
-    "A gate answer is a file, not a call: no buy, sell, hold, overweight, "
-    "underweight, target price or valuation verdict, in any language. Say what "
-    "the evidence shows and what would falsify it, and stop there.",
+    "A view, a valuation judgement or a recommendation is allowed (owner decision "
+    "2026-10-09) when the cited rows carry its premises; label it as our judgement "
+    "and say what would falsify it.",
     "Every digit in a sentence must appear, verbatim, in one of the rows that "
     "sentence cites. A figure you cannot cite is a figure you must remove.",
     "Do not add, drop or re-decide an answer. Change only the sentences the "
@@ -1780,6 +1780,21 @@ def run_gate(
             # current version does not is not a version, and saying so here costs
             # nothing; assembling one and having the authority refuse it would leave
             # the summary describing a record nobody can read.
+            # Batch D / ap: q7, q9 and q10 have answer standards, and a
+            # ``high`` confidence needs a decomposition.  Applied after the
+            # verifier passed the drafted text and before anything is
+            # assembled: an answer that misses its standard is published as
+            # an honest unknown that names the MaterialRequest opened for it.
+            from .deep_insight_gate_standards import (
+                apply_answer_standards,
+                model_invariants_passed,
+            )
+
+            answers, standards_report = apply_answer_standards(
+                answers, company_ref=chosen,
+                model_invariants_passed=model_invariants_passed(store.connection, chosen),
+                state_dir=state_dir)
+            summary["answer_standards"] = standards_report
             fresh = fresh_evidence(answers, prior)
             if not fresh and review is not None:
                 # D2: a reviewer's return is the new information.  The rows are the

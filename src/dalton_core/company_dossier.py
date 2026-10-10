@@ -1263,9 +1263,13 @@ def dossier_artefact(
 # the Constitution's output_rubric, as a pre-publish structural check
 # ---------------------------------------------------------------------------
 
-# Words that turn a file into a call.  Deliberately short and deliberately
-# unambiguous: a dossier says what is true about a company, and the decision
-# about what to do with it is a Thesis, admitted by a person (ADR-0001).
+# Words that turn a file into a call.  Batch D (owner decision 2026-10-09):
+# views, watch prices and reasons are *allowed* -- the dossier may say what we
+# think a company is worth.  What is still refused is a call stated as a fact:
+# a sentence carrying one of these words must be labelled as our judgement
+# (我们认为 / 我们的观察价 / we think ...) or be an attributed, source-supported
+# historical target change.  An unlabelled verdict reads as something the
+# company or the market said, and that is the defect left to catch.
 _CONCLUSION_PATTERNS = (
     "买入", "卖出", "增持", "减持", "目标价", "低估", "高估",
     "should buy", "should sell", "price target", "undervalued", "overvalued",
@@ -1290,6 +1294,14 @@ _TARGET_SOURCE_ACTIONS = {
 _TARGET_SOURCE_ACTOR = r"\b(?:analysts?|brokers?|investment bank)\b|分析师|券商|卖方"
 _TARGET_NEGATION = r"\b(?:no|not|never|without|denied)\b|未|没有|并非|否认|不曾|不会"
 _TARGET_AUTHOR_VIEW = r"我们|本基金|本系统|建议|预计|预测|\b(?:we|our|should|expect|recommend)\b"
+# A sentence that labels its verdict as ours.  Narrower than the author-view
+# words above: "建议" or "should" alone is a call with no owner.
+_OUR_VIEW_LABEL = (r"我们(?:认为|判断|的观点|的看法|的观察价|的估计|预计|估计|看多|看空|给出|的目标价|的判断)"
+                   r"|本基金认为|\b(?:we|our)\s+(?:think|believe|view|estimate|expect|price target|watch price)\b")
+
+
+def _conclusion_sentences(text: str) -> list[str]:
+    return [part for part in re.split(r"(?<=[。！？；!?;])|\n|(?<=\.)\s", text or "") if part.strip()]
 
 
 def _source_supports_target_change(text: str, direction: str) -> bool:
@@ -1311,7 +1323,9 @@ def _source_supports_target_change(text: str, direction: str) -> bool:
 def output_rubric_contract_fingerprint() -> str:
     """Version only the deterministic admission check, not published bodies."""
     return content_hash({
-        "version": "company-dossier-output-rubric:0.2",
+        "version": "company-dossier-output-rubric:0.3",
+        # 0.3 (batch D): views allowed; only an unlabelled verdict is a finding.
+        "our_view_label": _OUR_VIEW_LABEL,
         "conclusion_patterns": _CONCLUSION_PATTERNS,
         "target_changes": _TARGET_CHANGE_PATTERNS,
         "target_sources": _TARGET_SOURCE_ACTIONS,
@@ -1346,6 +1360,89 @@ def _conclusion_check_body(block: Mapping[str, Any]) -> str:
             checked_rows.append({**sentence, "text": text})
         checked_slots.append({**slot, "sentences": checked_rows})
     return section_body({**block, "slots": checked_slots})
+
+
+# ---------------------------------------------------------------------------
+# Batch D: reasoning lint, substance and gap classes for freshly drafted parts
+# ---------------------------------------------------------------------------
+
+#: How a dossier gap names its class in prose (the stored record keeps gaps as
+#: strings, so the class is read off the wording the drafter is asked for).
+GAP_CLASS_PATTERNS: Mapping[str, str] = MappingProxyType({
+    "company_not_disclosed": r"公司未披露|公司不披露|未披露|不披露|company_not_disclosed|not disclosed",
+    "not_acquired": r"未取得|系统没取到|没有取得|尚未取得|not_acquired|not acquired",
+})
+
+
+def classify_gap(text: str) -> str:
+    """``company_not_disclosed``, ``not_acquired`` or ``unclassified``."""
+
+    for kind, pattern in GAP_CLASS_PATTERNS.items():
+        if re.search(pattern, text or "", re.IGNORECASE):
+            return kind
+    return "unclassified"
+
+
+def gap_classes(record: Mapping[str, Any], *, units: Sequence[str] | None = None) -> dict[str, Any]:
+    """Every gap of the named parts, classified; not_acquired ones without a
+    MaterialRequest ref are listed as requests still to open."""
+
+    from .product_contract import MATERIAL_REQUEST_REF_RE
+
+    wanted = None if units is None else set(units)
+    out: dict[str, Any] = {"company_not_disclosed": 0, "not_acquired": 0, "unclassified": 0,
+                           "requests_needed": []}
+    for part in _artefact_sections(record):
+        if wanted is not None and part["title"] not in wanted:
+            continue
+        for gap in part.get("gaps") or []:
+            kind = classify_gap(str(gap))
+            out[kind] += 1
+            if kind == "not_acquired" and not MATERIAL_REQUEST_REF_RE.search(str(gap)):
+                out["requests_needed"].append({"section": part["title"], "need": str(gap)[:300]})
+    return out
+
+
+def batch_d_findings(record: Mapping[str, Any], *, units: Sequence[str]) -> list[dict[str, Any]]:
+    """Repairable findings over the parts drafted on this run.
+
+    The reasoning lint (batch as) and the substance rule (batch ap 1): a part
+    that was drafted but reads as a heading or a placeholder is a defect of the
+    draft.  Only parts drafted now are read -- a carried-forward part has no
+    call behind it to repair, and refusing on it would freeze the chain.
+    """
+
+    from .product_contract import placeholder_findings
+    from .product_substance import section_substance
+    from .research_reasoning_lint import lint_text
+
+    wanted = set(units)
+    findings: list[dict[str, Any]] = []
+    for part in _artefact_sections(record):
+        if part["title"] not in wanted:
+            continue
+        body = part["body"]
+        for item in lint_text(body, section=part["title"]):
+            findings.append({"code": "reasoning_lint", "section": part["title"],
+                             "rule": item["rule"], "excerpt": item["excerpt"][:300]})
+        for item in placeholder_findings(body):
+            findings.append({"code": "indirect_placeholder", "section": part["title"],
+                             "matched": item["matched"][:120]})
+        if body.strip():
+            verdict = section_substance({"title": part["title"], "body": body,
+                                         "gaps": part.get("gaps") or []})
+            if verdict["status"] in ("heading_only", "placeholder_only"):
+                findings.append({"code": "section_without_substance", "section": part["title"],
+                                 "detail": verdict["reason"]})
+    return findings
+
+
+def failed_substance_sections(record: Mapping[str, Any]) -> list[dict[str, Any]]:
+    """Parts of the whole file that fail on substance (empty, gap-only ...)."""
+
+    from .product_substance import failed_sections
+
+    return failed_sections(_artefact_sections(record))
 
 
 def output_rubric_findings(
@@ -1411,12 +1508,16 @@ def output_rubric_findings(
             for part in parts:
                 checked_body = (_conclusion_check_body(blocks[part["title"]])
                                 if part["title"] in blocks else part["body"])
-                for pattern in _CONCLUSION_PATTERNS:
-                    if pattern in checked_body.casefold():
-                        findings.append({
-                            "code": "investment_conclusion", "criterion_index": index,
-                            "section": part["title"], "phrase": pattern,
-                        })
+                for sentence in _conclusion_sentences(checked_body):
+                    if re.search(_OUR_VIEW_LABEL, sentence, re.IGNORECASE):
+                        continue
+                    for pattern in _CONCLUSION_PATTERNS:
+                        if pattern in sentence.casefold():
+                            findings.append({
+                                "code": "investment_conclusion", "criterion_index": index,
+                                "section": part["title"], "phrase": pattern,
+                                "detail": "观点允许，但要写成我们的判断（我们认为…）",
+                            })
     return findings
 
 
@@ -1744,6 +1845,11 @@ __all__ = [
     "MAX_SIGNALS",
     "OUTPUT_RUBRIC_CHECKS",
     "REPAIR_FINDING_KINDS",
+    "GAP_CLASS_PATTERNS",
+    "batch_d_findings",
+    "classify_gap",
+    "failed_substance_sections",
+    "gap_classes",
     "REF_KINDS",
     "SCHEMA_VERSION",
     "SECTIONS",

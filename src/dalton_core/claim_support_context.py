@@ -22,7 +22,8 @@ recheck) now gives the verifier with each statement:
 * ``speaker_at`` -- who is speaking at the span, from a transcript's own
   speaker label (``发言人Ravi Kumar：``, or a line-labelled transcript's
   ``Ravi Kumar : ``), never inferred from prose, and nobody when the label is
-  an anonymous diarisation number (``发言人3：``);
+  an anonymous diarisation number (``发言人3：``); in an expert interview of
+  ``Q:``/``A:`` turns (Guidepoint), the interviewer or the expert;
 * ``document_facts`` -- the title, date and publishing house the Core already
   holds for the document (``document_provenance_records``; a sales note's
   subject, send date and sending house off the raw ``get_note`` header, the
@@ -65,6 +66,15 @@ _ANONYMOUS_SPEAKER_RE = re.compile(r"[0-9０-９]+")
 #: is read only from a text that is a turn transcript throughout
 #: (``_line_labelled_transcript``).
 _LINE_LABEL_RE = re.compile(r"([A-Z][^\s:：]{0,30}(?: [^\s:：]{1,30}){0,5}) : ")
+#: 2026-09-29: Guidepoint's expert-network excerpts are interview turns,
+#: ``Q: <question>`` and ``A: <answer>``, a turn running on over blank lines
+#: until the next label.  Before, ``speaker_at`` read no speaker there, and the
+#: interviewer's premise ("Since Microsoft's Copilot cannot be widely used
+#: domestically due to compliance issues, ... do you think ...") was checked --
+#: when it was checked at all -- as if anybody might have said it.
+_QA_LABEL_RE = re.compile(r"(?m)^[ \t]*(Q|A|问|答)[ \t]*[:：]")
+QA_SPEAKERS = {"Q": "interviewer (asking the question)", "问": "interviewer (asking the question)",
+               "A": "expert (answering)", "答": "expert (answering)"}
 _SPEAKER_LOOKBACK = 200_000
 MAX_FACT_CHARS = 200
 FACT_KEYS = ("title", "date", "house", "period", "speaker")
@@ -139,6 +149,27 @@ def _line_labelled_transcript(text: str) -> bool:
     return labelled >= 2
 
 
+@lru_cache(maxsize=16)
+def _qa_interview(text: str) -> bool:
+    """Whether ``text`` is an interview of ``Q:`` and ``A:`` turns (both present)."""
+
+    kinds = {QA_SPEAKERS[match.group(1)] for match in _QA_LABEL_RE.finditer(text)}
+    return len(kinds) == 2
+
+
+def _qa_speaker(text: str, position: int) -> str | None:
+    """The interview turn ``position`` is in: the last ``Q:``/``A:`` label at or before it."""
+
+    if not _qa_interview(text):
+        return None
+    found = None
+    for match in _QA_LABEL_RE.finditer(text, 0, min(len(text), position + 4)):
+        if match.start() > position:
+            break
+        found = match.group(1)
+    return None if found is None else QA_SPEAKERS[found]
+
+
 def speaker_at(text: str, position: int) -> str | None:
     """The transcript speaker whose turn ``position`` is in, or None.
 
@@ -160,7 +191,12 @@ def speaker_at(text: str, position: int) -> str | None:
                 return None
             return name[:MAX_FACT_CHARS] or None
         index = text.rfind("发言人", floor, index)
-    if "发言人" in text or not _line_labelled_transcript(text):
+    if "发言人" in text:
+        return None
+    qa = _qa_speaker(text, position)
+    if qa is not None:
+        return qa
+    if not _line_labelled_transcript(text):
         return None
     # The line ``position`` is in (a position on a line break belongs to the
     # line it ends); its label is the turn's.
@@ -287,6 +323,7 @@ def facts_digest(facts: Mapping[str, Any] | None) -> str:
 
 __all__ = [
     "FACT_KEYS",
+    "QA_SPEAKERS",
     "cited_passage",
     "document_facts",
     "facts_digest",

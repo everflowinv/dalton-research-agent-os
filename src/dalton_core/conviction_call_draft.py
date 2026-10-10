@@ -32,6 +32,7 @@ from .call_budget import default_call_budget
 from .final_text_contract import final_text_instructions
 
 import hashlib
+import json
 from typing import Any, Callable, Mapping, Sequence
 
 from .cockpit_model import (
@@ -965,7 +966,9 @@ def change_evidence(
 
     from .conviction_call import cited_refs
 
-    fresh = cited_refs(call)
+    # A v2 call (ADR-0013) carries scenarios; read its refs with the v2 reader.
+    fresh = (cited_refs({**call, "schema_version": "0.2"}) if "scenarios" in call
+             else cited_refs(call))
     if previous is not None:
         fresh = fresh - cited_refs(previous)
     return sorted(fresh)

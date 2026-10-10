@@ -228,7 +228,11 @@ class ArithmeticTests(ValuationLaneHarness):
         self.assertEqual(self.by_metric["ev_to_ebitda"]["value"], "4.4828")
         self.assertEqual(self.by_metric["fcf_yield"]["value"], "0.16")
         for item in self.by_metric.values():
-            self.assertEqual(item["status"], "available", item)
+            if item["metric"] == "core_pe":
+                self.assertEqual(item["status"], "unavailable")
+                self.assertEqual(item["tax_basis"], "explicit_core_tax_authority_required")
+            else:
+                self.assertEqual(item["status"], "available", item)
 
     def test_the_market_cap_and_the_enterprise_value_are_both_stated(self):
         self.assertEqual(self.snapshot["basis"]["market_cap"], "5000")
@@ -293,11 +297,9 @@ class ArithmeticTests(ValuationLaneHarness):
 
     def test_the_percentile_says_what_it_rests_on(self):
         percentile = self.by_metric["trailing_pe"]["percentile"]
-        self.assertEqual(percentile["sample_size"], BARS)
-        self.assertEqual(percentile["value"], "100")
-        self.assertEqual(percentile["basis"], "price_only")
-        self.assertEqual(percentile["shares_basis"],
-                         "current_shares_applied_to_history")
+        self.assertEqual(percentile["sample_size"], 0)
+        self.assertIsNone(percentile["value"])
+        self.assertEqual(self.snapshot["basis"]["shares_basis"], "historical_shares_not_collected")
 
 
 class IdempotenceTests(ValuationLaneHarness):
@@ -346,7 +348,7 @@ class MissingInputTests(ValuationLaneHarness):
         self.assertEqual(by_metric["trailing_pe"]["value"], "5")
         self.assertEqual(by_metric["ev_to_ebitda"]["status"], "unavailable")
         self.assertIsNone(snapshot["basis"]["enterprise_value"])
-        self.assertIn("total debt", snapshot["basis"]["enterprise_value_reason"])
+        self.assertIn("有息债务合计", snapshot["basis"]["enterprise_value_reason"])
         coverage = self.coverage(snapshot)
         self.assertEqual(coverage["total_debt"]["status"], "missing")
         self.assertIn("数据源缺失", coverage["total_debt"]["detail"])
@@ -481,7 +483,7 @@ class LaneTests(ValuationLaneHarness):
         # Second tick inside the scan floor: answered from the signature alone.
         second = lane.dispatch_once()
         self.assertEqual(second["status"], "idle")
-        self.assertIn("没有新版本", second["reason"])
+        self.assertIn("都没有更新", second["reason"])
 
     def test_a_mission_without_the_grant_is_ungranted_not_broken(self):
         self.publish_prices()

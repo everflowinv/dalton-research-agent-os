@@ -59,7 +59,7 @@ GOVERNANCE = "connector-governance:yfinance-daily-prices:v1"
 PM_QUESTIONS: tuple[tuple[str, str], ...] = (
     ("你怎么看 ACN 现在的位置？", "view"),
     ("ACN 的估值现在贵不贵？", "valuation"),
-    ("EPAM 下个季度的收入增速你预测是多少？", "outlook"),
+    ("EPAM 下个季度的收入增速你预测是多少？", "forecast"),
     ("ACN 上季度的新签订单是多少？", "fact"),
     ("市场对 IT services 的需求分歧在哪？", "debate"),
     ("ACN 下次财报是什么时候？", "catalyst"),
@@ -129,8 +129,10 @@ def claims(count: int = 6) -> list[dict]:
     return rows
 
 
-def context_for(question: str, core, *, claim_rows=None, theses=(), budget=90_000,
+def context_for(question: str, core, *, claim_rows=None, theses=(), budget=60_000,
                 consensus_reader=None) -> dict:
+    # Batch G: no state directory here, so no evidence index and no numbers
+    # pack -- the Core-only blocks and the Claims fallback are what is tested.
     return ask_context.build_context(
         core, question=question, mission=mission(), members=members(),
         claims=claims() if claim_rows is None else claim_rows, theses=theses,
@@ -192,12 +194,13 @@ class ContextOnAnOldCoreTests(unittest.TestCase):
     def test_every_absent_block_says_which_kind_of_absence_it_is(self):
         context = context_for("怎么看 ACN 的估值", empty_core())
         reasons = {item["block"]: item["reason"] for item in context["missing"]}
-        for block in ("dossier", "debates", "forecast", "valuation", "market_price",
-                      "catalyst", "events", "judgements", "reflections", "journal"):
+        for block in ("move", "events"):
             self.assertEqual(reasons[block], "no_authority_on_this_core", block)
-        # Not the same sentence: the consensus authority is on a branch that
-        # has not merged, and "we never built it" is not "this Core lacks it".
-        self.assertEqual(reasons["consensus"], "reader_not_available")
+        # No evidence index is its own sentence: the environment has not built
+        # one, which is not "nothing was written about this company".
+        self.assertEqual(reasons["passages"], "no_index")
+        self.assertEqual(reasons["numbers"], "no_record_for_this_company")
+        self.assertEqual(reasons["house_view"], "no_record_for_this_company")
 
     def test_the_claims_still_arrive_and_are_the_only_block_that_does(self):
         context = context_for("ACN 上季度的收入是多少", empty_core())
@@ -257,13 +260,17 @@ class ContextOnAnOldCoreTests(unittest.TestCase):
     def test_a_question_naming_nobody_marks_the_per_company_blocks_as_such(self):
         core = empty_core()
         core.executescript(
-            "CREATE TABLE company_dossier_versions (company_ref TEXT, version_number INT,"
-            " record_json TEXT);")
+            "CREATE TABLE research_events (event_id TEXT, company_ref TEXT, kind TEXT, occurred_at TEXT,"
+            " evidence_tier TEXT, record_json TEXT);"
+            "CREATE TABLE market_price_series_versions (version_id TEXT, series_ref TEXT,"
+            " version_number INT, company_ref TEXT, ticker TEXT, record_json TEXT);")
         context = context_for("行业现在处在周期什么位置", core)
         reasons = {item["block"]: item["reason"] for item in context["missing"]}
-        # The table is here and the question named nobody; those are different
-        # absences and the refresh decision is made from the difference.
-        self.assertEqual(reasons["dossier"], "no_record_for_this_company")
+        # The tables are here and the question named nobody; those are
+        # different absences from "this Core has no such authority".
+        self.assertEqual(reasons["events"], "no_company_resolved")
+        self.assertEqual(reasons["move"], "no_company_resolved")
+        self.assertEqual(reasons["numbers"], "no_company_resolved")
 
 
 class ContextOnAFullCoreTests(unittest.TestCase):
@@ -420,9 +427,9 @@ class ContextOnAFullCoreTests(unittest.TestCase):
     def test_a_view_question_reaches_every_authority_on_this_core(self):
         context = self.context("你怎么看 ACN？")
         available = {b["block"] for b in context["blocks"] if b["available"]}
-        for block in ("claims", "dossier", "debates", "forecast", "valuation",
-                      "market_price", "catalyst", "events", "judgements",
-                      "reflections", "journal"):
+        # Batch G: the events (with their titles), our own view (the latest
+        # judgement) and -- with no evidence index -- the Claims fallback.
+        for block in ("claims", "events", "house_view"):
             self.assertIn(block, available, block)
         self.assertTrue(context["wants_market_vs_us"])
 
@@ -435,46 +442,25 @@ class ContextOnAFullCoreTests(unittest.TestCase):
                 self.assertTrue(row["ref"], row)
                 self.assertTrue(row["statement"])
         letters = {row["tag"][0] for row in context["shown"]}
-        self.assertLessEqual({"C", "D", "B", "V", "P"}, letters)
+        self.assertLessEqual({"C", "E", "O"}, letters)
 
-    def test_the_dossier_block_shows_the_sections_that_were_drafted(self):
+    def test_our_own_judgement_is_shown_as_ours_and_never_as_evidence(self):
         context = self.context("你怎么看 ACN？")
-        dossier = next(b for b in context["blocks"] if b["block"] == "dossier")
-        aspects = {row["detail"]["aspect"] for row in dossier["rows"]}
-        self.assertEqual(aspects, {"business_model", "competitive_position"})
-        self.assertIn("GCC", " ".join(row["text"] for row in dossier["rows"]))
+        ours = next(b for b in context["blocks"] if b["block"] == "house_view")
+        self.assertIn("我们的看法", ours["label"])
+        self.assertTrue(any("我们的事件研判" in row["text"] for row in ours["rows"]))
+        self.assertFalse(any(row["evidence"] for row in context["shown"] if row["block"] == "house_view"))
 
-    def test_the_debate_block_says_where_the_market_is_and_where_we_are(self):
-        context = self.context("市场在 ACN 上的分歧是什么？")
-        debates = next(b for b in context["blocks"] if b["block"] == "debates")
-        row = debates["rows"][0]
-        self.assertEqual(row["detail"]["market_lean"], "bear")
-        self.assertEqual(row["detail"]["our_side"], "bull")
+    def test_an_event_is_rendered_with_its_document_title(self):
+        context = self.context("ACN 最近发生了什么？")
+        events = next(b for b in context["blocks"] if b["block"] == "events")
+        self.assertIn("TD 把 ACN 上调到买入", " ".join(row["text"] for row in events["rows"]))
 
-    def test_the_valuation_block_carries_the_percentile_basis_with_the_number(self):
-        context = self.context("ACN 的估值贵不贵？")
-        valuation = next(b for b in context["blocks"] if b["block"] == "valuation")
-        self.assertTrue(valuation["rows"])
-        for row in valuation["rows"]:
-            if row["detail"]["status"] == "available":
-                self.assertIn("percentile_basis", row["detail"])
-
-    def test_the_question_kind_promotes_its_blocks_to_the_front_of_the_budget(self):
-        # A budget that fits only a little: the valuation question keeps its
-        # valuation block and drops the low-priority ones, and a plain factual
-        # question spends the same budget differently.
-        valuation = self.context("ACN 的估值贵不贵？", budget=2_400)
-        kept = {b["block"] for b in valuation["blocks"] if b["available"]}
-        self.assertIn("valuation", kept)
-        dropped = {item["block"] for item in valuation["missing"]
-                   if item["reason"] == "dropped_for_budget"}
-        self.assertTrue(dropped)
-
-    def test_the_claims_keep_their_floor_however_much_else_competes(self):
+    def test_a_tight_budget_trims_the_fallback_claims_not_the_events_or_our_view(self):
         context = self.context("你怎么看 ACN？", budget=2_400)
-        claims_block = next(b for b in context["blocks"] if b["block"] == "claims")
-        self.assertTrue(claims_block["available"])
-        self.assertGreater(context["claims_considered"], 0)
+        kept = {b["block"] for b in context["blocks"] if b["available"]}
+        self.assertTrue({"events", "house_view"} <= kept)
+        self.assertLessEqual(context["spent_chars"], 2_400 + 1_200)
 
     def test_the_same_question_on_the_same_core_builds_the_same_context(self):
         first = self.context("你怎么看 ACN？")
@@ -488,19 +474,13 @@ class ContextOnAFullCoreTests(unittest.TestCase):
         self.assertLessEqual(context["spent_chars"], 12_000)
         self.assertLessEqual(len(ask_context.render_context(context)), 14_000)
 
-    def test_a_consensus_reader_that_exists_fills_the_block_it_was_missing(self):
-        def reader(company_ref):
-            if company_ref != ACN:
-                return None
-            return {"id": "consensus-version:1", "as_of": "2026-09-05",
-                    "source": "yfinance",
-                    "estimates": [{"metric": "revenue", "period": "2026Q4",
-                                   "value": "18900", "unit": "USDm", "contributors": 14}]}
-
-        context = self.context("ACN 下个季度收入预测是多少", consensus_reader=reader)
-        consensus = next(b for b in context["blocks"] if b["block"] == "consensus")
-        self.assertTrue(consensus["available"])
-        self.assertIn("一致预期", consensus["rows"][0]["text"])
+    def test_without_a_state_directory_the_numbers_block_says_so(self):
+        # Batch G: consensus arrives through the material pack's numbers
+        # section (tests/test_ask_research_qa.py); the old injected reader is
+        # accepted and ignored.
+        context = self.context("ACN 下个季度收入预测是多少", consensus_reader=lambda ref: None)
+        numbers = next(b for b in context["blocks"] if b["block"] == "numbers")
+        self.assertFalse(numbers["available"])
 
 
 class AnswerShapeTests(unittest.TestCase):
@@ -565,8 +545,8 @@ class AnswerShapeTests(unittest.TestCase):
              "source": "yfinance"}]), context=self.context())
         self.assertEqual(bad["unknowns"], [])
         self.assertIn("unknowns_typed", bad["verification"]["failed_checks"])
-        self.assertEqual(bad["verification"]["findings"][0]["code"],
-                         "source_cannot_answer_content_kind")
+        check = next(c for c in bad["verification"]["checks"] if c["check"] == "unknowns_typed")
+        self.assertEqual(check["findings"][0]["code"], "source_cannot_answer_content_kind")
 
     def test_an_untyped_gap_sentence_no_longer_counts_as_an_unknown(self):
         answer = ask_answer.parse_answer(self.reply(unknowns=["需要更多数据"]),
@@ -659,7 +639,7 @@ class AnswerShapeTests(unittest.TestCase):
         answer = ask_answer.parse_answer(
             self.reply(sentences=[{"text": "收入增长了 5.6%。", "refs": []}]),
             context=self.context())
-        self.assertIn("numeric_sentences_cite", answer["verification"]["failed_checks"])
+        self.assertIn("numbers_sourced", answer["verification"]["failed_checks"])
 
     def test_a_refresh_suggestion_is_checked_against_the_capability_map(self):
         good = ask_answer.parse_answer(self.reply(refresh_suggested={
@@ -913,7 +893,8 @@ class RefreshRunTests(unittest.TestCase):
         self.assertEqual([h["document_ref"] for h in outcome["headers"]],
                          ["alphaengine-doc:new", "alphaengine-doc:old"])
         self.assertEqual(outcome["headers"][0]["title"], "ACN Q4 preview")
-        self.assertIn("正文还没有被读", outcome["note"])
+        # Batch G: a title is never shown as contents; the answer retrieves again.
+        self.assertIn("进入全文索引后重新检索", outcome["note"])
         for header in outcome["headers"]:
             self.assertNotIn("body", header)
             self.assertNotIn("text", header)
@@ -946,22 +927,11 @@ class RefreshRunTests(unittest.TestCase):
         self.assertEqual(outcome["status"], "pending")
         self.assertIn("还没落下发现记录", outcome["reason"])
 
-    def test_the_second_pass_sees_the_headers_as_their_own_tagged_block(self):
-        headers = [{"document_ref": "alphaengine-doc:1", "title": "ACN Q4 preview",
-                    "host": "alphaengine", "source_ref": "source:alphaengine",
-                    "discovered_at": "2026-09-09T00:00:00+00:00"}]
-        again = ask_refresh.with_headers(self.context, headers)
-        self.assertTrue(again["refreshed"])
-        block = again["blocks"][-1]
-        self.assertEqual(block["block"], "refreshed")
-        self.assertEqual(block["rows"][0]["tag"], "H1")
-        self.assertIn("H1", {row["tag"] for row in again["shown"]})
-        # A context that gained a block is a different context, and says so.
-        self.assertNotEqual(again["context_hash"], self.context["context_hash"])
-        self.assertEqual(again["context_hash"], ask_context.context_identity(again))
-        prompt = ask_answer.build_prompt(again, mission=mission())
-        self.assertIn("ACN Q4 preview", prompt)
-        self.assertIn("只有标题", prompt)
+    def test_the_second_pass_is_a_retrieval_and_only_new_passages_justify_it(self):
+        # Batch G replaced the headers-only second pass: new material is
+        # measured in passages the first answer did not read.
+        self.assertFalse(hasattr(ask_refresh, "with_headers"))
+        self.assertEqual(ask_refresh.new_passages(self.context, self.context), [])
 
 
 class KnownSpecsTests(unittest.TestCase):
@@ -1060,19 +1030,19 @@ class DossierVariantReaderTests(unittest.TestCase):
             "sources": [{"ref": "claim-version:a"}],
         }
 
-    def test_a_drafted_variant_view_arrives_as_its_own_row(self):
+    def test_a_drafted_variant_view_arrives_as_our_own_view(self):
+        # Batch G: the dossier's variant view is ours -- it travels in the
+        # 「我们的看法」 block, never as evidence.
         context = context_for("你怎么看 ACN？", self.core(self.variant()))
-        dossier = next(b for b in context["blocks"] if b["block"] == "dossier")
-        rows = {row["detail"]["aspect"]: row for row in dossier["rows"]}
-        self.assertIn("variant_view", rows)
-        self.assertIn("convergence_pathway 的一句话", rows["variant_view"]["text"])
-        self.assertTrue(rows["variant_view"]["detail"]["market_view_available"])
+        ours = next(b for b in context["blocks"] if b["block"] == "house_view")
+        rows = {row["detail"]["kind"]: row for row in ours["rows"]}
+        self.assertIn("dossier_variant", rows)
+        self.assertIn("convergence_pathway 的一句话", rows["dossier_variant"]["text"])
 
     def test_an_unavailable_variant_view_is_simply_not_shown(self):
         context = context_for("你怎么看 ACN？", self.core(self.variant("unavailable")))
-        dossier = next(b for b in context["blocks"] if b["block"] == "dossier")
-        self.assertNotIn("variant_view",
-                         {row["detail"]["aspect"] for row in dossier["rows"]})
+        ours = next(b for b in context["blocks"] if b["block"] == "house_view")
+        self.assertNotIn("dossier_variant", {row["detail"]["kind"] for row in ours["rows"]})
 
 
 GOLDEN = Path(__file__).resolve().parent / "ask_v2_golden"
@@ -1467,7 +1437,11 @@ class CockpitAskV2Tests(unittest.TestCase):
 
     def view_reply(self) -> str:
         return json.dumps({
-            "sentences": [{"text": "我们比市场乐观一档。", "refs": []}],
+            "what_happened": [{"text": "我们比市场乐观一档。", "refs": []}],
+            "market_expected": [{"text": "卖方在下修。", "refs": []}],
+            "our_view": {"house_view": "预算恢复只是被推迟。", "change": "no_change",
+                         "sentences": [{"text": "我们认为预算恢复只是被推迟。", "refs": []}]},
+            "uncertainties": [{"text": "缺卖方最近的评级分布。", "refs": []}],
             "confidence": "medium", "refused": False, "refusal_reason": None,
             "refusal_detail": None,
             "unknowns": [{"what": "缺卖方最近的评级分布",
@@ -1516,7 +1490,13 @@ class CockpitAskV2Tests(unittest.TestCase):
         self.assertEqual(result["market_vs_us"]["convergence_pathway"],
                          "十月的 bookings 会分岔。")
         self.assertIn("市场向我们靠拢的路径", result["answer"])
-        self.assertTrue(result["verification"]["passed"], result["verification"])
+        statuses = {c["check"]: c["status"] for c in result["verification"]["checks"]}
+        self.assertEqual(statuses["market_vs_us_present"], "pass")
+        self.assertEqual(statuses["structure_present"], "pass")
+        # This harness Core holds no evidence for ACN, and the verifier says so.
+        self.assertEqual(statuses["what_happened_cites_evidence"], "fail")
+        self.assertEqual([s["key"] for s in result["sections"]],
+                         ["what_happened", "market_expected", "our_view", "uncertainties"])
         self.assertEqual(result["quality"]["rubric_ref"], "rubric:ask-answer")
 
     def test_the_refresh_is_offered_with_every_reason_it_is_shut(self):
@@ -1556,21 +1536,26 @@ class CockpitAskV2Tests(unittest.TestCase):
         self.assertEqual([h["document_ref"] for h in result["refreshed_with"]],
                          [self.NEW_DOC])
         self.assertTrue(result["refreshed_with"][0]["new"])
-        self.assertIn("正文还没有被读", result["refresh_note"])
-        self.assertIn("补搜到一份新的卖方研报", result["answer"])
-        self.assertEqual([row["tag"] for row in result["citations"]], ["H1"])
+        # Batch G: the found document's body is not in the evidence index yet,
+        # so retrieval found nothing new and the first answer stands -- no
+        # second model call, no headers dressed up as material.
+        self.assertEqual(result["refresh"]["new_passages"], 0)
+        self.assertIn("还没有进入全文索引", result["refresh_note"])
+        self.assertIn("我们比市场乐观一档", result["answer"])
+        self.assertNotIn("补搜到一份新的卖方研报", result["answer"])
+        self.assertEqual(result["citations"], [])
         self.assertFalse(result["refresh"]["available"])
         self.assertEqual(result["refresh"]["reasons"], ["already_refreshed"])
 
-    def test_a_refreshed_context_is_a_different_context_and_says_so(self):
+    def test_a_refresh_that_brings_no_indexed_passage_keeps_the_first_context(self):
         self.grant_research_task()
         self.c.reply = self.view_reply()
         plain = self.ask("你怎么看 ACN？", "h1")
         self.c.reply = self.view_reply()
         refreshed = self.ask("你怎么看 ACN？", "h2", refresh=True)
         self.assertEqual(refreshed["refresh"]["status"], "found")
-        self.assertNotEqual(refreshed["context"]["context_hash"],
-                            plain["context"]["context_hash"])
+        self.assertEqual(refreshed["context"]["context_hash"],
+                         plain["context"]["context_hash"])
 
     def test_a_child_that_has_not_finished_says_pending_and_shows_nothing(self):
         self.grant_research_task()

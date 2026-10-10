@@ -154,11 +154,18 @@ def validate_checker_output(value: Mapping[str, Any], *, sections: list[Mapping[
         raise ResearchLanguageReviewError("language checker suggestions must be a list")
     suggestions = []
     unanchored = []
+    # 2026-10-09: one suggestion of ten carrying both ``body`` and
+    # ``assessment`` failed a whole paid review, and the cached checker reply
+    # replayed the same failure six times.  A malformed suggestion is set aside
+    # on the record like an unanchored one -- unless malformed and unanchored
+    # together are most of the review.
+    malformed = []
     for item in value["suggestions"]:
         required = {"section_index", "quote", "assessment", "suggestion"}
         body_alias = {"section_index", "quote", "body", "suggestion"}
         if not isinstance(item, Mapping):
-            raise ResearchLanguageReviewError("language checker suggestion has an invalid shape")
+            malformed.append(item)
+            continue
         item = dict(item)
         # One reviewed checker transport emitted its language assessment under
         # ``body``. Accept only that exact closed alias; mixed or extra fields
@@ -168,7 +175,8 @@ def validate_checker_output(value: Mapping[str, Any], *, sections: list[Mapping[
                 and isinstance(item.get("body"), str) and item["body"].strip()):
             item["assessment"] = item.pop("body")
         if set(item) - optional != required:
-            raise ResearchLanguageReviewError("language checker suggestion has an invalid shape")
+            malformed.append(item)
+            continue
         index = item["section_index"]
         if isinstance(index, bool) or not isinstance(index, int) or not 0 <= index < len(sections):
             raise ResearchLanguageReviewError("language checker section index is invalid")
@@ -223,11 +231,15 @@ def validate_checker_output(value: Mapping[str, Any], *, sections: list[Mapping[
     # cannot be applied by any reviser, so it is set aside, on the record,
     # instead of failing the whole review -- unless it is most of the review,
     # which means the checker read some other text.
-    if unanchored and len(unanchored) * 2 > len(value["suggestions"]):
+    if malformed and (len(malformed) + len(unanchored)) * 2 > len(value["suggestions"]):
+        raise ResearchLanguageReviewError("language checker suggestion has an invalid shape")
+    if unanchored and (len(unanchored) + len(malformed)) * 2 > len(value["suggestions"]):
         raise ResearchLanguageReviewError("language checker quote is not in its source section")
     result = {"overall": value["overall"].strip(), "suggestions": suggestions}
     if unanchored:
         result["unanchored_suggestions"] = unanchored
+    if malformed:
+        result["malformed_suggestions"] = malformed
     return result
 
 

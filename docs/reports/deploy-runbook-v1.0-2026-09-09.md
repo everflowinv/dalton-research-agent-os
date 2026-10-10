@@ -1,18 +1,20 @@
 # Deploy runbook — main `8717de0` onto the live Core — v1.0 — 2026-09-09
 
+历史技术评审：保留当时结论与局限；当前运行状态见 [项目状态](../PROJECT_STATUS.md)。原始操作证据私有保存。
+
 > **Revised in place 2026-09-10 for main `8717de0`** (deploy rehearsal #2,
-> `docs/reports/ops-deploy-rehearsal-2-v1.0-2026-09-10.md`). The step *order*
+> whose original report is privately archived). The step *order*
 > is unchanged and still measured; what changed is step 2 (a new pre-install
 > check), step 6 (six more records), step 7 (eleven scopes and three
 > checkpoints, and a hand-edit the params script cannot do) and step 11's
 > expected table. The owner-facing companion is
-> `docs/reports/owner-steps-after-deploy-v2.0-2026-09-10.md`, which supersedes
+> the privately archived owner checklist v2.0, which supersedes
 > v1.0 of that document; where the two disagree, the v2.0 checklist is the
 > one that was measured against this commit.
 
 Owner-facing. Every command below was run against a copy of the live state by
 `scripts/rehearse_deploy.py` on 2026-09-10 (see
-`docs/reports/ops-deploy-rehearsal-2-v1.0-2026-09-10.md`), except the four that
+the privately archived deployment rehearsal #2), except the four that
 cannot be rehearsed at all — `launchctl`, `openclaw gateway restart`,
 `dalton-gov` and `dalton-connector-governance approve` — which are marked
 **not rehearsed**.
@@ -246,8 +248,7 @@ of four gives a lane that reads three kinds of filing and reports the fourth
 on by themselves — the watcher's real switch is the declared-pages file, step
 10a.
 
-The full 26-record list, grouped by lane with what each one starts, is §7 of
-`docs/reports/owner-steps-after-deploy-v2.0-2026-09-10.md`.
+The full 26-record list, grouped by lane with what each one starts, is §7 of the privately archived owner checklist v2.0.
 
 **Ordering that matters:** the market-price lane's plist argument is written
 only when the record file is *on disk*, and `install.sh` seeds it in step 3, so
@@ -537,8 +538,8 @@ read one of `idle`, `launched`, `ungranted`, `unconfigured`, `held` or
 `deferred`, and `tick_ledger` should read `recorded`. The rehearsal's table for
 this exact code against a copy of this exact state is in
 `docs/reports/int3-seeds-v1.0-2026-09-09.md`, which is the same script run
-against merged main (`docs/reports/ops-deploy-rehearsal-v1.0-2026-09-09.md` §6
-has the run before INT3's seeds). The lanes that should *change* after the
+against merged main (the original deployment rehearsal, now privately archived,
+§6 records the run before INT3's seeds). The lanes that should *change* after the
 later steps:
 
 | lane | before | after |
@@ -557,7 +558,7 @@ later steps:
 | `conviction_call` | `idle` | stays quiet until P12c publishes a debate map on live; granting the two words is still correct |
 
 The rehearsal's full 34-row table for this commit against a copy of this exact
-state is §1 of `docs/reports/ops-deploy-rehearsal-2-v1.0-2026-09-10.md`.
+state is §1 of the privately archived deployment rehearsal #2.
 
 `launched` means a child was started, not that it did anything: the outcome
 arrives in the next tick's `settled`. A lane reading `launched` whose record is

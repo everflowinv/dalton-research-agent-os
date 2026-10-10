@@ -131,7 +131,19 @@ class ShapeTests(unittest.TestCase):
         self.assertEqual(warning["detail"]["ceiling_source"], "configured")
         self.assertIn("超过上限", warning["title"])
         # And it says what is refused and what is not.
-        self.assertIn("已经落盘对象的读取", warning["why_blocked"])
+        self.assertIn("已保存资料的读取", warning["why_blocked"])
+        # BUG-09: sizes and ages in the owner's units, no page that does not
+        # exist, and the command only under 技术详情 with a sentence saying
+        # what it does.
+        self.assertIn("91 字节 / 50 字节（182%）", warning["title"])
+        self.assertIn("7 天以前", warning["action"])
+        self.assertNotIn("python -m", warning["action"])
+        self.assertNotIn("运行状态", warning["where"])
+        self.assertNotIn("where_view", warning)
+        command = warning["detail"]["commands"][0]
+        self.assertIn("无损压缩归档", command["label"])
+        self.assertIn("dalton_core.raw_spool_maintenance archive", command["apply"])
+        self.assertIn("--max-total-bytes 50 --min-age-seconds 604800", command["apply"])
 
     def test_a_configured_ceiling_bounds_a_writer_without_the_environment(self):
         from dalton_core.raw_spool import RawSpoolCapacityError, publish_capacity_policy
@@ -182,7 +194,8 @@ class GovernanceTests(unittest.TestCase):
         item = items[0]
         self.assertIn("sec-form144-notices", item["title"])
         self.assertIn("sec-form144-notices", item["action"])
-        self.assertEqual(item["where"], "来源")
+        self.assertEqual(item["where"], "资料来源")
+        self.assertEqual(item["where_open"], "sources")
         self.assertTrue(item["why_blocked"])
         self.assertTrue(item["consequence"])
 
@@ -216,11 +229,17 @@ class LaneTests(unittest.TestCase):
             }}}
         items = held_lanes(heartbeat)
         self.assertEqual(len(items), 1)
-        self.assertIn("mission_document_research", items[0]["title"])
-        # The lane's own sentence, not a translation of it: this module cannot
-        # know every lane's recovery story and a wrong instruction is worse
-        # than the lane's own words.
-        self.assertIn("controlled_reentry_unavailable", items[0]["why_blocked"])
+        # P1-5: the lane is named in the owner's words; its key stays in detail.
+        self.assertIn("基于已获取原文开展专题研究", items[0]["title"])
+        self.assertEqual(items[0]["detail"]["lane"], "mission_document_research")
+        # A known reason is translated; the lane's own sentence is kept whole
+        # under 技术详情, because a wrong instruction is worse than its words.
+        self.assertIn("研究恢复暂时不可用", items[0]["why_blocked"])
+        self.assertEqual(items[0]["detail"]["reason"],
+                         "controlled_reentry_unavailable:ticket identity changed")
+        # 2026-10-09: settled in 管理员设置 → 运行控制, not the approvals list.
+        self.assertEqual(items[0]["where"], "本卡片，或「管理员设置 → 运行控制」")
+        self.assertNotIn("where_view", items[0])
 
     def test_an_escalated_unproved_send_says_the_retry_already_happened(self):
         heartbeat = {"bounded_planner": {
@@ -256,7 +275,7 @@ class LaneTests(unittest.TestCase):
             }}}
         items = held_lanes(heartbeat)
         self.assertIn("自动重试过一次", items[0]["title"])
-        self.assertIn("自动改绑", items[0]["why_blocked"])
+        self.assertIn("自动更新执行凭证", items[0]["why_blocked"])
 
     def _ledger(self, root, holds):
         directory = Path(root) / "mission-document-research-runs"
@@ -290,23 +309,33 @@ class LaneTests(unittest.TestCase):
                     "admission_ref": "mission-document-research-admission:" + "f" * 32,
                 }}}}
             items = held_lanes(heartbeat, state_dir=Path(name))
-        # One per escalated admission, plus the lane's aggregate.  The lane
-        # having resumed some other admission this tick changes nothing.
+        # One per held admission waiting on a person (2026-10-09: whatever its
+        # reason), plus the lane's aggregate.  The lane having resumed some
+        # other admission this tick changes nothing.
         refs = [item["ref"] for item in items]
         self.assertEqual(refs, [
             "lane:mission_document_research:"
             "mission-document-research-admission:" + "a" * 32,
+            "lane:mission_document_research:"
+            "mission-document-research-admission:" + "c" * 32,
             "lane:mission_document_research",
         ])
         first = items[0]
         self.assertEqual(first["detail"]["admission_ref"],
                          "mission-document-research-admission:" + "a" * 32)
-        self.assertIn("自动改绑", first["why_blocked"])
-        self.assertIn("document_recovery_cli", first["action"])
-        self.assertEqual(items[1]["detail"]["held"], 2)
-        self.assertEqual(items[1]["detail"]["escalated"], 1)
-        self.assertEqual(items[1]["detail"]["holds_path"], str(path))
-        self.assertIn("resumed", items[1]["why_blocked"])
+        self.assertIn("自动更新执行凭证", first["why_blocked"])
+        self.assertIn("技术详情", first["action"])
+        self.assertTrue(any("document_recovery_cli authorize-reentry" in command["apply"]
+                            for command in first["detail"]["commands"]
+                            if "apply" in command))
+        group = items[-1]
+        self.assertEqual(group["detail"]["held"], 2)
+        self.assertEqual(group["detail"]["escalated"], 1)
+        self.assertEqual(group["detail"]["holds_path"], str(path))
+        self.assertEqual(group["detail"]["status"], "resumed")
+        self.assertIn("本轮在处理另一条研究任务", group["why_blocked"])
+        # The legacy stop the lane re-enters by itself says so.
+        self.assertIsNotNone(items[1]["detail"]["automatic_retry"])
 
     def test_a_ledger_without_escalations_still_says_how_many_are_held(self):
         with tempfile.TemporaryDirectory() as name:
@@ -324,10 +353,12 @@ class LaneTests(unittest.TestCase):
             })
             items = held_lanes(None, state_dir=Path(name))
         self.assertEqual([item["ref"] for item in items],
-                         ["lane:mission_document_research"])
+                         ["lane:mission_document_research:"
+                          "mission-document-research-admission:" + "a" * 32,
+                          "lane:mission_document_research"])
         # A timed wait is the lane's own business and is not counted.
-        self.assertEqual(items[0]["detail"]["held"], 1)
-        self.assertEqual(items[0]["detail"]["escalated"], 0)
+        self.assertEqual(items[-1]["detail"]["held"], 1)
+        self.assertEqual(items[-1]["detail"]["escalated"], 0)
 
     def test_a_lane_with_a_ledger_is_not_also_read_from_its_tick_result(self):
         with tempfile.TemporaryDirectory() as name:
@@ -344,8 +375,8 @@ class LaneTests(unittest.TestCase):
                     "status": "recovery_required", "held": 1,
                     "reason": "no unstarted document research admission"}}}}
             items = held_lanes(heartbeat, state_dir=Path(name))
-        self.assertEqual(len(items), 1)
-        self.assertEqual(items[0]["ref"], "lane:mission_document_research")
+        self.assertEqual(len(items), 2)
+        self.assertEqual(items[-1]["ref"], "lane:mission_document_research")
 
     def test_an_idle_lane_is_not_a_to_do(self):
         self.assertEqual(held_lanes({"bounded_planner": {"last_result": {
@@ -391,6 +422,48 @@ class DocumentRecoveryCliTests(unittest.TestCase):
         self.assertEqual(value["waiting_on_owner"], 1)
         self.assertEqual(value["escalated"][0]["admission_ref"], self.admission)
         self.assertEqual(value["other"][0]["reason"], "send_state_unproved")
+
+    def test_holds_prints_the_command_that_opens_each_door(self):
+        from dalton_core import document_recovery_cli
+        from dalton_core.document_recovery_cli import holds
+
+        value = holds(self.state)["mission_document_research"]
+        escalated = value["escalated"][0]
+        self.assertEqual(escalated["operation"], document_recovery_cli.OPERATION)
+        self.assertIn("document_recovery_cli authorize-reentry", escalated["command"])
+        self.assertIn(f"--state-dir {self.state}", escalated["command"])
+        self.assertIn(f"--admission-ref {self.admission}", escalated["command"])
+        self.assertNotIn("--max-cost-usd", escalated["command"])
+        # A hold the lane still owns carries no command, and says why.
+        self.assertIsNone(value["other"][0]["command"])
+        self.assertEqual(value["other"][0]["note"], document_recovery_cli.LANE_OWNS_IT)
+        # The printed form is what the owner reads.
+        import contextlib
+        import io
+
+        out = io.StringIO()
+        with contextlib.redirect_stdout(out):
+            self.assertEqual(document_recovery_cli.main(
+                ["holds", "--state-dir", str(self.state)]), 0)
+        self.assertIn("authorize-reentry", out.getvalue())
+
+    def test_paid_and_unproved_commands_carry_a_cap_to_fill_in(self):
+        from dalton_core.document_recovery_cli import owner_command
+
+        for reason, sub in (("contract_failed_after_automatic_retry", "authorize-paid"),
+                            ("unproved_send_failed_after_automatic_retry",
+                             "authorize-unproved"),
+                            ("reentry_failed_after_automatic_rebind:"
+                             "controlled_reentry_unavailable:controlled reentry "
+                             "summary is unavailable", "authorize-reentry")):
+            command = owner_command(Path("/Volumes/My State"),
+                                    {"admission_ref": self.admission, "reason": reason})
+            self.assertIn(sub, command)
+            self.assertIn("--state-dir '/Volumes/My State'", command)
+            self.assertEqual("--max-cost-usd" in command, sub != "authorize-reentry")
+        self.assertIsNone(owner_command(self.state, {
+            "admission_ref": self.admission,
+            "reason": "controlled_reentry_unavailable:ticket is unavailable"}))
 
     def test_a_dry_run_names_the_operation_and_calls_no_writer(self):
         from dalton_core import document_recovery_cli
@@ -557,6 +630,72 @@ class EscalatedRecoveryDoorTests(unittest.TestCase):
             "admission_ref": self.UNPROVED, "actor_ref": "human:lumos",
             "max_cost_usd": 0.5})
 
+    def _owner_authorized(self, admission_ref, authorization_id):
+        import sqlite3
+
+        connection = sqlite3.connect(self.state / "core.sqlite")
+        connection.executescript(
+            "CREATE TABLE IF NOT EXISTS "
+            "mission_document_research_controlled_recovery_authorizations("
+            "authorization_id TEXT, admission_ref TEXT, stage_ordinal INTEGER, "
+            "failed_work_order_ref TEXT, created_at TEXT, record_json TEXT);"
+            "CREATE TABLE IF NOT EXISTS mission_document_research_recovery_links("
+            "recovery_link_id TEXT, admission_ref TEXT, stage_ordinal INTEGER, "
+            "failed_work_order_ref TEXT, recovery_work_order_ref TEXT);"
+            "CREATE TABLE IF NOT EXISTS "
+            "mission_document_research_model_authority_epoch_rebinds("
+            "recovery_link_ref TEXT, rebound_work_order_ref TEXT, created_at TEXT);"
+            "CREATE TABLE IF NOT EXISTS scheduler_formal_results("
+            "work_order_id TEXT, terminal_state TEXT);")
+        failed = "work:failed-" + authorization_id
+        recovery = "work:recovery-" + authorization_id
+        connection.execute(
+            "INSERT INTO mission_document_research_controlled_recovery_authorizations "
+            "(authorization_id, admission_ref, stage_ordinal, failed_work_order_ref, "
+            "created_at, record_json) VALUES(?,?,?,?,?,?)",
+            (authorization_id, admission_ref, 2, failed, "2026-09-26T12:54:05+00:00",
+             json.dumps({"id": authorization_id})))
+        # Authorized 09-26 and failed again: the recovery it bought ran and
+        # its formal result failed.
+        connection.execute(
+            "INSERT INTO mission_document_research_recovery_links VALUES(?,?,?,?,?)",
+            ("link:" + authorization_id, admission_ref, 2, failed, recovery))
+        connection.execute("INSERT INTO scheduler_formal_results VALUES(?,?)",
+                           (recovery, "failed"))
+        connection.commit()
+        connection.close()
+
+    def test_a_door_the_owner_already_used_shows_no_command_and_is_not_called(self):
+        """Live ws-7d bec19d08/c737cc83/4225dbd9: authorized 09-26, failed again."""
+
+        from unittest import mock
+
+        from dalton_core import document_recovery_cli
+
+        self._owner_authorized(
+            self.UNPROVED, "mission-document-unproved-send-recovery-authorization:29cea8")
+        # An *automatic* retry authorization is not the owner's door.
+        self._owner_authorized(
+            self.PAID, "mission-document-automatic-contract-retry-authorization:e520")
+        value = document_recovery_cli.holds(self.state)["mission_document_research"]
+        by_ref = {item["admission_ref"]: item for item in value["escalated"]}
+        self.assertIsNone(by_ref[self.UNPROVED]["command"])
+        self.assertIn("already owner-recovered", by_ref[self.UNPROVED]["note"])
+        self.assertIn("authorize-paid", by_ref[self.PAID]["command"])
+        self.assertEqual(value["actionable"], value["waiting_on_owner"] - 1)
+        with mock.patch("dalton_core.governance_cli.ephemeral_call") as call:
+            code = document_recovery_cli.main([
+                "authorize-unproved", "--state-dir", str(self.state),
+                "--admission-ref", self.UNPROVED, "--max-cost-usd", "0.5",
+                "--apply", "--actor", "human:lumos"])
+            self.assertEqual(code, 1)
+            call.return_value = {"status": "admitted", "max_cost_usd": 0.1}
+            document_recovery_cli.authorize_all_escalated(
+                self.state, actor="human:lumos", apply=True, max_total_cost_usd=5.0)
+        called = [c.kwargs["params"]["admission_ref"] for c in call.call_args_list]
+        self.assertNotIn(self.UNPROVED, called)
+        self.assertIn(self.PAID, called)
+
     def test_apply_without_a_human_actor_is_refused(self):
         from dalton_core import document_recovery_cli
 
@@ -614,7 +753,7 @@ class EscalatedRecoveryDoorTests(unittest.TestCase):
                 self.assertIn(name, HUMAN_GOVERNANCE_OPERATIONS)
                 self.assertEqual(
                     OPERATION_FIELDS[name],
-                    frozenset({"admission_ref", "max_cost_usd", "actor_ref"}))
+                    frozenset({"admission_ref", "max_cost_usd", "actor_ref", "job_ref"}))
                 self.assertEqual(OPERATION_ACTOR_FIELDS[name], "actor_ref")
                 self.assertTrue(hasattr(WriterServer, "_op_" + name))
 
@@ -664,13 +803,107 @@ class EscalatedRecoveryDoorTests(unittest.TestCase):
             (self.REENTRY, "authorize-reentry"),
         ):
             with self.subTest(admission=admission):
-                action = items[admission]["action"]
+                item = items[admission]
+                # P1-5: the page says what to do in words; the exact command
+                # sits under 技术详情 where it can be copied.
+                self.assertIn("技术详情", item["action"])
+                self.assertNotIn("MissionDocumentResearchExecutor", item["action"])
+                commands = item["detail"]["commands"]
+                door = commands[0]
                 self.assertIn(
-                    f"python -m dalton_core.document_recovery_cli {subcommand} "
+                    f" -m dalton_core.document_recovery_cli {subcommand} "
                     f"--state-dir {self.state} --admission-ref {admission}",
-                    action)
-                self.assertIn("--apply --actor human:<owner>", action)
-                self.assertNotIn("MissionDocumentResearchExecutor", action)
+                    door["apply"])
+                self.assertTrue(door["apply"].endswith("--apply --actor human:<owner>"))
+                self.assertNotIn("--apply", door["preview"])
+                self.assertEqual("--max-cost-usd" in door["apply"],
+                                 subcommand != "authorize-reentry")
+                withdraw = commands[1]
+                self.assertIn(f"document_recovery_cli withdraw --state-dir {self.state} "
+                              f"--admission-ref {admission} --reason", withdraw["apply"])
+                self.assertTrue(commands[-1]["preview"].endswith(
+                    f"document_recovery_cli holds --state-dir {self.state}"))
+
+    def test_cards_name_the_company_and_question_not_the_admission_hash(self):
+        import sqlite3
+        from dalton_core.needs_human import held_lanes
+
+        connection = sqlite3.connect(self.state / "core.sqlite")
+        connection.executescript(
+            "CREATE TABLE mission_document_research_admissions("
+            "admission_id TEXT, company_ref TEXT, question_version_ref TEXT);"
+            "CREATE TABLE backlog_question_versions(version_id TEXT, question TEXT);"
+            "CREATE TABLE coverage_mission_versions(mission_version_id TEXT, record_json TEXT);"
+            "CREATE TABLE coverage_mission_pointer(mission_ref TEXT, mission_version_id TEXT,"
+            " updated_at TEXT);")
+        connection.execute(
+            "INSERT INTO mission_document_research_admissions VALUES(?,?,?)",
+            (self.UNPROVED, "company:sec-cik:0001352010", "question-version:q1:1"))
+        connection.execute(
+            "INSERT INTO backlog_question_versions VALUES(?,?)",
+            ("question-version:q1:1", "EPAM 在欧洲的交付中心迁移会不会在未来两个季度拖累毛利率？"))
+        connection.execute("INSERT INTO coverage_mission_versions VALUES(?,?)", (
+            "coverage-mission-version:x:1", json.dumps({"universe": [
+                {"company_ref": "company:sec-cik:0001352010", "ticker": "EPAM",
+                 "name": "EPAM Systems"}]})))
+        connection.execute("INSERT INTO coverage_mission_pointer VALUES(?,?,?)",
+                           ("coverage-mission:x", "coverage-mission-version:x:1",
+                            "2026-09-30T00:00:00+00:00"))
+        connection.commit()
+        connection.close()
+        from dalton_core.needs_human import _open
+        core = _open(self.state / "core.sqlite")
+        self.addCleanup(core.close)
+        items = {item["detail"].get("admission_ref"): item
+                 for item in held_lanes(None, state_dir=self.state, core=core)}
+        item = items[self.UNPROVED]
+        self.assertTrue(item["title"].startswith("等你决定：EPAM · EPAM Systems · EPAM 在欧洲"))
+        self.assertNotIn("f" * 8, item["title"])
+        self.assertLessEqual(len(item["title"]), 80)
+        self.assertIn("送达未确认，自动重试一次仍失败", item["why_blocked"])
+        self.assertNotIn("unproved_send_failed_after_automatic_retry", item["why_blocked"])
+        self.assertEqual(item["detail"]["reason"], "unproved_send_failed_after_automatic_retry")
+        # 2026-10-09: settled on the card and in 管理员设置 → 运行控制, not on
+        # the approvals list (which never held these).
+        self.assertEqual(item["where"], "本卡片，或「管理员设置 → 运行控制」")
+        self.assertNotIn("where_view", item)
+        self.assertEqual([door["door"] for door in item["detail"]["owner_doors"]],
+                         ["unproved", "withdraw"])
+        # No admission row: still no hash in the title.
+        other = items[self.PAID]
+        self.assertNotIn("e" * 8, other["title"])
+        self.assertIn("当前无法核实这项研究的恢复记录", other["why_blocked"])
+        self.assertFalse(other["actionable"])
+        self.assertEqual(other["status"], "recovery_state_unverified")
+        self.assertEqual(other["detail"]["owner_doors"], [])
+
+    def test_a_used_door_offers_only_withdraw_and_listing(self):
+        from dalton_core.needs_human import held_lanes
+
+        self._owner_authorized(
+            self.UNPROVED, "mission-document-unproved-send-recovery-authorization:29cea8")
+        items = {item["detail"].get("admission_ref"): item
+                 for item in held_lanes(None, state_dir=self.state)}
+        used = items[self.UNPROVED]
+        self.assertTrue(used["detail"]["owner_door_used"])
+        subcommands = [command.get("apply") or command["preview"]
+                       for command in used["detail"]["commands"]]
+        self.assertFalse(any("authorize-unproved" in line for line in subcommands))
+        self.assertTrue(any(" withdraw " in line for line in subcommands))
+        self.assertIn("暂缓当前专项课题", used["action"])   # batch am wording (text evaluation 7.3)
+        self.assertFalse(items[self.PAID]["detail"]["owner_door_used"])
+
+    def test_a_state_dir_with_spaces_is_quoted_in_the_command(self):
+        import shlex
+        from dalton_core.needs_human import hold_commands
+
+        commands = hold_commands(
+            "mission_document_research", self.PAID, "contract_failed_after_automatic_retry",
+            state_dir=Path("/Users/x/Library/Application Support/Dalton/state/dalton-core"))
+        argv = shlex.split(commands[0]["apply"])
+        self.assertEqual(argv[argv.index("--state-dir") + 1],
+                         "/Users/x/Library/Application Support/Dalton/state/dalton-core")
+        self.assertEqual(argv[argv.index("--max-cost-usd") + 1], "<上限美元>")
 
 
 class ProviderTests(unittest.TestCase):
@@ -713,7 +946,8 @@ class ProviderTests(unittest.TestCase):
         # than a bug, and "wait" and "use another key" are the only two things
         # that change it.
         self.assertIn("额度", item["action"])
-        self.assertEqual(item["where"], "模型")
+        self.assertEqual(item["where"], "模型与预算")
+        self.assertEqual(item["where_open"], "models")
 
     def test_a_failure_that_is_not_a_refusal_is_somebody_elses_problem(self):
         self.add(120, code="BUDGET_REFUSED")
@@ -875,7 +1109,8 @@ class GateAndOrderTests(unittest.TestCase):
         self.assertEqual(item["detail"]["answered"], 12)
         self.assertIn("提交标准", item["detail"]["quality_summary"])
         self.assertTrue(item["detail"]["submittable"])
-        self.assertEqual(item["where"], "待办")
+        self.assertEqual(item["where"], "待办审批")
+        self.assertEqual(item["where_view"], "approve")
         self.assertIn("六个研究阶段", item["why_blocked"])
 
     def test_the_same_state_produces_the_same_list_twice(self):
@@ -945,3 +1180,60 @@ class HeldDraftTests(unittest.TestCase):
 
 if __name__ == "__main__":  # pragma: no cover
     unittest.main()
+
+
+class MemoDecisionItemTests(unittest.TestCase):
+    """ADR-0011: a verified Investment Memo draft is on the owner's one list."""
+
+    def core(self):
+        connection = sqlite3.connect(":memory:")
+        connection.row_factory = sqlite3.Row
+        connection.executescript(
+            "CREATE TABLE coverage_mission_versions(mission_version_id TEXT, mission_ref TEXT, "
+            "record_json TEXT);"
+            "CREATE TABLE coverage_mission_pointer(mission_ref TEXT, mission_version_id TEXT);"
+            "CREATE TABLE coverage_mission_stage_records(record_id TEXT, company_ref TEXT, "
+            "stage_ref TEXT, status TEXT, record_json TEXT);"
+            "CREATE TABLE mission_deliverable_versions(version_id TEXT, kind TEXT, "
+            "mission_version_ref TEXT, record_json TEXT, created_at TEXT);"
+            "CREATE TABLE mission_deliverable_pointer(deliverable_ref TEXT, version_id TEXT);")
+        for version in ("mission:v14", "mission:v15"):
+            connection.execute("INSERT INTO coverage_mission_versions VALUES(?,?,?)",
+                               (version, "mission:coverage", json.dumps({"universe": [
+                                   {"company_ref": "company:a", "ticker": "AAA"}]})))
+        connection.execute("INSERT INTO coverage_mission_pointer VALUES(?,?)",
+                           ("mission:coverage", "mission:v15"))
+        memo = {"id": "memo:a:1", "kind": "investment_memo", "subject_ref": "company:a",
+                "mission_version_ref": "mission:v14",
+                "gate": {"verifier": {"verdict": "pass"},
+                         "key_questions": [{}] * 12}}
+        connection.execute("INSERT INTO mission_deliverable_versions VALUES(?,?,?,?,?)",
+                           (memo["id"], "investment_memo", "mission:v14", json.dumps(memo),
+                            "2026-10-06T00:00:00+00:00"))
+        connection.execute("INSERT INTO mission_deliverable_pointer VALUES(?,?)",
+                           ("mission-deliverable:investment_memo:a", memo["id"]))
+        return connection
+
+    def test_undecided_memo_is_listed_until_a_decision_cites_it(self):
+        from dalton_core.needs_human import memo_decisions
+
+        core = self.core()
+        items = memo_decisions(core)
+        self.assertEqual([item["kind"] for item in items], ["memo_decision"])
+        item = items[0]
+        self.assertEqual(item["urgency"], 1)
+        self.assertEqual(item["where"], "待办审批")
+        self.assertEqual(item["where_view"], "approve")
+        self.assertIn("投资备忘录等你裁决", item["title"])
+        self.assertIn("批准并进入持续覆盖", item["action"])
+        self.assertEqual(item["detail"]["verifier_verdict"], "pass")
+        core.execute("INSERT INTO coverage_mission_stage_records VALUES(?,?,?,?,?)", (
+            "stage:1", "company:a", "investment_memo", "gate_passed",
+            json.dumps({"evidence_refs": ["memo:a:1"]})))
+        self.assertEqual(memo_decisions(core), [])
+
+    def test_a_core_without_memos_lists_nothing(self):
+        from dalton_core.needs_human import memo_decisions
+
+        self.assertEqual(memo_decisions(sqlite3.connect(":memory:")), [])
+        self.assertEqual(memo_decisions(None), [])

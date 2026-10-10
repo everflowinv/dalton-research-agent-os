@@ -31,6 +31,7 @@ register_lane(LaneSpec(
 ))
 register_lane(LaneSpec(
     operation="dispatch_document_extraction",
+    failure_ledger="document_extraction",
     order=40,
     driver_key="document_extraction",
     note="ADR-0005: drafts awaiting documents under the mission grant. Its "

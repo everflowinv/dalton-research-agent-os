@@ -786,6 +786,7 @@ class LLMResearchPlannerModelWorker:
                 route_decision_ref=route["id"],
                 reserved_micros=reserved,
                 mission_binding=self.mission_binding,
+                purpose="plan", thinking_level=route.get("thinking_level"),
             )
             if decision["status"] != "admitted":
                 # The gate above already answered the common case; reaching

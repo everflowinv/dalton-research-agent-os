@@ -170,6 +170,62 @@ def _display_embedded_periods(part: str) -> str:
     text = _EMBEDDED_PERIOD.sub(replace, text)
     return re.sub(r"(?<=财年)\s+outlook\b", " 展望", text, flags=re.IGNORECASE)
 
+# 2026-10-08 inspection (section 三, P2): English terms left inside Chinese
+# research prose and goals -- 「建立对 US IT services 行业的首次覆盖」,
+# 「fiscal 2026 第二季度」, 「book-to-bill 低于一」, 「CapEx、GW Capacity 与
+# Backlog」.  Applied to Chinese lines only, outside quotations, and as a closed
+# list: a proper name or a quoted English phrase is never touched.  The
+# stored text is unchanged and stays under 技术详情 where it differs.
+_OWNER_TERMS: tuple[tuple[re.Pattern[str], Any], ...] = tuple(
+    (re.compile(pattern), replacement) for pattern, replacement in (
+        (r"\bfiscal (?:year )?(\d{4})\s*(?=[\u3400-\u9fff])", r"\1 财年"),
+        (r"\bFY ?(\d{4})\s*(?=第[一二三四]季度)", r"\1 财年"),
+        (r"book-to-bill\s*(?:比率)?\s*低于一", "订单收入比（book-to-bill）低于 1"),
+        (r"book-to-bill\s*(?:比率)?\s*高于一", "订单收入比（book-to-bill）高于 1"),
+        (r"略高于一(?=[，。；、])", "略高于 1"),
+        (r"(?<![（(A-Za-z])book-to-bill(?![）)A-Za-z])", "订单收入比（book-to-bill）"),
+        (r"\bUS IT [Ss]ervices\b", "美国 IT 服务"),
+        (r"初筛（Initial Screen）", "初步筛选"),
+        (r"\bInitial Screen\b", "初步筛选"),
+        (r"投资逻辑（Thesis）", "投资论点"),
+        (r"\bThesis\b", "投资论点"),
+        (r"\bautomation\b", "系统自动流程"),
+        (r"\bplaybook、constitution、mandate\b", "研究手册、研究章程、投资授权"),
+        (r"(?<![（(A-Za-z])CapEx(?![）)A-Za-z])", "资本开支（CapEx）"),
+        (r"\bGW Capacity\b", "电力容量（GW）"),
+        (r"(?<![（(A-Za-z])Backlog(?![）)A-Za-z])", "在手订单（Backlog）"),
+        (r"(?<![A-Za-z])driver(?:s)?(?![A-Za-z])", "驱动因素"),
+        (r"(?<![A-Za-z])narrative(?![A-Za-z])", "市场叙事"),
+        (r"(?<![A-Za-z])catalyst(?![A-Za-z])", "催化剂"),
+        (r"人类给方向、初始\s*投资论点\s*和检查点裁决", "你负责研究方向、初始投资论点和关键决策"),
+    ))
+
+
+def owner_terms_text(value: Any) -> str:
+    """The closed owner glossary above, on Chinese lines outside quotations."""
+
+    text = str(value) if value is not None else ""
+
+    def chinese(part: str) -> str:
+        if not re.search(r"[\u3400-\u9fff]", part):
+            return part
+        before = part
+        for pattern, replacement in _OWNER_TERMS:
+            part = pattern.sub(replacement, part)
+        if part != before:
+            # 「对 美国 IT 服务 行业」 -> 「对美国 IT 服务行业」: the spaces were
+            # there to set off the English term that is no longer there.
+            part = re.sub(r"(?<=[\u3400-\u9fff（）、，。；：])[ ]+(?=[\u3400-\u9fff（）])", "", part)
+            part = re.sub(r"(?<=[\u3400-\u9fff（）])[ ]+(?=[\u3400-\u9fff（）、，。；：])", "", part)
+        return part
+
+    lines = []
+    for line in text.splitlines(keepends=True):
+        lines.append(transform_unquoted_prose(line, chinese)
+                     if re.search(r"[\u3400-\u9fff]", line) else line)
+    return "".join(lines)
+
+
 def display_metadata_text(value: Any) -> str:
     """Replace only registered machine metadata tokens in reader-facing text."""
     text = str(value) if value is not None else ""
@@ -188,7 +244,7 @@ def display_metadata_text(value: Any) -> str:
                 .replace("Deep Insight Gate", "深度研究阶段验收")
                 .replace("furlough（年假）", "临时停工休假（furlough）")),
     )
-    return format_prose_date_ranges(format_prose_usd_amounts(text))
+    return owner_terms_text(format_prose_date_ranges(format_prose_usd_amounts(text)))
 
 def gap_display_text(value: Any) -> str:
     """Return friendly Chinese for a closed known gap; preserve everything else."""

@@ -28,6 +28,7 @@ import re
 from collections.abc import Callable, Mapping
 from datetime import datetime, timedelta, timezone
 from pathlib import Path
+from types import MappingProxyType
 from typing import Any
 
 from .alphaengine_core_acquisition import RUNNER_ACTOR_REF, RUNNER_RUNTIME_REF, VISIBILITY_SCOPES
@@ -83,6 +84,23 @@ HOST_SCOPED_GENERATION = "h1"
 DEFAULT_USER_AGENT = "Dalton Research Agent OS public-web fetch lane (owner: lumos)"
 # One page per call; a bigger page is a new profile version.
 FETCH_MAX_RESPONSE_BYTES = 4_000_000
+# 2026-10-02 (ws-7d): hosts whose ordinary documents are bigger than a web
+# page.  Microsoft's 10-K primary document (inline XBRL, ``msft-2026063
+# 0.htm``) is over 4 MB, so every fetch of it failed
+# ``PublicTransportResponseTooLarge`` -- 162 times an hour-apart for twelve
+# days, then rested by the failure cap -- and the annual-report item of the
+# company's Initial Screen could never close.  Amazon's, Alphabet's and
+# Meta's (2.0-2.6 MB) and every legacy issuer's (ACN 2.8 MB, DXC 3.2 MB) fit,
+# which is why nobody had seen it.  Large-accelerated-filer 10-Ks run to
+# 10-15 MB; 32 MB leaves room without making the host an unbounded download.
+#
+# A profile is immutable once registered and is looked up by id, so a bigger
+# ceiling is a new *generation* for that host only: new profile, price and
+# rate-policy refs, same host-scoped quota.  Every other host keeps the
+# generation and the records it already has.
+HOST_MAX_RESPONSE_BYTES: Mapping[str, int] = MappingProxyType({
+    "www.sec.gov": 32_000_000,
+})
 FETCH_MAX_RECORDS = 1
 FETCH_TIMEOUT_MS = 60_000
 MANIFEST_SCHEMA_VERSION = "0.1"
@@ -123,6 +141,21 @@ def _with_hash(value: Mapping[str, Any]) -> dict[str, Any]:
     wire = json.loads(canonical_json(value))
     wire["content_hash"] = content_hash(wire)
     return wire
+
+
+def host_max_response_bytes(host: str) -> int:
+    """The body ceiling one host's fetch profile is registered with."""
+
+    return int(HOST_MAX_RESPONSE_BYTES.get(host, FETCH_MAX_RESPONSE_BYTES))
+
+
+def host_generation(host: str) -> str:
+    """The profile generation for one host: ``h1``, or ``h1b<MB>m`` for a raised ceiling."""
+
+    ceiling = host_max_response_bytes(host)
+    if ceiling == FETCH_MAX_RESPONSE_BYTES:
+        return HOST_SCOPED_GENERATION
+    return f"{HOST_SCOPED_GENERATION}b{ceiling // 1_000_000}m"
 
 
 def host_slug(host: str) -> str:
@@ -515,8 +548,9 @@ class PublicWebCoreFetch:
             return cached
         descriptor = self.ensure_descriptor()
         slug = host_slug(host)
+        generation = host_generation(host)
         # ":host" marks the chain whose quota scope is this host alone.
-        rate_policy_ref = f"{FETCH_RATE_POLICY_PREFIX}:{slug}:{HOST_SCOPED_GENERATION}"
+        rate_policy_ref = f"{FETCH_RATE_POLICY_PREFIX}:{slug}:{generation}"
         binding = {
             "binding_ref": f"runner-binding:web-fetch:{slug}:0.1",
             "descriptor_revision_ref": descriptor.revision_ref,
@@ -559,7 +593,7 @@ class PublicWebCoreFetch:
             # once registered -- reusing the old id left the recorded hash
             # disagreeing with the manifest the gate is handed, which is
             # exactly the AdapterNotResolved the live fetch reported.
-            "id": f"{FETCH_PROFILE_PREFIX}:{slug}:{HOST_SCOPED_GENERATION}:v1",
+            "id": f"{FETCH_PROFILE_PREFIX}:{slug}:{generation}:v1",
             "created_at": self.governance.effective_from,
             "connector_ref": self.template["connector_ref"],
             "version": None,
@@ -590,7 +624,7 @@ class PublicWebCoreFetch:
                 "max_pages": self.contract["pagination"]["max_pages"],
             },
             "completeness": {OPERATION: self.contract["completeness_ceiling"]},
-            "max_response_bytes": FETCH_MAX_RESPONSE_BYTES,
+            "max_response_bytes": host_max_response_bytes(host),
             "max_records": FETCH_MAX_RECORDS,
             "timeout_ms": FETCH_TIMEOUT_MS,
             "access_policy_ref": "policy:access:public-web",
@@ -599,9 +633,9 @@ class PublicWebCoreFetch:
             "network_policy": dict(self.network_policy),
         }
         profile = register_chained_profile(
-            self.connectors, profile_wire, idempotency_key=f"web-fetch:profile:{slug}:{HOST_SCOPED_GENERATION}:v1"
+            self.connectors, profile_wire, idempotency_key=f"web-fetch:profile:{slug}:{generation}:v1"
         )
-        price_ref = f"{FETCH_PRICE_RATE_PREFIX}:{slug}:{HOST_SCOPED_GENERATION}:calls"
+        price_ref = f"{FETCH_PRICE_RATE_PREFIX}:{slug}:{generation}:calls"
         price = self.connectors.register_price_rate(
             {
                 "schema_version": "0.1",
@@ -621,7 +655,7 @@ class PublicWebCoreFetch:
                 "source_ref": "pricing:public-web:free",
                 "actor_ref": self.governance.approved_by,
             },
-            idempotency_key=f"web-fetch:price:{slug}:{HOST_SCOPED_GENERATION}:v1",
+            idempotency_key=f"web-fetch:price:{slug}:{generation}:v1",
         )
         quota = governed_daily_quota(TEMPLATE_KEY, OPERATION)
         price_book = {"price_rate_refs": [price["id"]], "required_price_meters": ["calls"]}
@@ -659,7 +693,7 @@ class PublicWebCoreFetch:
                 "effective_until": None,
                 "actor_ref": self.governance.approved_by,
             },
-            idempotency_key=f"web-fetch:rate-policy:{slug}:{HOST_SCOPED_GENERATION}:v1",
+            idempotency_key=f"web-fetch:rate-policy:{slug}:{generation}:v1",
         )
         authorities = {
             "descriptor": descriptor, "binding": binding, "manifest": manifest,
@@ -1044,6 +1078,9 @@ __all__ = [
     "WebFetchConnectorGovernance",
     "build_web_fetch_governance_record",
     "count_recent_public_web_fetch_calls",
+    "HOST_MAX_RESPONSE_BYTES",
+    "host_generation",
+    "host_max_response_bytes",
     "host_slug",
     "cited_hosts_from_discovery",
     "url_authority_from_discovery",

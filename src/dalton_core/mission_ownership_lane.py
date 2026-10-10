@@ -147,6 +147,7 @@ class MissionOwnershipLaneCoordinator:
         mission: Callable[[], dict[str, Any] | None],
         record_event: Callable[..., Any] | None = None,
         ir_watch: Callable[..., Any] | None = None,
+        ir_watch_reason: str | None = None,
         clock: Callable[[], datetime] | None = None,
         lookback_days: int = DEFAULT_LOOKBACK_DAYS,
     ) -> None:
@@ -163,6 +164,10 @@ class MissionOwnershipLaneCoordinator:
         # writer's connector store and spool, which a lane module has no
         # business constructing.
         self.ir_watch = ir_watch
+        # Why there is no watcher, in the owner's language, for the tick
+        # summary.  Most Cores have none, and "no watcher" alone does not say
+        # whether the missing piece is a file, an approval or the writer.
+        self.ir_watch_reason = ir_watch_reason
         self.clock = clock or (lambda: datetime.now(timezone.utc))
         self.lookback_days = int(lookback_days)
         self._open: str | None = None
@@ -345,13 +350,32 @@ class MissionOwnershipLaneCoordinator:
 
         if self.ir_watch is None:
             return {"status": "unconfigured",
-                    "reason": "no changedetection watcher on this writer"}
+                    "reason": self.ir_watch_reason or IR_WATCH_ABSENT_REASON}
         if self._ir_watched_on == self._today():
             return {"status": "watched_today"}
+        if self.budget.parked(IR_WATCH_ITEM) is not None:
+            # Parked on changedetection: asked again once per probe interval,
+            # not once per tick -- every ask is a child process and a call
+            # against the day's quota.
+            held = self.budget.blocked(IR_WATCH_ITEM)
+            if held is not None:
+                return {"status": "parked", "reason": held.classification.reason,
+                        "display_reason": _ir_failure_display(held.classification.reason),
+                        "failure": held.as_wire()}
         try:
             found = self.ir_watch()
         except Exception as exc:  # noqa: BLE001 - one source, not the tick
-            return {"status": "failed", "reason": f"{type(exc).__name__}: {exc}"}
+            reason = f"{type(exc).__name__}: {exc}"
+            # F14: the watcher is a source like any other, so a sweep that
+            # failed is in the failure ledger -- a changedetection that is not
+            # running parks on its own dependency instead of being a line in
+            # a tick summary nobody reads.
+            decision = self.budget.record(IR_WATCH_ITEM, reason=reason, status="failed")
+            return {"status": "failed", "reason": reason,
+                    "display_reason": _ir_failure_display(reason),
+                    "failure": decision.as_wire()}
+        if found.get("status") == "watched":
+            self.budget.clear(IR_WATCH_ITEM)
         recorded: list[dict[str, Any]] = []
         for change in found.get("changes") or []:
             key = change["payload"].get("event_key")
@@ -388,6 +412,7 @@ class MissionOwnershipLaneCoordinator:
             # connector will not read. Counted here rather than logged, because
             # a count in the tick summary is a thing somebody sees.
             "undeclared_count": found.get("undeclared_count", 0),
+            "immaterial_count": found.get("immaterial_count", 0),
             "recorded_count": len(recorded),
             "changes": recorded,
         }
@@ -595,9 +620,38 @@ def dispatch(server: Any, params: Mapping[str, Any]) -> dict[str, Any]:
             mission=mission,
             record_event=getattr(server, "record_research_event", None),
             ir_watch=build_ir_watch(server, launcher),
+            ir_watch_reason=ir_watch_absent_reason(server, launcher),
         )
         server.lane_state[LAUNCHER_KWARG] = coordinator
     return coordinator.dispatch_once()
+
+
+IR_WATCH_ITEM = "ir-pages"
+IR_WATCH_ABSENT_REASON = "本写入服务没有配置投资者关系页面监测"
+
+
+def _ir_failure_display(reason: str) -> str:
+    lowered = reason.lower()
+    if "is not answering" in lowered or "connection refused" in lowered:
+        return "本机 changedetection（127.0.0.1:5055）没有响应，今天的投资者关系页面变动未读取"
+    if "declaration" in lowered:
+        return "ir-pages.json 无法读取或格式不对，今天的投资者关系页面变动未读取"
+    return "投资者关系页面监测本轮失败，具体原因见技术详情"
+
+
+def ir_watch_absent_reason(server: Any, launcher: Any) -> str:
+    """Why ``build_ir_watch`` returned ``None``, said to the owner."""
+
+    from .ir_page_watch_core import IR_PAGES_ABSENT_REASON
+
+    if getattr(launcher, "ir_declaration_path", None) is None:
+        return IR_PAGES_ABSENT_REASON
+    if getattr(launcher, "ir_governance_dir", None) is None:
+        return "投资者关系页面监测缺少审批目录（connector-governance）"
+    if (getattr(server, "_connectors", None) is None
+            or getattr(server, "_transcript_spool", None) is None):
+        return "本写入服务没有连接器存储或原文缓存，无法读取投资者关系页面变动"
+    return IR_WATCH_ABSENT_REASON
 
 
 def build_ir_watch(server: Any, launcher: Any) -> Callable[[], dict[str, Any]] | None:
@@ -687,6 +741,7 @@ def _governance_filenames() -> tuple[str, ...]:
 
 LANE = register_lane(LaneSpec(
     operation="dispatch_mission_ownership",
+    failure_ledger="mission_ownership",
     # After the calendar and before the model specification. It is a filings
     # lane and it wants the tick's single child slot no more urgently than the
     # calendar does; running the three tracking lanes adjacent keeps a day's

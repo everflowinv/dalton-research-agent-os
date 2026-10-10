@@ -40,12 +40,15 @@ class IndexSpec:
     table: str
     columns: str
     reason: str
+    #: A partial index's predicate, when most rows would only be dead weight.
+    where: str = ""
 
     @property
     def statement(self) -> str:
         return (
             f"CREATE INDEX IF NOT EXISTS {self.name} "
             f"ON {self.table}({self.columns})"
+            + (f" WHERE {self.where}" if self.where else "")
         )
 
 
@@ -103,6 +106,56 @@ WATERMARK_SCHEDULER_TABLES: tuple[str, ...] = (
 )
 
 
+#: The exact expressions ``forecast_reconciliation`` filters Claims by.  An
+#: expression index serves a query only when the query spells the same
+#: expressions, so both sides import this one string.
+CLAIM_SUBJECT_METRIC_PERIOD = (
+    "json_extract(claim_json,'$.subject_ref'), "
+    "json_extract(claim_json,'$.metric_or_aspect'), "
+    "json_extract(claim_json,'$.period')"
+)
+#: The same for the two scheduler work-order lookups by metadata.
+WORK_ORDER_DOCUMENT_STAGE = (
+    "json_extract(work_order_json,'$.metadata.mission_document_research_admission_ref'), "
+    "json_extract(work_order_json,'$.metadata.stage')"
+)
+WORK_ORDER_REQUEST_ID = "json_extract(work_order_json,'$.metadata.request_id')"
+
+
+#: Work-order JSON can be tens of KB, although the first projection needs only
+#: these exact capabilities and identity columns. The rowid is implicit in the
+#: index. Expression spelling must match the fold query exactly.
+WORK_ORDER_FOLD_COVER_INDEX = IndexSpec(
+    name="scheduler_work_orders_projection_fold_cover",
+    table="scheduler_work_orders",
+    columns="work_order_id, created_at, json_extract(work_order_json,'$.requested_capabilities')",
+    reason="dashboard cold WorkOrder fold reads complete lightweight history without reading prompt bodies",
+)
+SCHEDULER_FOLD_COVER_INDEXES = (WORK_ORDER_FOLD_COVER_INDEX,)
+# Deliberately separate from SCHEDULER_PROJECTION_INDEXES used by worker opens.
+# apply_projection_indexes (also used by service startup) installs this index.
+# Its first CREATE reads every old JSON body and holds a write lock: large
+# existing authorities must prebuild in a drained quiet window. The open budget
+# checks only before each CREATE; it is not a per-statement execution deadline.
+
+#: Compact historical fold reads on wide connector authority tables. Only a
+#: fresh fold forces these indexes; warm rowid deltas retain the primary-key
+#: seek. No source rows, immutable hashes or quota values change.
+CONNECTOR_FOLD_COVER_INDEXES: tuple[IndexSpec, ...] = (
+    IndexSpec(name="connector_invocations_projection_fold_cover", table="connector_invocations",
+              columns="connector_invocation_id, connector_profile_ref, call_spec_ref, created_at",
+              reason="dashboard projector first fold covers lightweight historical columns"),
+    IndexSpec(name="connector_call_specs_projection_fold_cover", table="connector_call_specs",
+              columns="call_spec_id, operation, created_at",
+              reason="dashboard projector first fold covers lightweight historical columns"),
+    IndexSpec(name="connector_physical_attempts_projection_fold_cover", table="connector_physical_attempts",
+              columns="physical_attempt_id, connector_invocation_ref, physical_attempt_number, reservation_ref, outcome, started_at, completed_at, retry_at, created_at",
+              reason="dashboard projector first fold covers lightweight historical columns"),
+    IndexSpec(name="connector_cost_entries_projection_fold_cover", table="connector_cost_entries",
+              columns="cost_entry_id, usage_entry_ref, revision_number, amount_micros, currency, cost_status, created_at",
+              reason="dashboard projector first fold covers lightweight historical columns"),
+)
+
 #: ``core.sqlite``.
 CORE_PROJECTION_INDEXES: tuple[IndexSpec, ...] = (
     IndexSpec(
@@ -124,7 +177,98 @@ CORE_PROJECTION_INDEXES: tuple[IndexSpec, ...] = (
             "for the same reason"
         ),
     ),
-) + tuple(_watermark_index(table) for table in WATERMARK_CORE_TABLES)
+    # 2026-09-29: the writer's per-tick reads, not the projection's.
+    IndexSpec(
+        name="claim_versions_subject_metric_period",
+        table="claim_versions",
+        # ``claim_version_id`` last: with it the per-subject change key
+        # (``lane_change_key.claim_change_keys``, twice per tick) is answered
+        # from the index alone instead of parsing every Claim.
+        columns=CLAIM_SUBJECT_METRIC_PERIOD + ", claim_version_id",
+        reason=(
+            "ForecastReconciliation._latest_claims runs once per latest "
+            "forecast line on every controller tick, filtering by these three "
+            "json_extract expressions; without the index each call parsed "
+            "every Claim's JSON (48 lines x 22 MB = ~1 GB per tick on the "
+            "legacy Core).  Its leading column also serves every per-company "
+            "Claim read keyed by json_extract(claim_json,'$.subject_ref'), and "
+            "the per-subject change key reads nothing but this index"
+        ),
+    ),
+    IndexSpec(
+        name="claim_versions_created_at",
+        table="claim_versions",
+        columns="created_at",
+        reason=(
+            "the dossier and industry-framework ledger signatures read "
+            "MAX(created_at) from claim_versions every tick, and the claim "
+            "review orders by it; created_at sits after claim_json in the row"
+        ),
+    ),
+    IndexSpec(
+        name="evidence_relations_claim_version",
+        table="evidence_relations",
+        columns="claim_version_id, relation",
+        reason=(
+            "a Claim's supporting evidence (forecast reconciliation, "
+            "get_claim) is looked up by claim_version_id, which was indexed "
+            "nowhere: one full scan of evidence_relations per Claim"
+        ),
+    ),
+    # 2026-10-07 (legacy writer stall).  "The newest, uncorrected row" is
+    # asked as ``NOT EXISTS (SELECT 1 FROM t n WHERE n.correction_of_ref=
+    # t.id)``, and ``correction_of_ref`` was indexed nowhere, so every lookup
+    # scanned the whole table (107k rows, 110-146 MB on legacy) once per row
+    # it matched.  The document-research runtime re-verifies every fetched
+    # page's receipts this way: 342 scans, 7.4 s warm, per owner door.  On a
+    # /tmp copy of legacy: 200 usage+settlement lookups 8.7 s -> 0.016 s.
+    # Partial: almost no row is a correction, so the index is near empty.
+    *(
+        IndexSpec(
+            name=f"{table}_correction_of",
+            table=table,
+            columns="correction_of_ref",
+            where="correction_of_ref IS NOT NULL",
+            reason=(
+                "public_web_extraction_source.verified_public_web_source and "
+                "the receipt readers select the row no correction supersedes "
+                "(NOT EXISTS ... n.correction_of_ref=...); a full scan per row "
+                "without it"
+            ),
+        )
+        for table in ("connector_usage_entries", "connector_quota_settlements",
+                      "connector_cost_entries")
+    ),
+    # 2026-10-07: the document-research executor's Scheduler lives on the
+    # Core (``MissionDocumentResearchRuntime`` builds it on the store's
+    # connection), not on scheduler.sqlite where these two were built.  The
+    # stage lookup and the owner's withdrawal check (``running_work_orders``)
+    # therefore scanned and parsed every Core work order on every call.
+    IndexSpec(
+        name="scheduler_work_orders_document_stage",
+        table="scheduler_work_orders",
+        columns=WORK_ORDER_DOCUMENT_STAGE,
+        where=(
+            "json_extract(work_order_json,"
+            "'$.metadata.mission_document_research_admission_ref') IS NOT NULL"
+        ),
+        reason=(
+            "mission_document_research_executor._effective_stage and "
+            "mission_document_research_withdrawal.running_work_orders find an "
+            "admission's work orders on the Core's own scheduler tables"
+        ),
+    ),
+    IndexSpec(
+        name="scheduler_work_orders_request_id",
+        table="scheduler_work_orders",
+        columns=WORK_ORDER_REQUEST_ID,
+        where=f"{WORK_ORDER_REQUEST_ID} IS NOT NULL",
+        reason=(
+            "controlled_lane_reentry._already_consumed on the Core's own "
+            "scheduler tables"
+        ),
+    ),
+) + CONNECTOR_FOLD_COVER_INDEXES + tuple(_watermark_index(table) for table in WATERMARK_CORE_TABLES)
 
 #: ``scheduler.sqlite``.  ``scheduler_formal_results`` is deliberately absent:
 #: its ``work_order_id`` is already ``UNIQUE``, so SQLite has kept an index on
@@ -148,7 +292,75 @@ SCHEDULER_PROJECTION_INDEXES: tuple[IndexSpec, ...] = (
             "by (work_order_id, attempt_number)"
         ),
     ),
+    # 2026-09-29.  Both are partial: only the work orders that carry the
+    # field are indexed, and a query's ``expr = ?`` implies ``expr IS NOT
+    # NULL``, so SQLite uses them.  Building either reads every work order's
+    # JSON once (0.85 GB on the legacy scheduler); after that a lookup is a
+    # seek instead of that same read.
+    IndexSpec(
+        name="scheduler_work_orders_document_stage",
+        table="scheduler_work_orders",
+        columns=WORK_ORDER_DOCUMENT_STAGE,
+        where=(
+            "json_extract(work_order_json,"
+            "'$.metadata.mission_document_research_admission_ref') IS NOT NULL"
+        ),
+        reason=(
+            "mission_document_research_executor._effective_stage finds a "
+            "stage's stored work orders by admission and stage; it was a "
+            "json_extract scan of every work order per call"
+        ),
+    ),
+    IndexSpec(
+        name="scheduler_work_orders_request_id",
+        table="scheduler_work_orders",
+        columns=WORK_ORDER_REQUEST_ID,
+        where=f"{WORK_ORDER_REQUEST_ID} IS NOT NULL",
+        reason=(
+            "controlled_lane_reentry._already_consumed asks whether a "
+            "recovery request id was ever enqueued; it read and parsed every "
+            "work order to answer"
+        ),
+    ),
 ) + tuple(_watermark_index(table) for table in WATERMARK_SCHEDULER_TABLES)
+
+
+#: ``model-router.sqlite``.  2026-09-30 (cockpit review P1-1): the three reads
+#: ``ModelRouter.chain_link_digest`` makes for the model and sources pages.
+#: Each build reads the link table once (~60 MB, 48k links on legacy): all
+#: three took ~70 ms on a compact copy of legacy's links -- expect a second or
+#: two cold on the live file -- and add ~3 MB together.
+MODEL_ROUTER_INDEXES: tuple[IndexSpec, ...] = (
+    IndexSpec(
+        name="model_route_chain_links_served_tier",
+        table="model_route_chain_links",
+        columns="served, tier, link_sequence",
+        reason=(
+            "chain_link_digest: SELECT tier, MAX(link_sequence) ... WHERE "
+            "served=1 GROUP BY tier, the newest skipped links of a tier "
+            "(served=0 AND tier=? ORDER BY link_sequence DESC LIMIT n) and "
+            "SELECT DISTINCT tier -- each a scan of every link without it"
+        ),
+    ),
+    IndexSpec(
+        name="model_route_chain_links_served_purpose",
+        table="model_route_chain_links",
+        columns="served, purpose, link_sequence",
+        reason=(
+            "chain_link_digest: SELECT purpose, MAX(link_sequence) ... WHERE "
+            "served=1 GROUP BY purpose (last served link per calling stage)"
+        ),
+    ),
+    IndexSpec(
+        name="model_route_chain_links_served_tier_reason",
+        table="model_route_chain_links",
+        columns="served, tier, skip_reason",
+        reason=(
+            "chain_link_digest: a tier's skip counts, SELECT skip_reason, "
+            "COUNT(*) ... WHERE served=0 AND tier=? GROUP BY skip_reason"
+        ),
+    ),
+)
 
 
 def _table_exists(connection: sqlite3.Connection, table: str) -> bool:
@@ -257,32 +469,48 @@ def apply_projection_indexes(
     core_db: Path | str | None = None,
     scheduler_db: Path | str | None = None,
     busy_timeout_ms: int = BUSY_TIMEOUT_MS,
+    model_router_db: Path | str | None = None,
 ) -> dict[str, Any]:
-    """Ensure both databases carry the indexes the projection reads through."""
+    """Ensure the databases carry the indexes their read paths go through.
 
-    return {
+    ``model_router_db`` is reported only when asked for, so the projection's
+    own callers see exactly the two sections they always did. The wide-JSON
+    WorkOrder expression index is installed here, not by every worker open.
+    First upgrade of a large existing authority requires a drained quiet window;
+    busy_timeout bounds lock acquisition, not CREATE INDEX execution.
+    """
+
+    report = {
         "core": _apply_one(core_db, CORE_PROJECTION_INDEXES,
                            busy_timeout_ms=busy_timeout_ms),
-        "scheduler": _apply_one(scheduler_db, SCHEDULER_PROJECTION_INDEXES,
-                                busy_timeout_ms=busy_timeout_ms),
+        "scheduler": _apply_one(
+            scheduler_db, SCHEDULER_PROJECTION_INDEXES + SCHEDULER_FOLD_COVER_INDEXES,
+            busy_timeout_ms=busy_timeout_ms),
     }
+    if model_router_db is not None:
+        report["model_router"] = _apply_one(
+            model_router_db, MODEL_ROUTER_INDEXES, busy_timeout_ms=busy_timeout_ms)
+    return report
 
 
 def main(argv: Sequence[str] | None = None) -> int:  # pragma: no cover - CLI
     parser = argparse.ArgumentParser(
         description=(
-            "Build the dashboard projection's indexes. Idempotent, and safe "
-            "to run while the service is up: an index that cannot take the "
-            "write lock right now is reported as deferred, not raised."
+            "Build the dashboard projection's indexes idempotently. Prebuild "
+            "on large existing authorities in a drained quiet window: CREATE "
+            "INDEX scans history while holding a write lock. Lock acquisition "
+            "failure is deferred; the lock timeout does not bound build time."
         )
     )
     parser.add_argument("--core-db")
     parser.add_argument("--scheduler-db")
+    parser.add_argument("--model-router-db")
     parser.add_argument("--busy-timeout-ms", type=int, default=BUSY_TIMEOUT_MS)
     args = parser.parse_args(argv)
     report = apply_projection_indexes(
         core_db=args.core_db, scheduler_db=args.scheduler_db,
         busy_timeout_ms=args.busy_timeout_ms,
+        model_router_db=args.model_router_db,
     )
     import json as _json
 

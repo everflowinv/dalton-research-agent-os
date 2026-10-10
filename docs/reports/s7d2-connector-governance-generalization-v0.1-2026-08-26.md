@@ -1,6 +1,6 @@
 # S7d-2：connector 治理记录泛化 v0.1（2026-08-26）
 
-分支 `s7d-connector-governance`（worktree `/Users/everflow/Projects/dalton-s7d-gov`，基于 main `84ffc70`），已 `--no-ff` 合并进 main `0b0fbc9`。子任务回报里列的 commit 与 worktree 实际 commit（`31cbb59` → `2950248` → `9f723e9` → `882c6cc`）不一致，且子任务没有留下报告文件，本报告由主 session 按合并后的代码补写。
+分支 `s7d-connector-governance`（worktree `$HOME/Projects/dalton-s7d-gov`，基于 main `84ffc70`），已 `--no-ff` 合并进 main `0b0fbc9`。子任务回报里列的 commit 与 worktree 实际 commit（`31cbb59` → `2950248` → `9f723e9` → `882c6cc`）不一致，且子任务没有留下报告文件，本报告由主 session 按合并后的代码补写。
 
 ## 结论
 

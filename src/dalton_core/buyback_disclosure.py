@@ -211,10 +211,20 @@ def issuer_purchase_section(text: str) -> dict[str, Any]:
     """
 
     blocks = _blocks(text)
-    start = next(
-        (index for index, block in enumerate(blocks) if _SECTION_RE.search(block)),
-        None,
-    )
+    starts = [index for index, block in enumerate(blocks) if _SECTION_RE.search(block)]
+    start = starts[0] if starts else None
+    # A 10-K names the item in its table of contents first, and that "section"
+    # runs into the next TOC line with no table in it. The section taken is the
+    # first mention that is followed by a monthly row before the next item.
+    def has_rows(candidate: int) -> bool:
+        for index in range(candidate + 1, len(blocks)):
+            if _NEXT_ITEM_RE.match(blocks[index]):
+                return False
+            if _is_period(blocks[index]):
+                return True
+        return False
+
+    start = next((candidate for candidate in starts if has_rows(candidate)), start)
     if start is None:
         return {
             "status": "absent",
@@ -782,7 +792,9 @@ def accession_of(*fields: Any) -> str | None:
 
 
 def buyback_documents(
-    connection: sqlite3.Connection, *, company_ref: str, limit: int = 40
+    connection: sqlite3.Connection, *, company_ref: str, limit: int = 40,
+    state_dir: Any = None, reports: list[dict[str, Any]] | None = None,
+    cache: dict[Any, Any] | None = None,
 ) -> list[dict[str, Any]]:
     """The filings held for this company that could carry a repurchase table.
 
@@ -812,7 +824,10 @@ def buyback_documents(
     except sqlite3.OperationalError as exc:
         if "no such table" not in str(exc):
             raise
-        return []
+        # 2026-10-07: the index lives in its own file, so on a live Core this
+        # table is absent and the scan used to end here with nothing -- while
+        # the SEC discovery lane had fetched every covered company's 10-K.
+        rows = []
     found: list[dict[str, Any]] = []
     for row in rows:
         title = row["title"] or ""
@@ -833,6 +848,24 @@ def buyback_documents(
             "accession": accession,
             "text": row["extracted_text"],
         })
+    if state_dir is not None:
+        # The filings the mission's SEC discovery lane fetched, read from the
+        # spooled bytes (``acquired_sec_filings``). An accession the index
+        # already returned is not read twice.
+        from .acquired_sec_filings import acquired_filing_documents
+
+        held = {item["accession"] for item in found if item["accession"]}
+        acquired = acquired_filing_documents(
+            connection, company_ref=company_ref, state_dir=state_dir, limit=limit,
+            cache=cache)
+        for item in acquired["documents"]:
+            if item["accession"] not in held:
+                found.append(item)
+        if reports is not None:
+            reports.extend(item for item in acquired["reports"]
+                           if item.get("status") in ("refused", "unavailable"))
+        found.sort(key=lambda item: str(item.get("document_date") or ""), reverse=True)
+        found = found[:int(limit)]
     return found
 
 
@@ -841,6 +874,8 @@ def buyback_event_candidates(
     *,
     company_ref: str,
     limit: int = 40,
+    state_dir: Any = None,
+    cache: dict[Any, Any] | None = None,
 ) -> dict[str, Any]:
     """Every buyback event derivable from the filings this Core already holds.
 
@@ -852,7 +887,12 @@ def buyback_event_candidates(
     events: list[dict[str, Any]] = []
     skipped: list[dict[str, Any]] = []
     tie_outs: list[dict[str, Any]] = []
-    for document in buyback_documents(connection, company_ref=company_ref, limit=limit):
+    unread: list[dict[str, Any]] = []
+    documents = buyback_documents(connection, company_ref=company_ref, limit=limit,
+                                  state_dir=state_dir, reports=unread, cache=cache)
+    skipped.extend({"accession": item.get("accession"), "form": None,
+                    "reason": item.get("reason")} for item in unread)
+    for document in documents:
         if document["accession"] is None:
             skipped.append({
                 "artifact_version_ref": document["artifact_version_ref"],
@@ -861,9 +901,12 @@ def buyback_event_candidates(
                           "not evidence",
             })
             continue
+        # An acquired SEC filing carries its block rendering beside the markup
+        # (``acquired_sec_filings``); the tables are read out of blocks.
+        text = document.get("rendered_text") or document["text"] or ""
         if document["form"] in ("10-Q", "10-K"):
             produced = issuer_purchase_events(
-                document["text"] or "",
+                text,
                 company_ref=company_ref,
                 accession=document["accession"],
                 form=document["form"],
@@ -878,7 +921,7 @@ def buyback_event_candidates(
                 })
         elif document["form"] == "8-K":
             produced = authorisation_events(
-                document["text"] or "",
+                text,
                 company_ref=company_ref,
                 accession=document["accession"],
                 filing_date=document["document_date"],

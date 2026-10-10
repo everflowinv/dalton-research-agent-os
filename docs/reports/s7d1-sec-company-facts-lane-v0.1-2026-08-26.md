@@ -1,6 +1,6 @@
 # S7d-1：Core-hosted SEC company-facts lane v0.1（2026-08-26）
 
-分支 `s7d-sec-company-facts-lane`，worktree `/Users/everflow/Projects/dalton-s7d-lane`。未 push、未合并、未部署、未碰 live `~/Library/Application Support/Dalton`、未调真实 SEC 网络。
+分支 `s7d-sec-company-facts-lane`，worktree `$HOME/Projects/dalton-s7d-lane`。未 push、未合并、未部署、未碰 live `~/Library/Application Support/Dalton`、未调真实 SEC 网络。
 
 ## 结论
 
@@ -24,7 +24,7 @@ Gate 1 canary 的整条链（perception snapshot → cycle → candidate → dec
 
 ## 验证
 
-`cd /Users/everflow/Projects/dalton-s7d-lane && PYTHONPATH=src /Users/everflow/Projects/dalton-research-agent-os/.venv/bin/python -m unittest -v tests.test_sec_company_facts_lane`
+`cd $HOME/Projects/dalton-s7d-lane && PYTHONPATH=src $HOME/Projects/dalton-research-agent-os/.venv/bin/python -m unittest -v tests.test_sec_company_facts_lane`
 
 最后一次完整运行：8 个用例，6 ok、2 error（约 297 秒）。两处 error 之后已修：`test_missing_core_rules_*` 用了不存在的表名 `work_orders`（改为 `agenda_cycles`）；`test_locates_own_candidate_*` 撞 `ConnectorQuotaExceeded`，已标 `unittest.skip` 并写明原因。**修后的整套没有再跑一遍**（时间上限）。
 

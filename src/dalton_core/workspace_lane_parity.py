@@ -110,8 +110,6 @@ HOST_SOURCES: tuple[HostSource, ...] = (
                requires_any=("wiki/vectors.db", "wiki-index.sqlite")),
     HostSource("feeds/market-digest-output", "卖方销售快报摘要目录",
                openclaw_relative="skills/market-digest/output"),
-    HostSource("feeds/prior-research", "本机既有研究资料库",
-               environment="DALTON_PRIOR_RESEARCH_DIR"),
     HostSource("host-tools/xueqiu", "雪球取数工具", executable=True),
     HostSource("host-tools/xueqiu-hot-rank", "雪球热榜工具", executable=True),
     HostSource("host-tools/xreach", "X/Twitter 取数工具", executable=True),
@@ -200,6 +198,15 @@ class LaneParity:
     mission_plan: str | None = None
     mission_sources: tuple[str, ...] = ()
     owner_inputs: tuple[str, ...] = ()
+    #: State files only the owner can write (a list of URLs nobody can
+    #: derive).  Never seeded: an invented declaration would switch the lane on
+    #: over pages nobody chose.  Reported as a blocker while absent.
+    owner_files: tuple[str, ...] = ()
+    #: Directories this environment owns outright: created empty inside its
+    #: own state, never linked anywhere.  2026-09-30, owner instruction: the
+    #: prior-research corpus is per workspace, not shared -- ws-7d's link into
+    #: the legacy state broke nothing yet only because nobody had moved it.
+    own_dirs: tuple[str, ...] = ()
     seeds: tuple[str, ...] = ()
     note: str = ""
 
@@ -232,7 +239,10 @@ def lane_parity_table() -> tuple[LaneParity, ...]:
     reading this table.
     """
 
-    from .hkex_filings_core import DAILY_BUYBACK_TAPE_OPERATION
+    from .cn_hk_findata_core import KIND_BY_OPERATION as FINDATA_KINDS
+    from .ir_page_watch_core import (
+        GOVERNANCE_FILENAME_BY_OPERATION as IR_PAGE_GOVERNANCE,
+    )
     from .hkex_filings_launcher import (
         GOVERNANCE_FILENAME_BY_OPERATION as HKEX_GOVERNANCE,
     )
@@ -281,16 +291,13 @@ def lane_parity_table() -> tuple[LaneParity, ...]:
         LaneParity(
             key="hkex_filings", label="港股披露",
             flags=("--hkex-filings-governance-dir",),
-            # The daily buy-back tape is left out on purpose, exactly as
-            # ``deploy/macos/install.sh`` leaves it out: it is a separately
-            # governed full-market acquisition, and installing it here would
-            # turn a new network permission into setup policy.  The lane turns
-            # on per operation, so the other three still buy the lane.
-            governance=tuple(sorted(
-                name for operation, name in HKEX_GOVERNANCE.items()
-                if operation != DAILY_BUYBACK_TAPE_OPERATION)),
+            # 2026-09-30, owner instruction: every connector permission is
+            # approved when an environment is created -- the daily buy-back
+            # tape included (``deploy/macos/install.sh`` still leaves it
+            # proposed on the legacy install; that is the legacy's own choice).
+            governance=tuple(sorted(HKEX_GOVERNANCE.values())),
             governance_any=True,
-            note="港交所公开披露；每日回购带宽另行审批，此处不装。",
+            note="港交所公开披露（含每日回购带宽），创建时全部批准。",
         ),
         LaneParity(
             key="guidepoint", label="专家访谈资料（Guidepoint）",
@@ -325,7 +332,7 @@ def lane_parity_table() -> tuple[LaneParity, ...]:
             flags=("--prior-research-corpus-root", "--prior-research-governance-list",
                    "--prior-research-governance-get", "--feed-discovery-plan"),
             governance=tuple(PRIOR_RESEARCH_GOVERNANCE),
-            host_sources=("feeds/prior-research",),
+            own_dirs=("feeds/prior-research",),
             mission_plan="feed",
             mission_sources=("source:prior-research",),
         ),
@@ -340,6 +347,32 @@ def lane_parity_table() -> tuple[LaneParity, ...]:
             mission_plan="crowd",
             mission_sources=("source:xueqiu", "source:x", "source:blind"),
             owner_inputs=("每家公司的 X 账号与员工评价站 slug 无法推导，需要你补。",),
+        ),
+        # 2026-09-30 (c3): the two groups the legacy Core had approved and no
+        # workspace was ever offered, because neither was in this table nor in
+        # the shared connection catalog.
+        LaneParity(
+            key="ir_page_watch", label="公司投资者关系页面变动",
+            # Rides on the ownership lane: the declaration flag is emitted by
+            # ``mission_ownership_lane.argv_fragment`` once an ownership record
+            # is approved and ``ir-pages.json`` exists.
+            flags=("--ir-page-declaration",),
+            governance=tuple(sorted(IR_PAGE_GOVERNANCE.values())),
+            owner_files=("ir-pages.json",),
+            owner_inputs=("每家公司要盯的投资者关系页面网址无法推导，需要你写进 "
+                          "ir-pages.json；本机还要运行 changedetection（127.0.0.1:5055）。",),
+            note="列出与读取变动是两项审批，两项都要；网址由你声明，不按任务生成。",
+        ),
+        LaneParity(
+            key="cn_hk_findata", label="沪深港财务与交易数据",
+            # Not a writer lane: the OpenClaw skill runs
+            # ``dalton_core.cn_hk_findata_cli`` with one record per operation,
+            # so there is no flag to wait for -- the approved records are the
+            # whole input, and any one of them buys its own operation.
+            flags=(),
+            governance=tuple(sorted(f"{kind}-v1.json" for kind in FINDATA_KINDS.values())),
+            governance_any=True,
+            note="公开行情与财报数据，无需账号；按操作逐项审批，由 OpenClaw 技能调用，不占 writer 参数。",
         ),
     )
 
@@ -359,7 +392,14 @@ def host_provisioned_source_refs(host_sources: Mapping[str, Path]) -> list[str]:
 
     refs: set[str] = set()
     for lane in lane_parity_table():
-        if not lane.host_sources or not lane.mission_sources:
+        if not lane.mission_sources:
+            continue
+        if lane.own_dirs and not lane.host_sources:
+            # Nothing on the host to wait for: the directory is this
+            # environment's own and is created with it.
+            refs.update(lane.mission_sources)
+            continue
+        if not lane.host_sources:
             continue
         if not all(name in host_sources for name in lane.host_sources):
             continue
@@ -677,6 +717,9 @@ def plan_parity_actions(
         raise LaneParityError(
             "a connector approval is signed by a person; actor_ref must be human:...")
     state = Path(state_dir).expanduser().resolve()
+    from .workspace_lifecycle import state_for_core
+    if state_for_core(state) != "active":
+        return []
     sources = (resolve_host_sources() if host_sources is None else dict(host_sources))
     selected = None if lanes is None else set(lanes)
     actions: list[ParityAction] = []
@@ -697,6 +740,18 @@ def plan_parity_actions(
                 kind="link", target=str(target), detail=str(sources[name]),
                 reason=f"{lane.label}：把本机已有的来源接进工作区（链接而非复制，"
                        "因为宿主还会继续往里写）。",
+            ))
+        for name in lane.own_dirs:
+            target = state / name
+            if target.exists() or target.is_symlink():
+                # Replace a link only with the generic prior-research localizer
+                # after stopping new dispatch and draining existing work;
+                # this audit only reports the ownership mismatch.
+                continue
+            actions.append(ParityAction(
+                kind="own_dir", target=str(target), detail=name,
+                reason=f"{lane.label}：在本环境自己的状态目录里建一个空目录"
+                       "（每个环境各有一份，不链接到别的环境）。",
             ))
         for name in lane.seeds:
             target = state / name
@@ -726,6 +781,66 @@ def plan_parity_actions(
     if selected is None:
         actions.extend(_routing_policy_actions(state))
         actions.extend(_credential_slot_actions(state, source_state_dir))
+        actions.extend(_host_scheme_actions(state, source_state_dir))
+    return actions
+
+
+def _host_scheme_actions(
+    state: Path, source_state_dir: str | Path | None,
+) -> list[ParityAction]:
+    """The rest of what a new environment now inherits at creation (2026-09-30).
+
+    Three settings ``workspace_host_scheme`` / ``workspace_runtime_setup`` give
+    a workspace created today, planned here for the ones created before:
+
+    * the per-call budgets (``call_budgets``) -- ws-e399 was still drafting
+      documents on 4 096 output tokens where the mature environment runs on
+      16 000;
+    * the day-budget policy (``budget_policy``) -- ws-e399 pinned $180/day
+      (production:3) in all 22 configs and service.json, the host runs $500;
+    * the claim-support settings file (``claim_support_settings``) -- absent,
+      so the fleet's backfill pause/resume scripts skipped it.
+    """
+
+    if source_state_dir is None:
+        return []
+    source = Path(source_state_dir).expanduser().resolve()
+    if source == state:
+        return []
+    from .workspace_host_scheme import budget_policy_plan, call_budget_differences
+
+    actions: list[ParityAction] = []
+    differences = call_budget_differences(state, source)
+    if differences:
+        actions.append(ParityAction(
+            kind="call_budgets", target=str(state), detail=str(source),
+            reason="每次调用的预算：" + "、".join(sorted({
+                f"{row['config']}#{row['field']}" for row in differences}))
+                   + " 与本机现有环境不同（例如起草定向回答的输出上限 4096 vs 16000）；"
+                     "按现有环境对齐，改完要重启服务才生效。"))
+    try:
+        budget = budget_policy_plan(state, source)
+    except (OSError, sqlite3.Error, ValueError) as exc:
+        budget = {"status": "unknown", "reason": str(exc)}
+    if budget["status"] == "extend":
+        caps = sorted({row["day_cap_micros"] for row in budget["register"]})
+        actions.append(ParityAction(
+            kind="budget_policy", target=str(state), detail=str(source),
+            reason=f"日预算策略：这里钉的是 {sorted(set(budget['pins'].values()))}，"
+                   f"本机现有环境是 {budget['source_head']}"
+                   f"（每天 ${budget['source_cap_micros'] / 1_000_000:g}）；登记它的新版本"
+                   f"（{len(budget['register'])} 个，日上限 "
+                   + "、".join(f"${cap / 1_000_000:g}" for cap in caps)
+                   + "）并把 22 份模型配置和 service.json 改钉到它。需先停服务。"))
+    from .claim_support_verification import SETTINGS_FILENAME
+
+    if not (state / SETTINGS_FILENAME).exists():
+        actions.append(ParityAction(
+            kind="claim_support_settings", target=str(state / SETTINGS_FILENAME),
+            detail=str(source / SETTINGS_FILENAME),
+            reason="晨报 claim 核验设置文件不存在：按本机现有环境复制一份"
+                   "（现有环境没有就写空设置 {}，行为等同默认值），"
+                   "这样暂停/恢复回补的脚本也能覆盖到这个环境。"))
     return actions
 
 
@@ -750,7 +865,7 @@ def _credential_slot_actions(
 
     if source_state_dir is None:
         return []
-    from .workspace_host_scheme import source_credential_slots
+    from .workspace_host_scheme import _configured_credential_slots, source_credential_slots
 
     source = Path(source_state_dir).expanduser().resolve()
     if source == state:
@@ -765,7 +880,7 @@ def _credential_slot_actions(
         except (OSError, ValueError):
             continue
         if isinstance(config, Mapping):
-            missing |= {slot for slot in wanted
+            missing |= {slot for slot in _configured_credential_slots(config, wanted)
                         if slot not in (config.get("credential_slot_refs") or [])}
     from .workspace_host_scheme import _slot_lists, service_config_path
 
@@ -863,6 +978,10 @@ def apply_parity_actions(
     performed: list[dict[str, str]] = []
     for action in actions:
         target = Path(action.target)
+        from .workspace_lifecycle import state_for_core
+        owner_state = next((parent for parent in (target.parent, *target.parents) if parent.name == "dalton-core" and (parent.parent.parent / "workspace.json").is_file()), None)
+        if owner_state is not None and state_for_core(owner_state) != "active":
+            raise LaneParityError("stopped workspace cannot apply a stale parity plan")
         target.parent.mkdir(mode=0o700, parents=True, exist_ok=True)
         if action.kind == "link":
             if target.exists() or target.is_symlink():
@@ -885,6 +1004,39 @@ def apply_parity_actions(
             outcome = align_credential_slots(target, source_state_dir=action.detail)
             performed.append({**action.as_wire(), "result": outcome["status"],
                               "detail": "、".join(outcome["updated"]) or "（本来就齐了）"})
+            continue
+        if action.kind == "call_budgets":
+            from .workspace_host_scheme import align_call_budgets
+
+            outcome = align_call_budgets(target, source_state_dir=action.detail)
+            performed.append({**action.as_wire(), "result": outcome["status"],
+                              "detail": "、".join(outcome["updated"]) or "（本来就一致）"})
+            continue
+        if action.kind == "budget_policy":
+            from .workspace_host_scheme import align_budget_policy
+
+            outcome = align_budget_policy(target, source_state_dir=action.detail)
+            performed.append({**action.as_wire(), "result": outcome["status"],
+                              "detail": "、".join(outcome.get("updated") or [])
+                                        or outcome.get("reason") or "（本来就一致）"})
+            continue
+        if action.kind == "claim_support_settings":
+            from .claim_support_verification import load_settings
+
+            source_file = Path(action.detail)
+            value: dict[str, Any] = {}
+            if source_file.is_file():
+                load_settings(source_file.parent)  # refuse to copy an invalid file
+                value = json.loads(source_file.read_text(encoding="utf-8"))
+            _write_json(target, value)
+            performed.append({**action.as_wire(), "result": "seeded"})
+            continue
+        if action.kind == "own_dir":
+            if target.exists() or target.is_symlink():
+                performed.append({**action.as_wire(), "result": "preserved"})
+                continue
+            target.mkdir(mode=0o700)
+            performed.append({**action.as_wire(), "result": "created"})
             continue
         if action.kind == "seed":
             _write_json(target, SEED_FILES[action.detail])
@@ -1000,6 +1152,12 @@ def audit_lanes(
     """
 
     state = Path(state_dir).expanduser().resolve()
+    from .workspace_lifecycle import state_for_core, archive_integrity, retained_integrity
+    lifecycle = state_for_core(state)
+    if lifecycle != "active":
+        return {"schema_version": "workspace-lane-parity-0.1", "state_dir": str(state),
+                "lifecycle": lifecycle, "status": "intentionally_stopped", "lanes": [],
+                "host_scheme": [], "integrity": archive_integrity(state.parent.parent.parent.parent, state.parent.parent.name) if lifecycle == "archived" else retained_integrity(state) if lifecycle == "paused" else {"status": "deleted"}}
     sources = (resolve_host_sources() if host_sources is None else dict(host_sources))
     mission = read_active_mission(state)
     granted = connected_source_refs(mission)
@@ -1029,6 +1187,20 @@ def audit_lanes(
         plan_missing = _missing_mission_plan(state, lane)
         if plan_missing is not None:
             blockers.append(plan_missing)
+        for name in lane.own_dirs:
+            target = state / name
+            if target.is_symlink():
+                blockers.append(
+                    f"{name} 是指向 {os.readlink(target)} 的链接，应是本环境自己的目录；"
+                    "先停止新任务、等待在途任务结束，并停止读取此目录的服务，再用 "
+                    "scripts/localize_workspace_prior_research.py --workspace <slug> "
+                    "预览；核对后加 --apply 换成真实目录。")
+            elif not target.is_dir():
+                blockers.append(f"本环境自己的 {name} 目录还没建（修复脚本会建一个空目录）")
+        missing_owner_files = [name for name in lane.owner_files
+                               if not (state / name).is_file()]
+        if missing_owner_files:
+            blockers.append("需要你写的文件还没有：" + "、".join(missing_owner_files))
         ungranted = [ref for ref in lane.mission_sources if ref not in granted]
         if ungranted and mission is not None:
             blockers.append("研究任务没有把这些来源标为已连接：" + "、".join(ungranted)
@@ -1040,7 +1212,10 @@ def audit_lanes(
                   "每一轮都归属不到；把名称写进本任务的资料通道检索计划"
                   f"（{MISSION_FEED_PLAN_NAME} 的 companies[].names），"
                   "或用修复脚本的 --company-name TICKER=名称。")
-        configured = all(flag in would_render for flag in lane.flags)
+        # A lane with no writer flag (cn-hk-findata) is "configured" when its
+        # approvals are, since they are its whole input.
+        configured = (all(flag in would_render for flag in lane.flags)
+                      if lane.flags else not missing_records)
         rows.append({
             "key": lane.key, "label": lane.label,
             "configured": configured,

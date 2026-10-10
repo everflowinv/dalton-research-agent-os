@@ -52,7 +52,12 @@ from .observability import ObservabilityStore
 from .openclaw_connector_bridge import LoopbackStreamableHttpMcpHandle
 from .raw_spool import RawSpool
 from .runner_journal import RunnerJournal
-from .scheduler import Scheduler
+from .scheduler import LaneChildScheduler
+from .sqlite_contention import (
+    LANE_LOCK_RETRY_SECONDS,
+    is_sqlite_lock_error,
+    sqlite_lock_failure,
+)
 from .store import DaltonStore, canonical_json
 
 
@@ -91,6 +96,7 @@ def run_discovery(
     missing_periods: tuple[str, ...] = (),
     catalog_db: Path | None = None,
     spool_dir: Path | None = None,
+    lock_retry_seconds: float = LANE_LOCK_RETRY_SECONDS,
 ) -> dict[str, Any]:
     """Authorize, search, and append the discovery record; return the summary."""
 
@@ -101,8 +107,9 @@ def run_discovery(
     connectors = ConnectorStore(core)
     observability = ObservabilityStore(core)
     journal = RunnerJournal(core)
-    scheduler = Scheduler(
-        str(state / "scheduler.sqlite"), default_lease_seconds=30, max_lease_seconds=60
+    scheduler = LaneChildScheduler(
+        str(state / "scheduler.sqlite"), default_lease_seconds=30, max_lease_seconds=60,
+        lock_retry_seconds=lock_retry_seconds,
     )
     # One catalog per governed capability.  ``CapabilityCatalog.prepare``
     # only admits a descriptor published at the catalog's *current* epoch and
@@ -188,7 +195,14 @@ def run_discovery(
         }
         summary["provider_calls"] = receipt["provider_calls"]
         if receipt["outcome"] != "succeeded" or receipt["source_envelope_ref"] is None:
-            summary["failure_reason"] = f"search outcome {receipt['outcome']}"
+            # 2026-10-08: carry the provider's own words (the runner journal
+            # holds them) and their class, instead of "search outcome retryable".
+            from .provider_failure import failure_reason_text, journal_failure
+
+            detail = journal_failure(core.connection, receipt["connector_invocation_ref"])
+            summary["failure_detail"] = detail
+            summary["failure_reason"] = failure_reason_text(
+                f"search outcome {receipt['outcome']}", detail)
             return summary
         present = alphaengine_documents_in_authority(core.connection, receipt["document_refs"])
         record = missions.record_source_discovery(
@@ -219,6 +233,9 @@ def run_discovery(
         summary["failure_reason"] = f"{type(exc).__name__}: {exc}"
         return summary
     except Exception as exc:  # unexpected: record the reason for the parent, then surface it
+        if is_sqlite_lock_error(exc):
+            summary.update(sqlite_lock_failure(exc))
+            return summary
         summary["failure_reason"] = f"unexpected {type(exc).__name__}: {exc}"
         raise
     finally:
@@ -280,7 +297,10 @@ def main(argv: list[str] | None = None) -> int:
         )
     else:
         governance = SearchConnectorGovernance.load(args.governance)
-    plan = load_discovery_plan(args.discovery_plan)
+    # 2026-10-06: render the plan exactly as the writer's coordinator does
+    # (code-owned query forms), so the discovery records the same plan hash.
+    from .alphaengine_query_forms import effective_discovery_plan
+    plan = effective_discovery_plan(load_discovery_plan(args.discovery_plan))
     as_of = date.fromisoformat(args.as_of) if args.as_of else datetime.now(timezone.utc).date()
     if args.fake_search_file is not None:
         results = json.loads(args.fake_search_file.read_text(encoding="utf-8"))

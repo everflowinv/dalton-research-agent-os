@@ -75,7 +75,7 @@ MAX_OPERATING_METRICS = 10
 # statements lane may be asked to fetch; the forward one bounds the model.
 MAX_HISTORICAL_QUARTERS = 20
 MAX_FORECAST_QUARTERS = 12
-MIN_FORECAST_QUARTERS = 4
+MIN_FORECAST_QUARTERS = 8
 
 STATEMENTS: tuple[str, ...] = ("income", "balance", "cash")
 IMPORTANCE: tuple[str, ...] = ("required", "supporting", "not_material")
@@ -143,7 +143,7 @@ OUTPUT_SCHEMA = {
         "schema_version", "assessment", "revenue_anchor_concept",
         "revenue_drivers", "expense_lines",
         "forecast_statements", "operating_metrics", "horizon",
-        "financial_statement_structure", "cash_flow_companion",
+        "financial_statement_structure", "cash_flow_companion", "driver_formulas",
     ],
     "properties": {
         "schema_version": {"const": SCHEMA_VERSION},
@@ -161,6 +161,21 @@ OUTPUT_SCHEMA = {
                 "what this model has to get right."
             ),
         },
+        "driver_formulas": {"type": "array", "items": _entry({
+            "output_ref": _REF, "operator": {"enum": ["sum", "product", "contract_conversion"]},
+            "driver_refs": {"type": "array", "items": _REF, "minItems": 1}, "because": _BECAUSE,
+        }, ("output_ref", "operator", "driver_refs", "because")),
+            "description": "Every declared economic driver must enter an executable formula: segment sum, volume × price, or contract book × conversion rate. Missing execution blocks publication."},
+        "fcf_definition": _entry({
+            "source_ref": {"type": "string", "minLength": 1},
+            "components": {"type": "array", "minItems": 2, "items": _entry({
+                "role": {"enum": ["operating_cash_flow", "capital_expenditure", "finance_lease_principal", "capitalized_software", "capitalized_contract_costs"]},
+                "concept": {"type": "string", "minLength": 1}, "coefficient": {"enum": ["1", "-1"]}}, ("role", "concept", "coefficient"))},
+            "one_off_items": {"type": "array", "items": _entry({
+                "period_end": {"type": "string", "format": "date"}, "value": {"type": "string"},
+                "direction": {"enum": ["inflow", "outflow"]}, "source_ref": {"type": "string", "minLength": 1},
+                "because": _BECAUSE}, ("period_end", "value", "direction", "source_ref", "because"))},
+        }, ("source_ref", "components", "one_off_items")),
         "revenue_drivers": {
             "type": "array", "minItems": 1, "maxItems": MAX_REVENUE_DRIVERS,
             "description": "What moves the top line. Not the top line itself.",
@@ -169,6 +184,7 @@ OUTPUT_SCHEMA = {
                     "ref": _REF, "label": _LABEL,
                     "kind": {"enum": list(DRIVER_KINDS)},
                     "basis_concept": _BASIS,
+                    "basis_identity": {"type":"object","additionalProperties":False,"required":["statement","dimensions"],"properties":{"statement":{"enum":["income","balance","cash"]},"dimensions":{"type":"object","minProperties":1,"additionalProperties":{"type":"string","minLength":1}}}},
                     "unit": {
                         "type": "string", "minLength": 1, "maxLength": 40,
                         "description": "USD, percent, headcount, days -- what this is counted in.",
@@ -431,10 +447,13 @@ _NUMERIC_PERIOD_FIELDS = (
 
 
 def _numeric_period_cell_line(cell: Mapping[str, Any]) -> str:
-    return "\t".join(
+    row="\t".join(
         json.dumps(cell.get(field), ensure_ascii=False, separators=(",", ":"))
         for field in _NUMERIC_PERIOD_FIELDS
     )
+    if "dimensions" in cell:
+        row+="\tSOURCE_IDENTITY="+json.dumps({k:cell[k] for k in ("dimensions","statement_context_ref","source_unit_ref","unit_definition_hash") if k in cell},ensure_ascii=False,sort_keys=True,separators=(",",":"))
+    return row
 
 
 def _numeric_period_table_header(context: Mapping[str, Any]) -> str:
@@ -458,6 +477,7 @@ def _numeric_period_table_header(context: Mapping[str, Any]) -> str:
         "period_start\tperiod_end\tperiod_shape\tduration_days\tvalue\tunit\t"
         "balance\taccession\tfiling_form\tline_content_hash\tstatus\t"
         "ambiguity_ref",
+        *(["SOURCE_IDENTITY suffix, when present, binds complete dimensions and exact context version; never infer missing axes from labels or amounts."] if any("dimensions" in c for c in context.get("cells") or []) else []),
     ])
 
 
@@ -531,6 +551,18 @@ def build_prompt(state: Mapping[str, Any]) -> str:
         "Separately, return revenue_anchor_concept: the exact consolidated "
         "filed revenue concept used to start the arithmetic. It is not an "
         "economic driver and must not be described as one.\n"
+        "driver_formulas is required. Every revenue_drivers ref must enter an explicit "
+        "formula whose output_ref is an exact filed financial_statement_structure leaf. "
+        "For sum, identify every source-disclosed member needed to tie the total; never omit "
+        "a residual member or infer an allocation. For product, use quantity × price; for "
+        "contract_conversion, use a genuine contract book and an admitted conversion basis. "
+        "A segment's reported revenue is a segment sum input, not a contract book. "
+        "A qualitative factor (for example FX without an admitted numerical mechanism) belongs "
+        "in assessment or an explicitly unavailable operating metric, not an unexecuted "
+        "revenue_drivers declaration. Never fabricate a member, historical amount, unit or "
+        "conversion basis to fill a formula. Where original bases are unavailable, state "
+        "the exact missing material in assessment; such plans cannot publish a forecast "
+        "until the normal material-acquisition and source-admission gates resolve it.\n"
         "2. What are its costs, and how do they behave? Split a filed line "
         "when its parts behave differently; an expense that follows revenue "
         "and one that follows headcount are different lines even when the "
@@ -546,8 +578,15 @@ def build_prompt(state: Mapping[str, Any]) -> str:
         "headcount. Say whether the company discloses each one -- an "
         "undisclosed metric has to be estimated, and that changes how it is "
         "used.\n\n"
+        "Every financial_statement_structure.lines entry must include every required "
+        "OUTPUT_SCHEMA field, including a nonempty source-grounded label; do not omit "
+        "fields because they seem repetitive. Include null for a nullable field that "
+        "does not apply (annual_forecast_method is null for all non-share lines). "
         "Then return financial_statement_structure: the exact duration income "
-        "lines and arithmetic this company disclosed. Use consolidated filed "
+        "lines and arithmetic this company disclosed, plus any filed cash-flow "
+        "leaves (share_repurchase, dividends_paid, acquisitions) and balance-sheet "
+        "leaves (cash_and_equivalents, debt, working capital) the model needs. "
+        "Use consolidated filed "
         "concepts only; derived sums must follow this presentation and tie to "
         "a filed subtotal. Every derived line sets concept to null. Put its "
         "exact filed historical tie only in the associated formula's "
@@ -558,13 +597,28 @@ def build_prompt(state: Mapping[str, Any]) -> str:
         "\"tie_out_concept\":\"us-gaap:OperatingIncomeLoss\"}. "
         "Every non-null expense_lines[].basis_concept selected above must also "
         "appear as the concept of a filed line in "
-        "financial_statement_structure; when it cannot participate in an exact "
-        "forecast bridge, retain that filed line with forecast_method unavailable. "
-        "For each filed leaf choose quarterly_growth, "
-        "share_of_line with an exact base ref, or unavailable. Derived lines "
-        "use formula. Missing non-operating, tax, attribution, preferred-dividend, "
-        "participating-security, convertible or share evidence stays unavailable; "
-        "never treat it as zero. Diluted EPS divides the company's disclosed "
+        "financial_statement_structure. Every filed line with at least eight "
+        "quarters of history needs a forecast method: quarterly_growth for "
+        "revenue and diluted shares without significant seasonality; "
+        "year_over_year_growth or seasonal_factor for stable quarterly seasonal patterns "
+        "(average quarterly_growth is prohibited there); share_of_line with an exact base ref for "
+        "costs (base revenue), income tax (base pretax income) and "
+        "noncontrolling interest (base net income); zero_one_off for a line "
+        "whose behaviour is one_off; rate_times_balance (base a balance-sheet "
+        "line) or carry_forward_mean for interest and other non-operating "
+        "items; carry_forward_mean for other recurring income-statement lines, never "
+        "for balance-sheet instants; unavailable only for a line with less history. "
+        "Every balance-sheet leaf has statement balance, "
+        "period_kind instant and annual_semantics not_applicable: accounts_receivable, "
+        "accounts_payable, deferred_revenue, debt and other asset/liability leaves use "
+        "hold_last, or share_of_line with a legitimate exact revenue base, or unavailable "
+        "when its actual basis is missing. Only cash_and_equivalents may additionally "
+        "use roll_forward. A balance-sheet leaf never uses carry_forward_mean. "
+        "Derived lines use formula. Missing "
+        "preferred-dividend, participating-security or convertible evidence "
+        "stays unavailable; never treat it as zero. Include "
+        "diluted_weighted_average_shares and a derived diluted_eps when the "
+        "company files them. Diluted EPS divides the company's disclosed "
         "diluted_eps_numerator by diluted_weighted_average_shares. Parent net "
         "income is not automatically that numerator. Use "
         "company_presented_component for a filed company-specific bridge item "
@@ -578,24 +632,27 @@ def build_prompt(state: Mapping[str, Any]) -> str:
         "income calculation structure as company_presented_component or change "
         "their units to make them fit. At least one final earnings line -- continuing income, "
         "net income, or parent net income as this company presents it -- must be "
-        "formula-derived and tied to that exact filed result. Prefer an exact filed "
-        "line when GrossProfit or another standard subtotal is available; do not "
-        "duplicate it as a derived line merely to forecast a bridge. A filed standard "
-        "subtotal is historical/tie authority and uses unavailable, not independent "
-        "growth or shares. When a company-specific total is itself filed, use a "
-        "filed company_presented_component with unavailable; reserve "
-        "company_presented_subtotal for a derived sum. Choose the structure backward "
-        "from a final earnings bridge that ties exactly in every applicable source "
-        "period. Derive a "
-        "subtotal only when its formula ties exactly in every applicable source "
-        "period; otherwise retain the unavailable forecast gap. "
-        "A filed pretax-income line is one of those standard subtotals: keep it "
-        "filed when it exists, and derive the next supported earnings line from it. "
+        "formula-derived and tied to that exact filed result. A filed standard "
+        "subtotal (gross profit, operating income, pretax income, net income, or a "
+        "company total such as total operating expenses) is tie authority only and "
+        "never a formula term and never given independent growth or shares: "
+        "forecast it as a derived line whose sum formula adds its filed "
+        "components and ties to the filed total (a company total is then a "
+        "company_presented_subtotal). Pretax income is operating income plus "
+        "every non-operating item; tax is a rate of pretax income; net income, "
+        "noncontrolling interest and attributable net income follow. Every "
+        "formula term must itself be forecastable. Choose the structure backward "
+        "from a final earnings bridge that ties in every applicable source "
+        "period. The code completes missing methods and replaces a filed subtotal "
+        "used as a term with its tied sum of components when the history proves "
+        "one, but a structure whose earnings chain still cannot be computed is "
+        "refused. "
         "A result tied to income including noncontrolling interests uses net_income; "
         "income_from_continuing_operations is reserved for the continuing-income "
         "result before any separate noncontrolling-interest attribution bridge. "
-        "Presentation rounding does not permit arbitrary or global tie "
-        "tolerance, rewriting a filed amount, or inventing a balancing term; "
+        "The only tie tolerance is the filed presentation rounding of a period; "
+        "never an arbitrary or global tolerance, rewriting a filed amount, or "
+        "inventing a balancing term; "
         "per-share division uses each period's disclosed filed precision. Do not assign independent "
         "growth or shares to formula-derived totals as a substitute for the bridge. "
         "A historically replay-ready formula does not make unavailable inputs forecastable. "
@@ -615,7 +672,10 @@ def build_prompt(state: Mapping[str, Any]) -> str:
         "weighted-average shares. Use unavailable there unless this exact company "
         "supports day_weighted_quarters and NUMERIC_PERIODS contains four "
         "positive contiguous quarter averages that tie to a direct annual share "
-        "value. quarterly_growth does not itself authorize annual weighting.\n\n"
+        "value. Alternatively annual_growth_from_filed explicitly projects annual "
+        "shares from at least two consecutive directly filed 10-K annual diluted "
+        "share values; this is a forecast assumption, never a historical quarter-to-year tie. "
+        "quarterly_growth does not itself authorize annual weighting.\n\n"
         "Then return cash_flow_companion separately from the income DAG. Select "
         "this company's exact filed operating-cash-flow and capital-expenditure "
         "concepts when they exist; capital expenditure must be the company's "
@@ -660,6 +720,12 @@ def build_prompt(state: Mapping[str, Any]) -> str:
         f"STATEMENTS:\n{_statement_table(state)}\n"
         f"\nNUMERIC_PERIODS:\n{_numeric_period_table(state)}\n"
         f"\nFINANCIAL_NOTE_EVIDENCE:\n{_financial_note_table(state)}\n"
+        + ("\nMATERIAL FORECAST DEVIATION REVIEW (frozen forecasts remain unchanged):\n"
+           "Reassess the affected methods and assumptions using the exact comparison sources below. "
+           "Do not copy a newer model as proof of correction, invent missing evidence, or change old forecasts. "
+           "Use the same required output schema and source/financial validation rules.\n"
+           + canonical_json(state["model_redraft_context"]) + "\n"
+           if state.get("model_redraft_context") else "")
     )
 
 
@@ -941,7 +1007,7 @@ def _cash_flow_companion(
             base_line = structure_lines[base_ref]
             if (base_line.get("kind") != "filed"
                     or base_line.get("forecast_method") not in {
-                        "quarterly_growth", "share_of_line",
+                        "quarterly_growth", "year_over_year_growth", "seasonal_factor", "share_of_line",
                     }):
                 raise CompanyModelSpecError(
                     f"cash_flow_companion {role} base is not a forecastable filed line")
@@ -1034,7 +1100,15 @@ def spec_from_response(
     for index, item in enumerate(raw_drivers):
         if not isinstance(item, Mapping):
             raise CompanyModelSpecError(f"revenue_drivers[{index}] must be an object")
+        if item.get("basis_identity") is not None:
+            from .company_model_inputs import validate_statement_identity
+            try:
+                identity=validate_statement_identity(item["basis_identity"])
+                if not any(c.get("concept")==item.get("basis_concept") and c.get("statement")==identity["statement"] and c.get("dimensions")==identity["dimensions"] for c in (state.get("numeric_context") or {}).get("cells") or []):
+                    raise ValueError("economic driver identity is not in the admitted exact numeric context")
+            except ValueError as exc: raise CompanyModelSpecError(str(exc)) from exc
         drivers.append({
+            **({"basis_identity":dict(item["basis_identity"])} if item.get("basis_identity") is not None else {}),
             "ref": _ref(item.get("ref"), f"revenue_drivers[{index}].ref", driver_refs),
             "label": _text(item.get("label"), f"revenue_drivers[{index}].label", limit=120),
             "kind": _one_of(item.get("kind"), DRIVER_KINDS, f"revenue_drivers[{index}].kind"),
@@ -1245,6 +1319,31 @@ def spec_from_response(
         "decided_by": decided_by,
         "task_hash": TASK_HASH,
     }
+    if "driver_formulas" not in body:
+        # A single total/mix identity is already executable and remains
+        # compatible with old producers; disaggregated declarations need plans.
+        identity = (len(drivers) == 1 and drivers[0]["kind"] == "mix"
+                    and drivers[0].get("basis_concept") == revenue_anchor)
+        if not identity:
+            raise CompanyModelSpecError(
+                "driver_formulas is required for declared economic driver execution; "
+                "missing driver refs: " + ", ".join(d["ref"] for d in drivers))
+    if "driver_formulas" in body:
+        from .forecast_financial_execution import validate_driver_formulas
+        try:
+            spec["driver_formulas"] = validate_driver_formulas(body["driver_formulas"], drivers, statement_structure)
+            used = {ref for formula in spec["driver_formulas"] for ref in formula["driver_refs"]}
+            missing = sorted({driver["ref"] for driver in drivers} - used)
+            if missing:
+                raise ValueError("driver_formulas does not execute every declared economic driver; missing driver refs: " + ", ".join(missing))
+        except ValueError as exc:
+            raise CompanyModelSpecError(str(exc)) from exc
+    if "fcf_definition" in body:
+        from .forecast_company_fcf import validate_fcf_definition
+        try:
+            spec["fcf_definition"] = validate_fcf_definition(body["fcf_definition"], concepts)
+        except ValueError as exc:
+            raise CompanyModelSpecError(str(exc)) from exc
     if any("cost_driver_slot" in item for item in expenses):
         selected = template_for(state.get("industry_classification"))["classification"]
         spec["cost_driver_template"] = {

@@ -33,6 +33,9 @@ from decimal import Decimal, InvalidOperation
 from typing import Any, Mapping
 
 from .store import content_hash
+from .document_numeric_unit_contracts import (
+    DIRECTED_NUMERIC_CONTRACT_REF, numeric_units, verify_years_quantity,
+)
 
 SCHEMA_VERSION = "0.1"
 CANDIDATE_KIND = "quantitative"
@@ -215,7 +218,7 @@ def _decimal(value: Any, name: str) -> Decimal:
 
 
 def validate_numeric_candidate(
-    value: Mapping[str, Any], *, grade: Any = None
+    value: Mapping[str, Any], *, grade: Any = None, numeric_contract_ref: str | None = None
 ) -> dict[str, Any]:
     """The closed shape a numeric suggestion must have before verification.
 
@@ -233,8 +236,12 @@ def validate_numeric_candidate(
             "as_reported_label/value/unit/currency/period/basis/scale"
         )
     unit = value["unit"]
-    if unit not in ALLOWED_UNITS:
-        raise NumericCandidateError(f"unit must be one of {list(ALLOWED_UNITS)}")
+    try:
+        allowed_units = numeric_units(numeric_contract_ref)
+    except ValueError as exc:
+        raise NumericCandidateError(str(exc)) from exc
+    if unit not in allowed_units:
+        raise NumericCandidateError(f"unit must be one of {list(allowed_units)}")
     basis = value["basis"]
     allowed = ALLOWED_BASES + (
         BASES_BY_GRADE.get(grade, ()) if isinstance(grade, str) else ()
@@ -250,6 +257,8 @@ def validate_numeric_candidate(
     scale = value["scale"]
     if scale is not None and scale not in _SCALE_WORDS:
         raise NumericCandidateError(f"scale must be null or one of {sorted(_SCALE_WORDS)}")
+    if unit == "years" and (currency is not None or scale is not None):
+        raise NumericCandidateError("a years figure must have null currency and scale")
     metric_ref = _text(value["metric_ref"], "metric_ref", maximum=120)
     if _METRIC_REF_RE.fullmatch(metric_ref) is None:
         raise NumericCandidateError("metric_ref must be the slot that was requested")
@@ -338,7 +347,8 @@ def _candidate_values(candidate: Mapping[str, Any]) -> set[Decimal]:
 
 
 def verify_numeric_candidate(
-    candidate: Mapping[str, Any], quotes: Mapping[str, str], *, grade: Any = None
+    candidate: Mapping[str, Any], quotes: Mapping[str, str], *, grade: Any = None,
+    numeric_contract_ref: str | None = None
 ) -> dict[str, Any]:
     """Refuse any candidate whose number is not in the bytes it cited.
 
@@ -348,7 +358,7 @@ def verify_numeric_candidate(
     contains it at all is not a matter of opinion.
     """
 
-    wire = validate_numeric_candidate(candidate, grade=grade)
+    wire = validate_numeric_candidate(candidate, grade=grade, numeric_contract_ref=numeric_contract_ref)
     quote = quotes.get(wire["quote_id"])
     if not isinstance(quote, str) or not quote:
         raise NumericCandidateError("numeric candidate cites a quote that was not supplied")
@@ -363,6 +373,11 @@ def verify_numeric_candidate(
         raise NumericCandidateError(
             "numeric candidate reports a label its citation does not contain"
         )
+    if wire["unit"] == "years":
+        try:
+            verify_years_quantity(wire["value"], quote, currency=wire["currency"], scale=wire["scale"])
+        except ValueError as exc:
+            raise NumericCandidateError(str(exc)) from exc
     verified = {
         **wire,
         "schema_version": SCHEMA_VERSION,
@@ -376,12 +391,15 @@ def verify_numeric_candidate(
         # And a figure that leant on the alias table says so, rather than
         # failing a later re-verification that did not know to ask.
         verified["label_grade"] = grade
+    if numeric_contract_ref is not None:
+        verified["numeric_contract_ref"] = numeric_contract_ref
     verified["content_hash"] = content_hash(verified)
     return verified
 
 
 def verify_numeric_candidates(
-    candidates: Any, quotes: Mapping[str, str], *, grade: Any = None
+    candidates: Any, quotes: Mapping[str, str], *, grade: Any = None,
+    numeric_contract_ref: str | None = None
 ) -> tuple[list[dict[str, Any]], list[dict[str, Any]]]:
     """Split a model's numeric suggestions into verified ones and refusals.
 
@@ -397,7 +415,8 @@ def verify_numeric_candidates(
     refused: list[dict[str, Any]] = []
     for item in candidates:
         try:
-            verified.append(verify_numeric_candidate(item, quotes, grade=grade))
+            verified.append(verify_numeric_candidate(
+                item, quotes, grade=grade, numeric_contract_ref=numeric_contract_ref))
         except NumericCandidateError as exc:
             refused.append({
                 "reason": str(exc),

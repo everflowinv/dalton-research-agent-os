@@ -234,6 +234,50 @@ class BudgetBindingTests(unittest.TestCase):
         same = self.remaining(mission_cap=30, owner_cap=30)
         self.assertEqual((same["cap"], same["bound_by"]), (30, "mission"))
 
+    def _with_plan(self, *, plan_cap, purpose, total, searches,
+                   mission_cap=130, owner_cap=500):
+        from unittest.mock import patch
+
+        from dalton_core import mission_source_discovery as m
+
+        def count(_connection, *, as_of=None, profile_refs=None):
+            return searches if profile_refs == (m.SEARCH_PROFILE_REF,) else total
+
+        with patch.object(m, "count_recent_alphaengine_calls", side_effect=count):
+            return m.alphaengine_calls_remaining(
+                None, mission_cap=mission_cap, owner_cap=owner_cap,
+                plan_cap=plan_cap, purpose=purpose)
+
+    def test_the_plan_cap_names_itself_not_the_owner(self):
+        # batch r: the plan's max_calls_24h was folded into owner_cap, so a
+        # plan of 50 under a mission of 130 read "bound_by: owner".
+        budget = self._with_plan(plan_cap=50, purpose="search", total=0, searches=0)
+        self.assertEqual((budget["cap"], budget["bound_by"]), (50, "plan"))
+        self.assertEqual(budget["owner_cap"], 500)
+        self.assertEqual(budget["plan_cap"], 50)
+        self.assertEqual(budget["search_floor"], 10)
+
+    def test_acquisitions_leave_the_search_floor_unspent(self):
+        # 40 of 50 spent, none of it searches: 10 left, all of them the floor.
+        acquisition = self._with_plan(plan_cap=50, purpose="acquisition",
+                                      total=40, searches=0)
+        self.assertEqual(acquisition["remaining"], 0)
+        self.assertEqual(acquisition["bound_by"], "search_floor")
+        search = self._with_plan(plan_cap=50, purpose="search", total=40, searches=0)
+        self.assertEqual(search["remaining"], 10)
+        # Once searches have used the floor, acquisitions get the rest again.
+        used = self._with_plan(plan_cap=50, purpose="acquisition", total=40, searches=10)
+        self.assertEqual(used["remaining"], 10)
+        self.assertEqual(used["bound_by"], "plan")
+
+    def test_the_cockpit_note_says_the_plan_and_the_floor(self):
+        from dalton_core.cockpit_plane import _alphaengine_cap_note
+
+        note = _alphaengine_cap_note({"cap": 50, "mission_cap": 130, "owner_cap": 500,
+                                      "bound_by": "plan", "search_floor": 10})
+        self.assertIn("检索计划预算 50", note)
+        self.assertIn("至少 10 次留给检索", note)
+
 
 if __name__ == "__main__":
     unittest.main()

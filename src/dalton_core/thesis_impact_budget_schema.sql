@@ -17,6 +17,8 @@ CREATE TABLE IF NOT EXISTS thesis_impact_budget_policies (
 -- its actual cost, an admission without one keeps counting its full
 -- reservation, so a crash between the paid call and settlement stays
 -- conservative.  Nothing in this authority is ever updated or deleted.
+-- aw: new record_json wires additionally freeze purpose/thinking_level.
+-- Historical wires retain their original hash and are never backfilled.
 CREATE TABLE IF NOT EXISTS thesis_impact_day_admissions (
     admission_id TEXT PRIMARY KEY,
     policy_version_id TEXT NOT NULL REFERENCES thesis_impact_budget_policies(policy_version_id),
@@ -34,6 +36,12 @@ CREATE TABLE IF NOT EXISTS thesis_impact_day_admissions (
 
 CREATE INDEX IF NOT EXISTS idx_thesis_impact_admission_day
 ON thesis_impact_day_admissions(policy_version_id, day);
+
+-- Open reservations from every prior day stay charged. Keep that exact
+-- anti-join off the large immutable record_json table pages under the write lock.
+CREATE INDEX IF NOT EXISTS idx_thesis_impact_admission_policy_open_cover
+ON thesis_impact_day_admissions(policy_version_id, admission_id, reserved_micros);
+
 
 -- Actual-cost settlement for exactly one admission.
 CREATE TABLE IF NOT EXISTS thesis_impact_day_settlements (

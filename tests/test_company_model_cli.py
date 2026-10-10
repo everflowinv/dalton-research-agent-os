@@ -95,6 +95,7 @@ def _spec_body():
         "schema_version": "0.4",
         "revenue_anchor_concept": "us-gaap:Revenues",
         "assessment": "A people business: billable heads times realised rate.",
+        "driver_formulas": [{"output_ref": "revenue", "operator": "sum", "driver_refs": ["heads"], "because": "Explicit synthetic planned revenue mechanism; the missing quantity source remains unavailable."}],
         "revenue_drivers": [{
             "ref": "heads", "label": "Billable headcount", "kind": "volume",
             "basis_concept": None, "unit": "headcount",
@@ -614,7 +615,14 @@ class ChooseCompanyTests(unittest.TestCase):
             summary_dir=self.state_dir / "forecast-summary",
         )
         self.assertEqual(forecast["status"], "succeeded")
-        self.assertEqual(forecast["forecast_status"], "published")
+        self.assertEqual(forecast["forecast_status"], "refused:unexecuted_driver_plan")
+        self.assertIn("驱动计划未执行", forecast["failure_reason"])
+        self.assertEqual(forecast["driver_execution"]["status"], "unexecuted")
+        self.assertEqual(len(forecast["execution_contract_hash"]), 64)
+        self.assertEqual(forecast["formal_authority_writes"], 0)
+        self.assertEqual(forecast["cost_micros"], 0)
+        self.assertEqual(forecast["material_requests"][0]["gap_key"], "economic_driver_history")
+        self.assertIsNone(forecast["model_version_ref"])
         self.assertEqual(forecast["spec_ref"], stored["spec_id"])
 
     def test_schema_valid_false_historical_tie_is_refused_before_persistence(self):

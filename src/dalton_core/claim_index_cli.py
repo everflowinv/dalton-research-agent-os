@@ -55,6 +55,7 @@ from .claim_index_tagging import (
     ProvenanceResolver,
     build_batch,
     build_prompt,
+    evidence_kind_for,
     parse_tagging_reply,
     pending_claims,
     prompt_tagger,
@@ -139,6 +140,7 @@ def record_tagged(
             tagger_hash=row["tags"]["tagger_hash"],
             actor_ref=actor_ref,
             created_at=created_at,
+            evidence_kind=evidence_kind_for(row),
         )
         counts[result["status"]] += 1
         counts["recanonicalised"] += len(result["recanonicalised"])

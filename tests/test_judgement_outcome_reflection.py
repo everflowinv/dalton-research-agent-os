@@ -143,12 +143,12 @@ class MetricTests(unittest.TestCase):
                   outcome="should_have_moved", at=WINDOW["start"])
         metrics = compute_metrics(self.core, window=WINDOW, now=NOW)
         prose = narrative(metrics, WINDOW)["prose"]
-        self.assertIn("当时该动没动", prose)
+        self.assertIn("当时该调整却没有调整", prose)
         self.assertIn("不是绩效考核", prose)
 
     def test_the_prose_reports_the_absence_rather_than_staying_silent(self) -> None:
         metrics = compute_metrics(self.core, window=WINDOW, now=NOW)
-        self.assertIn("判断结果台账读不出来", narrative(metrics, WINDOW)["prose"])
+        self.assertIn("历史判断跟踪暂时无法读取", narrative(metrics, WINDOW)["prose"])
 
 
 class CockpitPanelTests(unittest.TestCase):

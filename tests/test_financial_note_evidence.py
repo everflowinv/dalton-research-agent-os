@@ -445,9 +445,8 @@ class FinancialNoteResolverTests(unittest.TestCase):
                           "metric_or_aspect": "diluted EPS numerator attribution",
                           "period": "year ended 2025-08-31", "basis": "filed note",
                           "cited_match_indexes": [0]}, "missing": []})
-        verifier = document_fixtures.RouteBoundCountingFakeAdapter({
-            "schema_version": "0.1", "verdict": "pass",
-            "verified_statement": statement, "findings": []})
+        verifier = document_fixtures.RouteBoundCountingFakeAdapter(
+            document_fixtures.passing_verifier_reply)
         executor, _, _ = document_fixtures.MissionDocumentResearchTests()._executor(
             fixture, authority, draft_adapter=draft, verifier_adapter=verifier)
         outcome = promotion_fixtures.DocumentPromotionTests._drive(executor, admission)

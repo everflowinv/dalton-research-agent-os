@@ -104,6 +104,16 @@ def _structure_key(row: Mapping[str, Any]) -> tuple[str | None, str | None, str 
     )
 
 
+def fact_dimensions(row: Mapping[str, Any]) -> dict[str, str] | None:
+    """The complete context, never reconstructed from the projected pair."""
+
+    columns = [key for key in row if str(key).startswith("dim_")]
+    if not columns:
+        return None
+    return dict(sorted((canonical_ref(str(key)[4:]), canonical_ref(row[key]))
+                       for key in columns if _text(row.get(key)) is not None))
+
+
 def fact_dimension_count(row: Mapping[str, Any]) -> int | None:
     """Count dimensions only when the parser supplied its complete axis set.
 
@@ -133,6 +143,8 @@ def normalise_statement(
     statement: str,
     structure: Sequence[Mapping[str, Any]],
     facts: Sequence[Mapping[str, Any]],
+    include_note_segments: bool = True,
+    legacy_breakdown_flags: bool = False,
 ) -> dict[str, Any]:
     """Lines for one statement, plus what was dropped and why."""
 
@@ -193,10 +205,12 @@ def normalise_statement(
                 # the flag clear, so the reported total and its two components
                 # were indistinguishable -- three rows for one quarter, and any
                 # series built from them silently adds a total to its parts.
-                "is_breakdown": bool(row.get("is_breakdown")) or axis is not None,
+                "is_breakdown": (bool(row.get("is_breakdown")) if legacy_breakdown_flags else
+                                 bool(row.get("is_breakdown")) or axis is not None or bool(fact_dimensions(fact))),
                 "dimension_axis": axis,
                 "dimension_member": canonical_ref(row.get("dimension_member")),
                 "dimension_count": fact_dimension_count(fact),
+                "dimensions": fact_dimensions(fact),
                 # A quarter and a year to date share an end date; only the
                 # start tells them apart, and a balance-sheet instant has none.
                 "period_start": period_start,
@@ -207,12 +221,16 @@ def normalise_statement(
                 "unit": unit,
                 "balance": _text(row.get("balance")) or _text(fact.get("balance")),
             })
+    if include_note_segments:
+        lines.extend(segment_lines(statement=statement, structure=structure, facts=facts,
+                                   drop=drop))
     # The fact view repeats a fact once per presentation it appears in, so the
     # same filed figure arrives several times. Identical lines are one line.
     unique: dict[tuple[Any, ...], dict[str, Any]] = {}
     for line in lines:
         key = (line["concept"], line["dimension_axis"], line["dimension_member"],
-               line["period_start"], line["period_end"], line["value"], line["unit"])
+               line["period_start"], line["period_end"], line["value"], line["unit"],
+               tuple((line.get("dimensions") or {}).items()))
         if key in unique:
             drop("duplicate presentation of one filed figure")
             continue
@@ -223,6 +241,104 @@ def normalise_statement(
     return {"lines": ordered, "dropped": dropped}
 
 
+SEGMENT_AXIS = "us-gaap:StatementBusinessSegmentsAxis"
+_SEGMENT_COLUMN = "dim_us-gaap_StatementBusinessSegmentsAxis"
+_CONSOLIDATION_COLUMN = "dim_srt_ConsolidationItemsAxis"
+_OPERATING_SEGMENTS = "us-gaap:OperatingSegmentsMember"
+_SEGMENT_LABEL_RE = re.compile(r"(?:^|,\s*)Segments:\s*([^,]+)")
+
+
+def _segment_label(fact: Mapping[str, Any], member: str) -> str:
+    full = _text(fact.get("full_dimension_label")) or ""
+    match = _SEGMENT_LABEL_RE.search(full)
+    if match:
+        return match.group(1).strip()
+    local = member.split(":", 1)[-1]
+    for suffix in ("SegmentMember", "Member"):
+        if local.endswith(suffix) and len(local) > len(suffix):
+            local = local[: -len(suffix)]
+            break
+    return local
+
+
+def segment_lines(
+    *,
+    statement: str,
+    structure: Sequence[Mapping[str, Any]],
+    facts: Sequence[Mapping[str, Any]],
+    drop: Any = None,
+) -> list[dict[str, Any]]:
+    """Operating-segment figures a statement's own lines carry, as breakdown lines.
+
+    2026-10-09.  The statement view decides the lines, and a filer that keeps
+    its segment table in the notes (IBM: Software / Consulting / Infrastructure
+    / Financing revenue, cost and pre-tax income) presents no segment row on
+    the income statement -- so every one of those filed facts was dropped as
+    "not a line", and the planner asked for IBM's consulting segment for days
+    while the parsed filing held it.  EPAM presents its segments on the face
+    of the statement and was unaffected.
+
+    Taken, and nothing else: a fact on the segment axis whose *concept is a
+    plain line of this statement*, with no other dimension except the
+    consolidation axis set to operating segments (how IBM tags them).  A
+    segment-by-geography cross, an elimination or a reconciling item is not a
+    segment figure and is left out.  Level and parent come from the line it
+    breaks down; nothing is invented.
+    """
+
+    base: dict[str, Mapping[str, Any]] = {}
+    for row in structure:
+        if bool(row.get("abstract")) or canonical_ref(row.get("dimension_axis")) is not None:
+            continue
+        concept = canonical_ref(row.get("concept"))
+        if concept is not None and _level(row.get("level")) is not None:
+            base.setdefault(concept, row)
+    out: list[dict[str, Any]] = []
+    for fact in facts:
+        dimensions = fact_dimensions(fact)
+        business = [(axis, member) for axis, member in (dimensions or {}).items()
+                    if axis in {"us-gaap:StatementBusinessSegmentsAxis", "srt:StatementBusinessSegmentsAxis", "srt:SegmentAxis"}]
+        if len(business) != 1:
+            continue
+        segment_axis, member = business[0]
+        concept = canonical_ref(fact.get("concept"))
+        row = base.get(concept)
+        if row is None:
+            continue
+        other = {axis: value for axis, value in (dimensions or {}).items() if axis != segment_axis}
+        consolidation = other.pop("srt:ConsolidationItemsAxis", None)
+        if consolidation is None:
+            consolidation = other.pop("us-gaap:ConsolidationItemsAxis", None)
+        if other or consolidation not in (None, _OPERATING_SEGMENTS):
+            continue
+        period_start, period_end = fact_period(fact)
+        unit = _text(fact.get("unit_ref"))
+        raw = _text(fact.get("value"))
+        if period_end is None or unit is None or raw is None or _DECIMAL_RE.fullmatch(raw) is None:
+            if drop is not None:
+                drop("segment fact has no period, unit or plain value")
+            continue
+        label = _text(row.get("label")) or concept
+        out.append({
+            "statement": statement,
+            "concept": concept,
+            "label": f"{label} — {_segment_label(fact, member)}",
+            "level": int(_level(row.get("level")) or 0) + 1,
+            "parent_concept": concept,
+            "is_breakdown": True,
+            "dimension_axis": segment_axis,
+            "dimension_member": member,
+            "dimension_count": fact_dimension_count(fact),
+            "dimensions": fact_dimensions(fact),
+            "period_start": period_start,
+            "period_end": period_end,
+            "value": raw,
+            "unit": unit,
+            "balance": _text(row.get("balance")) or _text(fact.get("balance")),
+        })
+    return out
+
+
 def normalise_filing(
     *,
     accession: str,
@@ -230,6 +346,8 @@ def normalise_filing(
     filed: str,
     report_date: str,
     statements: Mapping[str, Mapping[str, Sequence[Mapping[str, Any]]]],
+    include_note_segments: bool = True,
+    legacy_breakdown_flags: bool = False,
 ) -> dict[str, Any]:
     """One filing's lines across the statements it reports.
 
@@ -244,6 +362,8 @@ def normalise_filing(
             statement=statement,
             structure=statements[statement].get("structure") or (),
             facts=statements[statement].get("facts") or (),
+            include_note_segments=include_note_segments,
+            legacy_breakdown_flags=legacy_breakdown_flags,
         )
         lines.extend(result["lines"])
         for reason, count in result["dropped"].items():
@@ -294,10 +414,13 @@ def build_wire(
 
 
 __all__ = [
+    "SEGMENT_AXIS",
     "SCHEMA_VERSION",
     "STATEMENT_BY_TYPE",
     "build_wire",
     "canonical_ref",
+    "fact_dimensions",
     "normalise_filing",
     "normalise_statement",
+    "segment_lines",
 ]

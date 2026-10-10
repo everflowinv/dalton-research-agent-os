@@ -23,7 +23,7 @@ _STRATEGY_REQUIRED_FIELDS = frozenset({
     "strategy_version", "document_ref", "document_version_hash",
     "query_terms", "query_rationale",
 })
-STRATEGY_FIELDS = _STRATEGY_REQUIRED_FIELDS | {"evidence_target"}
+STRATEGY_FIELDS = _STRATEGY_REQUIRED_FIELDS | {"evidence_target", "numeric_targets", "replaces_numeric_rejection", "resumes_numeric_result"}
 FINANCIAL_NOTE_TARGET_FIELDS = frozenset({
     "schema_version", "target_ref", "kind", "statement_ingest_ref",
     "statement_filing_hash", "accession", "form", "applicability_kind",
@@ -105,8 +105,12 @@ def normalize_strategy(value: Any, *, max_query_terms: int,
             or not _STRATEGY_REQUIRED_FIELDS <= set(value)
             or set(value) - STRATEGY_FIELDS):
         raise DocumentResearchStrategyError("directed document strategy has an invalid closed shape")
-    if value["strategy_version"] != STRATEGY_VERSION:
+    from .directed_numeric_research import CONTRACT_REF, normalize_targets
+    if value["strategy_version"] not in {STRATEGY_VERSION, CONTRACT_REF}:
         raise DocumentResearchStrategyError("unsupported directed document strategy")
+    numeric = value["strategy_version"] == CONTRACT_REF
+    if numeric != ("numeric_targets" in value) or (numeric and "evidence_target" in value):
+        raise DocumentResearchStrategyError("numeric strategy requires exact typed targets and no note target")
     for limit in (max_query_terms, max_query_term_chars):
         if isinstance(limit, bool) or not isinstance(limit, int) or limit < 1:
             raise DocumentResearchStrategyError("document query policy is unavailable")
@@ -131,6 +135,23 @@ def normalize_strategy(value: Any, *, max_query_terms: int,
                 "query_rationale": value["query_rationale"].strip(), "query_terms": normalized}
     if "evidence_target" in strategy:
         strategy["evidence_target"] = normalize_evidence_target(strategy["evidence_target"])
+    if numeric:
+        try:
+            strategy["numeric_targets"] = normalize_targets(strategy["numeric_targets"])
+        except ValueError as exc:
+            raise DocumentResearchStrategyError(str(exc)) from exc
+    upgrade = strategy.get("replaces_numeric_rejection")
+    if upgrade is not None:
+        if not numeric or not isinstance(upgrade,Mapping) or set(upgrade)!={"admission_ref","admission_hash","rejection_ref","rejection_hash"}:
+            raise DocumentResearchStrategyError("numeric capability upgrade has invalid closed shape")
+        if any(not isinstance(upgrade[k],str) or not upgrade[k] for k in ("admission_ref","rejection_ref")) or any(not isinstance(upgrade[k],str) or _HASH.fullmatch(upgrade[k]) is None for k in ("admission_hash","rejection_hash")):
+            raise DocumentResearchStrategyError("numeric capability upgrade binding is invalid")
+    resume = strategy.get("resumes_numeric_result")
+    if resume is not None:
+        if not numeric or not isinstance(resume,Mapping) or set(resume)!={"admission_ref","admission_hash","numeric_result_hash"}:
+            raise DocumentResearchStrategyError("numeric source resume has invalid closed shape")
+        if not isinstance(resume["admission_ref"],str) or not resume["admission_ref"] or any(not isinstance(resume[k],str) or _HASH.fullmatch(resume[k]) is None for k in ("admission_hash","numeric_result_hash")):
+            raise DocumentResearchStrategyError("numeric source resume binding is invalid")
     return strategy
 
 

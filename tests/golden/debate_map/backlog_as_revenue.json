@@ -1,0 +1,123 @@
+{
+  "case_ref": "debate_map-backlog_as_revenue",
+  "rubric": "debate_map",
+  "source": "Synthetic acceptance fixture; no production company data.",
+  "note": "Exercises backlog_as_revenue; judgement scores are unmeasured, not a real model rating.",
+  "artefact": {
+    "artefact_kind": "debate_map",
+    "ref": "synthetic:debate_map:backlog_as_revenue",
+    "hash": "aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa",
+    "title": "",
+    "subject_ref": null,
+    "sections": [
+      {
+        "title": "多方观点",
+        "body": "创纪录的RPO意味着未来几个季度收入加速。",
+        "claim_refs": [
+          "claim-version:synthetic"
+        ],
+        "numbers": [
+          {
+            "text": "营业收入 100 万美元",
+            "claim_version_ref": "claim-version:synthetic",
+            "period": null
+          }
+        ],
+        "gaps": []
+      },
+      {
+        "title": "空方观点",
+        "body": "需求恢复仍待确认。相反证据是客户审批延后，订单增长不能直接等同于当期收入增长。",
+        "claim_refs": [
+          "claim-version:synthetic"
+        ],
+        "numbers": [
+          {
+            "text": "营业收入 100 万美元",
+            "claim_version_ref": "claim-version:synthetic",
+            "period": null
+          }
+        ],
+        "gaps": []
+      },
+      {
+        "title": "本所判断",
+        "body": "我们的判断仍有不确定性；估值暂不可得，因为尚未取得可比口径的盈利与股本数据。",
+        "claim_refs": [
+          "claim-version:synthetic"
+        ],
+        "numbers": [
+          {
+            "text": "营业收入 100 万美元",
+            "claim_version_ref": "claim-version:synthetic",
+            "period": null
+          }
+        ],
+        "gaps": []
+      },
+      {
+        "title": "验证条件",
+        "body": "下一次申报时核对客户留存与现金回款。如果合同取消明显增加，则重新审查原有判断。",
+        "claim_refs": [
+          "claim-version:synthetic"
+        ],
+        "numbers": [
+          {
+            "text": "营业收入 100 万美元",
+            "claim_version_ref": "claim-version:synthetic",
+            "period": null
+          }
+        ],
+        "gaps": []
+      }
+    ],
+    "gaps": [],
+    "expected_sections": [
+      "多方观点",
+      "空方观点",
+      "本所判断",
+      "验证条件"
+    ],
+    "shown_claims": [],
+    "cited_tags": [],
+    "confidence": null,
+    "question": null,
+    "prior": null
+  },
+  "expected": {
+    "rationale": "Pinned deterministic result for backlog_as_revenue; judgement requires an independent reading.",
+    "score_ranges_are_calibration_only": true,
+    "score_ranges": {
+      "substance": [
+        0,
+        4
+      ],
+      "number_provenance": [
+        0,
+        4
+      ],
+      "reasoning_lint": [
+        0,
+        4
+      ],
+      "decision_usefulness": [
+        0,
+        4
+      ]
+    },
+    "deterministic": {
+      "required_sections_present": {
+        "status": "pass",
+        "count": 0
+      },
+      "numbers_without_refs": {
+        "status": "pass",
+        "count": 0
+      },
+      "reasoning_lint": {
+        "status": "fail",
+        "count": 1
+      }
+    }
+  }
+}

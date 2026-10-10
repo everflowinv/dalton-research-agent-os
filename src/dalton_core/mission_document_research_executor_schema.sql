@@ -51,6 +51,26 @@ CREATE TABLE IF NOT EXISTS mission_document_research_model_authority_epoch_rebin
  created_at TEXT NOT NULL,
  UNIQUE(admission_ref,stage_ordinal,current_base_work_ref)
 );
+-- 2026-10-09: a prior-epoch rebind whose rebound Work ended without success
+-- and was followed by a RecoveryLink of its own; the link's fresh Work is
+-- rebound under the then-current authority.  Append-only audit.
+CREATE TABLE IF NOT EXISTS mission_document_research_model_authority_epoch_rebind_supersessions (
+ supersession_id TEXT PRIMARY KEY, admission_ref TEXT NOT NULL,
+ stage_ordinal INTEGER NOT NULL CHECK(stage_ordinal IN (2,3)),
+ rebind_ref TEXT NOT NULL UNIQUE, rebound_work_order_ref TEXT NOT NULL,
+ failure_link_ref TEXT NOT NULL UNIQUE,
+ record_json TEXT NOT NULL, content_hash TEXT NOT NULL UNIQUE, created_at TEXT NOT NULL
+);
+CREATE TRIGGER IF NOT EXISTS mission_document_research_epoch_rebind_supersessions_no_update
+BEFORE UPDATE ON mission_document_research_model_authority_epoch_rebind_supersessions BEGIN
+ SELECT RAISE(ABORT,'mission document epoch rebind supersessions are append-only'); END;
+CREATE TRIGGER IF NOT EXISTS mission_document_research_epoch_rebind_supersessions_no_delete
+BEFORE DELETE ON mission_document_research_model_authority_epoch_rebind_supersessions BEGIN
+ SELECT RAISE(ABORT,'mission document epoch rebind supersessions are append-only'); END;
+CREATE TRIGGER IF NOT EXISTS mission_document_research_epoch_rebind_supersessions_authorized_insert
+BEFORE INSERT ON mission_document_research_model_authority_epoch_rebind_supersessions
+WHEN dalton_mission_document_research_executor_authorized()=0
+BEGIN SELECT RAISE(ABORT,'mission document epoch rebind supersession insert requires executor'); END;
 CREATE TRIGGER IF NOT EXISTS mission_document_research_starts_no_update
 BEFORE UPDATE ON mission_document_research_starts BEGIN SELECT RAISE(ABORT,'mission document starts are append-only'); END;
 CREATE TRIGGER IF NOT EXISTS mission_document_research_starts_no_delete
@@ -126,3 +146,20 @@ WHEN NOT (
   WHERE work_order_ref=NEW.authorized_recovery_work_ref)
 )
 BEGIN SELECT RAISE(ABORT,'model authority epoch rebind requires atomically unused recovery Work'); END;
+
+-- One question-scoped typed numeric outcome, separate from qualitative candidates.
+CREATE TABLE IF NOT EXISTS mission_document_numeric_results (
+ admission_ref TEXT PRIMARY KEY REFERENCES mission_document_research_admissions(admission_id),
+ admission_hash TEXT NOT NULL, work_order_ref TEXT NOT NULL,
+ record_json TEXT NOT NULL, content_hash TEXT NOT NULL, created_at TEXT NOT NULL
+);
+CREATE TRIGGER IF NOT EXISTS mission_document_numeric_results_authorized_insert
+BEFORE INSERT ON mission_document_numeric_results
+WHEN dalton_mission_document_research_executor_authorized()=0
+BEGIN SELECT RAISE(ABORT,'numeric directed result requires executor'); END;
+CREATE TRIGGER IF NOT EXISTS mission_document_numeric_results_no_update
+BEFORE UPDATE ON mission_document_numeric_results
+BEGIN SELECT RAISE(ABORT,'numeric directed results are append-only'); END;
+CREATE TRIGGER IF NOT EXISTS mission_document_numeric_results_no_delete
+BEFORE DELETE ON mission_document_numeric_results
+BEGIN SELECT RAISE(ABORT,'numeric directed results are append-only'); END;

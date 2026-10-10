@@ -210,7 +210,7 @@ def _decision(policy_version: Mapping[str, Any], *, claim_wire: Mapping[str, Any
 
 
 def document_qualitative_content_rejection(
-    claim_wire: Mapping[str, Any],
+    claim_wire: Mapping[str, Any], *, restated_figures: Any = frozenset(),
 ) -> str | None:
     """The content reasons the document qualitative rule refuses a candidate.
 
@@ -232,7 +232,19 @@ def document_qualitative_content_rejection(
     if not isinstance(statement, str) or not statement.strip():
         return "document qualitative rule requires a normalized statement"
     from .document_extraction import statement_asserts_a_value, statement_is_boilerplate
-    if statement_asserts_a_value(statement):
+    # 2026-09-30: a directed-document draft asked under contract 0.2 must
+    # restate the figure its question names ("the 15.8% is the adjusted
+    # operating margin"), because a statement that says "this figure" is
+    # hollow.  That one figure -- and only it, by significant digits -- is the
+    # question's, not a value the statement asserts; the claim still carries
+    # no value, unit or scale, and any other number is refused as before.
+    # ``restated_figures`` is empty for everything else
+    # (``document_research_qualitative.restated_question_figures``).
+    valued = statement
+    if restated_figures:
+        from .document_inquiry_equivalence import strip_figures
+        valued = strip_figures(statement, frozenset(restated_figures))
+    if statement_asserts_a_value(valued):
         return "document qualitative rule admits no numeric statement"
     if statement_is_boilerplate(statement):
         return "document qualitative rule admits no disclaimer or boilerplate"
@@ -306,7 +318,9 @@ def _authorize_document_qualitative(
     actor = claim_wire["actor_ref"]
     if not isinstance(actor, str) or not actor.startswith("automation:") or evidence_wire["actor_ref"] != actor:
         raise ResearchAutoCommitRejected("document qualitative rule admits only mission automation candidates")
-    content_rejection = document_qualitative_content_rejection(claim_wire)
+    from .document_research_qualitative import restated_question_figures
+    content_rejection = document_qualitative_content_rejection(
+        claim_wire, restated_figures=restated_question_figures(material))
     if content_rejection is not None:
         raise ResearchAutoCommitRejected(content_rejection)
     from .research_verification import MISSION_DOCUMENT_AUTHORITY_MODE

@@ -1,0 +1,237 @@
+{
+  "case_ref": "review-bc-reasoning-unsupported",
+  "rubric": "initial_screen_strl",
+  "note": "B/C评审九类推理错误的合成规则回放；仅校准reasoning_lint，其他维度不在本例评分范围。真实18份回放只保留审计结果，不作通用公司夹具。",
+  "artefact": {
+    "artefact_kind": "initial_screen",
+    "ref": "synthetic:review-bc:unsupported",
+    "hash": "8a0e8cc487f5e33ae4777a483cc5f312201b9f86dfd147af86c7d92b0ef51070",
+    "title": "",
+    "subject_ref": "company:ticker:synw",
+    "sections": [
+      {
+        "title": "backlog_as_near_term_revenue",
+        "body": "创纪录的 RPO 意味着未来几个季度收入加速。",
+        "claim_refs": [],
+        "numbers": [],
+        "gaps": []
+      },
+      {
+        "title": "consensus_without_authority",
+        "body": "共识认为 FY2027 EPS 为 4.50 美元。",
+        "claim_refs": [],
+        "numbers": [],
+        "gaps": []
+      },
+      {
+        "title": "fixed_lag_uncalibrated",
+        "body": "新签订单领先收入 2-4 个季度。",
+        "claim_refs": [],
+        "numbers": [],
+        "gaps": []
+      },
+      {
+        "title": "classification_without_counter_check",
+        "body": "这是一家合同型 compounder。",
+        "claim_refs": [],
+        "numbers": [],
+        "gaps": []
+      },
+      {
+        "title": "management_share_gain_as_fact",
+        "body": "公司正在赢得份额。",
+        "claim_refs": [],
+        "numbers": [],
+        "gaps": []
+      },
+      {
+        "title": "survey_intent_as_realisation",
+        "body": "CIO 调研显示 AI 支出将带来收入加速。",
+        "claim_refs": [],
+        "numbers": [],
+        "gaps": []
+      },
+      {
+        "title": "price_move_without_benchmark",
+        "body": "股价上涨 6% 是因为订单超预期。",
+        "claim_refs": [],
+        "numbers": [],
+        "gaps": []
+      },
+      {
+        "title": "product_to_roi_without_economics",
+        "body": "产品升级会带来 ROI 提升。",
+        "claim_refs": [],
+        "numbers": [],
+        "gaps": []
+      },
+      {
+        "title": "usd_revenue_as_organic",
+        "body": "美元收入增长 8%，说明有机增长强劲。",
+        "claim_refs": [],
+        "numbers": [],
+        "gaps": []
+      }
+    ],
+    "gaps": [],
+    "expected_sections": [],
+    "shown_claims": [],
+    "cited_tags": [],
+    "confidence": null,
+    "question": null,
+    "prior": null
+  },
+  "expected": {
+    "deterministic": {
+      "stance_and_watch_price": {
+        "status": "fail",
+        "count": 2
+      },
+      "sourced_quantitative_statements": {
+        "status": "fail",
+        "count": 4
+      },
+      "ours_vs_consensus": {
+        "status": "fail",
+        "count": 2
+      },
+      "valuation_six_elements": {
+        "status": "fail",
+        "count": 6
+      },
+      "source_kind_diversity": {
+        "status": "fail",
+        "count": 1
+      },
+      "latest_transcript_and_release_cited": {
+        "status": "fail",
+        "count": 2
+      },
+      "material_missing_bound": {
+        "status": "pass",
+        "count": 0
+      },
+      "gap_classification": {
+        "status": "pass",
+        "count": 0
+      },
+      "fact_repetition": {
+        "status": "pass",
+        "count": 0
+      },
+      "required_sections_present": {
+        "status": "skipped",
+        "count": 0
+      },
+      "numbers_without_refs": {
+        "status": "fail",
+        "count": 3
+      },
+      "residual_citation_artefacts": {
+        "status": "pass",
+        "count": 0
+      },
+      "indirect_placeholders": {
+        "status": "pass",
+        "count": 0
+      },
+      "number_display_rounding": {
+        "status": "pass",
+        "count": 0
+      },
+      "number_metadata": {
+        "status": "pass",
+        "count": 0
+      },
+      "reasoning_lint": {
+        "status": "fail",
+        "count": 9
+      },
+      "issuer_attribution": {
+        "status": "skipped",
+        "count": 0
+      },
+      "actual_vs_estimate_labelling": {
+        "status": "fail",
+        "count": 1
+      },
+      "one_off_normalisation": {
+        "status": "pass",
+        "count": 0
+      },
+      "cash_bridge_consistency": {
+        "status": "skipped",
+        "count": 0
+      },
+      "cross_product_consistency": {
+        "status": "skipped",
+        "count": 0
+      }
+    },
+    "score_ranges": {
+      "view_and_watch_price": [
+        0,
+        4
+      ],
+      "quantitative_density": [
+        0,
+        4
+      ],
+      "ours_vs_consensus": [
+        0,
+        4
+      ],
+      "valuation_six_elements": [
+        0,
+        4
+      ],
+      "source_breadth": [
+        0,
+        4
+      ],
+      "gaps_bound": [
+        0,
+        4
+      ],
+      "no_restatement": [
+        0,
+        4
+      ],
+      "substance_and_hygiene": [
+        0,
+        4
+      ],
+      "reasoning_lint": [
+        0,
+        0
+      ],
+      "issuer_attribution": [
+        0,
+        4
+      ],
+      "actual_vs_estimate": [
+        0,
+        4
+      ],
+      "one_off_normalisation": [
+        0,
+        4
+      ],
+      "cash_bridge_consistency": [
+        0,
+        4
+      ],
+      "cross_product_consistency": [
+        0,
+        4
+      ],
+      "judgement_quality": [
+        0,
+        4
+      ]
+    },
+    "score_ranges_are_calibration_only": true,
+    "rationale": "只断言九类推理规则命中数；本片段不是完整初筛，其他维度不设质量分数下限。"
+  },
+  "source": "2026-10-09 研究产物质量评审 B/C 推理纪律；合成九类断言与合格改写。"
+}

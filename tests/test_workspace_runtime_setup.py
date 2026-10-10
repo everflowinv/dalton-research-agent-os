@@ -52,6 +52,14 @@ class WorkspaceRuntimeSetupTests(unittest.TestCase):
         result = install(self.manifest, actor_ref="human:owner@example.com",
                          stage_host_lanes=False)
         self.assertEqual(result["setup_state"], "awaiting_mission")
+        # The actual review control entry can start before the Writer has
+        # staged anything, including the newly added SLA terminal schema.
+        from dalton_core.research_review import HumanReviewAuthority
+        review = HumanReviewAuthority(self.state / "research-review/candidate-staging.sqlite")
+        self.addCleanup(review.close)
+        self.assertEqual(review.list_candidates(), [])
+        self.assertIsNotNone(review.connection.execute("SELECT 1 FROM sqlite_master WHERE name='candidate_terminal_events'").fetchone())
+
         for name in ("market-proxy-mappings.json", "tracking-policy.json",
                      "research-foundation.json", "p12a-dossier-policy-v1.json",
                      "p12e-industry-framework-policy-v1.json"):
@@ -139,7 +147,12 @@ class WorkspaceRuntimeSetupTests(unittest.TestCase):
             records, unsupported = _connector_records(load_workspace_manifest(self.manifest), 'human:workspace-owner')
         self.assertEqual(unsupported, [])
         self.assertEqual(set(records), {'alphaengine-search-library-v1.json', 'alphaengine-get-document-v1.json',
-            'sec-filings-index-v1.json', 'sec-company-facts-v3.json', 'sec-financial-statements-v3.json'})
+            'sec-filings-index-v1.json', 'sec-company-facts-v3.json', 'sec-financial-statements-v4.json'})
+        from dalton_core.connector_governance import ConnectorGovernance
+        from dalton_core.sec_financials_core import sec_financials_schema_hash
+        record = json.loads((self.state / 'connector-governance/sec-financial-statements-v4.json').read_text())
+        self.assertTrue(ConnectorGovernance(record).approved)
+        self.assertEqual(record['expected_schema_hash'], sec_financials_schema_hash(version=4))
         self.assertFalse((self.state / 'connector-governance/yfinance-daily-prices-v1.json').exists())
 
     def test_cockpit_first_goal_plans_once_and_publishes_existing_authorities(self):

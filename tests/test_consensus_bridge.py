@@ -534,9 +534,23 @@ class ShapeTests(FakeConsensus):
             {"metric": "revenue", "period": period,
              "ours": "1", "consensus": "2", "unit": "USD",
              "gap_percent": "-50.0000", "refs": ["consensus-estimate-version:1"]}]})
-        gap = consensus_gap(FakeStore(), "company:x")
+        # This case checks the adapter's output shape after source admission;
+        # the real numerical source gate has its own synthetic-authority tests.
+        from unittest.mock import patch
+        admitted=[{"metric":"revenue","period":period,"ours":"1","consensus":"2","unit":"USD",
+                   "gap_percent":"-50.0000","refs":["consensus-estimate-version:1"]}]
+        with patch("dalton_core.conviction_call_cli.comparable_consensus_metrics",return_value=(admitted,None)):
+            gap = consensus_gap(FakeStore(), "company:x")
         self.assertEqual(gap["status"], "available")
         self.assertEqual(cb.validate_bridge(gap), gap)
+
+    def test_reader_without_numerical_authority_is_an_honest_gap(self):
+        install(latest_consensus=lambda store,company_ref:{"metrics":[{"metric":"revenue","period":"2027-03-31",
+            "ours":"1","consensus":"2","unit":"USD","gap_percent":"-50","refs":["consensus-estimate-version:1"]}]})
+        gap=consensus_gap(FakeStore(),"company:x")
+        self.assertEqual(gap["status"],"unavailable")
+        self.assertEqual(gap["metrics"],[])
+        self.assertIn("authority",gap["reason"])
 
     def test_a_malformed_row_is_refused_rather_than_carried(self):
         with self.assertRaises(cb.ConsensusBridgeError):

@@ -59,6 +59,8 @@ from .tracking_cadence import (
 
 SUMMARY_SCHEMA_VERSION = "0.1"
 MAX_EVENTS_PER_RUN = 120
+#: Per company, how many filing reads the summary lists.
+MAX_DISCLOSURE_READS = 20
 # How many settled trading days back the price detector looks. Short: an
 # abnormal move six days old is history, and the reason it happened has
 # already been written or never will be.
@@ -209,10 +211,16 @@ def company_events(
     now: datetime,
     lookback_days: int = DEFAULT_LOOKBACK_DAYS,
     max_candidates_per_source: int | None = None,
+    state_dir: Path | None = None,
+    disclosure_reads: list[dict[str, Any]] | None = None,
 ) -> list[dict[str, Any]]:
     """The three ledger scans for one company, newest first."""
 
     connection = store.connection
+    if state_dir is None:
+        # The Core's own directory: where the SEC fetch tickets and the spool
+        # the disclosure parsers read from live (``acquired_sec_filings``).
+        state_dir = _core_directory(connection)
     ledger_limit = 60 if max_candidates_per_source is None else max_candidates_per_source
     disclosure_limit = 40 if max_candidates_per_source is None else max_candidates_per_source
     candidates = document_event_candidates(
@@ -234,13 +242,62 @@ def company_events(
     # again. The scan is bounded by the number of filings held instead, and
     # re-reading one costs a lookup because the ledger is idempotent on what
     # the event says.
-    buybacks = buyback_event_candidates(connection, company_ref=company_ref, limit=disclosure_limit)
+    filings: dict[Any, Any] = {}
+    buybacks = buyback_event_candidates(connection, company_ref=company_ref, limit=disclosure_limit,
+                                        state_dir=state_dir, cache=filings)
     candidates += buybacks["events"]
-    plans = trading_plan_event_candidates(connection, company_ref=company_ref, limit=disclosure_limit)
+    plans = trading_plan_event_candidates(connection, company_ref=company_ref, limit=disclosure_limit,
+                                          state_dir=state_dir, cache=filings)
     candidates += plans["events"]
+    # ADR-0015: the company's own earnings release, once its Exhibit 99.1 has
+    # been read (``ingest_releases``); one event per release, until filed.
+    from .earnings_release_intake import earnings_release_event_candidates
+
+    candidates += earnings_release_event_candidates(connection, company_ref=company_ref)
+    if disclosure_reads is not None:
+        # What the disclosure scan read and refused, in the tick summary, so a
+        # filing that yields nothing says why rather than reading as silence.
+        for item in buybacks.get("skipped") or ():
+            disclosure_reads.append({"kind": "buyback_disclosure", **{
+                key: item.get(key) for key in ("accession", "form", "reason")}})
+        for item in plans.get("reports") or ():
+            disclosure_reads.append({"kind": "insider_trading_plan", **{
+                key: item.get(key) for key in ("accession", "status", "reason")}})
     for candidate in candidates:
         candidate.setdefault("company_ref", company_ref)
     return candidates
+
+
+def ingest_releases(store: DaltonStore, company_refs: Sequence[str], *,
+                    state_dir: Path | None) -> dict[str, Any]:
+    """ADR-0015: read every fetched earnings-release exhibit not yet read.
+
+    Deterministic and free (no model, no network); idempotent per exhibit
+    body and parser version.  One company's failure is reported, not raised.
+    """
+
+    from .earnings_release_intake import ingest_company
+
+    out: dict[str, Any] = {}
+    for ref in company_refs:
+        try:
+            report = ingest_company(store, company_ref=ref, state_dir=state_dir)
+        except Exception as exc:  # noqa: BLE001 - one company, not the run
+            out[ref] = {"status": "failed", "reason": f"{type(exc).__name__}: {exc}"[:300]}
+            continue
+        if report.get("reads"):
+            out[ref] = {"status": report.get("status"), "fresh": report.get("fresh"),
+                        "reads": report["reads"][:MAX_DISCLOSURE_READS]}
+    return out
+
+
+def _core_directory(connection: Any) -> Path | None:
+    try:
+        row = connection.execute("PRAGMA database_list").fetchone()
+    except Exception:  # noqa: BLE001 - an in-memory test Core has no directory
+        return None
+    path = row[2] if row is not None and len(row) > 2 else None
+    return Path(path).parent if path else None
 
 
 def round_robin(
@@ -356,12 +413,23 @@ def run_tracking(
             store, prices, mission, policy, events, tracked=tracked, now=moment,
         ):
             by_company[candidate["company_ref"]].append(candidate)
+        disclosure_reads: dict[str, list[dict[str, Any]]] = {}
+        if not dry_run:
+            release_reads = ingest_releases(store, tracked, state_dir=state_dir)
+            if release_reads:
+                summary["earnings_release_reads"] = release_reads
         for ref in tracked:
+            reads: list[dict[str, Any]] = []
             by_company[ref].extend(
                 company_events(store, mission, company_ref=ref, now=moment,
                                lookback_days=lookback_days,
-                               max_candidates_per_source=scan_limit)
+                               max_candidates_per_source=scan_limit,
+                               state_dir=state_dir, disclosure_reads=reads)
             )
+            if reads:
+                disclosure_reads[ref] = reads[:MAX_DISCLOSURE_READS]
+        if disclosure_reads:
+            summary["disclosure_reads"] = disclosure_reads
         candidates = round_robin(by_company, order=tracked)
 
         recorded = duplicated = previewed = 0

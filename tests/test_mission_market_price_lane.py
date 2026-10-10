@@ -47,7 +47,11 @@ def mission(*, may_write=(WRITE_SCOPE,), universe=None):
     }
 
 
-def version(*, first="2023-09-09", last, provisional=False):
+# The backfill floor (batch B: ten years, was three), as the lane computes it.
+FLOOR = f"{NOW.year - BACKFILL_YEARS}-09-09"
+
+
+def version(*, first=FLOOR, last, provisional=False):
     """The shape of a stored version, as far as this lane reads it."""
 
     captured_at = (
@@ -148,7 +152,7 @@ class WindowTests(LaneTestCase):
     def test_a_company_with_no_history_is_backfilled_three_years(self):
         lane = self.coordinator()
         start, end, kind = lane.window(ACN)
-        self.assertEqual(start, "2023-09-09")
+        self.assertEqual(start, FLOOR)
         # Yahoo's window excludes ``end``, so tomorrow is how today's bar gets
         # in.
         self.assertEqual(end, "2026-09-10")
@@ -187,7 +191,7 @@ class WindowTests(LaneTestCase):
         lane = self.coordinator(authority=FakeAuthority(
             {ACN: version(first="2025-01-06", last="2026-09-09")}))
         self.assertEqual(
-            lane.window(ACN), ("2023-09-09", "2025-01-06", "backfill_gap"))
+            lane.window(ACN), (FLOOR, "2025-01-06", "backfill_gap"))
 
     def test_the_forward_gap_is_closed_before_the_backward_one(self):
         lane = self.coordinator(authority=FakeAuthority(

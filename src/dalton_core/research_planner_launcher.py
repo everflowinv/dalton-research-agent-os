@@ -376,13 +376,20 @@ class ResearchPlannerCoordinator:
 
         from .dossier_repair_feedback import dossier_repair_feedback_signature
         from .document_research_inventory import document_inventory_signature
-        from .document_research_feedback import document_research_feedback_signature
+        from .document_research_feedback import (
+            document_research_feedback_signature, document_research_settlement_signature,
+        )
 
         return {
             # What is held, and what has been read out of it.
             "documents": count("SELECT COUNT(*) FROM coverage_mission_discovered_documents"),
             "document_versions": document_inventory_signature(self.store, Path(self.store.path).parent),
             "document_research_feedback": document_research_feedback_signature(self.store),
+            # 2026-10-01: an owner withdrawal writes no observation, Claim or
+            # document, so nothing above moved when legacy's 27 were withdrawn
+            # and the lane held "nothing changed" for the next hour.  Which
+            # admissions are withdrawn or settled is part of the state.
+            "document_research_settlement": document_research_settlement_signature(self.store),
             "reviews_open": count(
                 "SELECT COUNT(*) FROM coverage_mission_document_reviews "
                 "WHERE state='awaiting_human_extraction'"),
@@ -400,6 +407,12 @@ class ResearchPlannerCoordinator:
                 "ON r.observation_id=o.observation_id WHERE r.observation_id IS NULL"),
             # A new mission version is a new goal, which is always worth a plan.
             "mission_versions": count("SELECT COUNT(*) FROM coverage_mission_versions"),
+            # Source requests and human decisions can arrive without a Claim.
+            # Automatic observations and tick timestamps never enter this key.
+            "reflection_requests": count("SELECT COUNT(*) FROM research_followup_requests WHERE json_extract(record_json,'$.kind')='research_reflection'"),
+            "followup_decisions": count("SELECT COUNT(*) FROM research_followup_decisions"),
+            "backlog_versions": count("SELECT COUNT(*) FROM backlog_question_versions"),
+            "backlog_events": count("SELECT COUNT(*) FROM backlog_question_events"),
             # Dossier gaps are owner-only child feedback rather than Core
             # Evidence, so no SQL count can see them. Bind the exact verified
             # latest-ticket projection instead.
@@ -412,6 +425,7 @@ class ResearchPlannerCoordinator:
             return {"status": "unconfigured", "reason": "no research plan launcher on this writer"}
         latest = self._latest()
         result: dict[str, Any] = {}
+        ticket = None
         if latest is not None and latest.get("ticket_ref"):
             try:
                 ticket = self.launcher.status(latest["ticket_ref"])
@@ -428,7 +442,27 @@ class ResearchPlannerCoordinator:
                     "failure_reason": (ticket.get("summary") or {}).get("failure_reason"),
                 }
         signature = self._signature()
-        if latest is not None and latest.get("idle_signature") == signature:
+        recovery = None
+        if latest is not None and ticket is not None:
+            summary = ticket.get('summary') or {}
+            if summary.get('plan_status') == 'model_unavailable' and summary.get('state_hash'):
+                from .coverage_mission import CoverageMissionAuthority
+                from .planner_paid_output_recovery import planner_candidate
+                pointer = self.store.connection.execute(
+                    'SELECT mission_version_id FROM coverage_mission_pointer ORDER BY mission_ref LIMIT 1').fetchone()
+                if pointer is not None:
+                    reader = CoverageMissionAuthority.__new__(CoverageMissionAuthority)
+                    reader.store, reader.connection = self.store, self.store.connection
+                    mission = reader.mission(pointer[0])
+                    recovery = planner_candidate(state_dir=self.launcher.state_dir,
+                        config_path=self.launcher.model_config_path,
+                        scheduler_db=self.launcher.scheduler_db, mission=mission,
+                        state_hash=summary['state_hash'], now=self.clock())
+                    # Once a successor exists, the normal child/receipt owns
+                    # it; an idle bypass never dispatches it a second time.
+                    if recovery is not None and recovery['successor_status'] is not None:
+                        recovery = None
+        if latest is not None and latest.get("idle_signature") == signature and recovery is None:
             held_since = latest.get("idle_at")
             if held_since:
                 try:

@@ -577,6 +577,7 @@ def _governance_filenames() -> tuple[str, ...]:
 
 LANE = register_lane(LaneSpec(
     operation="dispatch_mission_hkex_filings",
+    failure_ledger="hkex_filings",
     # At the head of the daily tracking block (84-89: prices, tracking,
     # calendar, ownership, consensus). Not after the SEC ownership lane, which
     # would have been the obvious place: 89 is taken by consensus and lane

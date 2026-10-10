@@ -53,3 +53,18 @@ CREATE TRIGGER IF NOT EXISTS human_review_commit_events_no_update
 BEFORE UPDATE ON human_review_commit_events BEGIN SELECT RAISE(ABORT, 'human_review_commit_events is immutable'); END;
 CREATE TRIGGER IF NOT EXISTS human_review_commit_events_no_delete
 BEFORE DELETE ON human_review_commit_events BEGIN SELECT RAISE(ABORT, 'human_review_commit_events is immutable'); END;
+
+-- A timed-out candidate is never silently promoted or presented as rejected
+-- by a human. Its exact version remains readable beside this terminal reason.
+CREATE TABLE IF NOT EXISTS candidate_terminal_events (
+    candidate_version_ref TEXT PRIMARY KEY REFERENCES candidate_claim_versions(version_id),
+    candidate_hash TEXT NOT NULL,
+    state TEXT NOT NULL CHECK(state='expired'),
+    record_json TEXT NOT NULL,
+    content_hash TEXT NOT NULL,
+    created_at TEXT NOT NULL
+);
+CREATE TRIGGER IF NOT EXISTS candidate_terminal_events_no_update
+BEFORE UPDATE ON candidate_terminal_events BEGIN SELECT RAISE(ABORT,'candidate terminal events are immutable'); END;
+CREATE TRIGGER IF NOT EXISTS candidate_terminal_events_no_delete
+BEFORE DELETE ON candidate_terminal_events BEGIN SELECT RAISE(ABORT,'candidate terminal events are immutable'); END;

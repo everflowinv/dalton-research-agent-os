@@ -128,7 +128,7 @@ OUTPUT_KEYS: frozenset[str] = frozenset({
     "next_verification", "citations",
 })
 _REWRITE_KEYS: frozenset[str] = frozenset({
-    "thesis_ref", "decision", "line", "because", "refs",
+    "thesis_ref", "decision", "line", "because", "refs", "proposed_confidence",
 })
 _STALE_KEYS: frozenset[str] = frozenset({"debate_ref", "because"})
 _VERIFICATION_KEYS: frozenset[str] = frozenset({"what", "date", "because"})
@@ -272,6 +272,18 @@ def review_state(
             })
             continue
         latest_review = _latest_review_at(connection, review_ref)
+        prior = connection.execute("SELECT record_json,content_hash FROM zero_base_review_versions "
+                                   "WHERE review_ref=? ORDER BY version_number DESC LIMIT 1", (review_ref,)).fetchone() if latest_review is not None else None
+        if prior is not None:
+            record = _decode(prior, "latest zero-base review")
+            deadline = (record.get("answers", {}).get("next_verification") or {}).get("date")
+            if deadline and str(deadline) < now.date().isoformat():
+                state.append({"company_ref": company_ref, "review_ref": review_ref, "due": True,
+                              "trigger": "monthly", "period_label": month, "calibration": calibration,
+                              "review_status": "stale", "stale_reason": "verification_expired",
+                              "stale_version_ref": record["id"], "verification_date": deadline,
+                              "reason": "零基复盘约定的核验日已过，按新来源重审"})
+                continue
         if latest_review is None or now - latest_review >= timedelta(days=30):
             state.append({
                 "company_ref": company_ref, "review_ref": review_ref, "due": True,
@@ -404,7 +416,34 @@ def build_context(
     }
     context["allowed_refs"] = allowed_refs(context)
     context["inputs_hash"] = inputs_hash(context)
+    # Batch an (binding only, outside inputs_hash): the exact upstream
+    # versions this review read, so a newer thesis, debate map or catalyst
+    # calendar marks it stale in product_consistency.
+    context["upstream_bindings"] = review_bindings(connection, company_ref, context)
     return context
+
+
+def review_bindings(connection: sqlite3.Connection, company_ref: str,
+                    context: Mapping[str, Any]) -> list[dict[str, Any]]:
+    """The ``upstream_bindings`` of a review: theses, debate map, calendar, calibration."""
+
+    from .product_consistency import upstream_bindings
+
+    refs: list[Any] = [{"ref": thesis.get("ref"), "role": "thesis"}
+                       for thesis in context.get("theses") or () if isinstance(thesis, Mapping)]
+    for table, column, role in (("debate_map_versions", "subject_ref", "debate_map"),
+                                ("catalyst_calendar_versions", "company_ref", "catalyst_calendar")):
+        if not _table_exists(connection, table):
+            continue
+        row = connection.execute(
+            f"SELECT version_id FROM {table} WHERE {column}=? ORDER BY version_number DESC LIMIT 1",
+            (company_ref,)).fetchone()
+        if row is not None:
+            refs.append({"ref": row[0], "role": role})
+    calibration = context.get("calibration")
+    if isinstance(calibration, Mapping) and calibration.get("version_ref"):
+        refs.append({"ref": calibration["version_ref"], "role": "calibration"})
+    return upstream_bindings(refs)
 
 
 def allowed_refs(context: Mapping[str, Any]) -> list[str]:
@@ -438,7 +477,7 @@ def inputs_hash(context: Mapping[str, Any]) -> str:
     which is the shape that never fires.
     """
 
-    return content_hash({
+    body = {
         "schema_version": SCHEMA_VERSION,
         "company_ref": context["company_ref"],
         "trigger": context["trigger"],
@@ -449,7 +488,12 @@ def inputs_hash(context: Mapping[str, Any]) -> str:
         "claims": context.get("claims") or [],
         "calibration": context.get("calibration"),
         "outcome_counts": context.get("outcome_counts") or {},
-    })
+    }
+    prior = context.get("prior_review") or {}
+    deadline = (prior.get("next_verification") or {}).get("date")
+    if deadline and str(deadline) < str(context.get("as_of") or ""):
+        body["verification_expiry"] = {"prior_ref": prior.get("ref"), "date": deadline}
+    return content_hash(body)
 
 
 # ---------------------------------------------------------------------------
@@ -536,7 +580,7 @@ def build_review_prompt(context: Mapping[str, Any]) -> str:
         '  "because": "<why, in at most a few sentences>",',
         '  "rewritten_lines": [{"thesis_ref": "<one of the thesis refs above>",',
         f'    "decision": one of {list(REWRITE_DECISIONS)},',
-        '    "line": "<how that thesis would read if written today>",',
+        '    "line": "<how that thesis would read if written today>", "proposed_confidence": "low|medium|high",',
         '    "because": "<why>", "refs": ["<refs>"]}],',
         '  "stale_debates": [{"debate_ref": "<one of the debate refs above>",',
         '    "because": "<why it no longer matters>"}],',
@@ -642,7 +686,13 @@ def validate_review_output(
             raise ZeroBaseReviewValidationError(
                 "a rewritten line may cite only archived thesis, debate, or claim refs"
             )
+        from .thesis_question_model import validate_revision_proposal
+        try:
+            validate_revision_proposal(item["line"], item["proposed_confidence"], decision=decision)
+        except ValueError as exc:
+            raise ZeroBaseReviewValidationError(str(exc)) from exc
         lines.append({
+            "proposed_confidence": item["proposed_confidence"],
             "thesis_ref": thesis_ref,
             "decision": decision,
             "line": _text(item["line"], "rewritten_lines[].line", maximum=MAX_LINE_CHARS),
@@ -766,6 +816,10 @@ def build_verifier_prompt(context: Mapping[str, Any], answered: Mapping[str, Any
         'Return raw JSON only: {"verdict":"pass|reject","findings":["<reason>"]}',
         "A pass has no findings; a reject has at least one.",
     ])
+    if answered.get("rewritten_lines"):
+        prompt += "\nCompare each old/new thesis and confidence wording. Add direction_checks: " \
+                  "[{thesis_version_ref, relation: same|opposite|unclear, reason}], in rewritten_lines order. " \
+                  "Opposite requires THESIS_BROKEN; unclear cannot pass."
     if len(prompt) > MAX_PROMPT_CHARS:
         raise ZeroBaseReviewValidationError(
             f"the verifier prompt is {len(prompt)} characters, over {MAX_PROMPT_CHARS}"
@@ -809,6 +863,17 @@ def verify_review(
                 "independence": independence, "model": provenance}
     try:
         payload = unwrap_json_object(call["text"])
+        directions = []
+        checks = payload.pop("direction_checks", None) if isinstance(payload, dict) else None
+        if answered.get("rewritten_lines"):
+            from .thesis_question_model import direction_binding, validate_directions
+            theses = {t["ref"]: t for t in context.get("theses") or ()}
+            proposals = [direction_binding(theses[line["thesis_ref"]], line["line"], line["proposed_confidence"])
+                         for line in answered["rewritten_lines"]]
+            directions = validate_directions(checks, proposals)
+            if any(d["relation"] == "unclear" or (d["relation"] == "opposite" and line["decision"] != "THESIS_BROKEN")
+                   for d, line in zip(directions, answered["rewritten_lines"])):
+                raise ZeroBaseReviewValidationError("opposite thesis requires THESIS_BROKEN; unclear direction requires review")
         if not isinstance(payload, Mapping) or set(payload) != {"verdict", "findings"}:
             raise ZeroBaseReviewValidationError("the verifier output is exactly verdict and findings")
         findings = payload["findings"]
@@ -817,14 +882,14 @@ def verify_review(
         if (payload["verdict"] == "pass") == bool(findings):
             raise ZeroBaseReviewValidationError("a pass has no findings and a reject has at least one")
         findings = [_text(row, "verifier finding", maximum=500) for row in findings]
-    except ZeroBaseReviewValidationError as exc:
+    except (ZeroBaseReviewValidationError, ValueError, KeyError) as exc:
         return {"status": "refused", "reason": str(exc), "independence": independence,
                 "model": provenance}
     if payload["verdict"] != "pass":
         return {"status": "refused", "reason": "; ".join(findings),
                 "independence": independence, "model": provenance, "findings": findings}
     return {"status": "verified", "independence": independence, "model": provenance,
-            "findings": []}
+            "findings": [], "direction_checks": directions}
 
 
 # ---------------------------------------------------------------------------
@@ -902,6 +967,7 @@ def build_review_body(
         },
         "model": answers.get("model"),
         "outcome_counts": dict(context.get("outcome_counts") or {}),
+        "upstream_bindings": list(context.get("upstream_bindings") or ()),
     }
     body["narrative"] = narrative(body)
     return body
@@ -1094,6 +1160,11 @@ class ZeroBaseReviewAuthority:
             raise ZeroBaseReviewValidationError(
                 f"a candidate carries one of {list(REWRITE_DECISIONS)}"
             )
+        from .thesis_question_model import validate_revision_proposal
+        try:
+            validate_revision_proposal(line.get("line"), line.get("proposed_confidence"), decision=decision)
+        except ValueError as exc:
+            raise ZeroBaseReviewValidationError(str(exc)) from exc
         refs = [_text(ref, "evidence_refs[]") for ref in (line.get("refs") or ())]
         if not refs:
             raise ZeroBaseReviewValidationError(
@@ -1123,7 +1194,7 @@ class ZeroBaseReviewAuthority:
             "company_ref": review["company_ref"],
             "decision": decision,
             "proposed_statement": _text(line["line"], "line", maximum=MAX_LINE_CHARS),
-            "proposed_confidence": None,
+            "proposed_confidence": line["proposed_confidence"],
             "falsifier_ref": None,
             "reflection_ref": None,
             "because": _text(line["because"], "because", maximum=MAX_BECAUSE_CHARS),

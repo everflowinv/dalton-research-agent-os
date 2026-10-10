@@ -184,6 +184,18 @@ def admit_directed_inquiry(
         raise MissionDocumentAdmissionHostError("caller differs from the exact planner question origin")
     # Derive the write from replayed server authority, never caller fields.
     mission, inquiry, registration = origin["mission"], origin["inquiry"], origin["registration"]
+    # The equivalent-inquiry rule, before anything is written: a rephrasing of
+    # a question still in flight, held or just answered records no backlog
+    # question and buys nothing.  The exact same inquiry falls through to
+    # ``admit_from_plan``, which answers it as the duplicate it is.
+    equivalent = authority.equivalent_open_admission(
+        {"company_ref": inquiry["company_ref"], "planner_inquiry": inquiry,
+         "mission_ref": mission["mission_ref"]},
+        exclude_inquiry_ref=inquiry_ref_for(digest))
+    if equivalent is not None:
+        from .mission_document_research import MissionDocumentResearchEquivalentPending
+
+        raise MissionDocumentResearchEquivalentPending(equivalent)
     principal = mission["autonomy"]["automation_principal"]
     question = backlog.record_question(
         mandate_version_ref=mission["bindings"]["mandate_version"]["ref"],

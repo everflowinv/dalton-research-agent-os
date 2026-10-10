@@ -1,0 +1,28 @@
+# 架构决策索引
+
+按记录编号列出已保存的设计决定。历史 ADR 保留其当时上下文；当前运行和资料缺口见 [项目状态](../PROJECT_STATUS.md)。
+
+- [ADR-0001：Thesis 置信度与首条覆盖准入权限](0001-thesis-confidence-and-coverage-admission.md)
+- [ADR-0002：自然语言意图与回答路由合同](0002-natural-language-intent-and-answer-routing.md)
+- [ADR-0003：transcript 候选如何进入 CandidateStaging](0003-transcript-candidate-admission.md)
+- [ADR-0004：任务驱动的自治与自动化写入范围](0004-mission-driven-autonomy-and-automation-write-scope.md)
+- [ADR-0005：文档抽取与 Claim 准入由自动化完成，人只定目标、掌舵与问答](0005-autonomous-document-extraction.md)
+- [ADR-0006: The owner's cockpit is five places, and none of them speaks machine](0006-owner-cockpit.md)
+- [ADR-0007: Automation may propose that a thesis is wrong, and a verified number may be a Claim](0007-thesis-revision-candidates-and-verified-figures-in-the-ledger.md)
+- [ADR-0008: No research output is ever finished, but nothing revises itself](0008-research-outputs-are-never-terminal.md)
+- [ADR-0009: One event plane. The Perception/Agenda plane is retired, not migrated](0009-one-event-plane.md)
+- [ADR-0010: The thesis-impact lane is retired; the ADR-0007 revision-candidate path is the only way automation speaks about a thesis](0010-retire-thesis-impact-lane.md)
+- [ADR-0011: industry_model and company_model close on deterministic exit checks over what the lanes already produce; the metric base is one of those checks](0011-achievable-model-stage-gates.md)
+- [ADR-0012: A scenario is a versioned object with machine-observable conditions; automation proposes it, the owner adopts it, and only an adopted scenario acts](0012-structured-scenarios-and-their-observation.md)
+- [ADR-0013: Conviction v2 — a call is evidence confidence × scenarios × alignment, held to thresholds the owner publishes; agreeing with the market is priced, not refused](0013-conviction-v2-priced-agreement.md)
+- [ADR-0014: Holding-period return attribution and buy-side expectation sources. Income bridges and per-share series come from the filed statement lines, and a fourth quarter is never derived](0014-return-attribution-and-expectation-sources.md)
+- [ADR-0015: Preliminary actuals from the company's own earnings release. An Item 2.02 8-K advances the fiscal period to "reported", its Exhibit 99.1 income statement is read deterministically, and a preliminary number never outranks a filed one](0015-preliminary-actuals-from-earnings-releases.md)
+- [ADR-0016: Cockpit v2, a workbench for non-technical financial analysts. One shell at `/v2` with five analyst pages and a module contract that the administrator interface and the financial charts plug into](0016-cockpit-v2-for-analysts.md)
+- [ADR-0017: Source attribution, forecast normalisation and an honest return bridge. A Claim about financials must belong to the issuer whose table it cites; a model's base is cleaned of one-offs and its costs, shares and cash are held to invariants; an expected return is never built on a proxy the model refused](0017-source-attribution-and-forecast-normalisation.md)
+- [ADR-0018: One material acquisition service for every stage. A missing document, figure or answer is a MaterialRequest; the service works its source ladder, records every attempt, links what arrives to the request, and reaches the owner only when all sources are exhausted, a budget cap is reached or a source needs a login](0018-material-acquisition-service.md)
+- [ADR-0019：按研究环节显式声明模型思考强度](0019-explicit-thinking-level-per-research-stage.md)
+- [ADR-0020：发布流水线收敛与原稿额度](0020-publication-convergence-and-shared-artifact-limits.md)
+- [ADR 0021 — 工作区创建、停用与审计生命周期](0021-workspace-creation-and-audited-lifecycle.md)
+- [ADR 0022: One research-question authority with bounded maintenance](0022-canonical-question-authority-and-bounded-maintenance.md)
+- [ADR 0023: Append-only repair of existing industry research methods](0023-existing-industry-archetype-repair.md)
+- [ADR 0024 — SEC 年报附件的独立原始文档](0024-independent-sec-annual-report-attachment-original.md)

@@ -65,6 +65,8 @@ RETENTION_DAYS = 90
 IDLE_STATUS_WORDS: frozenset[str] = frozenset({
     "idle", "held", "not_granted", "up_to_date", "nothing_to_do", "complete",
     "no_work", "quiet",
+    # 2026-10-06: the owner paused it (owner_levers).  A decision, not a stall.
+    "paused",
 })
 
 # Words that mean the lane wanted to work and could not.  ``skipped`` is not
@@ -152,7 +154,26 @@ def bounded_counts(result: Mapping[str, Any]) -> dict[str, Any]:
 
 _COORDINATOR_FIELDS = ("status", "reason", "deferred_streak", "budget_exhausted",
                        "acquisitions_launched", "position", "share_seconds",
-                       "elapsed_seconds")
+                       "elapsed_seconds",
+                       # 2026-09-29: why a coordinator whose own word is idle
+                       # did not move -- a selection hold or quarantine on the
+                       # acquisition side, or searches that ran and failed.
+                       "acquisition_status", "acquisition_reason",
+                       # 2026-10-08: the step the found candidate is really
+                       # at ("候选已选中，等待获取：…额度已用完"), not "等选取/获取".
+                       "candidate_step",
+                       "selection_quarantined", "discovery_failures",
+                       "discovery_failure_reason",
+                       # 2026-10-04: where the share went, step by step, and
+                       # what held the search when it launched nothing.
+                       "settle_seconds", "carry_seconds", "held_seconds",
+                       "acquire_seconds", "search_seconds",
+                       "search_blocked_reason", "search_first",
+                       # 2026-10-06: which query form set a freshly loaded
+                       # plan renders (once per load; see alphaengine_query_forms).
+                       "query_forms", "query_forms_hash", "query_forms_note")
+#: Acquisition words that mean the coordinator's queue is held, not empty.
+BLOCKED_ACQUISITION_WORDS = frozenset({"selection_pending", "selection_unavailable"})
 
 
 def coordinator_states(result: Mapping[str, Any]) -> dict[str, dict[str, Any]]:
@@ -181,6 +202,20 @@ def deferred_coordinators(result: Mapping[str, Any]) -> list[str]:
 
     return [name for name, state in coordinator_states(result).items()
             if status_word(state.get("status")) == "deferred"]
+
+
+def blocked_coordinators(result: Mapping[str, Any]) -> list[str]:
+    """The coordinators of this lane result whose queue was held, not empty.
+
+    A selection hold (the AlphaEngine queue behind ``selection_pending`` on
+    both environments, 2026-09-29) or a search that ran and failed is work the
+    coordinator could not do; the lane is not idle over it.
+    """
+
+    return [name for name, state in coordinator_states(result).items()
+            if state.get("acquisition_status") in BLOCKED_ACQUISITION_WORDS
+            or (isinstance(state.get("discovery_failures"), int)
+                and state["discovery_failures"] > 0)]
 
 
 def _apply_planner_budget_migration(connection: sqlite3.Connection) -> None:
@@ -332,7 +367,8 @@ class TickLedger:
             exhausted = mentions_pool_exhausted(result)
             # A lane whose own word is idle while one of its coordinators was
             # deferred had work it could not reach; that is not an idle tick.
-            idle = word in IDLE_STATUS_WORDS and not deferred_coordinators(result)
+            idle = (word in IDLE_STATUS_WORDS and not deferred_coordinators(result)
+                    and not blocked_coordinators(result))
             idle_lanes += int(idle)
             lane_rows.append((
                 tick_id, day, started_text, key,
@@ -501,6 +537,34 @@ class TickLedger:
             },
         }
 
+    def latest_coordinator_state(
+        self, driver_key: str, coordinator: str, *, lookback: int = 24,
+    ) -> dict[str, Any] | None:
+        """The newest state of one coordinator that actually ran, with its time.
+
+        Ticks the coordinator was deferred in before its acquire step are
+        skipped (it said nothing new); the first other state is the answer, so a later launch is never shadowed by an older hold.  ``None``
+        when the last ``lookback`` rows have none.
+        """
+
+        rows = self.connection.execute(
+            "SELECT started_at, counts_json FROM tick_ledger_lanes WHERE driver_key=? "
+            "ORDER BY started_at DESC LIMIT ?", (driver_key, int(lookback)),
+        ).fetchall()
+        for row in rows:
+            try:
+                counts = json.loads(row["counts_json"])
+            except (TypeError, ValueError):
+                continue
+            state = ((counts or {}).get("coordinators") or {}).get(coordinator)
+            if not isinstance(state, dict):
+                continue
+            if (state.get("status") == "deferred" and "acquisition_status" not in state
+                    and not state.get("acquire_seconds")):
+                continue
+            return {**state, "started_at": row["started_at"]}
+        return None
+
     def lane_stalls(self, window: Any = None, *, now: datetime | None = None) -> dict[str, Any]:
         """Per lane: how often it could not work, and its longest run of that.
 
@@ -650,6 +714,7 @@ __all__ = [
     "TickLedgerError",
     "bounded_counts",
     "coordinator_states",
+    "blocked_coordinators",
     "deferred_coordinators",
     "mentions_pool_exhausted",
     "default_path",

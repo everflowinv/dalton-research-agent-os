@@ -84,8 +84,9 @@ class ScheduledWorkOrderCacheTests(unittest.TestCase):
         scheduled = _scheduled_work_orders(connection, self.path)
         connection.set_trace_callback(None)
         self.assertEqual(set(scheduled), {"work:1", "work:2", "work:3"})
-        incremental = [sql for sql in reads if "WHERE created_at >= " in sql]
+        incremental = [sql for sql in reads if "WHERE rowid > " in sql]
         self.assertEqual(len(incremental), 1)
+        self.assertIn("ORDER BY rowid", incremental[0])
         self.assertFalse(
             [sql for sql in reads
              if "FROM scheduler_work_orders" in sql
@@ -106,6 +107,40 @@ class ScheduledWorkOrderCacheTests(unittest.TestCase):
         )
         self.assertEqual(set(_scheduled_work_orders(connection, self.path)),
                          {"work:1", "work:2"})
+
+    def test_a_row_committed_behind_the_watermark_is_filled_in_not_reloaded(self):
+        # 2026-09-29: created_at is stamped before BEGIN IMMEDIATE, so a
+        # writer that waited out a lock commits a row older than rows already
+        # read.  A ``created_at >=`` watermark cannot see it; the count then
+        # disagreed and every such row cost a full re-read of 1.48 GB of
+        # work-order JSON.  The watermark is the rowid now, which is commit
+        # order, so a late row is simply the next row.
+        connection = _work_order_db(self.path, [
+            ("work:1", ["capability:a"], "2026-09-01T00:00:00Z"),
+            ("work:3", ["capability:c"], "2026-09-03T00:00:00Z"),
+        ])
+        _scheduled_work_orders(connection, self.path)
+        connection.execute(
+            "INSERT INTO scheduler_work_orders VALUES (?,?,?)",
+            ("work:2", json.dumps({"requested_capabilities": ["capability:b"]}),
+             "2026-09-02T00:00:00Z"),
+        )
+        reads = []
+        connection.set_trace_callback(reads.append)
+        scheduled = _scheduled_work_orders(connection, self.path)
+        connection.set_trace_callback(None)
+        self.assertEqual(set(scheduled), {"work:1", "work:2", "work:3"})
+        self.assertEqual(scheduled["work:2"]["wire"]["requested_capabilities"],
+                         ["capability:b"])
+        self.assertFalse(
+            [sql for sql in reads
+             if "json_extract" in sql and "WHERE" not in sql],
+            "a late row forced a full re-read of every work order",
+        )
+        self.assertEqual(
+            len([sql for sql in reads if "json_extract" in sql]), 1)
+        self.assertEqual(
+            len([sql for sql in reads if "WHERE rowid > " in sql]), 1)
 
     def test_a_replaced_database_is_reloaded_rather_than_mixed(self):
         connection = _work_order_db(self.path, [

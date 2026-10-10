@@ -153,6 +153,47 @@ class ConnectorGovernanceTests(unittest.TestCase):
         with patch.object(module, "load_packaged_connector_inventory", return_value=changed):
             self.assertNotEqual(module._sec_fixture_hash(), base)
 
+    def test_sec_receipt_keeps_a_sealed_whole_manifest_binding_of_todays_fixtures(self) -> None:
+        """2026-09-29: ws-7d's filings-index descriptor (published 09-16, after
+        S5) sealed the whole ``sec`` manifest; legacy's (before S5) sealed the
+        operation projection.  Both bind today's fixture evidence, so both are
+        honoured -- and nothing else is."""
+
+        import copy
+        from unittest.mock import patch
+
+        from dalton_core import connector_governance as module
+
+        inventory = load_packaged_connector_inventory()
+        whole = inventory["templates"]["sec"]["fixture_manifest_hash"]
+        projection = module._sec_fixture_hash()
+        self.assertNotEqual(whole, projection)
+        for kind in ("sec-filings-index", "sec-company-facts"):
+            governance = ConnectorGovernance(build_governance_record(
+                kind, approved_by=OWNER, status="approved"))
+            query = {"capability_id": governance.capability_id,
+                     "source_ref": "artifact:sec-public-source",
+                     "source_hash": governance.wire["expected_source_hash"],
+                     "schema_hash": governance.wire["expected_schema_hash"]}
+            fresh = governance.approval(query)
+            self.assertEqual(fresh["fixture_manifest_hash"], projection)
+            sealed_whole = governance.approval({**query, "sealed_fixture_manifest_hash": whole})
+            self.assertEqual(sealed_whole["fixture_manifest_hash"], whole)
+            self.assertNotEqual(sealed_whole["receipt_hash"], fresh["receipt_hash"])
+            other = governance.approval({**query, "sealed_fixture_manifest_hash": "0" * 64})
+            self.assertEqual(other, fresh)
+            # A changed fixture of an approved operation moves both spellings:
+            # the old whole-manifest seal is no longer honoured.
+            changed = copy.deepcopy(inventory)
+            case = next(item for item in changed["fixtures"]["sec"]["cases"]
+                        if item["operation"] == "list_filings")
+            case["provider_status"] = 599
+            changed["templates"]["sec"]["fixture_manifest_hash"] = "f" * 64
+            with patch.object(module, "load_packaged_connector_inventory", return_value=changed):
+                refused = governance.approval({**query, "sealed_fixture_manifest_hash": whole})
+            self.assertNotEqual(refused["fixture_manifest_hash"], whole)
+            self.assertNotEqual(refused["fixture_manifest_hash"], projection)
+
     def test_unknown_capability_is_rejected(self) -> None:
         record = build_governance_record("sec-company-facts", approved_by=OWNER)
         body = {**record, "capability_id": "capability:unknown:connector"}

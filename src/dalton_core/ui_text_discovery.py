@@ -44,7 +44,54 @@ _RETRY_FIELDS = {"schema_version", "batch_ref", "manifest_hash", "generation",
 DEFERRED_STATUS = "deferred"
 #: Who writes the retry that follows a route/family fix.
 AUTOMATIC_RETRY_ACTOR = "automation:ui-text-discovery"
-RETRY_TRIGGERS = ("owner", "route_fingerprint_changed")
+RETRY_TRIGGERS = ("owner", "route_fingerprint_changed", "automatic_after_fix")
+
+#: 2026-10-02.  Live, 287 batches were ``blocked`` -- every one sealed between
+#: 09-21 and 09-24, before fixes that removed the cause: 163 on "display
+#: attachment exceeds the size limit" (the one-file mapping, split per batch on
+#: 09-22), 23 on "no model route is available right now", a handful on "database
+#: is locked", "this request is already running" and an unanchored checker
+#: quote (re-anchored 09-25).  Nothing ever looked at them again, because only
+#: a route fingerprint change or an owner retry reopens a blocked batch.  A
+#: blocked batch whose *every* recorded failure is in one of these classes now
+#: gets one automatic retry generation per :data:`AUTO_RETRY_ROUND` (a fresh
+#: attempt budget, the cached draft kept).  A failure on the text itself -- a
+#: changed number, a verifier rejection, a section count -- stays blocked for
+#: the owner.
+AUTO_RETRY_ROUND = "2026-10-02a"
+AUTO_RETRY_CLASSES: tuple[tuple[str, tuple[str, ...]], ...] = (
+    ("attachment_size", ("display attachment exceeds the size limit",)),
+    ("database_locked", ("database is locked",)),
+    ("already_running", ("this request is already running",)),
+    ("provider_unavailable", ("no model route is available right now",
+                              "(provider_cooldown)", "MODEL_CHAIN_EXHAUSTED")),
+    ("checker_quote_unanchored", ("language checker quote is not in its source section",)),
+    # 2026-10-08 (batch w): the numeric check now accepts a faithful unit
+    # conversion the target states (104863000 -> 1.04863 亿美元), a restated
+    # display ("65543000美元（约合6554.3万美元）") and a dropped accession
+    # number or XBRL row.  Live 34 batches were blocked on exactly that; a
+    # number that really changed still fails the retry and stays blocked.
+    ("numeric_tokens_changed", ("localized section changed financial number tokens",)),
+    # 2026-10-09: a minority of malformed checker suggestions is now set
+    # aside instead of failing the review, and a hyphen is no longer read as
+    # a minus sign ("mid-2026"); the cached checker reply then validates.
+    ("checker_suggestion_malformed", ("language checker suggestion has an invalid shape",)),
+)
+#: The round a class was added or fixed in; classes not listed are
+#: :data:`AUTO_RETRY_ROUND`'s.  One automatic retry generation per class round,
+#: so adding a class does not re-retry the batches of the older ones.
+AUTO_RETRY_CLASS_ROUNDS = {"numeric_tokens_changed": "2026-10-08w",
+                           "checker_suggestion_malformed": "2026-10-09ag"}
+#: How a blocked reason reads when it is counted, not listed: the most common
+#: content failures, then the automatic classes; everything else is "other".
+_REASON_CLASSES: tuple[tuple[str, tuple[str, ...]], ...] = (
+    ("numeric_tokens_changed", ("localized section changed financial number tokens",)),
+    ("verifier_rejected", ("independent localization verifier did not pass cleanly",)),
+    ("brain_decisions_invalid", ("brain must decide every language suggestion",
+                                 "brain suggestion decision index is invalid")),
+    ("section_count_changed", ("localized sections must match source section count",)),
+    *AUTO_RETRY_CLASSES,
+)
 
 #: 2026-09-24.  Failures that are about *which model served*, not about the
 #: text: the verifier could not be shown independent of the drafting models,
@@ -388,6 +435,34 @@ def failure_class(result: Any) -> str | None:
     return None
 
 
+def auto_retry_class(result: Any) -> str | None:
+    """The automatic-retry class covering every recorded failure, or ``None``."""
+
+    errors = _failure_errors(result)
+    if not errors:
+        return None
+    found = set()
+    for error in errors:
+        name = next((name for name, markers in AUTO_RETRY_CLASSES
+                     if any(marker in error for marker in markers)), None)
+        if name is None:
+            return None
+        found.add(name)
+    return "+".join(sorted(found))
+
+
+def reason_class(result: Any) -> str:
+    """One countable class for a failed result: the first error's class."""
+
+    if failure_class(result) == FAILURE_CLASS_ROUTE_FAMILY:
+        return FAILURE_CLASS_ROUTE_FAMILY
+    for error in _failure_errors(result):
+        for name, markers in _REASON_CLASSES:
+            if any(marker in error for marker in markers):
+                return name
+    return "other"
+
+
 def _blocked_reason(result: Mapping[str, Any], max_attempts: int) -> str:
     if result.get("failure_class") == FAILURE_CLASS_ROUTE_FAMILY:
         return (f"路由或模型家族问题，重试同一份草稿不会通过（第 {result.get('attempts')} 次）；"
@@ -444,21 +519,62 @@ def _digest(batch_ref: str) -> str:
     return batch_ref.split(":", 1)[1]
 
 
-def latest_retry(root: Path, batch_ref: str) -> dict[str, Any] | None:
-    """The newest retry record for one batch, after checking the whole chain."""
+def retry_records(root: Path, batch_ref: str) -> list[dict[str, Any]]:
+    """Every retry record of one batch, after checking the whole chain."""
 
     directory = Path(root) / "retries" / _digest(batch_ref)
     if directory.is_symlink():
         raise ValueError("UI text retry directory must not be a symlink")
     if not directory.is_dir():
-        return None
+        return []
     records = [_read_closed(path, RETRY_SCHEMA, _RETRY_FIELDS)
                for path in sorted(directory.glob("*.json"))]
     for number, record in enumerate(records, start=1):
         if (record["batch_ref"] != batch_ref or record["generation"] != number
                 or record["trigger"] not in RETRY_TRIGGERS):
             raise ValueError("UI text retry chain drifted")
+    return records
+
+
+def latest_retry(root: Path, batch_ref: str) -> dict[str, Any] | None:
+    """The newest retry record for one batch, after checking the whole chain."""
+
+    records = retry_records(root, batch_ref)
     return records[-1] if records else None
+
+
+def _auto_retry_round(name: str | None = None) -> str:
+    """The round of a (possibly joined) automatic-retry class."""
+
+    parts = (name or "").split("+")
+    return max([AUTO_RETRY_ROUND,
+                *(AUTO_RETRY_CLASS_ROUNDS[part] for part in parts
+                  if part in AUTO_RETRY_CLASS_ROUNDS)])
+
+
+def _auto_retry_mark(name: str | None = None) -> str:
+    return f"[auto-retry {_auto_retry_round(name)}]"
+
+
+def _automatic_retry_due(root: Path, prior: Mapping[str, Any] | None,
+                         max_attempts: int) -> str | None:
+    """The class of a blocked batch owed its one automatic retry this round."""
+
+    if prior is None or prior["status"] == "completed":
+        return None
+    if prior["status"] != "blocked" and prior["attempts"] < max_attempts:
+        return None
+    if prior["failure_class"] == FAILURE_CLASS_ROUTE_FAMILY:
+        return None  # the route fingerprint owns these
+    name = auto_retry_class(prior["result"])
+    if name is None:
+        return None
+    mark = _auto_retry_mark(name)
+    if any(record["trigger"] == "automatic_after_fix"
+           and str(record["reason"]).startswith(mark)
+           for record in retry_records(root, prior["batch_ref"])):
+        return None
+    return name
 
 
 def _write_retry(root: Path, manifest: Mapping[str, Any], prior: Mapping[str, Any], *,
@@ -504,15 +620,18 @@ def _chunks(entries: list[dict[str, Any]]) -> list[list[dict[str, Any]]]:
     return result
 
 
+def _current_sources(discovered: list[Mapping[str, Any]]) -> dict[str, set[tuple[str, str]]]:
+    return {entry["text"]: {(source["ref"], source["hash"]) for source in entry["sources"]}
+            for entry in discovered}
+
+
 def _eligible(manifest: Mapping[str, Any], mission_ref: str,
-              discovered: list[Mapping[str, Any]]) -> bool:
+              discovered: list[Mapping[str, Any]],
+              current: Mapping[str, set[tuple[str, str]]] | None = None) -> bool:
     if manifest["mission_ref"] != mission_ref:
         return False
-    current = {
-        entry["text"]: {(source["ref"], source["hash"])
-                        for source in entry["sources"]}
-        for entry in discovered
-    }
+    if current is None:
+        current = _current_sources(discovered)
     return all(needs_display_translation(entry["text"]) and entry["text"] in current and
                {(source["ref"], source["hash"]) for source in entry["sources"]}
                .issubset(current[entry["text"]]) for entry in manifest["entries"])
@@ -524,6 +643,7 @@ def poll_ui_texts(connection: Any, mission: Mapping[str, Any], *, state_dir: Pat
                   batches_per_run: int = DEFAULT_BATCHES_PER_RUN,
                   max_attempts: int = DEFAULT_MAX_ATTEMPTS,
                   route_fingerprint: Callable[[], str | None] | None = None,
+                  stop_requested: Callable[[], bool] | None = None,
                   ) -> dict[str, Any]:
     """Seal newly discovered strings and prepare a bounded number of batches.
 
@@ -568,8 +688,11 @@ def poll_ui_texts(connection: Any, mission: Mapping[str, Any], *, state_dir: Pat
         mission_ref = mission.get("mission_ref")
         if not isinstance(mission_ref, str) or not mission_ref:
             raise ValueError("mission_ref must be non-empty text")
+        # Built once: ``_eligible`` used to rebuild it per manifest (2,700 x
+        # 11,000 entries a poll live).
+        current_sources = _current_sources(discovered)
         assigned = {entry["text"] for manifest in existing
-                    if _eligible(manifest, mission_ref, discovered)
+                    if _eligible(manifest, mission_ref, discovered, current_sources)
                     for entry in manifest["entries"]}
         translatable = [entry for entry in discovered if needs_display_translation(entry["text"])]
         new = [entry for entry in translatable if entry["text"] not in mapping
@@ -586,6 +709,9 @@ def poll_ui_texts(connection: Any, mission: Mapping[str, Any], *, state_dir: Pat
 
         summaries = []
         attempted = 0
+        auto_retried = 0
+        ceiling_deferred = 0
+        ceiling_reason: str | None = None
         fingerprint_cache: list[str | None] = []
 
         def current_fingerprint() -> str | None:
@@ -629,6 +755,19 @@ def poll_ui_texts(connection: Any, mission: Mapping[str, Any], *, state_dir: Pat
                         reason=("路由或模型家族配置已变化，丢弃缓存草稿和路由决策，从头重新起草；"
                                 f"上次失败：{_failure_reason(prior['result'])}")[:1000],
                         route_fingerprint=now, created_at=_now())
+            if not pending_retry and not (retry is not None and prior is not None
+                                          and retry["generation"] > prior["generation"]):
+                automatic = _automatic_retry_due(root, prior, max_attempts)
+                if automatic is not None and _eligible(manifest, mission_ref, discovered,
+                                                       current_sources):
+                    retry = _write_retry(
+                        root, manifest, prior, redraft=False,
+                        trigger="automatic_after_fix", actor_ref=AUTOMATIC_RETRY_ACTOR,
+                        reason=(f"{_auto_retry_mark(automatic)} 上次失败只因 {automatic}（已修复或只是一时）"
+                                f"，新开一轮重试，保留缓存草稿；上次失败："
+                                f"{_failure_reason(prior['result'])}")[:1000],
+                        route_fingerprint=None, created_at=_now())
+                    auto_retried += 1
             if retry is not None and prior is not None \
                     and retry["generation"] > prior["generation"]:
                 # A new generation: its own attempt budget, its own draft.
@@ -637,10 +776,19 @@ def poll_ui_texts(connection: Any, mission: Mapping[str, Any], *, state_dir: Pat
                 redraft_generation = retry["redraft_generation"]
             elif prior is not None and (prior["status"] == "blocked"
                                         or attempts >= max_attempts):
+                if not _eligible(manifest, mission_ref, discovered, current_sources):
+                    # Superseded (its Claim versions changed or left the
+                    # mission): the strings, if still shown, are in a newer
+                    # batch.  Counting it as blocked reported 224 of the 287
+                    # live "blocked" batches about text nobody can see.
+                    summaries.append({"batch_ref": manifest["batch_ref"],
+                                      "status": "ineligible", "attempts": attempts})
+                    continue
                 summaries.append({
                     "batch_ref": manifest["batch_ref"], "status": "blocked",
                     "attempts": attempts,
                     "reason": _blocked_reason(prior, max_attempts),
+                    "reason_class": reason_class(prior["result"]),
                 })
                 if prior["status"] != "blocked":
                     _seal_blocked(result_path, prior, max_attempts)
@@ -652,7 +800,7 @@ def poll_ui_texts(connection: Any, mission: Mapping[str, Any], *, state_dir: Pat
 
         eligible = [row for row in summaries if row["status"] == "eligible"]
         for row in eligible:
-            if not _eligible(row["manifest"], mission_ref, discovered):
+            if not _eligible(row["manifest"], mission_ref, discovered, current_sources):
                 row["status"] = "ineligible"
         queue = sorted((row for row in eligible if row["status"] == "eligible"),
                        key=lambda row: (row["attempts"] != 0, row["attempts"],
@@ -662,7 +810,12 @@ def poll_ui_texts(connection: Any, mission: Mapping[str, Any], *, state_dir: Pat
             if row["status"] == "eligible" and row["batch_ref"] not in selected:
                 row["status"] = "deferred"
         ceiling_reached = False
+        quiesced = False
         for row in queue:
+            if stop_requested is not None and stop_requested():
+                quiesced = True
+                row["status"] = "deferred"
+                continue
             manifest = row.pop("manifest")
             result_path = row.pop("result_path")
             if ceiling_reached:
@@ -670,7 +823,6 @@ def poll_ui_texts(connection: Any, mission: Mapping[str, Any], *, state_dir: Pat
                 # share is spent, the rest of the queue waits with it.
                 row["status"] = "deferred"
                 continue
-            attempted += 1
             redraft_generation = row.pop("redraft_generation")
             generation = row.pop("generation")
             try:
@@ -689,9 +841,14 @@ def poll_ui_texts(connection: Any, mission: Mapping[str, Any], *, state_dir: Pat
                 # A spend ceiling is not a failure: no attempt is counted, the
                 # saved result is left as it was, and the batch is offered
                 # again on the next poll -- tomorrow, once the day has room.
+                # Nor is it counted as ``attempted``: live, "attempted 1" for
+                # days read as one batch a pass being tried when none was.
                 ceiling_reached = True
+                ceiling_deferred += 1
+                ceiling_reason = _failure_reason(result_value)[:300]
                 row["status"] = "deferred"
                 continue
+            attempted += 1
             attempts = row["attempts"] + 1
             route_family = (not completed and failure_class(result_value)
                             == FAILURE_CLASS_ROUTE_FAMILY)
@@ -713,20 +870,37 @@ def poll_ui_texts(connection: Any, mission: Mapping[str, Any], *, state_dir: Pat
             row["attempts"] = saved["attempts"]
             if status == "blocked":
                 row["reason"] = _blocked_reason(saved, max_attempts)
+                row["reason_class"] = reason_class(saved["result"])
         for row in summaries:
             row.pop("manifest", None); row.pop("result_path", None)
             row.pop("generation", None); row.pop("redraft_generation", None)
         blocked = [row for row in summaries if row["status"] == "blocked"]
-        return {"schema_version": POLL_SCHEMA, "discovered": len(discovered),
+        reason_classes: dict[str, int] = {}
+        for row in blocked:
+            reason_classes[row["reason_class"]] = reason_classes.get(row["reason_class"], 0) + 1
+        return {"schema_version": POLL_SCHEMA,
+                **({"quiesced": quiesced} if stop_requested is not None else {}),
+                "discovered": len(discovered),
                 "translation_needed": len(translatable),
+                # ``translation_needed`` counts every English string, mapped or
+                # not; this is how many still have no reviewed translation.
+                "translation_unmapped": sum(entry["text"] not in mapping
+                                            for entry in translatable),
                 "already_readable": len(discovered) - len(translatable),
-                "sealed": len(new), "attempted": attempted, "batches": summaries,
+                "sealed": len(new), "attempted": attempted,
+                # Prepare calls that met the day's spend ceiling instead of
+                # running (at most one: the rest of the queue waits with it).
+                "ceiling_deferred": ceiling_deferred, "ceiling_reason": ceiling_reason,
+                "auto_retried": auto_retried, "batches": summaries,
                 "batches_per_run": batches_per_run, "max_attempts": max_attempts,
                 "blocked": len(blocked),
                 # A blocked batch is not pending work: nothing will pick it up
                 # again, so counting it as pending kept the worker reporting
                 # "there is more to do" about work it had already given up on.
                 "blocked_reasons": sorted({row["reason"] for row in blocked}),
+                # The same, counted by class: 74 distinct sentences live were
+                # mostly one number-token failure each.
+                "blocked_reason_classes": dict(sorted(reason_classes.items())),
                 "pending": sum(row["status"] in {"pending", "deferred"} for row in summaries)}
 
 

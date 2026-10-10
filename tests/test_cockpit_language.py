@@ -155,7 +155,7 @@ class CockpitLanguageTests(unittest.TestCase):
         self.assertIn('if(doc.publication_status==="pending_language_review")', text)
         self.assertIn('doc.display_reason||"正文正在进行语言检查', text)
         self.assertIn('(s.display_gaps||s.gaps||[]).forEach', text)
-        self.assertIn('finalResearchText(doc.summary)', text)
+        self.assertIn('finalResearchText(doc.summary,finalState(doc))', text)
         self.assertIn('"公司最新阶段评审：通过"', text)
         self.assertNotIn('"出口门：通过"', text)
 
@@ -364,7 +364,7 @@ class CockpitLanguageTests(unittest.TestCase):
         self.assertIn('existing.fingerprint===fingerprint||existing.pending', text)
         self.assertIn('localized=displayText(raw)', text)
         self.assertIn('summary=approvalDetailSummary(shown)', text)
-        self.assertIn('finalResearchText(it.summary):displayText(it.summary),summary=approvalSummary(localized)', text)
+        self.assertIn('finalResearchText(it.summary,finalState(it)):displayText(it.summary),summary=approvalSummary(localized)', text)
 
     def test_lost_approval_response_uses_exact_readback_without_resubmitting(self) -> None:
         text = HTML.read_text(encoding="utf-8")
@@ -378,14 +378,14 @@ class CockpitLanguageTests(unittest.TestCase):
         self.assertIn('FINAL_RESEARCH_REQUIRED&&!Object.prototype.hasOwnProperty.call(UI_TEXT,value)', text)
         self.assertIn('正文正在检查文字表达，完成后会显示。', text)
         for field in (
-            'readableEventJudgement(x.because)', 'const shown=finalResearchText(value);',
-            'finalResearchText(r.what_we_expected)', 'finalResearchText(r.what_happened)',
+            'readableEventJudgement(x.because,st)', 'const shown=finalResearchText(value,state);',
+            'finalResearchText(r.what_we_expected,st)', 'finalResearchText(r.what_happened,st)',
         ):
             self.assertIn(field, text)
         self.assertIn('const finalFields=[r.title,r.prose', text)
-        self.assertIn('if(!finalResearchReady(finalFields))', text)
+        self.assertIn('if(!finalResearchReady(finalFields,finalState(r)))', text)
         self.assertIn('technicalDetails({original_reflection:r})', text)
-        self.assertIn('const answer=r.display_answer?displayText(r.display_answer):finalResearchText(r.answer)', text)
+        self.assertIn('const answer=r.display_answer?displayText(r.display_answer):finalResearchText(r.answer,st)', text)
         self.assertIn('technicalDetails({original_answer:r.answer,original_gaps:r.gaps})', text)
         self.assertIn('fields=[z.title,...(z.sections||[]).flatMap', text)
         self.assertIn('technicalDetails({original_review:z})', text)

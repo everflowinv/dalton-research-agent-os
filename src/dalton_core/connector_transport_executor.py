@@ -727,6 +727,10 @@ class ConnectorTransportExecutor:
             provider_request_id=provider_request_id,
             retry_at=observed["retry_at"],
             idempotency_key=f"{key_prefix}:attempt",
+            # 2026-10-08: the provider's own words survive into the ledger.
+            **({"error": observed["error"]}
+               if observed["attempt_outcome"] != "succeeded" and observed.get("error")
+               else {}),
         )
         self._barrier("after_attempt_recorded")
         successful = observed["attempt_outcome"] == "succeeded"

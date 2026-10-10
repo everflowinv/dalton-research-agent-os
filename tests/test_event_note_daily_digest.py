@@ -14,7 +14,7 @@ from datetime import date, datetime, timezone
 from unittest import mock
 
 from dalton_core.event_judgement import (
-    DAILY_DIGEST_FIGURE_ELIDED,
+    DAILY_DIGEST_DROPPED_NOTE,
     DAILY_DIGEST_MARKER,
     DAILY_DIGEST_TEMPLATE_REF,
     apply_effect,
@@ -207,14 +207,37 @@ class DigestTests(DailyDigestHarness):
         self.assertEqual(self.digest(), [])
         self.assertEqual(len(self.versions()), 1)
 
-    def test_an_unsourced_figure_is_elided_not_a_refusal_of_the_day(self):
-        self.run_event(decision(because="收入季度增长 14.5% 与预测一致，无需改写。"),
+    def test_an_unsourced_figure_drops_its_sentence_not_the_day_and_leaves_no_placeholder(self):
+        # Batch F: never 〔数字见研判记录〕 in place of a figure -- a sentence whose
+        # figure nothing sources is left out and counted; the rest is printed.
+        self.run_event(decision(because="收入季度增长 14.5% 与预测一致。这条价格变动没有改变需求判断。"),
                        at=f"{DAY}T09:00:00+00:00")
         results = self.digest()
         self.assertEqual(results[0]["status"], "fresh", results)
         body = self.versions()[0]["sections"][1]["body"]
         self.assertNotIn("14.5", body)
-        self.assertIn(DAILY_DIGEST_FIGURE_ELIDED, body)
+        self.assertNotIn("〔", body)
+        self.assertIn("这条价格变动没有改变需求判断。", body)
+        self.assertIn(DAILY_DIGEST_DROPPED_NOTE.format(n=1), body)
+
+    def test_a_figure_restated_from_the_event_payload_is_printed_with_its_source(self):
+        self.run_event(decision(because="当日收于 104，单日上涨 4.0000%，没有公司消息。"),
+                       at=f"{DAY}T09:00:00+00:00")
+        rows = [json.loads(row["record_json"]) for row in self.store.connection.execute(
+            "SELECT record_json FROM event_judgements").fetchall()]
+        events = {self.event["id"]: self.event}
+        digest = build_daily_digest(ACN, DAY, rows, events=events, allow_pack_numbers=True)
+        section = digest["sections"][1]
+        self.assertIn("104", section["body"])
+        self.assertIn("4.0000%", section["body"])
+        refs = {entry.get("number_ref") for entry in section["numbers"]}
+        self.assertIn(f"event-payload:{self.event['id']}/close", refs)
+        # 4.0000% is both the return and the excess over the basket in this payload.
+        self.assertTrue(any(str(ref).endswith("_percent") for ref in refs), refs)
+        self.assertEqual(digest["pack_numbers"][f"event-payload:{self.event['id']}/close"], "close 104")
+        # Without a publisher that resolves pack numbers, the sentence is left out instead.
+        plain = build_daily_digest(ACN, DAY, rows, events=events)
+        self.assertNotIn("104", plain["sections"][1]["body"])
 
     def test_a_retired_claim_is_dropped_rather_than_refusing_the_digest(self):
         claim = self.claim(statement="管理层说需求在改善。")
@@ -226,6 +249,21 @@ class DigestTests(DailyDigestHarness):
         dropped = build_daily_digest(ACN, DAY, rows, live_claim_refs=set())
         self.assertEqual(kept["sections"][1]["claim_refs"], [claim])
         self.assertEqual(dropped["sections"][1]["claim_refs"], [])
+
+    def test_a_grouped_input_names_its_primary_event(self):
+        # 2026-10-09 (batch am): 「与同组主事件一并研判」 carries the primary's ID.
+        self.run_event(no_change_note(), at=f"{DAY}T09:00:00+00:00")
+        rows = [json.loads(row["record_json"]) for row in self.store.connection.execute(
+            "SELECT record_json FROM event_judgements").fetchall()]
+        primary = rows[0]["event_ref"]
+        grouped = dict(rows[0], id="judgement:grouped", event_ref="research-event:grouped",
+                       effect={"kind": "grouped_judgement", "status": "recorded",
+                               "primary_event_ref": primary, "daily_digest": DAILY_DIGEST_MARKER})
+        digest = build_daily_digest(ACN, DAY, [rows[0], grouped])
+        section = digest["sections"][2]
+        self.assertTrue(section["title"].endswith(f" · 主事件 {primary}"), section["title"])
+        self.assertLessEqual(len(section["title"]), 200)
+        self.assertIn("主事件编号见本节标题", section["body"])
 
     def test_the_render_is_deterministic(self):
         self.run_event(no_change_note(), at=f"{DAY}T09:00:00+00:00")

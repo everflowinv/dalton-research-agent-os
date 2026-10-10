@@ -43,6 +43,7 @@ from .openclaw_connector_bridge import (
     BridgeRateLimited,
     HostToolInvocationResult,
 )
+from .provider_failure import PROVIDER_AUTH_CODE, is_provider_auth_text
 from .public_web_connector import (
     OPENCLAW_GEMINI_WEB_SEARCH_BRIDGE_HASH,
     OPENCLAW_GEMINI_WEB_SEARCH_BRIDGE_REF,
@@ -1311,6 +1312,20 @@ class AlphaEngineLiveAdapter:
                 ]
                 if parts:
                     message = "\n".join(parts)[:1000]
+            # 2026-10-08: a login/session refusal ("E_UPSTREAM_API: 用户状态发生
+            # 变更，刷新 token") is its own class -- provider_auth, not a
+            # transport retry -- so the coordinator can hold the source and
+            # tell the owner instead of re-asking tomorrow.
+            if is_provider_auth_text(message):
+                return self._failure(
+                    wire,
+                    outcome="failed",
+                    code=PROVIDER_AUTH_CODE,
+                    message=message,
+                    retryable=False,
+                    provider_status=401,
+                    retry_after_ms=None,
+                )
             lowered = message.lower()
             permission = any(word in lowered for word in ("permission", "login", "auth"))
             return self._failure(

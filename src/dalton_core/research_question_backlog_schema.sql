@@ -1,5 +1,20 @@
 PRAGMA foreign_keys = ON;
 
+CREATE TABLE IF NOT EXISTS backlog_canonical_aliases (
+    canonical_hash TEXT PRIMARY KEY,
+    question_ref TEXT NOT NULL REFERENCES backlog_questions(question_ref),
+    record_json TEXT NOT NULL,
+    content_hash TEXT NOT NULL
+);
+CREATE TRIGGER IF NOT EXISTS backlog_canonical_aliases_authorized_insert
+BEFORE INSERT ON backlog_canonical_aliases WHEN dalton_authorized() = 0 BEGIN
+    SELECT RAISE(ABORT, 'question canonical alias requires DaltonStore');
+END;
+CREATE TRIGGER IF NOT EXISTS backlog_canonical_aliases_no_update
+BEFORE UPDATE ON backlog_canonical_aliases BEGIN SELECT RAISE(ABORT, 'question aliases are immutable'); END;
+CREATE TRIGGER IF NOT EXISTS backlog_canonical_aliases_no_delete
+BEFORE DELETE ON backlog_canonical_aliases BEGIN SELECT RAISE(ABORT, 'question aliases are immutable'); END;
+
 -- ResearchQuestionBacklog append-only authority.
 --
 -- ``backlog_questions`` holds the canonical identity binding for one logical
@@ -178,3 +193,31 @@ BEFORE DELETE ON backlog_idempotency BEGIN SELECT RAISE(ABORT, 'backlog idempote
 
 CREATE TRIGGER IF NOT EXISTS backlog_question_pointer_authorized_delete
 BEFORE DELETE ON backlog_question_pointer BEGIN SELECT RAISE(ABORT, 'backlog question pointer cannot be deleted'); END;
+
+-- Compatibility receipts replace the legacy shadow's state authority while
+-- leaving its bytes and all historical candidate foreign keys intact.
+CREATE TABLE IF NOT EXISTS backlog_legacy_question_links (
+    legacy_version_ref TEXT PRIMARY KEY,
+    canonical_question_ref TEXT REFERENCES backlog_questions(question_ref),
+    record_json TEXT NOT NULL,
+    content_hash TEXT NOT NULL
+);
+CREATE TRIGGER IF NOT EXISTS backlog_legacy_question_links_authorized_insert
+BEFORE INSERT ON backlog_legacy_question_links WHEN dalton_authorized() = 0 BEGIN SELECT RAISE(ABORT,'legacy question migration requires DaltonStore'); END;
+CREATE TRIGGER IF NOT EXISTS backlog_legacy_question_links_no_update
+BEFORE UPDATE ON backlog_legacy_question_links BEGIN SELECT RAISE(ABORT,'legacy question links are immutable'); END;
+CREATE TRIGGER IF NOT EXISTS backlog_legacy_question_links_no_delete
+BEFORE DELETE ON backlog_legacy_question_links BEGIN SELECT RAISE(ABORT,'legacy question links are immutable'); END;
+
+CREATE TABLE IF NOT EXISTS backlog_material_request_links (
+    question_version_ref TEXT PRIMARY KEY REFERENCES backlog_question_versions(version_id),
+    request_ref TEXT NOT NULL,
+    record_json TEXT NOT NULL,
+    content_hash TEXT NOT NULL
+);
+CREATE TRIGGER IF NOT EXISTS backlog_material_request_links_authorized_insert
+BEFORE INSERT ON backlog_material_request_links WHEN dalton_authorized() = 0 BEGIN SELECT RAISE(ABORT, 'question request links require DaltonStore'); END;
+CREATE TRIGGER IF NOT EXISTS backlog_material_request_links_no_update
+BEFORE UPDATE ON backlog_material_request_links BEGIN SELECT RAISE(ABORT, 'question request links are immutable'); END;
+CREATE TRIGGER IF NOT EXISTS backlog_material_request_links_no_delete
+BEFORE DELETE ON backlog_material_request_links BEGIN SELECT RAISE(ABORT, 'question request links are immutable'); END;

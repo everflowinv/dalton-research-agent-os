@@ -45,6 +45,7 @@ from .company_model_forecast import (
     missing_write_scope,
     model_digest,
     pending_action,
+    forecast_reporting_boundary,
     run_company_forecast,
 )
 from .company_model_inputs import ModelInputError, build_model_inputs
@@ -53,6 +54,7 @@ from .model_forecast import ModelForecastAuthority
 from .model_forecast_driver import (
     ForecastModelAuthority,
     ForecastModelError,
+    ForecastDriverExecutionRefused,
     ForecastModelUnavailable,
     is_structured_schema,
 )
@@ -72,19 +74,40 @@ def _write_owner_only(path: Path, value: Any) -> None:
     os.replace(tmp, path)
 
 
-def needs_model(latest: Any, spec: Any, table: Any) -> str | None:
-    """What this company needs: its first model, a new spec model, or actuals.
+def needs_model(latest: Any, spec: Any, table: Any, *, reporting_boundary: Any = None) -> str | None:
+    """First model, rule migration, or rolling after an admitted actual."""
 
-    A newly authorized specification is itself an explicit modelling
-    judgement, so it starts a new model identity. The lane does not re-forecast
-    because a document arrived, because a broker changed a rating, or even
-    because a filing landed: a filing settles the quarters it covers and says
-    nothing this system is entitled to conclude about the quarters ahead. What
-    a filing or an event *means* for the forecast is a judgement with a
-    decision word on it, and it reaches the model as an explicit revision.
-    """
+    return pending_action(latest, spec, table, reporting_boundary=reporting_boundary)
 
-    return pending_action(latest, spec, table)
+
+class ForecastSpecificationPending(ForecastModelUnavailable):
+    """Exact obsolete specifications that need a complete driver-plan replacement."""
+    def __init__(self, specifications: dict[str, Any]):
+        self.specifications = dict(specifications)
+        super().__init__("模型规格尚待补齐可执行的驱动公式")
+
+
+def obsolete_driver_specification(spec: dict[str, Any]) -> dict[str, Any] | None:
+    from .company_model_spec import TASK_HASH
+
+    task_hash = spec.get("task_hash")
+    # Only a known obsolete persisted contract is a migration wait. Unknown
+    # custom readers and current-contract errors keep their original validators.
+    if not isinstance(task_hash, str) or len(task_hash) != 64 or task_hash == TASK_HASH:
+        return None
+    drivers = list(spec.get("revenue_drivers") or [])
+    if (len(drivers) == 1 and drivers[0].get("kind") == "mix"
+            and drivers[0].get("basis_concept") == spec.get("revenue_anchor_concept")
+            and not spec.get("driver_formulas")):
+        return None
+    used = {ref for plan in spec.get("driver_formulas") or []
+            for ref in plan.get("driver_refs") or []}
+    missing = sorted({d["ref"] for d in drivers} - used)
+    if not missing:
+        return None
+    return {"spec_ref": spec["spec_id"], "spec_hash": spec.get("content_hash"),
+            "task_hash": task_hash, "required_task_hash": TASK_HASH,
+            "missing_driver_refs": missing}
 
 
 def pending_companies(
@@ -92,6 +115,7 @@ def pending_companies(
     models: ForecastModelAuthority,
     mission: dict[str, Any],
     *, company_ref: str | None = None,
+    waiting_specifications: dict[str, Any] | None = None,
 ) -> list[tuple[str, dict[str, Any], dict[str, Any]]]:
     """Every company with something to do, in order, with what to do it from.
 
@@ -128,9 +152,14 @@ def pending_companies(
                        if str(item["company_ref"]) in universe})
     out: list[tuple[str, dict[str, Any], dict[str, Any]]] = []
     blocked: list[str] = []
+    waiting = {} if waiting_specifications is None else waiting_specifications
     for ref in refs:
         spec = missions.latest_company_model_spec(ref)
         if spec is None:
+            continue
+        obsolete = obsolete_driver_specification(spec)
+        if obsolete is not None:
+            waiting[ref] = obsolete
             continue
         try:
             table = build_model_inputs(missions, spec)
@@ -140,7 +169,7 @@ def pending_companies(
             blocked.append(f"{ref}: {exc}")
             continue
         latest = models.latest(ref)
-        pending = needs_model(latest, spec, table)
+        pending = needs_model(latest, spec, table, reporting_boundary=forecast_reporting_boundary(missions, models.connection, ref, table=table))
         if (pending is None and latest is not None
                 and is_structured_schema(latest.get("schema_version"))
                 and models.annual_projection(latest["id"]) is None
@@ -149,6 +178,8 @@ def pending_companies(
             pending = "annual_projection_backfill"
         if pending is not None:
             out.append((ref, spec, table))
+    if not out and waiting:
+        raise ForecastSpecificationPending(waiting)
     if not out and blocked:
         raise ForecastModelUnavailable(
             "company model inputs are blocked: " + "; ".join(blocked))
@@ -223,6 +254,10 @@ def run_model_forecast(
         try:
             chosen, spec, table = choose_company(
                 missions, models, mission, company_ref=company_ref)
+        except ForecastSpecificationPending as exc:
+            summary.update(status="succeeded", forecast_status="awaiting_specification",
+                           failure_reason=str(exc), waiting_specifications=exc.specifications)
+            return summary
         except ForecastModelUnavailable as exc:
             summary.update({"status": "succeeded",
                             "forecast_status": f"refused:{exc}"})
@@ -248,6 +283,7 @@ def run_model_forecast(
         summary["digest"] = model_digest(
             spec, table, note_evidence_resolver=note_resolver,
             financial_note_context=held_note_context,
+            reporting_boundary=forecast_reporting_boundary(missions, models.connection, chosen, table=table),
         )
         if (expected_model_digest is not None
                 and summary["digest"] != expected_model_digest):
@@ -288,13 +324,32 @@ def run_model_forecast(
                 "failure_reason": "; ".join(exc.report.reasons),
             })
             return summary
+        except ForecastDriverExecutionRefused as exc:
+            # This report passed deterministic replay but failed publication.
+            # Keep the original rejection and request its source gap through
+            # the same governed material path, never manufacture an override.
+            summary.update(status="succeeded", forecast_status="refused:unexecuted_driver_plan",
+                           failure_reason=f"{type(exc).__name__}: {exc}",
+                           driver_execution=exc.driver_report,
+                           execution_contract_hash=exc.contract_hash)
+            from .forecast_material_gaps import open_gap_requests
+            summary["material_requests"] = open_gap_requests(
+                state_dir, spec, table,
+                record={"execution_contract": {"drivers": exc.driver_report}},
+                failure=str(exc),
+            )
+            return summary
         except (ForecastModelUnavailable, ForecastPublishRefused) as exc:
             # Refused whole. A model whose top line could not be identified is
             # not a model with one line missing; every other line in it is a
             # share of the line that is not there.
             summary.update({"status": "succeeded",
                             "forecast_status": f"refused:{exc}"})
+            from .forecast_material_gaps import open_gap_requests
+            summary["material_requests"]=open_gap_requests(state_dir,spec,table,record=models.latest(chosen),failure=str(exc))
             return summary
+        from .forecast_material_gaps import open_gap_requests
+        summary["material_requests"]=open_gap_requests(state_dir,spec,table,record=outcome.get("record"))
         if outcome["status"] == "nothing_to_do":
             summary.update({"status": "idle", "forecast_status": "nothing_to_model"})
             return summary
@@ -321,6 +376,10 @@ def run_model_forecast(
             "annual_projection_hash": annual_projection.get("content_hash"),
             "failure_reason": outcome["lines_refused"],
         })
+        return summary
+    except ForecastSpecificationPending as exc:
+        summary.update(status="succeeded", forecast_status="awaiting_specification",
+                       failure_reason=str(exc), waiting_specifications=exc.specifications)
         return summary
     except ForecastModelError as exc:
         summary["failure_reason"] = f"{type(exc).__name__}: {exc}"

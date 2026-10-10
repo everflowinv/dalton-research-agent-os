@@ -22,7 +22,8 @@ import hashlib
 import heapq
 import json
 import re
-from collections.abc import Mapping, Sequence
+from collections.abc import Iterator, Mapping, Sequence
+from contextlib import contextmanager
 from pathlib import Path
 from typing import Any
 
@@ -415,7 +416,7 @@ class AlphaEngineDocumentSourceAdapter:
         )
 
     def materialize(
-        self, *, document_ref: str, acquisition_ticket_ref: str | None
+        self, *, document_ref: str, acquisition_ticket_ref: str | None,
     ) -> tuple[dict[str, Any], str]:
         lookup_ref = _text(document_ref, "document_ref")
         if acquisition_ticket_ref is None:
@@ -534,8 +535,45 @@ class AlphaEngineDocumentSourceAdapter:
         }), text
 
 
+#: The reader identity a 10-K-with-Exhibit-13 rendering carries (2026-10-09).
+ANNUAL_REPORT_EXHIBIT_READER = "annual-report-exhibit:0.1"
+
+
 class PublicWebDocumentSourceAdapter:
     """Materialize one fetched body and derive its discovery-source identity."""
+
+    def _annual_report_exhibit(
+        self, document_ref: str, ticket_ref: str | None,
+    ) -> dict[str, Any] | None:
+        """The fetched Exhibit 13 of a 10-K ticket, rendered, or None.
+
+        Only a ``sec:filing:`` document whose fetch ticket recorded a
+        succeeded Exhibit 13 (``sec_annual_report_exhibit``); everything else
+        reads exactly as before.
+        """
+
+        state_dir = getattr(self.launcher, "state_dir", None)
+        if (not document_ref.startswith("sec:filing:") or not isinstance(ticket_ref, str)
+                or state_dir is None):
+            return None
+        from .public_web_extraction_source import render_public_web_text
+        from .sec_annual_report_exhibit import exhibit_for_ticket
+
+        found = exhibit_for_ticket(Path(state_dir), ticket_ref, document_ref)
+        if found.get("status") != "fetched":
+            return None
+        manifest = found["manifest"]
+        rendering = render_public_web_text(
+            found["bytes"], raw_media_type=manifest["raw_media_type"],
+            max_source_chars=self.max_source_chars, max_pdf_pages=self.max_pdf_pages,
+            max_decompressed_bytes=self.max_decompressed_bytes)
+        if rendering["truncated"] is not False:
+            raise DocumentResearchConflict(
+                "document research requires a complete non-truncated rendering"
+            )
+        return {"text": rendering["text"], "url": manifest["canonical_url"],
+                "artifact_ref": manifest["raw_artifact_version_ref"],
+                "body_sha256": manifest["body_sha256"], "body_bytes": manifest["body_bytes"]}
 
     def __init__(
         self, *, source_ref: str | None, launcher: Any, core: Any, spool: Any,
@@ -561,7 +599,8 @@ class PublicWebDocumentSourceAdapter:
         )
 
     def materialize(
-        self, *, document_ref: str, acquisition_ticket_ref: str | None
+        self, *, document_ref: str, acquisition_ticket_ref: str | None,
+        legacy: bool = False,
     ) -> tuple[dict[str, Any], str]:
         lookup_ref = _text(document_ref, "document_ref")
         if acquisition_ticket_ref is None:
@@ -585,6 +624,7 @@ class PublicWebDocumentSourceAdapter:
             max_source_chars=self.max_source_chars,
             max_pdf_pages=self.max_pdf_pages,
             max_decompressed_bytes=self.max_decompressed_bytes,
+            legacy=legacy,
         )
         if rendering["truncated"] is not False:
             raise DocumentResearchConflict(
@@ -635,6 +675,30 @@ class PublicWebDocumentSourceAdapter:
             policies[name] = _text(profile.get(name), f"public-web profile {name}")
         source_identity = profile["source_identity"]
         text = rendering["text"]
+        renderer_ref = rendering["renderer"]
+        artifact_refs = [manifest["raw_artifact_version_ref"]]
+        content_hashes = [manifest["body_sha256"]]
+        total_size_bytes = manifest["body_bytes"]
+        # ``legacy`` reproduces a registration taken before 2026-10-09: the
+        # old rendering and no appended exhibit.
+        exhibit = None if legacy else self._annual_report_exhibit(
+            lookup_ref, acquisition_ticket_ref)
+        if exhibit is not None:
+            # 2026-10-09: a 10-K that incorporates its annual report by
+            # reference is read with that Exhibit 13 appended, so a question
+            # about the segment table reaches the table.  Both bodies are
+            # bound in raw_source; the renderer identity says so.
+            text = (text + "\n\n" + "Exhibit 13 -- Annual Report to Security Holders, "
+                    f"incorporated by reference into this 10-K ({exhibit['url']})"
+                    + "\n\n" + exhibit["text"])
+            renderer_ref = f"{renderer_ref}+{ANNUAL_REPORT_EXHIBIT_READER}"
+            artifact_refs.append(exhibit["artifact_ref"])
+            content_hashes.append(exhibit["body_sha256"])
+            total_size_bytes += exhibit["body_bytes"]
+            if len(text) > self.max_source_chars:
+                raise DocumentResearchConflict(
+                    "document research requires a complete non-truncated rendering"
+                )
         reader = _record({
             "ref": "document-reader:public-web-render:0.1",
             "config": {
@@ -670,14 +734,14 @@ class PublicWebDocumentSourceAdapter:
                 "status": "bound",
                 "representation": "connector-response-body",
                 "reason": None,
-                "artifact_refs": [manifest["raw_artifact_version_ref"]],
-                "content_hashes": [manifest["body_sha256"]],
-                "total_size_bytes": manifest["body_bytes"],
+                "artifact_refs": artifact_refs,
+                "content_hashes": content_hashes,
+                "total_size_bytes": total_size_bytes,
             },
             "normalized_text": {
                 "status": "complete",
                 "representation": "deterministic-rendering",
-                "renderer_ref": rendering["renderer"],
+                "renderer_ref": renderer_ref,
                 "object_hash": None,
                 "size_bytes": len(text.encode("utf-8")),
                 "text_sha256": hashlib.sha256(text.encode("utf-8")).hexdigest(),
@@ -793,6 +857,7 @@ class CoreAcquiredDocumentSourceAdapter:
     def materialize_record(
         self, *, record_id: str,
         acquisition_ticket_ref: str | None = None,
+        legacy: bool = False,
     ) -> tuple[dict[str, Any], str]:
         record_id = _text(record_id, "record_id")
         rows = self.core.connection.execute(
@@ -837,6 +902,8 @@ class CoreAcquiredDocumentSourceAdapter:
         registration, text = adapter.materialize(
             document_ref=row["document_ref"],
             acquisition_ticket_ref=resolved_ticket,
+            # Only the fetched-page adapter has a legacy rendering to offer.
+            **({"legacy": True} if legacy else {}),
         )
         if (
             registration.get("source_ref") != adapter_source_ref
@@ -1156,6 +1223,22 @@ def _normalize_terms(
     return terms
 
 
+def _registered_under_legacy_rendering(
+    expected: Mapping[str, Any], actual: Mapping[str, Any],
+) -> bool:
+    """A registration taken before the inline-XBRL renderer, re-read after it."""
+
+    from .public_web_extraction_source import (
+        INLINE_XBRL_RENDERER, renderer_is_legacy_for_inline_xbrl,
+    )
+
+    before = (expected.get("normalized_text") or {}).get("renderer_ref")
+    now = (actual.get("normalized_text") or {}).get("renderer_ref")
+    return (renderer_is_legacy_for_inline_xbrl(before)
+            and isinstance(now, str)
+            and now.split("|")[-1].split("+")[0] == INLINE_XBRL_RENDERER)
+
+
 def _validated_materialization(registration: Mapping[str, Any], text: str) -> dict[str, Any]:
     """Apply the same complete-text contract at registration and later reads."""
     if not isinstance(text, str) or not text.strip():
@@ -1323,6 +1406,15 @@ class DocumentResearchRegistry:
                 acquisition_ticket_ref=expected["acquisition_ticket_ref"],
             )
             actual = _validated_materialization(actual, text)
+            if actual != expected and _registered_under_legacy_rendering(expected, actual):
+                # 2026-10-09: registered before the inline-XBRL renderer; the
+                # same bytes rendered the old way are the registered text.
+                actual, text = self.acquired_document_adapter.materialize_record(
+                    record_id=expected["source_authority"]["ref"],
+                    acquisition_ticket_ref=expected["acquisition_ticket_ref"],
+                    legacy=True,
+                )
+                actual = _validated_materialization(actual, text)
             if actual != expected:
                 raise DocumentResearchConflict("registered document authority changed")
             self._authorize(purpose, actual)
@@ -1336,6 +1428,13 @@ class DocumentResearchRegistry:
             acquisition_ticket_ref=expected["acquisition_ticket_ref"],
         )
         actual = _validated_materialization(actual, text)
+        if actual != expected and _registered_under_legacy_rendering(expected, actual):
+            actual, text = adapter.materialize(
+                document_ref=expected["document_ref"],
+                acquisition_ticket_ref=expected["acquisition_ticket_ref"],
+                legacy=True,
+            )
+            actual = _validated_materialization(actual, text)
         if actual != expected:
             raise DocumentResearchConflict("registered document authority changed")
         self._authorize(purpose, actual)
@@ -1504,10 +1603,41 @@ class DocumentResearchRegistry:
             or not isinstance(value.get("request"), Mapping)
         ):
             raise DocumentResearchError("document search proof has an invalid shape")
+        memo = getattr(self, "_search_proof_memo", None)
+        key = canonical_json(value) if memo is not None else None
+        if memo is not None and key in memo:
+            return json.loads(memo[key])
         expected = self.search(value["request"])
         if canonical_json(expected) != canonical_json(value):
             raise DocumentResearchConflict("document search proof does not replay")
+        if memo is not None:
+            memo[key] = canonical_json(expected)
         return expected
+
+    @contextmanager
+    def replayed_search_proofs(self) -> Iterator[None]:
+        """Within this block, replay each exact search proof once.
+
+        2026-10-03.  One owner recovery door derives the same stage chain
+        three or four times (the door, the executor method, the epoch rebind,
+        the convergence check), and every derivation of the draft stage
+        re-runs the registered document search to verify its proof -- live
+        legacy, minutes of the single writer store thread for one
+        ``authorize-unproved`` while every lane tick queued behind it.  The
+        registry does not change during one such call, so a proof that
+        replayed byte-identically once is the same answer the second time.
+        Only successful replays are remembered, the memo is a copy (never
+        the caller's object), and it ends with the block.
+        """
+
+        if getattr(self, "_search_proof_memo", None) is not None:
+            yield
+            return
+        self._search_proof_memo: dict[str, str] | None = {}
+        try:
+            yield
+        finally:
+            self._search_proof_memo = None
 
     def verify_read_proof(self, value: Mapping[str, Any]) -> dict[str, Any]:
         """Re-read the exact range and require byte-identical proof."""

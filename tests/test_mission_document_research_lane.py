@@ -490,6 +490,56 @@ class MissionDocumentResearchLaneTests(unittest.TestCase):
             "controlled_reentry_unavailable:"))
         self.assertEqual(result["status"], "recovery_required")
 
+    def test_a_refusal_that_repeats_is_escalated_to_the_reentry_door(self) -> None:
+        """Live ws-7d 256f7569: the same pre-claim refusal, every tick, no door."""
+
+        from dalton_core.document_recovery_cli import OPERATION, door_for
+        from dalton_core.lane_child_launcher import LaneChildRejected
+        from dalton_core.mission_document_research_lane import (
+            REENTRY_ESCALATED_REASON, REENTRY_UNAVAILABLE_ESCALATION_NOTE,
+        )
+        from dalton_core.needs_human import ESCALATED_HOLD_REASONS
+
+        admission = self.store.add(1)
+        self.store.started(admission["id"])
+        ticket_ref = "mission-document-research:" + "9" * 24
+        self.launcher.tickets[ticket_ref] = {
+            "id": ticket_ref, "status": "orphaned",
+            "admission_ref": admission["id"],
+            "admission_hash": admission["content_hash"],
+        }
+        _write_latest(self.lane.latest_path, admission, ticket_ref)
+        self.lane._execution_state = lambda _admission: {
+            "action": "resume", "reason": "expired_lease_replay",
+            "work_order_ref": "work:resumable",
+        }
+        self.launcher.resume_error = LaneChildRejected(
+            "controlled reentry summary is unavailable")
+
+        self.lane.dispatch_once()
+        first = json.loads(self.lane.holds_path.read_text(encoding="utf-8"))
+        unavailable = ("controlled_reentry_unavailable:"
+                       "controlled reentry summary is unavailable")
+        self.assertEqual(first["holds"][admission["id"]]["reason"], unavailable)
+
+        for _tick in range(2):  # and it stays escalated, not flapping back
+            result = self.lane.dispatch_once()
+            holds = json.loads(self.lane.holds_path.read_text(encoding="utf-8"))
+            reason = holds["holds"][admission["id"]]["reason"]
+            self.assertEqual(reason, f"{REENTRY_ESCALATED_REASON}:{unavailable}")
+        self.assertEqual(result["waiting_on_owner"], 1)
+        self.assertEqual(result["holds"][0]["owner_action"],
+                         REENTRY_UNAVAILABLE_ESCALATION_NOTE)
+        self.assertIn("authorize-reentry", REENTRY_UNAVAILABLE_ESCALATION_NOTE)
+        # The owner's CLI has a door for it and counts it as waiting.
+        self.assertEqual(door_for(reason), OPERATION)
+        self.assertTrue(any(name in reason for name in ESCALATED_HOLD_REASONS))
+
+        # Once the condition is repaired the lane continues by itself.
+        self.launcher.resume_error = None
+        result = self.lane.dispatch_once()
+        self.assertEqual(result["status"], "resumed")
+
     def test_a_claim_that_never_ran_a_child_is_not_an_attempt(self) -> None:
         """The live 2026-09-18 shape: marker taken, nothing ever re-entered."""
 

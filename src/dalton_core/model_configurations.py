@@ -54,6 +54,8 @@ _SEED_NAMES = (
     "research-language-revision-model-config.json",
     "research-localization-draft-model-config.json",
     "research-localization-verifier-model-config.json",
+    "street-estimate-model-config.json",
+    "street-estimate-verifier-model-config.json",
 )
 _NAMES: list[str] = list(_SEED_NAMES)
 

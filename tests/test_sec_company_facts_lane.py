@@ -28,6 +28,7 @@ from dalton_core.research_plan import (
 from dalton_core.research_verification import CandidateStagingStore
 from dalton_core.coverage_mission import CoverageMissionAuthority
 from dalton_core.sec_authority_harness import MutableClock, _Response
+from dalton_core.sec_company_facts_lane import LANE_SLUG as LANE_SLUG_FOR_TEST
 from dalton_core.sec_company_facts_lane import (
     Issuer,
     LanePreconditionError,
@@ -627,6 +628,96 @@ class LaneTests(unittest.TestCase):
         with self._lane(governance=RehearsalGovernance(approved_by="human:someone-else")) as lane:
             with self.assertRaises(LanePreconditionError):
                 lane.ensure_agenda_bindings(actor_ref="human:tester")
+
+    def _as_workspace(self, slug: str = "ws-0123456789abcdef01234567") -> None:
+        """Lay this test's state out as a workspace: <root>/state/dalton-core."""
+
+        root = Path(self.temp.name) / slug
+        state = root / "state" / "dalton-core"
+        state.mkdir(parents=True, mode=0o700)
+        (root / "workspace.json").write_text(json.dumps(
+            {"slug": slug, "state_dir": str(state)}), encoding="utf-8")
+        self.state = state
+        self.staging = state / "candidate-staging.sqlite"
+
+    def _mandate(self, version_id: str):
+        core = DaltonStore(str(self.state / "core.sqlite"))
+        try:
+            return core.connection.execute(
+                "SELECT mandate_ref, objective, scope_refs_json FROM mandate_versions "
+                "WHERE version_id=?", (version_id,)).fetchone()
+        finally:
+            core.close()
+
+    def test_a_workspace_state_names_its_bindings_after_the_workspace(self) -> None:
+        # e2 (2026-09-30): ws-7d carried mandate:us-it-services-sec-lane:... for
+        # a hyperscaler mission.  A workspace's own bindings carry its slug.
+        from dalton_core.sec_company_facts_lane import (
+            LANE_SLUG, WORKSPACE_MANDATE_OBJECTIVE, lane_slug_for_state,
+        )
+
+        self.assertEqual(lane_slug_for_state(self.state), LANE_SLUG)
+        self._as_workspace()
+        slug = "ws-0123456789abcdef01234567-sec-lane"
+        self.assertEqual(lane_slug_for_state(self.state), slug)
+        install_lane_rules(self.state)
+        amzn = Issuer("AMZN", "0001018724", "company:ticker:amzn", "AMZN")
+        with self._lane(issuers=(amzn,)) as lane:
+            self.assertEqual(lane.lane_slug, slug)
+            binding = lane.ensure_agenda_bindings(actor_ref="human:tester", issuer=amzn)
+            again = lane.ensure_agenda_bindings(actor_ref="human:tester", issuer=amzn)
+            # A packaged IT-services issuer is a company like any other here.
+            packaged = lane.ensure_agenda_bindings(
+                actor_ref="human:tester", issuer=US_IT_SERVICES_ISSUERS[0])
+        self.assertEqual(binding, again)
+        self.assertTrue(binding["mandate_version_ref"].startswith(f"mandate-version:{slug}:v3:company:"))
+        self.assertNotIn("us-it-services", json.dumps([binding, packaged]))
+        row = self._mandate(binding["mandate_version_ref"])
+        self.assertTrue(row["mandate_ref"].startswith(f"mandate:{slug}:company:"))
+        self.assertEqual(row["objective"], WORKSPACE_MANDATE_OBJECTIVE)
+        self.assertEqual(json.loads(row["scope_refs_json"]), ["company:ticker:amzn"])
+
+    def test_a_workspace_keeps_the_legacy_name_an_issuer_was_already_bound_under(self) -> None:
+        # ws-7d already holds mandate-version:us-it-services-sec-lane:v3:company:<tag>
+        # for AMZN; its earlier runs' questions name it.  It stays, byte-identical.
+        self._as_workspace()
+        install_lane_rules(self.state)
+        amzn = Issuer("AMZN", "0001018724", "company:ticker:amzn", "AMZN")
+        msft = Issuer("MSFT", "0000789019", "company:ticker:msft", "MSFT")
+        with self._lane(issuers=(amzn,), lane_slug=LANE_SLUG_FOR_TEST) as lane:
+            old = lane.ensure_agenda_bindings(actor_ref="human:tester", issuer=amzn)
+        with self._lane(issuers=(amzn, msft)) as lane:
+            self.assertNotEqual(lane.lane_slug, LANE_SLUG_FOR_TEST)
+            kept = lane.ensure_agenda_bindings(actor_ref="human:tester", issuer=amzn)
+            fresh = lane.ensure_agenda_bindings(actor_ref="human:tester", issuer=msft)
+        self.assertEqual(kept, old)
+        self.assertIn(":us-it-services-sec-lane:", old["mandate_version_ref"])
+        self.assertEqual(self._mandate(old["mandate_version_ref"])["objective"],
+                         "Track reported quarterly revenue for US IT services issuers "
+                         "from SEC company facts")
+        self.assertIn("ws-0123456789abcdef01234567-sec-lane", fresh["mandate_version_ref"])
+
+    def test_a_workspace_run_commits_under_its_own_names(self) -> None:
+        self._as_workspace()
+        install_lane_rules(self.state)
+        with self._lane() as lane:
+            summary = self._run(lane)
+        self.assertEqual(summary["status"], "committed", summary)
+        core = DaltonStore(str(self.state / "core.sqlite"))
+        try:
+            cycles = core.connection.execute(
+                "SELECT cycle_id, mandate_version_ref FROM agenda_cycles").fetchall()
+            questions = [row[0] for row in core.connection.execute(
+                "SELECT mandate_ref FROM backlog_question_versions")]
+        finally:
+            core.close()
+        self.assertTrue(cycles and questions)
+        name = "ws-0123456789abcdef01234567-sec-lane"
+        for cycle_id, mandate_version_ref in cycles:
+            self.assertIn(name, cycle_id)
+            self.assertIn(name, mandate_version_ref)
+        for mandate_ref in questions:
+            self.assertIn(name, mandate_ref)
 
     def test_mission_companies_outside_the_package_each_bind_their_own_scope(self) -> None:
         # 2026-09-25: ws-7d's AMZN, GOOGL, META and MSFT are not packaged

@@ -1,0 +1,49 @@
+<!doctype html>
+<html lang="zh-CN">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1">
+<title>Dalton 研究工作台</title>
+<link rel="icon" href="/favicon.ico">
+<link rel="stylesheet" href="/v2/static/shell.css">
+</head>
+<body>
+<a class="v2-skip" href="#v2-main">跳到主要内容</a>
+<div class="v2-app">
+<div class="v2-rail">
+  <a class="v2-brand" href="#/overview"><span class="v2-brand-text">Dalton 研究工作台</span></a>
+  <nav class="v2-nav" aria-label="主导航"><ul id="v2-nav-list"></ul></nav>
+  <div class="v2-rail-foot"><button type="button" class="v2-rail-toggle" id="v2-rail-toggle" aria-expanded="true" aria-controls="v2-nav-list"><span class="v2-nav-ic" aria-hidden="true">⇤</span><span class="v2-rail-toggle-text">收起导航</span></button></div>
+</div>
+<div class="v2-col">
+<header class="v2-top" role="banner">
+  <div class="v2-project">
+    <label for="v2-project-select">当前研究项目</label>
+    <select id="v2-project-select" aria-describedby="v2-project-hint"></select>
+    <span id="v2-project-hint" class="v2-visually-hidden">切换研究项目后打开它的研究总览</span>
+  </div>
+  <div class="v2-status" id="v2-status">
+    <span class="v2-pill" data-status="service" role="status" aria-live="polite">研究服务状态读取中</span>
+    <a class="v2-pill" data-status="blocked" href="#/tasks">待审阅与决策：读取中</a>
+    <span class="v2-pill" data-status="updated">工作台界面同步时间读取中</span>
+    <button type="button" class="v2-btn v2-btn-quiet v2-refresh" id="v2-refresh">同步最新数据</button>
+    <span class="v2-fresh" id="v2-fresh" hidden role="status" aria-live="polite"></span>
+  </div>
+</header>
+<div class="v2-body">
+  <main id="v2-main" tabindex="-1"><p class="v2-loading">正在打开研究工作台…</p></main>
+  <aside id="v2-side" class="v2-side" hidden aria-labelledby="v2-side-title">
+    <div class="v2-side-head">
+      <h2 id="v2-side-title" tabindex="-1">事实底稿与引用出处</h2>
+      <button type="button" class="v2-btn v2-btn-quiet" id="v2-side-close" aria-keyshortcuts="Escape">关闭 [Esc]</button>
+    </div>
+    <div id="v2-side-body"></div>
+  </aside>
+</div>
+</div>
+</div>
+<div id="v2-live" class="v2-visually-hidden" aria-live="polite"></div>
+<noscript>研究工作台需要启用浏览器脚本。</noscript>
+<script type="module" src="/v2/static/shell.js"></script>
+</body>
+</html>

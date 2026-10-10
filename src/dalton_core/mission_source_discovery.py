@@ -35,12 +35,13 @@ import hashlib
 import json
 import os
 import re
+import sqlite3
 import string
 import subprocess
 import sys
 import threading
 import time
-from collections.abc import Callable, Mapping
+from collections.abc import Callable, Collection, Mapping
 from datetime import date, datetime, timedelta, timezone
 from pathlib import Path
 from typing import Any, Sequence
@@ -53,6 +54,7 @@ from .alphaengine_core_search import (
 )
 from .bounded_alphaengine_probe import (
     MAX_CALLS_PER_WINDOW,
+    SEARCH_PROFILE_REF,
     count_recent_alphaengine_calls,
     document_in_authority,
 )
@@ -100,10 +102,15 @@ DISCOVERY_PLAN_SCHEMA_VERSION_V3 = "0.3"
 DISCOVERY_PLAN_SCHEMA_VERSION_V4 = "0.4"
 DISCOVERY_PLAN_SCHEMA_VERSION_V5 = "0.5"
 DISCOVERY_PLAN_SCHEMA_VERSION_V6 = "0.6"
+# 2026-10-06 (owner decision A): an AlphaEngine plan of owner-governed fields
+# only.  Its query forms are the code's (``alphaengine_query_forms``); it is
+# rendered to an ordinary 0.6 plan by ``effective_discovery_plan``.
+DISCOVERY_PLAN_SCHEMA_VERSION_V7 = "0.7"
 DISCOVERY_PLAN_SCHEMA_VERSIONS: tuple[str, ...] = (
     DISCOVERY_PLAN_SCHEMA_VERSION, DISCOVERY_PLAN_SCHEMA_VERSION_V2,
     DISCOVERY_PLAN_SCHEMA_VERSION_V3, DISCOVERY_PLAN_SCHEMA_VERSION_V4,
     DISCOVERY_PLAN_SCHEMA_VERSION_V5, DISCOVERY_PLAN_SCHEMA_VERSION_V6,
+    DISCOVERY_PLAN_SCHEMA_VERSION_V7,
 )
 ALPHAENGINE_SOURCE_REF = "source:alphaengine"
 WEB_SEARCH_SOURCE_REF = "source:web-search"
@@ -134,6 +141,26 @@ DISCOVERY_COORDINATOR_KEYS: tuple[str, ...] = (
 # beside core.sqlite. Small, rewritten only when a streak changes.
 DISCOVERY_ROTATION_FILENAME = "discovery-coordinator-rotation.json"
 DISCOVERY_DEFERRED_REASON = "tick budget exhausted"
+# 2026-10-04: after this many ticks in a row whose search was deferred by the
+# deadline, the coordinator searches before it acquires.  ws-7d's AlphaEngine
+# coordinator ended 172 of 192 ticks "deferred" after the v3 plan approval:
+# acquisition ran first every tick and spent the whole share, so no v3 query
+# was ever tried.  Acquisition still has every other tick.
+SEARCH_STARVATION_TICKS = 2
+_NO_TICK_CACHE = object()
+#: The tick steps whose elapsed time the ledger records per coordinator.
+DISCOVERY_STEP_NAMES = ("settle", "carry", "held", "acquire", "search")
+_TICK_CACHE_UNREAD = object()
+# 2026-09-29: acquisition outcomes that mean the AlphaEngine queue did not
+# move because of candidate selection.  The coordinator's own status stayed
+# ``idle`` over them, so ledger, heartbeat and parity all read a stalled lane
+# as a quiet one; ``discovery_coordinator_state`` now carries them.
+# AlphaEngine document types whose candidates go through candidate selection
+# before anything is fetched.
+SELECTED_DOCUMENT_TYPES = frozenset({"meeting_minutes", "sell_side_report"})
+SELECTION_PENDING = "selection_pending"
+SELECTION_QUARANTINED = "selection_quarantined"
+SELECTION_BLOCKED_STATUSES = frozenset({SELECTION_PENDING, "selection_unavailable"})
 # P13h: how far past a checklist requirement a spec may keep collecting.
 #
 # The cadence says how *often* a search may be repeated. It never said whether
@@ -148,6 +175,24 @@ DISCOVERY_DEFERRED_REASON = "tick budget exhausted"
 # "complete" and still wants this quarter's. Twice the requirement leaves room
 # for that while ending a thirty-fold overshoot.
 SATISFIED_OVERSHOOT = 2
+
+
+# Placeholders a v0.6 query variant may use.  ``{quarter}`` is the checklist's
+# own period id ("FY2025-Q3"); ``{quarter_label}`` is the same fiscal quarter
+# the way AlphaEngine titles an earnings call ("Q3 2025"), which is what its
+# ranking matches: "Alphabet Q3 2025" is rank 1, "Alphabet FY2025-Q3 earnings
+# call transcript" returns other companies' pre-close calls (2026-10-03, ws-7d).
+QUERY_PLACEHOLDERS = frozenset({"name", "ticker", "aliases", "quarter", "quarter_label"})
+_PERIOD_ID_RE = re.compile(r"FY(20[0-9]{2})-Q([1-4])")
+
+
+def quarter_title_label(period: str) -> str:
+    """``FY2025-Q3`` -> ``Q3 2025``; any other text is returned unchanged."""
+
+    match = _PERIOD_ID_RE.fullmatch(period)
+    if match is None:
+        return period
+    return f"Q{match.group(2)} {match.group(1)}"
 
 
 def _monotonic() -> float:
@@ -226,6 +271,7 @@ _PLAN_FIELDS_V3 = _PLAN_FIELDS_V2 | frozenset({"acquisition"})
 _PLAN_FIELDS_V4 = _PLAN_FIELDS_V2
 _PLAN_FIELDS_V5 = _PLAN_FIELDS_V3
 _PLAN_FIELDS_V6 = _PLAN_FIELDS_V2
+_PLAN_FIELDS_V7 = _PLAN_FIELDS_V2
 _BUDGET_FIELDS = frozenset({"max_calls_24h"})
 _ACQUISITION_FIELDS = frozenset({"preferred_hosts", "skip_hosts"})
 _ACQUISITION_FIELDS_V5 = _ACQUISITION_FIELDS | {"failure_cooldown"}
@@ -277,6 +323,7 @@ _SPEC_FIELDS = frozenset({
 })
 _SPEC_FIELDS_V6 = frozenset({"spec_ref", "document_type", "query_variants",
                              "lookback_days", "rediscovery_interval_days", "retry_interval_days"})
+_SPEC_FIELDS_V7 = _SPEC_FIELDS_V6 - frozenset({"query_variants"})
 # Web search has no library document type: one ranked page per query.
 _WEB_SPEC_FIELDS = _SPEC_FIELDS - frozenset({"document_type"})
 # The SEC index is asked for a form, not a phrase.
@@ -328,7 +375,7 @@ def _query_template(value: Any) -> str:
     try:
         for _,field,format_spec,conversion in string.Formatter().parse(template):
             if field is not None:
-                if field not in {"name","ticker","aliases","quarter"} or format_spec or conversion:
+                if field not in QUERY_PLACEHOLDERS or format_spec or conversion:
                     raise DiscoveryPlanError("query variant placeholders are invalid")
                 fields.append(field)
     except ValueError as exc:
@@ -363,6 +410,7 @@ def validate_discovery_plan(value: Mapping[str, Any]) -> dict[str, Any]:
         DISCOVERY_PLAN_SCHEMA_VERSION_V4: _PLAN_FIELDS_V4,
         DISCOVERY_PLAN_SCHEMA_VERSION_V5: _PLAN_FIELDS_V5,
         DISCOVERY_PLAN_SCHEMA_VERSION_V6: _PLAN_FIELDS_V6,
+        DISCOVERY_PLAN_SCHEMA_VERSION_V7: _PLAN_FIELDS_V7,
     }[schema_version]
     if set(value) != fields:
         raise DiscoveryPlanError("discovery plan has an invalid closed shape")
@@ -383,6 +431,9 @@ def validate_discovery_plan(value: Mapping[str, Any]) -> dict[str, Any]:
         )
     if schema_version == DISCOVERY_PLAN_SCHEMA_VERSION_V6 and source_ref != ALPHAENGINE_SOURCE_REF:
         raise DiscoveryPlanError("discovery plan 0.6 is only for source:alphaengine")
+    if schema_version == DISCOVERY_PLAN_SCHEMA_VERSION_V7 and source_ref != ALPHAENGINE_SOURCE_REF:
+        raise DiscoveryPlanError("discovery plan 0.7 is only for source:alphaengine")
+    named = schema_version in (DISCOVERY_PLAN_SCHEMA_VERSION_V6, DISCOVERY_PLAN_SCHEMA_VERSION_V7)
     budget: dict[str, int] | None = None
     if schema_version != DISCOVERY_PLAN_SCHEMA_VERSION:
         raw_budget = wire["budget"]
@@ -405,7 +456,9 @@ def validate_discovery_plan(value: Mapping[str, Any]) -> dict[str, Any]:
     if source_ref == SEC_SOURCE_REF:
         spec_fields = _SEC_SPEC_FIELDS
     elif source_ref == ALPHAENGINE_SOURCE_REF:
-        spec_fields = _SPEC_FIELDS_V6 if schema_version == DISCOVERY_PLAN_SCHEMA_VERSION_V6 else _SPEC_FIELDS
+        spec_fields = (_SPEC_FIELDS_V6 if schema_version == DISCOVERY_PLAN_SCHEMA_VERSION_V6
+                       else _SPEC_FIELDS_V7 if schema_version == DISCOVERY_PLAN_SCHEMA_VERSION_V7
+                       else _SPEC_FIELDS)
     else:
         spec_fields = _WEB_SPEC_FIELDS
     companies = wire["companies"]
@@ -414,7 +467,7 @@ def validate_discovery_plan(value: Mapping[str, Any]) -> dict[str, Any]:
     cleaned_companies: dict[str, dict[str, str]] = {}
     company_fields = (
         (_SEC_COMPANY_FIELDS if source_ref == SEC_SOURCE_REF else
-         _COMPANY_FIELDS_V6 if schema_version == DISCOVERY_PLAN_SCHEMA_VERSION_V6 else _COMPANY_FIELDS)
+         _COMPANY_FIELDS_V6 if named else _COMPANY_FIELDS)
     )
     for company_ref in sorted(companies):
         entry = companies[company_ref]
@@ -430,7 +483,7 @@ def validate_discovery_plan(value: Mapping[str, Any]) -> dict[str, Any]:
                 )
             cleaned_companies[_plan_text(company_ref, "company_ref")] = {"cik": cik}
             continue
-        if schema_version == DISCOVERY_PLAN_SCHEMA_VERSION_V6:
+        if named:
             aliases=entry["aliases"]
             if (not isinstance(aliases,list) or len(aliases)>10
                     or any(not isinstance(alias,str) or not alias.strip() or len(alias)>80 for alias in aliases)
@@ -470,7 +523,7 @@ def validate_discovery_plan(value: Mapping[str, Any]) -> dict[str, Any]:
                 if not isinstance(variant,Mapping) or set(variant)!={"query_template","filters"}:
                     raise DiscoveryPlanError("query variant has an invalid closed shape")
                 template=_query_template(variant["query_template"])
-                allowed={"{name}","{ticker}","{aliases}","{quarter}"}
+                allowed={"{"+field+"}" for field in QUERY_PLACEHOLDERS}
                 tokens=set(re.findall(r"\{[^{}]+\}",template))
                 if not tokens or not tokens <= allowed:
                     raise DiscoveryPlanError("query variant placeholders are invalid")
@@ -484,6 +537,12 @@ def validate_discovery_plan(value: Mapping[str, Any]) -> dict[str, Any]:
             if len({canonical_json(v) for v in cleaned_variants}) != len(cleaned_variants):
                 raise DiscoveryPlanError("query variants must be unique")
             cleaned={"spec_ref":spec_ref,"query_variants":cleaned_variants}
+        elif schema_version == DISCOVERY_PLAN_SCHEMA_VERSION_V7:
+            from .alphaengine_query_forms import code_query_variants
+            if code_query_variants(spec_ref, raw["document_type"]) is None:
+                raise DiscoveryPlanError(
+                    f"discovery plan 0.7 spec {spec_ref} has no code-owned query forms")
+            cleaned = {"spec_ref": spec_ref}
         else:
             template = _plan_text(raw["query_template"], "query_template")
             if "{terms}" not in template or template.count("{") != 1 or template.count("}") != 1:
@@ -556,7 +615,10 @@ def build_discovery_plan(
     if companies and all(isinstance(terms,Mapping) for terms in companies.values()):
         if source_ref != ALPHAENGINE_SOURCE_REF or max_calls_24h is None:
             raise DiscoveryPlanError("a 0.6 AlphaEngine plan requires max_calls_24h")
-        base["schema_version"] = DISCOVERY_PLAN_SCHEMA_VERSION_V6
+        base["schema_version"] = (
+            DISCOVERY_PLAN_SCHEMA_VERSION_V6
+            if any("query_variants" in spec for spec in base["specs"])
+            else DISCOVERY_PLAN_SCHEMA_VERSION_V7)
         base["budget"] = {"max_calls_24h": max_calls_24h}
     elif source_ref != ALPHAENGINE_SOURCE_REF or max_calls_24h is not None:
         if max_calls_24h is None:
@@ -601,6 +663,10 @@ def build_discovery_parameters(
     compile to ``search_web`` specs with an explicit date window.
     """
 
+    if plan.get("schema_version") == DISCOVERY_PLAN_SCHEMA_VERSION_V7:
+        # A governed-only plan has no forms of its own: render the code's.
+        from .alphaengine_query_forms import effective_discovery_plan
+        plan = effective_discovery_plan(plan)
     spec = plan_spec(plan, spec_ref)
     company = plan["companies"].get(company_ref)
     if company is None:
@@ -635,11 +701,14 @@ def build_discovery_parameters(
             raise DiscoveryPlanError("missing periods are invalid")
         variant=spec["query_variants"][variant_index]
         quarter=missing_periods[0] if missing_periods else "latest quarter"
-        query=variant["query_template"].format(name=company["name"],ticker=company["ticker"],
-            aliases=" ".join(company["aliases"]),quarter=quarter)
         substitutions={"name":company["name"],"ticker":company["ticker"],
-                       "aliases":" ".join(company["aliases"]),"quarter":quarter}
-        configured={key:value.format(**substitutions) for key,value in variant["filters"].items()}
+                       "aliases":" ".join(company["aliases"]),"quarter":quarter,
+                       "quarter_label":quarter_title_label(missing_periods[0]) if missing_periods else ""}
+        # An empty quarter label leaves the bare name, which is how AlphaEngine
+        # titles a call ("Alphabet Q2 2026"); collapse the gap it leaves.
+        query=" ".join(variant["query_template"].format(**substitutions).split())
+        configured={key:" ".join(value.format(**substitutions).split())
+                    for key,value in variant["filters"].items()}
         filters={"document_type":spec["document_type"],"date_from":window_start,
                  "date_to":as_of.isoformat(),**configured}
     else:
@@ -679,6 +748,37 @@ def _next_page_binding(discovery: Mapping[str, Any], envelope: Mapping[str, Any]
     if not isinstance(as_of, str):
         return None
     return {"cursor": cursor, "as_of": as_of}
+
+
+_DATE_KEYS = frozenset({"date_from", "date_to", "date_after", "date_before"})
+
+
+def _request_date(parameters: Mapping[str, Any]) -> date | None:
+    """The ``as_of`` a compiled request was built for, from its window end."""
+
+    filters = parameters.get("filters")
+    candidates = [parameters.get("date_to"), parameters.get("date_before")]
+    if isinstance(filters, Mapping):
+        candidates.insert(0, filters.get("date_to"))
+    for value in candidates:
+        if isinstance(value, str):
+            try:
+                return date.fromisoformat(value[:10])
+            except ValueError:
+                return None
+    return None
+
+
+def _query_identity(parameters: Mapping[str, Any]) -> str:
+    """A compiled request without its date window and cursor."""
+
+    def strip(value: Any) -> Any:
+        if isinstance(value, Mapping):
+            return {key: strip(item) for key, item in value.items()
+                    if key not in _DATE_KEYS and key != "cursor"}
+        return value
+
+    return canonical_json(strip(parameters))
 
 
 def _failed_cursor_dispatch_exists(
@@ -804,8 +904,11 @@ class _SearchLauncherBase:
         return governance
 
     def load_plan(self) -> dict[str, Any]:
+        # 2026-10-06: the plan this launcher checks and hashes into the ticket
+        # is the rendered one, the same the coordinator and the child run.
+        from .alphaengine_query_forms import load_effective_discovery_plan
         try:
-            plan = load_discovery_plan(self.plan_path)
+            plan = load_effective_discovery_plan(self.plan_path)
         except FileNotFoundError as exc:
             raise DiscoveryLaunchRejected("discovery plan is missing") from exc
         except (DiscoveryPlanError, json.JSONDecodeError) as exc:
@@ -832,6 +935,7 @@ class _SearchLauncherBase:
         cursor: str | None = None,
         variant_index: int | None = None,
         missing_periods: Sequence[str] = (),
+        targeted_binding: Mapping[str, Any] | None = None,
     ) -> list[str]:
         command = [
             self.python_executable, "-m", self.CHILD_MODULE,
@@ -855,6 +959,8 @@ class _SearchLauncherBase:
             command += ["--variant-index", str(variant_index)]
         for period in missing_periods:
             command += ["--missing-period", period]
+        if targeted_binding is not None:
+            command += ["--targeted-binding", canonical_json(dict(targeted_binding))]
         command += self._extra_command_args()
         command += list(self.mode_args)
         return command
@@ -868,6 +974,7 @@ class _SearchLauncherBase:
         cursor: str | None = None,
         variant_index: int | None = None,
         missing_periods: Sequence[str] = (),
+        targeted_binding: Mapping[str, Any] | None = None,
     ) -> dict[str, Any]:
         """Spawn one discovery child bound to an exact mission authorization."""
 
@@ -905,6 +1012,15 @@ class _SearchLauncherBase:
         as_of_date = as_of or self.clock().date()
         if not isinstance(as_of_date, date) or isinstance(as_of_date, datetime):
             raise DiscoveryLaunchRejected("as_of must be a calendar date")
+        if targeted_binding is not None:
+            from .material_targeted_web import targeted_web_parameters, TargetedWebError
+            try:
+                _, targeted_binding = targeted_web_parameters(self.state_dir, plan=plan,
+                    company_ref=authorization["company_ref"], spec_ref=spec_ref, as_of=as_of_date,
+                    mission_version_ref=authorization["mission_version_ref"],
+                    mission_version_hash=authorization["mission_version_hash"], binding=targeted_binding)
+            except TargetedWebError as exc:
+                raise DiscoveryLaunchRejected(str(exc)) from exc
         with self._lock:
             if self._current is not None and self._current[1].poll() is None:
                 raise DiscoveryLaunchConflict(f"discovery {self._current[0]} is still running")
@@ -916,6 +1032,7 @@ class _SearchLauncherBase:
                     "variant_index": variant_index, "missing_periods": list(missing_periods),
                     "governance_hash": governance.content_hash,
                     "plan_hash": plan["content_hash"],
+                    **({"targeted_binding":dict(targeted_binding)} if targeted_binding else {}),
                 }).encode("utf-8")
             ).hexdigest()[:24]
             ticket_id = f"{self.TICKET_PREFIX}:{digest}"
@@ -927,6 +1044,7 @@ class _SearchLauncherBase:
                 mission_version_hash=authorization["mission_version_hash"],
                 as_of=as_of_date.isoformat(), ticket_dir=ticket_dir, cursor=cursor,
                 variant_index=variant_index, missing_periods=missing_periods,
+                **({"targeted_binding":targeted_binding} if targeted_binding else {}),
             )
             log_path = ticket_dir / "run.log"
             log_fd = os.open(str(log_path), os.O_WRONLY | os.O_CREAT | os.O_TRUNC, 0o600)
@@ -975,6 +1093,7 @@ class _SearchLauncherBase:
                 "status": "running",
                 "exit_code": None,
                 "completed_at": None,
+                **({"targeted_binding":dict(targeted_binding)} if targeted_binding else {}),
             }
             _write_owner_only(self._ticket_path(ticket_id), record)
             self._current = (ticket_id, process)
@@ -1070,6 +1189,59 @@ class AlphaEngineSearchLauncher(_SearchLauncherBase):
             return ["--mcp-endpoint", self.mcp_endpoint]
         return []
 
+    #: The cheapest AlphaEngine call that still reaches the server's session
+    #: check.  ``auth_status`` is not enough: on 2026-10-08 it said "ready"
+    #: (token valid to 2026-11-07) while every search was refused.
+    PROBE_TOOL = "list_filters"
+    PROBE_TIMEOUT_SECONDS = 8.0
+
+    def probe_health(self) -> dict[str, Any]:
+        """One bounded ``list_filters`` call; ``ok`` unless it is refused or unreachable.
+
+        Called by the coordinator only when a ``provider_auth`` hold lapses
+        (at most every ``connector_health.HOLD_MINUTES``).  A rehearsal
+        (non-networked) launcher has no provider to ask.
+        """
+
+        from .provider_failure import classify_provider_failure
+
+        if not self.networked:
+            return {"ok": True, "method": "rehearsal", "message": "no live transport to probe"}
+        from .alphaengine_search_cli import DEFAULT_MCP_ENDPOINT
+        from .openclaw_connector_bridge import (
+            BridgePermissionDenied,
+            LoopbackStreamableHttpMcpHandle,
+        )
+
+        handle = LoopbackStreamableHttpMcpHandle(
+            self.mcp_endpoint or DEFAULT_MCP_ENDPOINT,
+            allowed_tools={self.PROBE_TOOL: self.PROBE_TOOL},
+            timeout_seconds=self.PROBE_TIMEOUT_SECONDS,
+        )
+        now = self.clock()
+        try:
+            invocation = handle.invoke(
+                self.PROBE_TOOL, {},
+                call_ref="connector-health-probe:alphaengine",
+                deadline_at=_wire_time(now + timedelta(seconds=self.PROBE_TIMEOUT_SECONDS + 2)),
+                max_response_bytes=512_000,
+            )
+        except BridgePermissionDenied as exc:
+            return {"ok": False, "method": self.PROBE_TOOL, "class": "provider_auth",
+                    "message": str(exc)[:500]}
+        except Exception as exc:  # noqa: BLE001 - unreachable is "not yet"
+            message = f"{type(exc).__name__}: {exc}"[:500]
+            return {"ok": False, "method": self.PROBE_TOOL,
+                    "class": classify_provider_failure(None, message), "message": message}
+        result = invocation.result
+        if result.get("isError") is True:
+            parts = [str(item.get("text")) for item in (result.get("content") or [])
+                     if isinstance(item, Mapping) and item.get("type") == "text"]
+            message = ("\n".join(parts) or "AlphaEngine MCP tool returned an error")[:500]
+            return {"ok": False, "method": self.PROBE_TOOL,
+                    "class": classify_provider_failure(None, message), "message": message}
+        return {"ok": True, "method": self.PROBE_TOOL, "message": "list_filters answered"}
+
 
 class WebSearchLauncher(_SearchLauncherBase):
     """Launch a governed search using the host's current provider selection.
@@ -1140,10 +1312,31 @@ class WebSearchLauncher(_SearchLauncherBase):
 # ---------------------------------------------------------------------------
 # controller-tick coordinator
 # ---------------------------------------------------------------------------
+#: 2026-10-07: the share of an AlphaEngine plan's ``max_calls_24h`` kept for
+#: searches.  Acquisitions and searches draw on one window; without a floor a
+#: day of document pages could spend all of it and leave discovery -- the thing
+#: that finds the next documents -- with nothing.  A policy default of the
+#: code, so every environment has the same floor; it is printed with the plan
+#: budget (``alphaengine_query_forms.query_form_report``) so parity shows it.
+SEARCH_FLOOR_SHARE = 0.2
+
+
+def search_floor_calls(max_calls_24h: int | None) -> int:
+    """Calls of a plan's daily cap reserved for searches (at least one)."""
+
+    if max_calls_24h is None:
+        return 0
+    import math
+
+    return max(1, math.ceil(int(max_calls_24h) * SEARCH_FLOOR_SHARE))
+
+
 def alphaengine_calls_remaining(
     connection: Any, *, mission_cap: int, owner_cap: int = MAX_CALLS_PER_WINDOW,
     as_of: datetime | None = None,
     shared: Mapping[str, Any] | None = None,
+    plan_cap: int | None = None,
+    purpose: str = "search",
 ) -> dict[str, int]:
     """Trailing-24h AlphaEngine calls (search + document pages) against the tighter cap.
 
@@ -1158,28 +1351,96 @@ def alphaengine_calls_remaining(
     each honouring 130 calls were between them honouring 520. It tightens the
     remaining figure and never loosens it, and it names itself in ``bound_by``
     for exactly the reason above.
+
+    2026-10-07: ``plan_cap`` is the approved plan's own ``max_calls_24h``,
+    reported as itself (``bound_by == "plan"``) instead of being folded into
+    the owner cap, where it read as "owner".  For ``purpose="acquisition"``
+    the unspent part of the plan's search floor (``search_floor_calls``) is
+    held back, so acquisitions cannot starve searches.
     """
 
     spent = count_recent_alphaengine_calls(connection, as_of=as_of)
     mission_cap, owner_cap = int(mission_cap), int(owner_cap)
-    cap = min(mission_cap, owner_cap)
+    caps = {"mission": mission_cap, "owner": owner_cap}
+    if plan_cap is not None:
+        caps["plan"] = int(plan_cap)
+    cap = min(caps.values())
     remaining = max(0, cap - spent)
-    bound_by = "owner" if owner_cap < mission_cap else "mission"
+    # The tightest cap names itself; a tie goes to the most specific one
+    # (plan, then mission, then owner) -- the one an owner edits last.
+    bound_by = next(name for name in ("plan", "mission", "owner")
+                    if caps.get(name) == cap)
     budget = {
         "spent": spent, "cap": cap, "remaining": remaining,
         "mission_cap": mission_cap, "owner_cap": owner_cap,
         "bound_by": bound_by,
     }
+    if plan_cap is not None:
+        budget["plan_cap"] = int(plan_cap)
+        floor = min(search_floor_calls(plan_cap), cap)
+        searches = count_recent_alphaengine_calls(
+            connection, as_of=as_of, profile_refs=(SEARCH_PROFILE_REF,))
+        budget["search_floor"] = floor
+        budget["search_spent"] = searches
+        if purpose == "acquisition":
+            held_back = max(0, floor - searches)
+            budget["search_floor_held"] = held_back
+            floored = max(0, cap - spent - held_back)
+            if floored < budget["remaining"]:
+                budget["remaining"] = floored
+                budget["bound_by"] = "search_floor"
     if shared is not None:
         elsewhere = int(shared.get("spent_elsewhere") or 0)
         shared_cap = int(shared["cap"])
         shared_remaining = max(0, shared_cap - spent - elsewhere)
         budget["shared_cap"] = shared_cap
         budget["shared_spent_elsewhere"] = elsewhere
-        if shared_remaining < remaining:
+        if shared_remaining < budget["remaining"]:
             budget["remaining"] = shared_remaining
             budget["bound_by"] = "shared"
     return budget
+
+
+def alphaengine_budget_frees_at(
+    connection: Any, budget: Mapping[str, Any], *, as_of: datetime | None = None,
+) -> str | None:
+    """When an exhausted AlphaEngine acquisition budget gets its next call back.
+
+    2026-10-08 (ws-7d MSFT FY2026-Q4): the selected transcript waited behind
+    ``budget_exhausted`` for hours while the ledger said ``idle``.  The answer
+    to "when will it move" is the oldest call that still binds the budget
+    leaving the trailing window: a document page when the search floor binds
+    (an ageing search only raises the floor held back), any call otherwise.
+    ``None`` when the host-wide window binds (its peers are not counted here)
+    or nothing in the window is ours.  A display hint, never an authority.
+    """
+
+    from .bounded_alphaengine_probe import ALPHAENGINE_PROFILE_REFS, TRAILING_WINDOW
+
+    bound_by = budget.get("bound_by")
+    if bound_by == "shared":
+        return None
+    profiles = tuple(ref for ref in ALPHAENGINE_PROFILE_REFS
+                     if bound_by != "search_floor" or ref != SEARCH_PROFILE_REF)
+    if not profiles:
+        return None
+    now = as_of or datetime.now(timezone.utc)
+    start = (now - TRAILING_WINDOW).isoformat(timespec="microseconds")
+    marks = ",".join("?" for _ in profiles)
+    try:
+        row = connection.execute(
+            "SELECT MIN(a.started_at) FROM connector_physical_attempts a "
+            "JOIN connector_invocations i ON i.connector_invocation_id=a.connector_invocation_ref "
+            f"WHERE i.connector_profile_ref IN ({marks}) AND a.started_at >= ?",
+            (*profiles, start)).fetchone()
+    except Exception:  # noqa: BLE001 - a hint for the ledger, not a gate
+        return None
+    if not row or not row[0]:
+        return None
+    try:
+        return (_parse_wire_time(str(row[0])) + TRAILING_WINDOW).isoformat(timespec="seconds")
+    except ValueError:
+        return None
 
 
 def _parse_wire_time(value: str) -> datetime:
@@ -1212,6 +1473,12 @@ class SecFilingsIndexLauncher(_SearchLauncherBase):
         return [] if self.user_agent is None else ["--user-agent", self.user_agent]
 
 
+#: 2026-10-08: the reason every search settled with before the provider's
+#: words were kept -- "search outcome retryable" and nothing else.
+_PRE_FIX_BARE_OUTCOME = re.compile(r"search outcome retryable")
+_NOT_A_LOGIN_FAILURE = object()
+
+
 class MissionSourceDiscoveryCoordinator:
     """Advance one plan's source discovery by one search and a run of acquisitions.
 
@@ -1236,6 +1503,8 @@ class MissionSourceDiscoveryCoordinator:
         acquisition_wait_seconds: float = ACQUISITION_WAIT_SECONDS,
         tick_budget_seconds: float = TICK_BUDGET_SECONDS,
         selection_launcher: Any | None = None,
+        query_forms: Mapping[str, str] | None = None,
+        health: Any | None = None,
     ) -> None:
         self.store = store
         self.missions = missions
@@ -1248,18 +1517,40 @@ class MissionSourceDiscoveryCoordinator:
         # bad one for the mission; the first tick after start retries failures
         # immediately, and the interval applies from then on.
         self._retry_failures_now = True
+        # Consecutive ticks whose search the deadline deferred.
+        self._search_deferred_ticks = 0
+        # The host-wide AlphaEngine view, read once per tick (see
+        # ``_shared_alphaengine_window``); ``_NO_TICK_CACHE`` outside a tick.
+        self._tick_shared_view: Any = _NO_TICK_CACHE
         self.plan = validate_discovery_plan(plan)
+        if (self.plan["schema_version"] == DISCOVERY_PLAN_SCHEMA_VERSION_V7
+                or self.plan["source_ref"] == SEC_SOURCE_REF):
+            # SEC: the spec set is code-owned (``sec_plan_specs``).
+            from .alphaengine_query_forms import effective_discovery_plan
+            self.plan = effective_discovery_plan(self.plan)
+        # 2026-10-06: what rendering did to the approved plan, said once in
+        # the first tick's ledger (``discovery_coordinator_state``).
+        self.query_forms: dict[str, str] | None = (
+            None if query_forms is None else dict(query_forms))
         self.source_ref = self.plan["source_ref"]
         self.search_launcher = search_launcher
         self.acquisition_launcher = acquisition_launcher
         self.clock = clock or (lambda: datetime.now(timezone.utc))
         self.owner_call_cap = int(owner_call_cap)
         self.selection_launcher = selection_launcher
+        # 2026-10-08: connector-level login health (``connector_health``).
+        self.health = health if health is not None else self._default_health()
+        self._failure_class_cache: dict[str, str | None] = {}
         # P9d-13: the connector spool, read only, is the sole route from a
         # public-web ref back to its host for rows recorded before the ledger
         # carried one.  Optional: without it the backfill reports "no_spool".
         self.spool_dir = None if spool_dir is None else Path(spool_dir)
         self._spool: RawSpool | None = None
+        # 2026-10-08: the step each (company_ref, spec_ref)'s found candidate
+        # is really at, from the latest acquisition attempt that concerned it
+        # (``launch_acquisition``); read by the search note of the same tick.
+        self._candidate_steps: dict[tuple[str, str], dict[str, Any]] = {}
+        self._acquisition_trace: dict[str, Any] = {}
         self._recovery_spool: RawSpoolReader | None = None
         self._local_recovery_cursor: tuple[str, str] | None = None
         self._local_recovery_mission_ref: str | None = None
@@ -1272,6 +1563,144 @@ class MissionSourceDiscoveryCoordinator:
         self.skip_hosts: tuple[str, ...] = tuple(dict.fromkeys(
             [*policy.get("skip_hosts", ()), *sorted(REDIRECT_PROXY_HOSTS)]
         )) if self.source_ref == WEB_SEARCH_SOURCE_REF else tuple(policy.get("skip_hosts", ()))
+
+    # -- 2026-10-08: connector login health -------------------------------------
+    def _default_health(self) -> Any | None:
+        from .connector_health import HOST_TOOL_SOURCES, ConnectorHealth
+
+        if self.source_ref not in HOST_TOOL_SOURCES:
+            return None
+        for launcher in (self.search_launcher, self.acquisition_launcher):
+            state_dir = getattr(launcher, "state_dir", None)
+            if isinstance(state_dir, (str, Path)) and Path(state_dir).is_dir():
+                return ConnectorHealth(state_dir, clock=self.clock)
+        return None
+
+    def _note_auth_failure(self, *, kind: str, ref: str | None,
+                           summary: Mapping[str, Any], reason: str) -> str | None:
+        """Classify one settled failure; open/extend the source's hold on ``provider_auth``."""
+
+        from .provider_failure import PROVIDER_AUTH, classify_reason
+
+        detail = summary.get("failure_detail") if isinstance(summary, Mapping) else None
+        cls = (detail.get("class") if isinstance(detail, Mapping) else None) or classify_reason(reason)
+        if cls == PROVIDER_AUTH and self.health is not None:
+            try:
+                self.health.record_auth_failure(
+                    self.source_ref, kind=kind, ref=ref,
+                    detail=detail if isinstance(detail, Mapping) else {"message": reason})
+            except OSError:
+                pass  # an unwritable health file costs the hold, not the settlement
+        return cls
+
+    def _health_hold(self) -> dict[str, Any] | None:
+        """``None`` when the source may be called; else why not (and probe when due).
+
+        While a ``provider_auth`` hold is open nothing is launched.  When it
+        lapses the launcher's cheapest call (``probe_health``) decides: pass
+        lifts the hold and the due work runs now; fail extends it.  A launcher
+        without a probe lets the next real call be the probe.
+        """
+
+        health = self.health
+        if health is None:
+            return None
+        record = health.held(self.source_ref)
+        if record is None:
+            return None
+        if not health.probe_due(self.source_ref):
+            return {"status": "health_hold", "failure_class": "provider_auth",
+                    "reason": f"{self.source_ref} login lapsed (provider_auth); "
+                              f"held until {record.get('hold_until')}",
+                    "since": record.get("since"), "hold_until": record.get("hold_until"),
+                    "provider_message": (record.get("last_detail") or {}).get("message")}
+        probe = getattr(self.search_launcher, "probe_health", None)
+        if not callable(probe):
+            probe = getattr(self.acquisition_launcher, "probe_health", None)
+        if callable(probe):
+            try:
+                verdict = probe()
+            except Exception as exc:  # noqa: BLE001 - a broken probe is a failed probe
+                verdict = {"ok": False, "message": f"{type(exc).__name__}: {exc}"[:500]}
+        else:
+            verdict = {"ok": True, "method": "next_call",
+                       "message": "no probe for this source; the next call decides"}
+        updated = health.record_probe(self.source_ref, ok=bool(verdict.get("ok")),
+                                      detail=verdict)
+        if verdict.get("ok"):
+            return None
+        return {"status": "health_hold", "failure_class": "provider_auth",
+                "reason": f"{self.source_ref} login still lapsed after probe; "
+                          f"held until {(updated or {}).get('hold_until')}",
+                "since": record.get("since"),
+                "hold_until": (updated or {}).get("hold_until"),
+                "probe": {"ok": False, "message": str(verdict.get("message") or "")[:300]}}
+
+    def _login_failure_block(self, row: Mapping[str, Any], age: timedelta) -> Any:
+        """The cadence verdict for a failed search that may be a lapsed login.
+
+        * ``provider_auth`` (tagged, or read back from the runner journal):
+          due now -- the connector health hold, checked before any launch,
+          decides when the source is usable; ``retry_interval_days`` does not
+          apply to a login problem.
+        * A pre-fix row that says only ``search outcome retryable`` and whose
+          provider words cannot be recovered: the same short retry as a hold
+          (``connector_health.HOLD_MINUTES``), and due at once when the
+          connector has passed a health probe since it failed.  ws-7d's GOOGL
+          (08:03Z) / MSFT (08:08Z, 08:33Z) and legacy's ACN (08:09Z) rows on
+          2026-10-08 are exactly this shape.
+        * Anything else: ``_NOT_A_LOGIN_FAILURE`` -- the plan's retry interval.
+        """
+
+        from .connector_health import HOLD_MINUTES
+        from .provider_failure import PROVIDER_AUTH
+
+        cls = self._dispatch_failure_class(row)
+        if cls == PROVIDER_AUTH:
+            return None
+        if cls is not None or _PRE_FIX_BARE_OUTCOME.fullmatch(
+                str(row.get("failure_reason") or "")) is None:
+            return _NOT_A_LOGIN_FAILURE
+        record = self.health.record(self.source_ref) if hasattr(self.health, "record") else None
+        recovered = (record or {}).get("recovered_at")
+        failed_at = str(row.get("updated_at") or row.get("created_at") or "")
+        try:
+            if (isinstance(recovered, str) and failed_at
+                    and _parse_wire_time(recovered) >= _parse_wire_time(failed_at)):
+                return None
+        except ValueError:
+            pass
+        if age >= timedelta(minutes=HOLD_MINUTES):
+            return None
+        return (f"last attempt failed {int(age.total_seconds() // 60)}m ago without provider "
+                f"detail; short retry {HOLD_MINUTES}m (connector health)")
+
+    def _dispatch_failure_class(self, row: Mapping[str, Any]) -> str | None:
+        """The class of a failed dispatch: from its reason, else from the runner journal.
+
+        Dispatches settled before 2026-10-08 say only "search outcome
+        retryable"; the journal behind their ticket still holds the provider's
+        words, so the retry clock can be judged by what actually happened.
+        """
+
+        from .provider_failure import classify_reason, journal_failure
+
+        key = str(row.get("dispatch_id") or row.get("ticket_ref") or "")
+        if key in self._failure_class_cache:
+            return self._failure_class_cache[key]
+        cls = classify_reason(row.get("failure_reason"))
+        if cls is None and str(row.get("failure_reason") or "").startswith("search outcome"):
+            try:
+                ticket = self.search_launcher.status(row["ticket_ref"])
+                invocation = ((ticket.get("summary") or {}).get("search") or {}).get(
+                    "connector_invocation_ref")
+                detail = journal_failure(self.store.connection, invocation)
+                cls = None if detail is None else detail.get("class")
+            except Exception:  # noqa: BLE001 - unknown stays unknown
+                cls = None
+        if key:
+            self._failure_class_cache[key] = cls
+        return cls
 
     # -- P9d-12/13 maintenance -------------------------------------------------
     def carry_forward(self, deadline: float | None = None) -> list[dict[str, Any]]:
@@ -1394,6 +1823,25 @@ class MissionSourceDiscoveryCoordinator:
             if ticket["status"] == "running":
                 continue
             summary = ticket.get("summary") or {}
+            if ticket.get("targeted_binding") is not None and ticket["status"] == "succeeded":
+                try:
+                    from .material_targeted_web import targeted_web_parameters
+                    parameters, bound = targeted_web_parameters(self.search_launcher.state_dir,
+                        plan=self.plan, company_ref=dispatch["company_ref"], spec_ref=dispatch["spec_ref"],
+                        as_of=date.fromisoformat(ticket["as_of"]),
+                        mission_version_ref=dispatch["mission_version_ref"],
+                        mission_version_hash=dispatch["mission_version_hash"],
+                        binding=ticket["targeted_binding"], allow_closed=True)
+                    if (summary.get("targeted_binding")!=bound or summary.get("parameters")!=parameters
+                            or summary.get("query_hash")!=discovery_query_hash(self.plan,parameters)
+                            or dispatch["query_hash"]!=discovery_query_hash(self.plan,parameters)):
+                        raise CoverageMissionError("targeted child query binding drifted")
+                except (CoverageMissionError, ValueError, KeyError, TypeError) as exc:
+                    result=self.missions.settle_discovery_dispatch(dispatch["dispatch_id"],
+                        status="failed",reason=f"targeted binding refused: {exc}"[:500])
+                    settled.append({"dispatch_ref":dispatch["dispatch_id"],"status":result["status"],
+                        "reason":result.get("failure_reason")})
+                    continue
             if ticket["status"] == "succeeded" and summary.get("discovery_ref"):
                 result = self.missions.settle_discovery_dispatch(
                     dispatch["dispatch_id"], status="succeeded"
@@ -1406,12 +1854,22 @@ class MissionSourceDiscoveryCoordinator:
                 result = self.missions.settle_discovery_dispatch(
                     dispatch["dispatch_id"], status="failed", reason=str(reason)[:500]
                 )
-            settled.append({
+            entry = {
                 "dispatch_ref": dispatch["dispatch_id"], "status": result["status"],
                 "ticket_ref": dispatch["ticket_ref"],
                 "discovery_ref": summary.get("discovery_ref"),
                 "new_document_count": summary.get("new_document_count"),
-            })
+            }
+            if result["status"] == "failed":
+                # Kept so the tick ledger can say *why* a source's searches
+                # fail (ws-7d SEC, 2026-09-27..29: every one, unreported).
+                entry["reason"] = str(result.get("failure_reason")
+                                      or summary.get("failure_reason") or "")[:500]
+                cls = self._note_auth_failure(kind="search", ref=dispatch["dispatch_id"],
+                                              summary=summary, reason=entry["reason"])
+                if cls is not None:
+                    entry["failure_class"] = cls
+            settled.append(entry)
         return settled
 
     @staticmethod
@@ -1508,6 +1966,15 @@ class MissionSourceDiscoveryCoordinator:
             self.plan, spec_ref=dispatch["spec_ref"], company_ref=dispatch["company_ref"],
             as_of=as_of,
         )
+        if ticket.get("targeted_binding") is not None:
+            from .material_targeted_web import targeted_web_parameters
+            parameters, bound = targeted_web_parameters(self.search_launcher.state_dir, plan=self.plan,
+                company_ref=dispatch["company_ref"], spec_ref=dispatch["spec_ref"], as_of=as_of,
+                mission_version_ref=dispatch["mission_version_ref"],
+                mission_version_hash=dispatch["mission_version_hash"],
+                binding=ticket["targeted_binding"], allow_closed=True)
+            if summary.get("targeted_binding") != bound:
+                raise CoverageMissionError("failed child targeted binding drifted")
         query_hash = web_search_spec_hash(parameters)
         if (
             summary.get("parameters") != parameters
@@ -1802,6 +2269,16 @@ class MissionSourceDiscoveryCoordinator:
                 "record_id": document["record_id"], "document_ref": document["document_ref"],
                 "status": result["status"], "ticket_ref": document["ticket_ref"],
             }
+            for context_key in ("statement_contexts", "statement_context_refresh"):
+                if context_key in result:
+                    entry[context_key] = result[context_key]
+            if result["status"] == "acquisition_failed":
+                cls = self._note_auth_failure(
+                    kind="acquisition", ref=document["record_id"],
+                    summary=ticket.get("summary") or {},
+                    reason=str(result.get("failure_reason") or ""))
+                if cls is not None:
+                    entry["failure_class"] = cls
             if review_status is not None:
                 entry["review_status"] = review_status
                 if review_id is not None:
@@ -1913,10 +2390,17 @@ class MissionSourceDiscoveryCoordinator:
             satisfied = self._satisfied_block(mission, company_ref, spec_ref)
             if satisfied is not None:
                 return satisfied
-        shortfall = self._checklist_shortfall(mission, company_ref, spec_ref)
+        # 2026-10-08 (ws-7d GOOGL/MSFT): a period-based spec with required
+        # periods still missing is short whatever else the checklist read
+        # says -- an unreadable sufficiency must not put the last missing
+        # quarter on the seven-day rediscovery interval.
+        missing, candidate_periods = self._period_state(mission, company_ref, spec)
+        shortfall = bool(missing) or self._checklist_shortfall(
+            mission, company_ref, spec_ref)
         cadence = self._cadence_block(
             mission["id"], company_ref, spec,
             use_retry_interval=shortfall,
+            missing_periods=tuple(p for p in missing if p not in candidate_periods),
         )
         if not cadence or cadence == "previous discovery still open":
             return cadence
@@ -1928,20 +2412,64 @@ class MissionSourceDiscoveryCoordinator:
         if (shortfall and cadence.startswith("rediscovered")
                 and self._continuation_page(
                 mission["id"], company_ref, spec_ref,
-                missing_periods=self._missing_periods(mission,company_ref,spec))):
+                missing_periods=missing)):
             return None
-        return cadence
+        return cadence + missing_periods_note(
+            missing, candidate_periods,
+            step=self._candidate_step(company_ref, spec_ref) if candidate_periods else None)
+
+    def _period_state(self, mission: Mapping[str, Any], company_ref: str,
+                      spec: Mapping[str, Any]) -> tuple[tuple[str, ...], frozenset[str]]:
+        """(required periods still missing, missing periods a found candidate covers).
+
+        Both empty for a spec that is not period-based or when the checklist
+        cannot be read: an unreadable checklist is not a missing quarter.
+        """
+
+        try:
+            item = self._period_item(mission, company_ref, spec)
+        except Exception:  # noqa: BLE001 - an unreadable checklist names no period
+            return (), frozenset()
+        if item is None:
+            return (), frozenset()
+        return (tuple(item.get("missing_periods") or ()),
+                frozenset(item.get("candidate_periods") or ()))
 
     def _missing_periods(self, mission: Mapping[str,Any], company_ref: str,
                          spec: Mapping[str,Any]) -> tuple[str,...]:
-        if (self.plan['schema_version'] != DISCOVERY_PLAN_SCHEMA_VERSION_V6
-                or spec.get('document_type') != 'meeting_minutes'):
-            return ()
-        from .mission_stage import evaluate_mission
-        stage=next(row for row in evaluate_mission(self.store.connection,mission)
-                   if row['company_ref']==company_ref)
-        calls=next(row for row in stage['items'] if row['item_ref']=='earnings_calls')
-        return tuple(calls.get('missing_periods') or ())
+        item = self._period_item(mission, company_ref, spec)
+        return () if item is None else tuple(item.get('missing_periods') or ())
+
+    def _period_item(self, mission: Mapping[str, Any], company_ref: str,
+                     spec: Mapping[str, Any]) -> dict[str, Any] | None:
+        """The checklist item a period-based spec feeds, or None.
+
+        Period-based means the item counts required periods (it carries
+        ``required_periods``) and the plan can render a period into the query
+        -- today the earnings-call item, but nothing here names it.
+        """
+
+        if self.plan['schema_version'] != DISCOVERY_PLAN_SCHEMA_VERSION_V6:
+            return None
+        if not any("{quarter" in str(variant.get("query_template") or "")
+                   for variant in spec.get("query_variants") or ()):
+            return None
+        from .mission_stage import SOURCE_BASE_ITEMS, evaluate_mission
+
+        spec_ref = spec['spec_ref']
+        declared = next((row for row in SOURCE_BASE_ITEMS
+                         if spec_ref in row['spec_refs']), None)
+        if declared is None:
+            return None
+        stage = next((row for row in evaluate_mission(self.store.connection, mission)
+                      if row['company_ref'] == company_ref), None)
+        if stage is None:
+            return None
+        item = next((row for row in stage['items']
+                     if row['item_ref'] == declared['item_ref']), None)
+        if item is None or 'required_periods' not in item:
+            return None
+        return item
 
     @staticmethod
     def _selection_context(mission: Mapping[str, Any], spec: Mapping[str, Any]) -> dict[str, str]:
@@ -2000,6 +2528,13 @@ class MissionSourceDiscoveryCoordinator:
         )
         if not discoveries:
             return None
+        if (discoveries[0].get("discovery_plan_ref") != self.plan["id"]
+                or discoveries[0].get("discovery_plan_hash") != self.plan["content_hash"]):
+            # 2026-10-04: a page from another plan is not this plan's cascade.
+            # Matching its request against this plan's variants resumed v3 at
+            # whichever v2 query it happened to equal and skipped v3's new
+            # first queries; a new plan opens at its own first query.
+            return None
         row = self.store.connection.execute(
             "SELECT record_json,content_hash FROM connector_source_envelopes "
             "WHERE source_envelope_id=?",
@@ -2043,21 +2578,36 @@ class MissionSourceDiscoveryCoordinator:
                 discovery_created_at=discoveries[0]["created_at"],
             ):
                 continuation = {"cursor": None, "as_of": as_of.isoformat()}
-        requires_selection=spec.get('document_type')=='meeting_minutes'
+        # 2026-10-03: every *selected* document type waits for selection to
+        # consume the previous page, not transcripts alone.  Sell-side pages
+        # used to follow their cursor on every tick while hundreds of
+        # candidates sat unselected (ws-7d META 300, MSFT 638), spending most
+        # of the 50 searches a day on pages nobody would read.  A page the
+        # selector set aside (quarantine) is as finished as a consumed one.
+        requires_selection=spec.get('document_type') in SELECTED_DOCUMENT_TYPES
         if requires_selection:
             if self.selection_launcher is None:
                 return None
             current=self.selection_launcher.currently_consumed(
                 mission_ref=mission_version_ref,missing_periods_by_company={company_ref:list(missing_periods)})
-            if discoveries[0]['id'] not in current and envelope.get('source_record_refs'):
+            finished={*current,*self._quarantined_discoveries()}
+            if discoveries[0]['id'] not in finished and envelope.get('source_record_refs'):
                 return None
         if continuation is not None:
             return {**continuation,'variant_index':variant_index}
         # A page without a cursor advances only after candidate selection has
         # consumed that exact discovery under current inputs.
-        if variant_index+1 >= len(spec['query_variants']):
-            return None
-        return {'cursor':None,'as_of':as_of.isoformat(),'variant_index':variant_index+1}
+        # Skip a later variant that compiles to the same search: "{name}
+        # {quarter_label}" with no missing quarter is the bare name, exactly
+        # what "{aliases}" asks, and re-running it would page the same results
+        # once per tick.
+        searched={canonical_json({**prior,'cursor':None})}
+        for index in range(variant_index+1,len(spec['query_variants'])):
+            candidate=build_discovery_parameters(self.plan,spec_ref=spec_ref,company_ref=company_ref,
+                as_of=as_of,variant_index=index,missing_periods=missing_periods)
+            if canonical_json(candidate) not in searched:
+                return {'cursor':None,'as_of':as_of.isoformat(),'variant_index':index}
+        return None
 
     def _satisfied_block(self, mission: Mapping[str, Any], company_ref: str,
                          spec_ref: str) -> str | None:
@@ -2141,7 +2691,8 @@ class MissionSourceDiscoveryCoordinator:
 
     def _cadence_block(self, mission_version_ref: str, company_ref: str,
                        spec: Mapping[str, Any], *,
-                       use_retry_interval: bool = False) -> str | None:
+                       use_retry_interval: bool = False,
+                       missing_periods: Sequence[str] = ()) -> str | None:
         # 2026-09-25b: every version of the mission.  P1/P2 publish a new
         # version over the one that searched last night, and asked of the new
         # version alone every (company, spec) read as never searched.
@@ -2155,20 +2706,149 @@ class MissionSourceDiscoveryCoordinator:
         age = self.clock() - _parse_wire_time(row["created_at"])
         if row["status"] == "launched":
             return "previous discovery still open"
+        # 2026-10-07 (ADR-0009, 「优先看这家」): the company's active tracking
+        # cadence re-times discovery too.  A priority divides the plan's
+        # intervals (by 4, never under a day); with no cadence, or once the
+        # cadence is back on its baseline, the divisor is 1 and the plan's
+        # own values apply unchanged.  Per company: the plan file and its
+        # hash are untouched, so no other company and no query changes.
+        from .tracking_cadence import discovery_cadence_divisor, scaled_interval_days
+
+        divisor = discovery_cadence_divisor(getattr(self, "store", None), company_ref)["divisor"]
+        retry_days = scaled_interval_days(spec["retry_interval_days"], divisor)
+        rediscovery_days = scaled_interval_days(spec["rediscovery_interval_days"], divisor)
+
+        def scaled(days: int, plan_days: int) -> str:
+            return (f"{days}d" if divisor == 1
+                    else f"{days}d (plan {plan_days}d ÷{divisor}, 优先看这家)")
+
         if row["status"] == "succeeded":
-            interval = (spec["retry_interval_days"] if use_retry_interval
-                        else spec["rediscovery_interval_days"])
+            if self._query_changed_since(mission_version_ref, company_ref, spec, row):
+                # 2026-10-04: a new plan asking a new question is a new
+                # discovery, not a repeat of the old one.  ws-7d's plan v3
+                # rewrote the transcript query and was approved at 19:00Z;
+                # the v2 searches of 03:53-04:58Z held it off for a week.
+                return None
+            if missing_periods and self._target_period_moved(
+                    mission_version_ref, company_ref, spec, row, missing_periods):
+                # 2026-10-08 (ws-7d): the last search asked for a quarter that
+                # is no longer missing -- it found it.  The next missing
+                # quarter is a new question, due now rather than after the
+                # interval that guards against repeating the old one.
+                return None
+            interval = retry_days if use_retry_interval else rediscovery_days
+            plan_interval = (spec["retry_interval_days"] if use_retry_interval
+                             else spec["rediscovery_interval_days"])
             if age < timedelta(days=interval):
                 kind = "rediscovered (shortfall retry)" if use_retry_interval else "rediscovered"
-                return f"{kind} {age.days}d ago; interval {interval}d"
+                return f"{kind} {age.days}d ago; interval {scaled(interval, plan_interval)}"
             return None
-        if age < timedelta(days=spec["retry_interval_days"]):
+        if row["status"] == "failed" and getattr(self, "health", None) is not None:
+            verdict = self._login_failure_block(row, age)
+            if verdict is not _NOT_A_LOGIN_FAILURE:
+                return verdict
+        if age < timedelta(days=retry_days):
             recover = getattr(self.search_launcher, "provider_recovery_available", None)
             if self.source_ref == WEB_SEARCH_SOURCE_REF and callable(recover):
                 if recover(row, self.store.connection):
                     return None
-            return f"last attempt {row['status']} {age.days}d ago; retry interval {spec['retry_interval_days']}d"
+            return (f"last attempt {row['status']} {age.days}d ago; retry interval "
+                    f"{scaled(retry_days, spec['retry_interval_days'])}")
         return None
+
+    def _target_period_moved(self, mission_version_ref: str, company_ref: str,
+                             spec: Mapping[str, Any], row: Mapping[str, Any],
+                             missing_periods: Sequence[str]) -> bool:
+        """Whether a succeeded search under this plan asked about a period that is
+        no longer the one this plan would ask about.
+
+        True only when the dispatch's own request is readable and no variant
+        of the plan, rendered for the periods still missing, compiles to it.
+        A variant that names no period ("{aliases}") renders the same for any
+        missing set, so the cascade inside one target never qualifies; a
+        search whose target is still missing never qualifies either.  Bounded
+        by construction: each qualifying search moves the target on, and a
+        target that cannot be found keeps the retry interval.
+        """
+
+        if (row.get("discovery_plan_ref") != self.plan["id"]
+                or row.get("discovery_plan_hash") != self.plan["content_hash"]):
+            return False
+        try:
+            prior = next((item for item in self.missions.source_discoveries(
+                mission_version_ref, company_ref=company_ref, spec_ref=spec["spec_ref"],
+                limit=20, across_versions=True,
+            ) if item.get("query_hash") == row.get("query_hash")), None)
+        except Exception:  # noqa: BLE001 - an unreadable request is not a moved one
+            return False
+        parameters = None if prior is None else prior.get("parameters")
+        if not isinstance(parameters, Mapping):
+            return False
+        as_of = _request_date(parameters)
+        if as_of is None:
+            return False
+        asked = _query_identity(parameters)
+        try:
+            for index in range(len(spec.get("query_variants") or ())):
+                candidate = build_discovery_parameters(
+                    self.plan, spec_ref=spec["spec_ref"], company_ref=company_ref,
+                    as_of=as_of, variant_index=index, missing_periods=missing_periods)
+                if _query_identity(candidate) == asked:
+                    return False
+        except Exception:  # noqa: BLE001 - an uncompilable plan moves nothing
+            return False
+        return True
+
+    def _plan_first_query(self, mission_version_ref: str, company_ref: str,
+                          spec: Mapping[str, Any], as_of: date) -> dict[str, Any] | None:
+        """The request this plan opens a (company, spec) with, without cursor."""
+
+        try:
+            missing: tuple[str, ...] = ()
+            if (self.plan["schema_version"] == DISCOVERY_PLAN_SCHEMA_VERSION_V6
+                    and spec.get("document_type") == "meeting_minutes"):
+                mission = self.missions.mission(mission_version_ref)
+                missing = self._missing_periods(mission, company_ref, spec)
+            return dict(build_discovery_parameters(
+                self.plan, spec_ref=spec["spec_ref"], company_ref=company_ref,
+                as_of=as_of, missing_periods=missing,
+            ))
+        except Exception:  # noqa: BLE001 - an uncompilable query is not a new one
+            return None
+
+    def _query_changed_since(self, mission_version_ref: str, company_ref: str,
+                             spec: Mapping[str, Any], row: Mapping[str, Any]) -> bool:
+        """Whether a succeeded dispatch was made under another plan asking another question.
+
+        Only a dispatch from a *different* plan (ref or content hash) can
+        qualify: inside one plan the variant and cursor cascade moves the query
+        on every page, and treating that as new would search every tick.
+
+        Across plans the comparison is the request the current plan would
+        open with against the request the old dispatch actually made, dates
+        and cursor aside (``query_hash`` alone binds the date window, so it
+        changes every day).  A plan change that left this spec's first query
+        alone -- the sell-side specs of ws-7d's v2 -> v3 -- keeps its cadence.
+        When the old request cannot be read the plan change alone decides.
+        """
+
+        if (row.get("discovery_plan_ref") == self.plan["id"]
+                and row.get("discovery_plan_hash") == self.plan["content_hash"]):
+            return False
+        prior = next((item for item in self.missions.source_discoveries(
+            mission_version_ref, company_ref=company_ref, spec_ref=spec["spec_ref"],
+            limit=20, across_versions=True,
+        ) if item.get("query_hash") == row.get("query_hash")), None)
+        parameters = None if prior is None else prior.get("parameters")
+        if not isinstance(parameters, Mapping):
+            return True
+        as_of = _request_date(parameters)
+        if as_of is None:
+            return True
+        current = self._plan_first_query(mission_version_ref, company_ref, spec, as_of)
+        if current is None:
+            return True
+        return _query_identity(current) != _query_identity(parameters)
 
     def _shared_alphaengine_window(self) -> dict[str, Any] | None:
         """The host-wide AlphaEngine window, when this environment is bound to one.
@@ -2181,25 +2861,36 @@ class MissionSourceDiscoveryCoordinator:
 
         from .shared_daily_budget import SharedDailyBudgetError, shared_alphaengine_view
 
+        # 2026-10-04: within one tick the peers' spend is read once.  Each read
+        # opens every peer Core and counts its trailing-24h calls; the tick
+        # asked again for every acquisition and for the search, and on a cold
+        # cache one peer count was 4.4 s of a 6.7 s share.  This Core's own
+        # spend is still counted on every check.
+        cached = self._tick_shared_view
+        if cached is not _NO_TICK_CACHE and cached is not _TICK_CACHE_UNREAD:
+            return cached
+        view: dict[str, Any] | None = None
         try:
             row = self.store.connection.execute(
                 "PRAGMA database_list").fetchall()
         except Exception:  # noqa: BLE001 - a budget hint, not an authority
-            return None
+            row = []
         path = next((item[2] for item in row if item[1] == "main" and item[2]), None)
-        if not path:
-            return None
-        try:
-            return shared_alphaengine_view(path, as_of=self.clock())
-        except (SharedDailyBudgetError, OSError, ValueError):
-            return None
+        if path:
+            try:
+                view = shared_alphaengine_view(path, as_of=self.clock())
+            except (SharedDailyBudgetError, OSError, ValueError):
+                view = None
+        if cached is _TICK_CACHE_UNREAD:
+            self._tick_shared_view = view
+        return view
 
     def _reserved_calls(self) -> int:
         """Children launched but not yet settled may not have recorded their call yet."""
 
         return self.missions.count_pending_source_calls(self.source_ref)
 
-    def _budget(self, mission_cap: int) -> dict[str, int]:
+    def _budget(self, mission_cap: int, *, purpose: str = "search") -> dict[str, int]:
         """Remaining trailing-24h calls for this plan's source.
 
         SEC filings index: the plan budget alone, because the reads are free
@@ -2233,11 +2924,12 @@ class MissionSourceDiscoveryCoordinator:
             cap = int(plan_cap)
             budget = {"spent": spent, "cap": cap, "remaining": max(0, cap - spent)}
         else:
-            owner_cap = self.owner_call_cap if plan_cap is None else min(self.owner_call_cap, int(plan_cap))
             budget = alphaengine_calls_remaining(
                 self.store.connection, mission_cap=mission_cap,
-                owner_cap=owner_cap, as_of=self.clock(),
+                owner_cap=self.owner_call_cap, as_of=self.clock(),
                 shared=self._shared_alphaengine_window(),
+                plan_cap=None if plan_cap is None else int(plan_cap),
+                purpose=purpose,
             )
         reserved = self._reserved_calls()
         budget["reserved"] = reserved
@@ -2253,6 +2945,9 @@ class MissionSourceDiscoveryCoordinator:
             return {"status": "no_active_mission", "mission_ref": self.plan["mission_ref"]}
         if self.search_launcher.running():
             return {"status": "busy", "reason": "a discovery child is still running"}
+        hold = self._health_hold()
+        if hold is not None:
+            return hold
         skipped: list[dict[str, Any]] = []
 
         for member in mission["universe"]:
@@ -2263,7 +2958,7 @@ class MissionSourceDiscoveryCoordinator:
             for spec in self.plan["specs"]:
                 if (self.plan.get("schema_version") == DISCOVERY_PLAN_SCHEMA_VERSION_V6
                         and self.source_ref == ALPHAENGINE_SOURCE_REF
-                        and spec.get("document_type") in {"meeting_minutes", "sell_side_report"}
+                        and spec.get("document_type") in SELECTED_DOCUMENT_TYPES
                         and self.selection_launcher is None):
                     skipped.append({"company_ref": company_ref, "spec_ref": spec["spec_ref"],
                                     "reason": "discovery_selection configuration is required"})
@@ -2347,6 +3042,130 @@ class MissionSourceDiscoveryCoordinator:
                 }
         return {"status": "idle", "skipped": skipped}
 
+    # -- batch E: a targeted query on behalf of a MaterialRequest -------------
+    def launch_targeted_discovery(self) -> dict[str, Any] | None:
+        """Run the oldest targeted query the material acquisition service queued.
+
+        The service asks "search this company on this spec now" for a request
+        it is working (``material_acquisition.enqueue_targeted_query``).  This
+        is the same launch as :meth:`launch_discovery` for one (company, spec)
+        -- the same mission grant, plan spec and code-owned query forms, the
+        same health hold, the same call window (``connector_rate_policy`` via
+        :meth:`_budget`), the same single slot -- minus the cadence, which is
+        exactly what a request waiting on material must not wait for.  What
+        happened is answered back to the service's ledger; ``None`` means
+        there was nothing queued and the scheduled search runs as before.
+        """
+
+        launcher = getattr(self, "search_launcher", None)
+        state_dir = getattr(launcher, "state_dir", None)
+        if launcher is None or not isinstance(state_dir, (str, Path)):
+            return None
+        try:
+            from .material_acquisition import pending_targeted_queries, record_targeted_event
+            pending = pending_targeted_queries(state_dir, self.source_ref, limit=1)
+        except Exception:  # noqa: BLE001 - a missing or locked ledger is nothing queued
+            return None
+        if not pending:
+            return None
+        query = pending[0]
+
+        def answer(status: str, kind: str | None, reason: str | None = None, **extra: Any) -> None:
+            try:
+                record_targeted_event(state_dir, query["query_id"], status=status, kind=kind,
+                                      reason=reason, **extra)
+            except Exception:  # noqa: BLE001 - the service times the query out instead
+                pass
+
+        base = {"targeted": True, "material_request_ref": query.get("request_id"),
+                "targeted_query_ref": query["query_id"], "company_ref": query.get("company_ref")}
+        try:
+            mission = self.missions.active_mission(self.plan["mission_ref"])
+        except CoverageMissionNotFound:
+            answer("refused", "unconfigured", "no active mission for this plan")
+            return {**base, "status": "targeted_refused", "reason": "no_active_mission"}
+        if self.search_launcher.running():
+            answer("deferred", "busy", "a discovery child is still running")
+            return None
+        hold = self._health_hold()
+        if hold is not None:
+            answer("deferred", "health_hold", str(hold.get("reason") or "connector health hold"))
+            return hold
+        company_ref = str(query.get("company_ref") or "")
+        if company_ref not in {member["company_ref"] for member in mission["universe"]} \
+                or company_ref not in self.plan["companies"]:
+            answer("refused", "not_in_plan", "company is not in this source's discovery plan")
+            return {**base, "status": "targeted_refused", "reason": "not_in_plan"}
+        specs = {spec["spec_ref"]: spec for spec in self.plan["specs"]}
+        spec = specs.get(str(query.get("spec_ref") or ""))
+        if spec is None and self.source_ref == WEB_SEARCH_SOURCE_REF and self.plan["specs"]:
+            spec = self.plan["specs"][0]
+        if spec is None:
+            answer("refused", "no_spec", f"plan has no spec {query.get('spec_ref')}")
+            return {**base, "status": "targeted_refused", "reason": "no_spec"}
+        if (self.plan.get("schema_version") == DISCOVERY_PLAN_SCHEMA_VERSION_V6
+                and self.source_ref == ALPHAENGINE_SOURCE_REF
+                and spec.get("document_type") in SELECTED_DOCUMENT_TYPES
+                and self.selection_launcher is None):
+            answer("refused", "unconfigured", "discovery_selection configuration is required")
+            return {**base, "status": "targeted_refused", "reason": "selection_unconfigured"}
+        try:
+            authorization = self.missions.authorize_source_discovery(
+                company_ref=company_ref, source_ref=self.plan["source_ref"],
+                requested_by=mission["autonomy"]["automation_principal"],
+                mission_version_ref=mission["id"], mission_version_hash=mission["content_hash"],
+            )
+        except CoverageMissionError as exc:
+            answer("refused", "not_authorized", f"{type(exc).__name__}: {exc}")
+            return {**base, "status": "targeted_refused", "reason": "not_authorized"}
+        budget = self._budget(authorization["max_alphaengine_calls_24h"])
+        if budget["remaining"] < 1:
+            answer("deferred", "budget", "the source's call window is spent", extra={"budget": budget})
+            return None
+        missing_periods = self._missing_periods(mission, company_ref, spec)
+        request_date = self.clock().date()
+        parameters = build_discovery_parameters(
+            self.plan, spec_ref=spec["spec_ref"], company_ref=company_ref, as_of=request_date,
+            cursor=None, variant_index=0, missing_periods=missing_periods,
+        )
+        page_options: dict[str, Any] = {}
+        if self.plan["schema_version"] == DISCOVERY_PLAN_SCHEMA_VERSION_V6:
+            page_options.update(variant_index=0, missing_periods=missing_periods)
+        if self.source_ref == WEB_SEARCH_SOURCE_REF:
+            from .material_targeted_web import targeted_web_parameters, TargetedWebError
+            try:
+                parameters, bound = targeted_web_parameters(state_dir, plan=self.plan,
+                    company_ref=company_ref, spec_ref=spec["spec_ref"], as_of=request_date,
+                    mission_version_ref=mission["id"], mission_version_hash=mission["content_hash"],
+                    query_ref=query["query_id"])
+                page_options["targeted_binding"] = bound
+            except TargetedWebError as exc:
+                answer("refused", "request_binding", str(exc))
+                return {**base, "status":"targeted_refused", "reason":"request_binding"}
+        try:
+            ticket = self.search_launcher.start(
+                authorization=authorization, spec_ref=spec["spec_ref"], as_of=request_date,
+                **page_options)
+        except DiscoveryLaunchConflict as exc:
+            answer("deferred", "busy", str(exc))
+            return None
+        except DiscoveryLaunchRejected as exc:
+            text = str(exc)
+            kind = ("credentials" if "approval is required" in text or "governance" in text
+                    else "rejected")
+            answer("refused", kind, f"{type(exc).__name__}: {text}")
+            return {**base, "status": "targeted_refused", "reason": kind}
+        dispatch = self.missions.record_discovery_dispatch(
+            authorization=authorization, discovery_plan_ref=self.plan["id"],
+            discovery_plan_hash=self.plan["content_hash"], spec_ref=spec["spec_ref"],
+            query_hash=discovery_query_hash(self.plan, parameters), ticket_ref=ticket["id"],
+        )
+        answer("launched", None, None, dispatch_ref=dispatch["dispatch_id"], ticket_ref=ticket["id"],
+               extra={"spec_ref": spec["spec_ref"], "missing_periods": list(missing_periods),
+                      **({"targeted_binding":page_options["targeted_binding"]} if "targeted_binding" in page_options else {})})
+        return {**base, "status": "launched", "dispatch_ref": dispatch["dispatch_id"],
+                "ticket_ref": ticket["id"], "spec_ref": spec["spec_ref"], "budget": budget}
+
     # -- document acquisition ------------------------------------------------
     def _stage_needs(self) -> tuple[list[dict[str, str]], str | None]:
         """P10a: what the missions still need from this source, most important first.
@@ -2370,7 +3189,193 @@ class MissionSourceDiscoveryCoordinator:
         except Exception as exc:  # noqa: BLE001 - ordering is an optimisation, not a gate
             return ([], f"{type(exc).__name__}: {exc}")
 
+    def _selection_quarantine(self) -> Any:
+        return getattr(self.selection_launcher, "quarantine", None)
+
+    def _quarantined_discoveries(self) -> tuple[str, ...]:
+        """Discoveries set aside under the current selection rules."""
+
+        from .discovery_candidate_selection import SELECTION_RULES_VERSION
+
+        quarantine = self._selection_quarantine()
+        if quarantine is None:
+            return ()
+        try:
+            return tuple(quarantine.active(rules_version=SELECTION_RULES_VERSION))
+        except Exception:  # an unreadable directory costs the exclusion, not the tick
+            return ()
+
+    def _covered_company_names(self, mission: Mapping[str, Any]) -> list[str]:
+        """Every name of every company this mission covers.
+
+        Used only to keep covered companies when a candidate's tag list is too
+        long to show whole.  The plan's own names (ws-7d's are bare tickers)
+        are joined with the packaged names the other lanes already use.
+        """
+
+        from .mission_company_names import mission_name_table
+
+        universe = [member for member in mission.get("universe") or ()
+                    if isinstance(member, Mapping)]
+        # The feed plans beside this state carry each company's registered
+        # name (W7) and the owner's alias ledger; the package knows the rest.
+        name_plans: list[Mapping[str, Any] | None] = [None]
+        state = getattr(self.selection_launcher, "state", None)
+        if isinstance(state, (str, Path)):
+            from .mission_feed_lane import load_feed_discovery_plan
+
+            for path in sorted((Path(state) / "feed-plans").glob("*.json")):
+                try:
+                    name_plans.append(load_feed_discovery_plan(path))
+                except Exception:  # an unreadable plan adds no names
+                    continue
+        names: list[str] = []
+        for name_plan in name_plans:
+            try:
+                for values in mission_name_table(universe, name_plan).values():
+                    names.extend(values)
+            except Exception:
+                continue
+        companies = self.plan.get("companies") or {}
+        for member in universe:
+            entry = companies.get(member.get("company_ref")) or {}
+            names.append(str(member.get("ticker") or ""))
+            for key in ("name", "search_terms", "ticker"):
+                if isinstance(entry.get(key), str):
+                    names.append(entry[key])
+            names.extend(x for x in entry.get("aliases") or () if isinstance(x, str))
+        return sorted({name for name in names if name})
+
+    def _note_candidate_step(self, result: dict[str, Any]) -> None:
+        """Record what the acquisition said about the candidate it looked at.
+
+        The (company, spec) comes from the document the attempt considered or
+        the discovery it names.  A launch (or bytes already held) clears the
+        note: the candidate is no longer waiting.
+        """
+
+        status = str(result.get("status") or "")
+        trace = getattr(self, "_acquisition_trace", None) or {}
+        document = trace.get("document") if isinstance(trace.get("document"), Mapping) else None
+        discovery_ref = result.get("discovery_ref") or (document or {}).get("discovery_ref")
+        if not isinstance(discovery_ref, str) or not discovery_ref:
+            return
+        try:
+            discovery = self.missions.discovery_record(discovery_ref)
+        except Exception:  # noqa: BLE001 - no discovery, nothing to say about it
+            return
+        key = (str(discovery.get("company_ref") or (document or {}).get("company_ref") or ""),
+               str(discovery.get("spec_ref") or ""))
+        if not all(key):
+            return
+        if status in {"launched", "already_in_authority"}:
+            self._candidate_steps.pop(key, None)
+            return
+        step = candidate_step_text(result, selected=bool(trace.get("selection_ticket")))
+        if not step:
+            return
+        subject = f"{key[0].rsplit(':', 1)[-1].upper()}/{key[1]}"
+        self._candidate_steps[key] = {"step": step, "at": self.clock(),
+                                      "status": status}
+        result["candidate_step"] = f"{subject}：{step}"[:200]
+
+    def _candidate_step(self, company_ref: str, spec_ref: str) -> str | None:
+        """The fresh step note for one (company, spec), if an attempt left one."""
+
+        entry = self._candidate_steps.get((company_ref, spec_ref))
+        if not entry:
+            return None
+        try:
+            if self.clock() - entry["at"] > CANDIDATE_STEP_FRESH_FOR:
+                return None
+        except (KeyError, TypeError):
+            return None
+        return entry.get("step")
+
+    def _quarantine_selection(self, document: Mapping[str, Any], discovery: Mapping[str, Any],
+                              spec: Mapping[str, Any], exc: Exception | None = None, *,
+                              reason: str | None = None, error_type: str | None = None,
+                              extra_detail: Mapping[str, Any] | None = None) -> dict[str, Any]:
+        from .discovery_candidate_selection import SELECTION_RULES_VERSION
+
+        if exc is not None:
+            reason = f"{type(exc).__name__}: {exc}"
+            error_type = type(exc).__name__
+        reason = str(reason or "selection refused")[:500]
+        error_type = str(error_type or "SelectionRefused")
+        pending = {"status": "selection_pending", "reason": reason,
+                   "discovery_ref": document["discovery_ref"]}
+        if extra_detail and extra_detail.get("ticket_ref"):
+            pending["ticket_ref"] = extra_detail["ticket_ref"]
+        quarantine = self._selection_quarantine()
+        if quarantine is None:
+            return pending
+        try:
+            record = quarantine.quarantine(
+                discovery_ref=document["discovery_ref"], reason=reason,
+                error_type=error_type, rules_version=SELECTION_RULES_VERSION,
+                detail={"source_ref": self.source_ref, "company_ref": document.get("company_ref"),
+                        "spec_ref": spec.get("spec_ref"),
+                        "source_envelope_ref": discovery.get("source_envelope_ref"),
+                        "mission_version_ref": document.get("mission_version_ref"),
+                        **dict(extra_detail or {})})
+        except Exception as write_error:
+            return {**pending,
+                    "reason": f"{reason}; quarantine unwritable: {type(write_error).__name__}"[:500]}
+        return {"status": "selection_quarantined", "reason": reason,
+                "discovery_ref": document["discovery_ref"],
+                **({"ticket_ref": pending["ticket_ref"]} if "ticket_ref" in pending else {}),
+                "rules_version": record.get("rules_version"),
+                "quarantined_at": record.get("quarantined_at")}
+
+    def _quarantine_exhausted_selection(self, document: Mapping[str, Any],
+                                        discovery: Mapping[str, Any], spec: Mapping[str, Any],
+                                        ticket: Mapping[str, Any]) -> dict[str, Any]:
+        """Set aside a discovery whose selection failed every attempt it is allowed.
+
+        2026-10-02: a single failed selection ticket (``database is locked``
+        on legacy, a model reply in the wrong shape on ws-7d) held every
+        AlphaEngine acquisition behind ``selection_pending: exhausted`` for
+        days.  The launcher now retries a failed ticket a bounded number of
+        times; what is still failing after that is quarantined like a
+        synchronous refusal, so the discovery behind it is taken next.
+        """
+
+        failure = str(ticket.get("failure_reason") or "selection child failed")
+        error_type = failure.split(":", 1)[0].strip() if ":" in failure else ""
+        if not re.fullmatch(r"[A-Za-z_][A-Za-z0-9_.]{0,99}", error_type):
+            error_type = "SelectionTicketFailed"
+        attempts = ticket.get("attempts")
+        return self._quarantine_selection(
+            document, discovery, spec,
+            reason=f"selection exhausted after {attempts} attempt(s): {failure}",
+            error_type="DiscoverySelectionExhausted",
+            extra_detail={"ticket_ref": ticket.get("id"),
+                          "recovery_epoch": ticket.get("recovery_epoch"),
+                          "attempts": attempts,
+                          "failure_reason": failure[:500],
+                          "failure_type": error_type,
+                          "ticket_completed_at": ticket.get("completed_at")})
+
     def launch_acquisition(self) -> dict[str, Any]:
+        """Acquire the next queued document, or say exactly why not.
+
+        2026-10-08 (ws-7d MSFT FY2026-Q4): a selected transcript waited behind
+        ``budget_exhausted`` while the ledger said ``idle`` and the search note
+        said "等选取/获取".  Every outcome now carries, for the (company, spec)
+        it concerns, the step the candidate is really at (``candidate_step``);
+        the next search of that spec names it instead of the generic words.
+        """
+
+        self._acquisition_trace: dict[str, Any] = {}
+        result = self._launch_acquisition()
+        try:
+            self._note_candidate_step(result)
+        except Exception:  # noqa: BLE001 - a display note must never block a fetch
+            pass
+        return result
+
+    def _launch_acquisition(self) -> dict[str, Any]:
         if self.acquisition_launcher is None:
             queued = self.missions.next_discovered_document(source_ref=self.source_ref)
             return {
@@ -2384,6 +3389,9 @@ class MissionSourceDiscoveryCoordinator:
             }
         if self.missions.launched_discovered_documents(limit=1, source_ref=self.source_ref):
             return {"status": "busy", "reason": "a discovered-document acquisition is still open"}
+        hold = self._health_hold()
+        if hold is not None:
+            return hold
         retry = False
         cooldowns = ([] if not self.failure_cooldown else self.missions.host_failure_cooldowns(
             source_ref=self.source_ref, as_of=self.clock(), **self.failure_cooldown))
@@ -2405,8 +3413,9 @@ class MissionSourceDiscoveryCoordinator:
             "first": needs[0] if needs else None,
         }
         empty_discoveries = ()
+        stage_rows: list[dict[str, Any]] | None = None
         current_selection_refs = None
-        selected_document_types = {"meeting_minutes", "sell_side_report"}
+        selected_document_types = SELECTED_DOCUMENT_TYPES
         selection_required = (
             self.source_ref == ALPHAENGINE_SOURCE_REF
             and self.plan.get("schema_version") == DISCOVERY_PLAN_SCHEMA_VERSION_V6
@@ -2422,7 +3431,10 @@ class MissionSourceDiscoveryCoordinator:
             from .mission_stage import evaluate_mission
             periods_by_company={}
             if mission is not None:
-                for company_stage in evaluate_mission(self.store.connection,mission):
+                # Read once: the selection step below needs the same rows, and
+                # the checklist is the slowest read of the acquire step.
+                stage_rows = evaluate_mission(self.store.connection, mission)
+                for company_stage in stage_rows:
                     calls=next((item for item in company_stage['items']
                                 if item['item_ref']=='earnings_calls'),None)
                     periods_by_company[company_stage['company_ref']]=list(
@@ -2432,6 +3444,26 @@ class MissionSourceDiscoveryCoordinator:
             current_selection_refs=tuple(ref for refs in self.selection_launcher.current_selections(
                 mission_ref=mission['id'],missing_periods_by_company=periods_by_company).values()
                 for ref in refs) if mission else ()
+            quarantined = self._quarantined_discoveries()
+            if quarantined:
+                empty_discoveries = tuple(dict.fromkeys((*empty_discoveries, *quarantined)))
+        # ADR-0015: an SEC spec with a code-owned item filter (the Item 2.02
+        # earnings-release 8-K) fetches only filings that carry the item.
+        ineligible_refs: tuple[str, ...] = ()
+        if self.source_ref == SEC_SOURCE_REF:
+            from .earnings_release_intake import ineligible_filing_refs
+
+            ineligible_refs = ineligible_filing_refs(self.store.connection, self.plan)
+        # 2026-10-09: documents the owner gave up on (「放弃这份资料」 on a
+        # capped-fetch card) are never offered for a fetch or a retry again.
+        from .needs_human_ack import abandoned_document_refs
+
+        try:
+            abandoned = abandoned_document_refs(self.store.connection)
+        except sqlite3.Error:
+            abandoned = ()
+        if abandoned:
+            ineligible_refs = tuple(dict.fromkeys((*ineligible_refs, *abandoned)))
         document = self.missions.next_discovered_document(
             source_ref=self.source_ref,
             preferred_hosts=self.preferred_hosts,
@@ -2440,7 +3472,9 @@ class MissionSourceDiscoveryCoordinator:
             excluded_needs=stopped_needs,
             excluded_mission_version_ref=None if mission is None else mission["id"],
             excluded_discovery_refs=empty_discoveries,
+            excluded_document_refs=ineligible_refs,
         )
+        self._acquisition_trace["document"] = document
         if document is not None and selection_required and self.selection_launcher is None:
             discovery = self.missions.discovery_record(document["discovery_ref"])
             spec = next((item for item in self.plan["specs"]
@@ -2456,19 +3490,22 @@ class MissionSourceDiscoveryCoordinator:
             spec=next((item for item in self.plan["specs"]
                        if item["spec_ref"] == discovery["spec_ref"]), None)
             if spec is not None and spec["document_type"] in selected_document_types:
+                from .discovery_candidate_selection import CandidateSelectionError, candidate_view
                 try:
-                    from .discovery_candidate_selection import candidate_view
                     row=self.store.connection.execute("SELECT record_json,content_hash FROM connector_source_envelopes WHERE source_envelope_id=?",(discovery["source_envelope_ref"],)).fetchone()
                     if row is None: raise ValueError("source envelope missing")
                     envelope=json.loads(row["record_json"])
                     if envelope.get("content_hash") != row["content_hash"]: raise ValueError("source envelope drifted")
                     if self._spool is None: self._spool=RawSpool(str(self.spool_dir),max_total_bytes=1_000_000_000)
-                    view=candidate_view(self._spool.read_object(envelope["raw_response_hash"]),envelope)
+                    view=candidate_view(self._spool.read_object(envelope["raw_response_hash"]),envelope,
+                                        priority_terms=self._covered_company_names(mission))
                     member=next(x for x in mission["universe"] if x["company_ref"]==document["company_ref"])
                     company_plan=self.plan["companies"][document["company_ref"]]
                     terms=company_plan.get("name",company_plan.get("search_terms"))
                     from .mission_stage import evaluate_mission
-                    stage=next(x for x in evaluate_mission(self.store.connection,mission) if x["company_ref"]==document["company_ref"])
+                    if stage_rows is None:
+                        stage_rows = evaluate_mission(self.store.connection, mission)
+                    stage=next(x for x in stage_rows if x["company_ref"]==document["company_ref"])
                     item=next(x for x in stage["items"] if x["item_ref"]=="earnings_calls")
                     ticket=self.selection_launcher.start(discovery_ref=document["discovery_ref"],view=view,
                         mission_ref=mission["id"],company={"company_ref":document["company_ref"],"name":terms,
@@ -2476,11 +3513,23 @@ class MissionSourceDiscoveryCoordinator:
                         missing_periods=(list(item.get("missing_periods") or ())
                                          if spec["document_type"] == "meeting_minutes" else []),
                         selection_context=self._selection_context(mission, spec))
+                except CandidateSelectionError as exc:
+                    # The same bytes, plan and mission refuse the same way on
+                    # every tick: set this one discovery aside and let the
+                    # queue behind it move (2026-09-29, both environments).
+                    return self._quarantine_selection(document, discovery, spec, exc)
                 except Exception as exc:
-                    return {"status":"selection_pending","reason":f"{type(exc).__name__}: {exc}"[:500]}
+                    return {"status":"selection_pending","reason":f"{type(exc).__name__}: {exc}"[:500],
+                            "discovery_ref":document["discovery_ref"]}
+                if ticket["status"] == "exhausted":
+                    # Every allowed attempt failed: set this one discovery
+                    # aside instead of holding the queue (2026-10-02).
+                    return self._quarantine_exhausted_selection(document, discovery, spec, ticket)
                 if ticket["status"] != "succeeded" or not isinstance(ticket.get("summary"),Mapping) or ticket["summary"].get("status") != "succeeded":
-                    return {"status":"selection_pending","ticket_ref":ticket.get("id"),"reason":ticket["status"]}
+                    return {"status":"selection_pending","ticket_ref":ticket.get("id"),"reason":ticket["status"],
+                            "discovery_ref":document["discovery_ref"]}
                 selected = list(ticket.get("effective_selected") or ())
+                self._acquisition_trace["selection_ticket"] = ticket.get("id")
                 if not selected:
                     self.selection_launcher.mark_consumed(ticket)
                     return {"status":"completed_empty","ticket_ref":ticket["id"],"discovery_ref":document["discovery_ref"]}
@@ -2492,9 +3541,16 @@ class MissionSourceDiscoveryCoordinator:
                     self.selection_launcher.mark_consumed(ticket)
                     return {"status":"completed_selected","ticket_ref":ticket["id"],
                             "discovery_ref":discovery["id"]}
+        capped: list[dict[str, Any]] = []
         if document is None:
             # No fresh documents: retry the oldest acquisition failure whose
             # interval has passed (e.g. a child orphaned by a deploy restart).
+            # P2-5: except documents that failed FETCH_FAILURE_CAP times in a
+            # row -- they rest for FETCH_FAILURE_COOLDOWN instead of being
+            # fetched again every hour.  The one immediate pass after a
+            # restart still offers them: new code is the likeliest fix.
+            capped = self.missions.capped_failed_documents(
+                as_of=self.clock(), source_ref=self.source_ref)
             document = self.missions.retryable_failed_document(
                 older_than=(
                     _IMMEDIATE_RETRY if self._retry_failures_now
@@ -2508,6 +3564,9 @@ class MissionSourceDiscoveryCoordinator:
                 included_document_refs=current_selection_refs,
                 restricted_spec_refs=tuple(spec['spec_ref'] for spec in self.plan['specs']
                                            if spec.get('document_type') in selected_document_types),
+                excluded_document_refs=(
+                    ineligible_refs if self._retry_failures_now
+                    else (*ineligible_refs, *(item["document_ref"] for item in capped))),
             )
             retry = document is not None
         recovery_probe = False
@@ -2521,15 +3580,27 @@ class MissionSourceDiscoveryCoordinator:
                 document = self.missions.next_discovered_document(
                     source_ref=self.source_ref, included_hosts=probe_hosts,
                     preferred_needs=needs, excluded_needs=stopped_needs,
-                    excluded_mission_version_ref=None if mission is None else mission["id"])
+                    excluded_mission_version_ref=None if mission is None else mission["id"],
+                    excluded_document_refs=ineligible_refs)
                 if document is None:
                     document = self.missions.retryable_failed_document(
                         older_than=_IMMEDIATE_RETRY, as_of=self.clock(),
                         source_ref=self.source_ref, recovery_probe_hosts=probe_hosts,
                         excluded_needs=stopped_needs,
-                        excluded_mission_version_ref=None if mission is None else mission["id"])
+                        excluded_mission_version_ref=None if mission is None else mission["id"],
+                        excluded_document_refs=abandoned)
                     retry = document is not None
                 recovery_probe = document is not None
+        if document is not None:
+            self._acquisition_trace["document"] = document
+        if (document is None and self.source_ref == SEC_SOURCE_REF and mission is not None
+                and callable(getattr(self.acquisition_launcher, "start_exhibit_redetect", None))):
+            # 2026-10-09 (ADR-0015 follow-up): with nothing else to fetch, look
+            # again -- once per detector version -- for the press release of an
+            # Item 2.02 8-K whose exhibit an older detector could not identify.
+            redetect = self._earnings_exhibit_redetect(mission)
+            if redetect is not None:
+                return redetect
         if document is None:
             idle: dict[str, Any] = {
                 "status": "idle", "stage_order": stage_order,
@@ -2543,6 +3614,8 @@ class MissionSourceDiscoveryCoordinator:
             if cooldown_hosts:
                 idle["held_by_host_quarantine"] = self.missions.discovered_documents_held_by_skip(
                     source_ref=self.source_ref, skip_hosts=cooldown_hosts)
+            if capped:
+                idle["held_by_failure_cap"] = capped
             return idle
         if document is not None and self._document_in_authority(
             document["document_ref"], document.get("discovery_ref")
@@ -2578,8 +3651,14 @@ class MissionSourceDiscoveryCoordinator:
                 "document_ref": document["document_ref"],
                 "reason": f"{type(exc).__name__}: {exc}",
             }
-        budget = self._budget(authorization["max_alphaengine_calls_24h"])
+        budget = self._budget(authorization["max_alphaengine_calls_24h"],
+                              purpose="acquisition")
         if budget["remaining"] < 1:
+            if self.source_ref == ALPHAENGINE_SOURCE_REF:
+                frees_at = alphaengine_budget_frees_at(
+                    self.store.connection, budget, as_of=self.clock())
+                if frees_at is not None:
+                    budget["frees_at"] = frees_at
             return {"status": "budget_exhausted", "budget": budget,
                     "document_ref": document["document_ref"], "stage_order": stage_order}
         try:
@@ -2605,6 +3684,38 @@ class MissionSourceDiscoveryCoordinator:
             "cooldown_hosts": cooldowns,
             **({"host_recovery_probe": True} if recovery_probe else {}),
         }
+
+    def _earnings_exhibit_redetect(self, mission: Mapping[str, Any]) -> dict[str, Any] | None:
+        """Launch one exhibit re-detection, or ``None`` when none is due."""
+
+        from .earnings_release_intake import core_state_dir, exhibit_redetect_candidates
+
+        state = core_state_dir(self.store.connection)
+        if state is None:
+            return None
+        try:
+            due = exhibit_redetect_candidates(self.store.connection, state, limit=1)
+            if not due:
+                # 2026-10-09: a 10-K fetched before its Exhibit 13 (the annual
+                # report it incorporates by reference) was looked for.
+                from .sec_annual_report_exhibit import redetect_candidates
+
+                due = redetect_candidates(self.store.connection, state, limit=1)
+        except (sqlite3.Error, OSError, ValueError):
+            return None
+        if not due:
+            return None
+        item = due[0]
+        try:
+            ticket = self.acquisition_launcher.start_exhibit_redetect(
+                ticket_ref=item["ticket_ref"],
+                caller_ref=mission["autonomy"]["automation_principal"])
+        except Exception as exc:  # noqa: BLE001 - busy slot or refusal: try next tick
+            return {"status": "exhibit_redetect_deferred", "ticket_ref": item["ticket_ref"],
+                    "accession": item["accession"], "reason": f"{type(exc).__name__}: {exc}"[:300]}
+        return {"status": "exhibit_redetect_launched", "accession": item["accession"],
+                "company_ref": item["company_ref"], "for_ticket_ref": item["ticket_ref"],
+                "ticket_ref": ticket.get("id")}
 
     def _acquire_within_budget(
         self, settled_documents: list[Any], deadline: float | None = None,
@@ -2637,6 +3748,10 @@ class MissionSourceDiscoveryCoordinator:
                 break
             acquisition = self.launch_acquisition()
             acquisitions.append(acquisition)
+            if acquisition.get("status") == SELECTION_QUARANTINED:
+                # One discovery was set aside; the next one is worth trying
+                # inside the same tick rather than five minutes later.
+                continue
             if acquisition.get("status") != "launched":
                 break
             wait = getattr(self.acquisition_launcher, "wait", None)
@@ -2680,39 +3795,71 @@ class MissionSourceDiscoveryCoordinator:
         own_deadline = _monotonic() + max(0.0, self.tick_budget_seconds)
         deadline = own_deadline if deadline is None else min(own_deadline, deadline)
         retried_after_restart = self._retry_failures_now
-        settled_dispatches = self.settle_dispatches(deadline)
-        recovered_dispatches = self.recover_local_web_discoveries(deadline=deadline)
-        settled_documents = self.settle_documents(deadline)
-        # P9d-12/13 maintenance, all before any new spend: documents stranded
-        # by a mission version change come back under the current grant,
-        # pre-ledger rows learn their host, and documents already held owe a
-        # review rather than a fetch.
-        carried_forward = self.carry_forward(deadline)
-        host_backfill = self.backfill_hosts(deadline=deadline)
-        already_held = self.settle_already_held(deadline)
-        review_backfill = self.missions.backfill_document_reviews(
-            self.plan["mission_ref"], deadline=deadline)
-        # Acquiring an already-discovered document comes before spending the
-        # shared budget on a new search: known gaps first, then new ones.
-        #
-        # P10x: keep acquiring while there is queued work and budget for it.
-        # One document per tick was not a throughput choice, it was an
-        # accident of settlement: the child fetches in about 0.1s and then the
-        # ticket waits for the next 300s tick to notice, so a queue of 130
-        # documents took eleven hours to move about thirteen seconds of work.
-        # Waiting for the child here costs a fraction of a second and settles
-        # it immediately, so the next one can start inside the same tick.
-        #
-        # P12e: and it keeps going only while the tick still has time. The
-        # deadline is on the loop, not on each acquisition, because the
-        # writer's patience is spent by the whole request.
-        acquisitions, out_of_time, settled_documents = self._acquire_within_budget(
-            settled_documents, deadline)
-        discovery = (
-            {"status": "deferred", "reason": "tick budget exhausted"}
-            if deadline is not None and _monotonic() >= deadline
-            else self.launch_discovery()
-        )
+        # 2026-10-04: where the share went, per step, in the ledger -- the
+        # ws-7d starvation had to be reconstructed from sampled timings.
+        steps = {"settle": 0.0, "carry": 0.0, "held": 0.0, "acquire": 0.0, "search": 0.0}
+
+        def timed(step: str, call: Callable[[], Any]) -> Any:
+            started = _monotonic()
+            try:
+                return call()
+            finally:
+                steps[step] += max(0.0, _monotonic() - started)
+
+        def search() -> dict[str, Any]:
+            if deadline is not None and _monotonic() >= deadline:
+                return {"status": "deferred", "reason": DISCOVERY_DEFERRED_REASON}
+            # Batch E: a MaterialRequest's targeted query takes the slot first.
+            targeted = timed("search", self.launch_targeted_discovery)
+            if targeted is not None and targeted.get("status") in ("launched", "health_hold"):
+                return targeted
+            return timed("search", self.launch_discovery)
+
+        # A search the deadline deferred SEARCH_STARVATION_TICKS ticks running
+        # goes first this tick, straight after its own dispatches settle (an
+        # open dispatch is what tells it a search is still running).
+        search_first = self._search_deferred_ticks >= SEARCH_STARVATION_TICKS
+        self._tick_shared_view = _TICK_CACHE_UNREAD
+        try:
+            settled_dispatches = timed("settle", lambda: self.settle_dispatches(deadline))
+            discovery = search() if search_first else None
+            recovered_dispatches = timed(
+                "settle", lambda: self.recover_local_web_discoveries(deadline=deadline))
+            settled_documents = timed("settle", lambda: self.settle_documents(deadline))
+            # P9d-12/13 maintenance, all before any new spend: documents stranded
+            # by a mission version change come back under the current grant,
+            # pre-ledger rows learn their host, and documents already held owe a
+            # review rather than a fetch.
+            carried_forward = timed("carry", lambda: self.carry_forward(deadline))
+            host_backfill = timed("carry", lambda: self.backfill_hosts(deadline=deadline))
+            already_held = timed("held", lambda: self.settle_already_held(deadline))
+            review_backfill = timed("held", lambda: self.missions.backfill_document_reviews(
+                self.plan["mission_ref"], deadline=deadline))
+            # Acquiring an already-discovered document comes before spending the
+            # shared budget on a new search: known gaps first, then new ones --
+            # unless the search has been starved (above).
+            #
+            # P10x: keep acquiring while there is queued work and budget for it.
+            # One document per tick was not a throughput choice, it was an
+            # accident of settlement: the child fetches in about 0.1s and then the
+            # ticket waits for the next 300s tick to notice, so a queue of 130
+            # documents took eleven hours to move about thirteen seconds of work.
+            # Waiting for the child here costs a fraction of a second and settles
+            # it immediately, so the next one can start inside the same tick.
+            #
+            # P12e: and it keeps going only while the tick still has time. The
+            # deadline is on the loop, not on each acquisition, because the
+            # writer's patience is spent by the whole request.
+            acquisitions, out_of_time, settled_documents = timed(
+                "acquire", lambda: self._acquire_within_budget(settled_documents, deadline))
+            if discovery is None:
+                discovery = search()
+        finally:
+            self._tick_shared_view = _NO_TICK_CACHE
+        if discovery.get("status") == "deferred":
+            self._search_deferred_ticks += 1
+        else:
+            self._search_deferred_ticks = 0
         launched = [item for item in acquisitions if item.get("status") == "launched"]
         launched_documents = len(launched)
         # Report the first document this tick actually took, not the attempt
@@ -2726,6 +3873,19 @@ class MissionSourceDiscoveryCoordinator:
         # so a document that fails for a permanent reason is not hot-looped.
         self._retry_failures_now = False
         active = discovery.get("status") == "launched" or launched_documents > 0
+        quarantined_now = [item.get("discovery_ref") for item in acquisitions
+                           if item.get("status") == SELECTION_QUARANTINED]
+        selection: dict[str, Any] = {}
+        if quarantined_now:
+            selection["selection_quarantined_now"] = quarantined_now
+        if self.selection_launcher is not None:
+            selection["selection_quarantined"] = len(self._quarantined_discoveries())
+        # Said once per load: the first tick's ledger records which form set
+        # this plan renders and what the approved file's own forms were.
+        query_forms = getattr(self, "query_forms", None)
+        if query_forms:
+            selection["query_forms"] = dict(query_forms)
+            self.query_forms = None
         return {
             "status": "launched" if active else "idle",
             "source_ref": self.source_ref,
@@ -2746,6 +3906,14 @@ class MissionSourceDiscoveryCoordinator:
             # tick that found nothing to do.
             "tick_budget_exhausted": out_of_time,
             "retried_after_restart": retried_after_restart,
+            # Nested, so the lane's own bounded counts (capped at twelve keys)
+            # keep what they kept; the coordinator state flattens it.
+            "tick_steps": {
+                "seconds": {key: round(value, 3) for key, value in steps.items()},
+                "search_first": search_first,
+                "search_blocked_reason": search_blocked_reason(discovery),
+            },
+            **selection,
         }
 
 
@@ -2779,6 +3947,159 @@ def discovery_coordinator_order(
     )
 
 
+#: How long an acquisition attempt's step note stays the word for its
+#: candidate.  Ticks run every five minutes; an hour-old note is history.
+CANDIDATE_STEP_FRESH_FOR = timedelta(hours=1)
+
+
+def _budget_phrase(budget: Any) -> str:
+    """An exhausted call budget, in the owner's words, with when it comes back."""
+
+    if not isinstance(budget, Mapping):
+        return "调用额度已用完"
+    text = f"24 小时调用额度已用完（已用 {budget.get('spent')}/{budget.get('cap')}"
+    held = budget.get("search_floor_held")
+    if isinstance(held, int) and not isinstance(held, bool) and held > 0:
+        text += f"，另有 {held} 次留给搜索"
+    text += "）"
+    frees_at = budget.get("frees_at")
+    if isinstance(frees_at, str) and frees_at:
+        text += f"，约 {frees_at[:16].replace('T', ' ')} UTC 起恢复"
+    return text
+
+
+def candidate_step_text(acquisition: Mapping[str, Any], *, selected: bool = False) -> str | None:
+    """The step a found candidate is really at, from one acquisition outcome.
+
+    ``selected`` says a successful selection ticket chose the document the
+    attempt was about to fetch.  ``None`` for an outcome that says nothing
+    about a candidate (an empty queue).
+    """
+
+    status = str(acquisition.get("status") or "")
+    reason = acquisition.get("reason")
+    reason = reason.strip()[:120] if isinstance(reason, str) else ""
+    waiting = "候选已选中，等待获取" if selected else "已找到，等待获取"
+    if status == "budget_exhausted":
+        source = "AlphaEngine " if str(acquisition.get("document_ref") or "").startswith(
+            "alphaengine-doc:") else ""
+        return f"{waiting}：{source}{_budget_phrase(acquisition.get('budget'))}"
+    if status == SELECTION_PENDING:
+        if reason == "running":
+            return "候选选取中"
+        if reason == "cooldown":
+            return "候选选取失败，冷却后重试"
+        if reason == "busy":
+            return "等待候选选取（另一个选取正在运行）"
+        return "候选选取未完成：" + (reason or "原因未记录")
+    if status == "selection_unavailable":
+        return "候选选取未配置：" + (reason or "原因未记录")
+    if status == SELECTION_QUARANTINED:
+        return "候选被规则拒绝：" + (reason or "原因未记录")
+    if status == "completed_empty":
+        return "候选已选取，没有符合的文档，下次重新搜索"
+    if status == "completed_selected":
+        return "选中的候选已不在待取队列，下次重新搜索"
+    if status == "busy":
+        return f"{waiting}：另一份文档正在获取"
+    if status == "health_hold":
+        return f"{waiting}：来源登录失效，暂停获取"
+    if status in {"not_authorized", "rejected", "unconfigured"}:
+        return f"{waiting}：" + (reason or status)
+    return None
+
+
+def acquisition_reason_text(acquisition: Mapping[str, Any]) -> str | None:
+    """Why an acquisition attempt launched nothing, for the ledger (<= 200 chars).
+
+    Its own ``reason`` when it has one; otherwise what its fields say -- the
+    budget it hit, the ticket it consumed -- plus the document concerned.
+    """
+
+    status = str(acquisition.get("status") or "")
+    reason = acquisition.get("reason")
+    if isinstance(reason, str) and reason:
+        return reason[:200]
+    text = ""
+    if status == "budget_exhausted":
+        budget = acquisition.get("budget")
+        budget = budget if isinstance(budget, Mapping) else {}
+        text = (f"24h calls {budget.get('spent')}/{budget.get('cap')} "
+                f"(bound by {budget.get('bound_by')}")
+        if budget.get("search_floor_held"):
+            text += f"; search floor holds {budget['search_floor_held']}"
+        text += ")"
+        if budget.get("frees_at"):
+            text += f"; next call frees at {budget['frees_at']}"
+    elif status in {"completed_empty", "completed_selected"}:
+        text = f"selection {acquisition.get('ticket_ref')} consumed"
+    elif status == "already_in_authority":
+        text = f"already held; settled {acquisition.get('settled_status')}"
+    subject = acquisition.get("document_ref") or acquisition.get("discovery_ref")
+    if isinstance(subject, str) and subject:
+        text = f"{text}; {subject}" if text else subject
+    return text[:200] or None
+
+
+def missing_periods_note(missing: Sequence[str],
+                         candidate_periods: Collection[str] = (),
+                         step: str | None = None) -> str:
+    """The periods a period-based spec still lacks, for the tick reason ('' if none).
+
+    ``step`` is what the latest acquisition attempt said about the found
+    candidate (``candidate_step_text``); without one the note keeps its
+    generic words.
+    """
+
+    if not missing:
+        return ""
+    note = "；仍缺 " + "、".join(missing)
+    found = [period for period in missing if period in candidate_periods]
+    if found and step:
+        note += "（" + "、".join(found) + " " + step + "）"
+    elif found:
+        note += "（" + "、".join(found) + " 已找到候选，等选取/获取）"
+    else:
+        note += f"，下一次搜 {quarter_title_label(missing[0])}"
+    return note
+
+
+def search_blocked_reason(discovery: Mapping[str, Any] | None) -> str | None:
+    """Why this tick's search launched nothing, in one short line; None if it launched.
+
+    Deferred and refused searches say their own reason. An idle search names
+    each (company, spec) it passed over with the gate that held it, which is
+    the line the 2026-10-04 inspection needed ("rediscovered 1d ago; interval
+    7d") and could only get by re-deriving the cadence by hand.
+    """
+
+    if not isinstance(discovery, Mapping):
+        return None
+    status = str(discovery.get("status") or "")
+    if status == "launched":
+        return None
+    reason = discovery.get("reason")
+    if isinstance(reason, str) and reason:
+        return f"{status}: {reason}"[:200] if status else reason[:200]
+    skipped = discovery.get("skipped")
+    if isinstance(skipped, list) and skipped:
+        parts = []
+        for item in skipped:
+            if not isinstance(item, Mapping):
+                continue
+            company = str(item.get("company_ref") or "").rsplit(":", 1)[-1]
+            spec = item.get("spec_ref")
+            subject = f"{company}/{spec}" if spec else company
+            parts.append(f"{subject}: {item.get('reason')}")
+        if parts:
+            # 2026-10-08: the ledger keeps 200 characters, and the entries
+            # that name a missing period are the ones an owner is waiting on;
+            # alphabetical order hid GOOGL/MSFT behind AMZN's satisfied specs.
+            parts.sort(key=lambda part: "仍缺" not in part)
+            return "; ".join(parts)[:200]
+    return status[:200] or None
+
+
 def discovery_coordinator_state(result: Mapping[str, Any]) -> dict[str, Any]:
     """One coordinator's tick, reduced to what the tick ledger and heartbeat keep.
 
@@ -2801,10 +4122,69 @@ def discovery_coordinator_state(result: Mapping[str, Any]) -> dict[str, Any]:
     state: dict[str, Any] = {"status": status}
     if isinstance(reason, str) and reason:
         state["reason"] = reason[:200]
+    if discovery.get("status") == "health_hold":
+        # 2026-10-08: the source's login lapsed; said in the ledger by name.
+        state["connector_health"] = "provider_auth_hold"
+        if isinstance(discovery.get("hold_until"), str):
+            state["health_hold_until"] = discovery["hold_until"]
     if result.get("tick_budget_exhausted"):
         state["budget_exhausted"] = True
     if isinstance(result.get("acquisitions_launched"), int):
         state["acquisitions_launched"] = result["acquisitions_launched"]
+    # 2026-09-29: what the acquisition side said when it did not move.  The
+    # AlphaEngine queue sat behind ``selection_pending`` for days while this
+    # state said ``idle`` and nothing else.
+    acquisition = result.get("acquisition")
+    acquisition = acquisition if isinstance(acquisition, Mapping) else {}
+    # 2026-10-08: every outcome but a launch or an empty queue, not only the
+    # selection holds -- ws-7d's selected MSFT transcript sat behind
+    # ``budget_exhausted`` for hours under a plain ``idle``.
+    acquisition_status = acquisition.get("status")
+    if isinstance(acquisition_status, str) and acquisition_status not in {"", "launched", "idle"}:
+        state["acquisition_status"] = acquisition_status[:200]
+        acquisition_reason = acquisition_reason_text(acquisition)
+        if acquisition_reason:
+            state["acquisition_reason"] = acquisition_reason
+        step = acquisition.get("candidate_step")
+        if isinstance(step, str) and step:
+            state["candidate_step"] = step[:200]
+    quarantined = result.get("selection_quarantined")
+    if isinstance(quarantined, int) and not isinstance(quarantined, bool) and quarantined > 0:
+        state["selection_quarantined"] = quarantined
+    # 2026-10-04: where the share went, flat so the ledger keeps it, and what
+    # held the search when it launched nothing.
+    tick_steps = result.get("tick_steps")
+    tick_steps = tick_steps if isinstance(tick_steps, Mapping) else {}
+    step_seconds = tick_steps.get("seconds")
+    if isinstance(step_seconds, Mapping):
+        for step in DISCOVERY_STEP_NAMES:
+            value = step_seconds.get(step)
+            if isinstance(value, (int, float)) and not isinstance(value, bool):
+                state[f"{step}_seconds"] = round(float(value), 3)
+    blocked = tick_steps.get("search_blocked_reason")
+    if status == "deferred" and not blocked:
+        # Skipped before its turn: the writer's stand-in result has no steps.
+        blocked = reason
+    if isinstance(blocked, str) and blocked:
+        state["search_blocked_reason"] = blocked[:200]
+    if tick_steps.get("search_first"):
+        state["search_first"] = True
+    query_forms = result.get("query_forms")
+    if isinstance(query_forms, Mapping):
+        for key in ("query_forms", "query_forms_hash", "query_forms_note"):
+            value = query_forms.get(key)
+            if isinstance(value, str) and value:
+                state[key] = value[:200]
+    # A search that ran and failed is not an idle coordinator either (ws-7d's
+    # SEC filings index, 2026-09-27..29: every search refused at lease use).
+    settled = result.get("settled_dispatches")
+    failures = [item for item in settled if isinstance(item, Mapping)
+                and item.get("status") == "failed"] if isinstance(settled, list) else []
+    if failures:
+        state["discovery_failures"] = len(failures)
+        first = failures[0].get("reason")
+        if isinstance(first, str) and first:
+            state["discovery_failure_reason"] = first[:200]
     return state
 
 
@@ -2816,8 +4196,19 @@ __all__ = [
     "DISCOVERY_COORDINATOR_KEYS",
     "DISCOVERY_DEFERRED_REASON",
     "DISCOVERY_ROTATION_FILENAME",
+    "SELECTION_BLOCKED_STATUSES",
+    "SELECTION_PENDING",
+    "SELECTION_QUARANTINED",
     "discovery_coordinator_order",
     "discovery_coordinator_state",
+    "DISCOVERY_STEP_NAMES",
+    "SEARCH_STARVATION_TICKS",
+    "missing_periods_note",
+    "candidate_step_text",
+    "acquisition_reason_text",
+    "alphaengine_budget_frees_at",
+    "CANDIDATE_STEP_FRESH_FOR",
+    "search_blocked_reason",
     "DISCOVERY_PLAN_SCHEMA_VERSION_V2",
     "DISCOVERY_PLAN_SCHEMA_VERSION_V3",
     "DISCOVERY_PLAN_SCHEMA_VERSIONS",

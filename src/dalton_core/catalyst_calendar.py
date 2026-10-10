@@ -579,6 +579,15 @@ class CatalystCalendarAuthority:
         latest = self.latest_version(company_ref)
         return [] if latest is None else [dict(entry) for entry in latest["entries"]]
 
+    def timeline(self, company_ref: str, now: datetime | date | None = None) -> list[dict[str, Any]]:
+        """Current source dates, including explicitly classified past entries."""
+        from .research_lifecycle import catalyst_status
+        today = _as_date(now)
+        latest = self.latest_version(company_ref)
+        return [] if latest is None else [{**self._reader_view(latest, entry, today),
+                                          **catalyst_status(self.connection, company_ref, entry, today)}
+                                         for entry in latest["entries"]]
+
     def next_catalyst(
         self, company_ref: str, now: datetime | date | None = None
     ) -> dict[str, Any] | None:
@@ -603,7 +612,10 @@ class CatalystCalendarAuthority:
             key=lambda item: (
                 item["expected_date"], item["event_kind"], item["anchor_date"]),
         )
-        return self._reader_view(latest, entry, today)
+        from .research_lifecycle import observation_points, catalyst_status
+        return {**self._reader_view(latest, entry, today),
+                **catalyst_status(self.connection, company_ref, entry, today),
+                **observation_points(self.connection, company_ref, entry, today)}
 
     def upcoming(
         self, now: datetime | date | None = None, horizon_days: int = 45
@@ -896,6 +908,53 @@ class CatalystCalendarAuthority:
         return {"status": "fresh", **stored}
 
 
+def entry_for_event(
+    connection: sqlite3.Connection, company_ref: str, event_day: str, *,
+    event_kind: str = "earnings", window_days: int = 7,
+) -> dict[str, Any] | None:
+    """Batch F: the calendar entry an occurred event belongs to, read-only.
+
+    The newest calendar version's entry of ``event_kind`` whose expected (or
+    anchor) date is nearest ``event_day`` within ``window_days``; ``None`` when
+    the company has no calendar or no entry is that close.  The event
+    judgement stores the ref so an occurred catalyst points at its judgement
+    and the judgement at its catalyst.
+    """
+
+    try:
+        row = connection.execute(
+            "SELECT record_json FROM catalyst_calendar_versions WHERE calendar_ref=? "
+            "ORDER BY version_number DESC LIMIT 1", (calendar_ref_for(company_ref),),
+        ).fetchone()
+        day = date.fromisoformat(str(event_day)[:10])
+    except (sqlite3.Error, ValueError):
+        return None
+    if row is None:
+        return None
+    try:
+        version = json.loads(row[0])
+    except (TypeError, ValueError):
+        return None
+    best: tuple[int, dict[str, Any]] | None = None
+    for entry in version.get("entries") or ():
+        if entry.get("event_kind") != event_kind:
+            continue
+        for key in ("expected_date", "anchor_date"):
+            try:
+                distance = abs((date.fromisoformat(str(entry.get(key))[:10]) - day).days)
+            except ValueError:
+                continue
+            if distance <= window_days and (best is None or distance < best[0]):
+                best = (distance, entry)
+    if best is None:
+        return None
+    entry = best[1]
+    return {"entry_ref": entry.get("entry_ref") or entry.get("id"), "expected_date": entry.get("expected_date"),
+            "anchor_date": entry.get("anchor_date"), "confidence": entry.get("confidence"),
+            "event_kind": entry.get("event_kind"), "calendar_version_ref": version.get("id"),
+            "distance_days": best[0]}
+
+
 def _change(
     entry: Mapping[str, Any], kind: str, before: Any, after: Any
 ) -> dict[str, Any]:
@@ -950,6 +1009,9 @@ EVENT_WINDOWS: tuple[str, ...] = ("preview", "calibration", "date_change")
 # company has reported there is nothing to calibrate against; an estimated
 # date says a report is likely, not that one happened.
 UNCONFIRMED_DATE_WINDOWS: frozenset[str] = frozenset({"preview", "date_change"})
+#: ADR-0015: how long after a confirmed release learned late its calibration
+#: may still open (see ``emit_calendar_events``).
+LATE_CALIBRATION_MAX_DAYS = 45
 # What a renderer puts next to an unconfirmed date. Carried on the event rather
 # than left to each consumer to invent, so the caveat cannot be dropped by the
 # one place that forgets it.
@@ -1015,6 +1077,7 @@ def emit_calendar_events(
     now: datetime | date | None = None,
     version_ref: str | None = None,
     moved_entry_refs: Sequence[str] = (),
+    late_calibration_entry_refs: Sequence[str] = (),
 ) -> list[dict[str, Any]]:
     """Tell the event ledger which windows opened, through the caller's writer.
 
@@ -1053,6 +1116,11 @@ def emit_calendar_events(
 
     today = _as_date(now)
     moved = {str(ref) for ref in moved_entry_refs}
+    # ADR-0015: a release this Core learned of after its two-day window had
+    # closed (the 8-K reached the index late) -- the quarter is reported and
+    # not yet filed, so its calibration is still owed.  Confirmed-only, and
+    # bounded so an old quarter cannot reopen.
+    late = {str(ref) for ref in late_calibration_entry_refs}
     emitted: list[dict[str, Any]] = []
     for entry in entries:
         expected = entry["expected_date"]
@@ -1066,6 +1134,9 @@ def emit_calendar_events(
             if 0 < days_until <= PREVIEW_LEAD_DAYS:
                 windows.append("preview")
             elif -CALIBRATION_TRAILING_DAYS <= days_until <= 0:
+                windows.append("calibration")
+            elif (entry["entry_ref"] in late
+                  and -LATE_CALIBRATION_MAX_DAYS <= days_until < -CALIBRATION_TRAILING_DAYS):
                 windows.append("calibration")
         if entry["confidence"] != "confirmed":
             windows = [

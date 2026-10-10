@@ -1105,6 +1105,7 @@ def argv_fragment(context: Any) -> list[str]:
 
 LANE = register_lane(LaneSpec(
     operation="dispatch_mission_crowd_sources",
+    failure_ledger="crowd_source",
     # Last in the tick. The crowd is the least of the evidence, and a tick that
     # runs out of time should run out of it here rather than before a filing.
     # 120 belongs to the human-feeds lane; the gap is deliberate room between

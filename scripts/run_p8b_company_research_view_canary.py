@@ -172,10 +172,7 @@ def main() -> int:
     parser = argparse.ArgumentParser(description=__doc__)
     parser.add_argument(
         "--source-core", type=Path,
-        default=Path(
-            "/Users/everflow/Library/Application Support/Dalton/state/dalton-core/"
-            "core.sqlite"
-        ),
+        default=Path.home() / "Library/Application Support/Dalton/state/dalton-core/core.sqlite",
     )
     args = parser.parse_args()
     result = run(args.source_core.resolve())

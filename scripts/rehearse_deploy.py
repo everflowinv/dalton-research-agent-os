@@ -42,6 +42,7 @@ import sqlite3
 import subprocess
 import sys
 import threading
+import tempfile
 import time
 from contextlib import contextmanager
 from dataclasses import dataclass, field
@@ -634,6 +635,10 @@ INSTALL_SEEDS: tuple[SeedSpec, ...] = (
         "connector-governance/sec-financial-statements-v3.json",
     ),
     SeedSpec(
+        "deploy/connector-governance/sec-financial-statements-v4.json",
+        "connector-governance/sec-financial-statements-v4.json",
+    ),
+    SeedSpec(
         "deploy/connector-governance/yfinance-daily-prices-v1.json",
         "connector-governance/yfinance-daily-prices-v1.json",
     ),
@@ -670,6 +675,11 @@ INSTALL_SEEDS: tuple[SeedSpec, ...] = (
     SeedSpec(
         "deploy/connector-governance/ir-page-watch-get-diff-v1.json",
         "connector-governance/ir-page-watch-get-diff-v1.json",
+    ),
+    # Vision-gap #13: the owner delivery contract, proposed, no recipient.
+    SeedSpec(
+        "deploy/connector-governance/owner-delivery-feishu-v1.json",
+        "connector-governance/owner-delivery-feishu-v1.json",
     ),
     SeedSpec(
         "deploy/connector-governance/alphaengine-search-library-v1.json",
@@ -1247,15 +1257,26 @@ CORE_MIGRATIONS: tuple[MigrationSpec, ...] = (
     # backfill's markers.
     MigrationSpec("claim_support_schema.sql", "dalton_core.claim_support_verification",
                   "ClaimSupportVerdictStore", "core"),
+    # 2026-10-09 (ADR-0017): needs_rewrite flags on products citing retired
+    # Claims, and the scan cache.
+    MigrationSpec("product_rewrite_flags_schema.sql", "dalton_core.product_rewrite_flags",
+                  "ProductRewriteFlagAuthority", "core"),
+    # 2026-10-09 (batch an): cross-product conflicts (append-only, with
+    # resolution events) and the migration-safe company-ref alias table.
+    MigrationSpec("product_consistency_schema.sql", "dalton_core.product_consistency",
+                  "ProductConsistencyAuthority", "core"),
     MigrationSpec("company_dossier_schema.sql", "dalton_core.company_dossier", "CompanyDossierAuthority", "core"),
     MigrationSpec("connector_schema.sql", "dalton_core.connector", "ConnectorStore", "core"),
     # P11b: what the street expects, from the vendor daily.
     MigrationSpec("consensus_estimate_schema.sql", "dalton_core.consensus_estimate", "ConsensusEstimateAuthority", "core"),
     MigrationSpec("conviction_call_schema.sql", "dalton_core.conviction_call", "ConvictionCallAuthority", "core"),
+    MigrationSpec("conviction_policy_schema.sql", "dalton_core.conviction_policy", "ConvictionPolicyAuthority", "core"),
     MigrationSpec("coverage_mission_schema.sql", "dalton_core.coverage_mission", "CoverageMissionAuthority", "core"),
     MigrationSpec("document_read_completion_schema.sql", "dalton_core.document_read_completion", "DocumentReadCompletionAuthority", "core"),
     # C2-1: the windows the extraction lane has proved it cannot read.
     MigrationSpec("document_extraction_window_schema.sql", "dalton_core.document_extraction_windows", "ExtractionWindowLedger", "core"),
+    # 2026-09-29: a document read and admitted, remembered past its review.
+    MigrationSpec("document_admission_schema.sql", "dalton_core.document_admission_scope", "DocumentAdmissionOutcomes", "core"),
     MigrationSpec("credential_authority_schema.sql", "dalton_core.credential_authority", "CredentialAuthorityStore", "core"),
     MigrationSpec("debate_map_schema.sql", "dalton_core.debate_map", "DebateMapAuthority", "core"),
     MigrationSpec("prior_model_schema.sql", "dalton_core.prior_model_import", "PriorModelAuthority", "core"),
@@ -1275,6 +1296,7 @@ CORE_MIGRATIONS: tuple[MigrationSpec, ...] = (
     MigrationSpec("model_forecast_schema.sql", "dalton_core.model_forecast", "ModelForecastAuthority", "core"),
     MigrationSpec("research_constitution_schema.sql", "dalton_core.research_constitution", "ResearchConstitutionAuthority", "core"),
     MigrationSpec("research_cycle_reflection_schema.sql", "dalton_core.research_cycle_reflection", "ResearchCycleReflectionAuthority", "core"),
+    MigrationSpec("research_followup_automation_schema.sql", "dalton_core.research_followup_automation", "FollowupAutomationAuthority", "core"),
     MigrationSpec("research_doctrine_schema.sql", "dalton_core.research_doctrine", "ResearchDoctrineAuthority", "core"),
     MigrationSpec("research_event_schema.sql", "dalton_core.research_event", "ResearchEventAuthority", "core"),
     MigrationSpec("research_plan_schema.sql", "dalton_core.research_plan", "ResearchPlanAuthority", "core"),
@@ -1295,10 +1317,36 @@ CORE_MIGRATIONS: tuple[MigrationSpec, ...] = (
     # P11b: the broker notes those expectations were read out of.
     MigrationSpec("street_estimate_schema.sql", "dalton_core.street_estimate", "StreetEstimateStore", "core"),
     MigrationSpec("tracking_cadence_schema.sql", "dalton_core.tracking_cadence", "TrackingCadenceAuthority", "core"),
+    MigrationSpec("owner_lever_schema.sql", "dalton_core.owner_levers", "OwnerLeverAuthority", "core"),
+    MigrationSpec("needs_human_ack_schema.sql", "dalton_core.needs_human_ack",
+                  "NeedsHumanAckAuthority", "core"),
+    # 2026-10-07 (vision-gap #4): fund Excel templates and the owner's choices.
+    MigrationSpec("fund_xlsx_template_registry_schema.sql", "dalton_core.fund_xlsx_template_registry",
+                  "FundXlsxTemplateRegistry", "core"),
+    # ADR-0012: structured scenario sets, versions, decisions, observations.
+    MigrationSpec("company_scenario_schema.sql", "dalton_core.company_scenario",
+                  "CompanyScenarioAuthority", "core"),
+    # ADR-0014: income bridges, per-share series, return bridges, source tags.
+    MigrationSpec("return_attribution_schema.sql", "dalton_core.return_attribution",
+                  "ReturnAttributionAuthority", "core"),
+    # ADR-0015: earnings-release reads and the preliminary actuals they produced.
+    MigrationSpec("earnings_release_schema.sql", "dalton_core.earnings_release_intake",
+                  "PreliminaryActualsAuthority", "core"),
+    # Batch B (2026-10-09): release outlooks, consensus period relabels and
+    # broker estimate-table figures.
+    MigrationSpec("earnings_release_outlook_schema.sql", "dalton_core.earnings_release_outlook",
+                  "EarningsReleaseOutlookStore", "core"),
+    MigrationSpec("financial_period_schema.sql", "dalton_core.financial_period",
+                  "ConsensusPeriodRelabelStore", "core"),
+    MigrationSpec("street_estimate_tables_schema.sql", "dalton_core.street_estimate_tables",
+                  "StreetEstimateFigureStore", "core"),
     MigrationSpec("transcript_correction_schema.sql", "dalton_core.transcript_correction", "TranscriptCorrectionAuthority", "core"),
     MigrationSpec("transcript_polish_schema.sql", "dalton_core.transcript_polish", "TranscriptPolishAuthority", "core"),
     MigrationSpec("valuation_snapshot_schema.sql", "dalton_core.valuation_snapshot", "ValuationSnapshotAuthority", "core"),
     MigrationSpec("weekly_brief_schema.sql", "dalton_core.weekly_brief", "WeeklyBriefAuthority", "core"),
+    # The same authority applies the legacy research tables first, then the
+    # additive progress tables and their shared-slot guards; never SQL-only.
+    MigrationSpec("weekly_brief_progress_schema.sql", "dalton_core.weekly_brief", "WeeklyBriefAuthority", "core"),
     MigrationSpec("answer_routing_schema.sql", "dalton_core.answer_routing", "AnswerRoutingAuthority", "core"),
     MigrationSpec("thesis_revision_schema.sql", "dalton_core.thesis_revision", "ThesisRevisionAuthority", "core"),
     MigrationSpec("thesis_impact_schema.sql", "dalton_core.thesis_impact", "ThesisImpactAuthority", "core"),
@@ -1333,6 +1381,8 @@ SIDECAR_MIGRATIONS: tuple[MigrationSpec, ...] = (
     # ThesisImpactBudgetStore calls -- it is not a constructor of its own.
     MigrationSpec("thesis_impact_budget_schema.sql", "dalton_core.thesis_impact_budget", "ThesisImpactBudgetStore", "sidecar", "thesis-impact-budget.sqlite"),
     MigrationSpec("budget_pools_schema.sql", "dalton_core.thesis_impact_budget", "ThesisImpactBudgetStore", "sidecar", "thesis-impact-budget.sqlite"),
+    # Batch E: the material acquisition service's tables beside the MaterialRequest ledger.
+    MigrationSpec("material_acquisition_schema.sql", "dalton_core.material_acquisition", "MaterialAcquisitionLedger", "sidecar", "material-requests.sqlite"),
 )
 
 
@@ -2812,7 +2862,8 @@ def validate_cli_paths(*, live_root: Path, source_root: Path | None,
     """Reject output aliases into sources before copying or opening a writer."""
     temp = temp_root.expanduser().resolve()
     if not any(temp.is_relative_to(Path(root).resolve()) and temp != Path(root).resolve()
-               for root in ("/tmp", "/private/tmp", "/var/folders")):
+               for root in ("/tmp", "/private/tmp", "/var/folders", tempfile.gettempdir())
+               if Path(root).resolve() != Path("/")):
         raise ValueError("--temp-root must live under /tmp or another temporary directory")
     sources = {live_root.expanduser().resolve()}
     if source_root is not None:

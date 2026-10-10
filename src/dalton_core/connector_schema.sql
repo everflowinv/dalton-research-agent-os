@@ -266,6 +266,14 @@ CREATE INDEX IF NOT EXISTS idx_connector_invocations_call_spec
 ON connector_invocations(call_spec_ref);
 CREATE INDEX IF NOT EXISTS idx_connector_source_envelopes_invocation
 ON connector_source_envelopes(connector_invocation_ref);
+-- The trailing-24h AlphaEngine call count (bounded_alphaengine_probe) asks for
+-- attempts started since a time.  Without this SQLite scanned every attempt
+-- row -- 120 MB on both environments, 2.8 s (ws-7d) and 4.4 s (legacy) with a
+-- cold cache, 2026-10-04 -- and the discovery budget check runs that count on
+-- this Core and again on every peer Core of the shared host window, once for
+-- the acquisition and once for the search, inside the tick's 6.7 s share.
+CREATE INDEX IF NOT EXISTS idx_connector_physical_attempts_started_at
+ON connector_physical_attempts(started_at, connector_invocation_ref);
 
 -- The UDF is an integrity boundary for the trusted single writer, not a
 -- hostile same-UID sandbox.

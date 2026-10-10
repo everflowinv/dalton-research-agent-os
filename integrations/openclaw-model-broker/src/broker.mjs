@@ -209,7 +209,7 @@ function validateConfig(input) {
       id: profile.id,
       model: profile.model,
       maxTokens: integer(profile.maxTokens, "profile.maxTokens", undefined, 1, 1_000_000),
-      timeoutMs: integer(profile.timeoutMs, "profile.timeoutMs", undefined, 1, 600_000),
+      timeoutMs: integer(profile.timeoutMs, "profile.timeoutMs", undefined, 1, 900_000),
       thinkingLevel: profile.thinkingLevel,
       providerControls: validateProviderControlProfile(profile.providerControls, profile.model),
     }));
@@ -241,6 +241,39 @@ function nullableUsageNumber(value, name) {
     throw new ProtocolError("INVALID_HOST_RESULT", `host returned invalid ${name}`);
   }
   return value;
+}
+
+// The host returns ``text: ""`` for two different things, and both used to
+// surface as the generic ``INVALID_HOST_RESULT: host returned invalid text``:
+//
+// * the provider spent the whole output budget before emitting any visible
+//   text -- a reasoning model thinking through ``maxTokens`` (live 2026-09-28/29:
+//   every glm-5.3 document draft reported exactly 4096 output tokens, paid, and
+//   empty);
+// * the provider produced nothing at all -- a CLI gateway that answers a usage
+//   limit ("You've hit your weekly limit") in-band on an already-open 200
+//   stream, which the host turns into an empty completion with zero usage.
+//
+// Each gets its own code so Dalton can fall back, cool the profile down, and
+// tell the owner what actually happened.  Neither carries model content.
+function emptyCompletion(request, result) {
+  const outputTokens = result.usage?.outputTokens;
+  if (
+    result.stopReason === "length"
+    || (Number.isSafeInteger(outputTokens) && outputTokens >= request.maxTokens)
+  ) {
+    return new ProtocolError(
+      "HOST_OUTPUT_LIMIT_REACHED",
+      "host completion reached its output token limit before emitting any text",
+    );
+  }
+  if (outputTokens === undefined || outputTokens === null || outputTokens === 0) {
+    return new ProtocolError(
+      "HOST_EMPTY_COMPLETION",
+      "host completion returned no text and no output tokens (provider unavailable or usage-limited)",
+    );
+  }
+  return new ProtocolError("INVALID_HOST_RESULT", "host returned invalid text");
 }
 
 function canonicalActualModel(provider, model) {
@@ -408,6 +441,10 @@ export class ModelBroker {
       return this.#failure(request, requestHash, "fresh", "PROFILE_LIMIT_EXCEEDED", "request exceeds profile limits");
     }
     let providerControls;
+    if (request.controls && !this.runtime.llm.capabilities?.thinkingLevel?.levels?.includes(request.controls.thinkingLevel)) {
+      return this.#failure(request, requestHash, "fresh", "REQUIRED_CONTROLS_UNAVAILABLE",
+        "host runtime cannot enforce the requested thinking level", true);
+    }
     if (request.requiredControls) {
       const capability = this.runtime.llm.capabilities?.providerControls;
       const configuredMode = profile.providerControls?.mode;
@@ -476,7 +513,9 @@ export class ModelBroker {
         maxTokens: request.maxTokens,
         signal: controller.signal,
         agentId: this.config.dedicatedAgentId,
-        ...(profile.thinkingLevel !== undefined
+        ...(request.controls?.thinkingLevel !== undefined
+          ? { thinkingLevel: request.controls.thinkingLevel }
+          : profile.thinkingLevel !== undefined
           ? { thinkingLevel: profile.thinkingLevel }
           : profile.providerControls?.thinkingLevel !== undefined
             ? { thinkingLevel: profile.providerControls.thinkingLevel }
@@ -534,6 +573,9 @@ export class ModelBroker {
       throw new ProtocolError("INVALID_HOST_RESULT", "host returned an invalid result");
     }
     for (const field of ["text", "provider", "model", "agentId"]) {
+      // An empty string is a real host answer with a known shape (below),
+      // not a malformed frame.
+      if (field === "text" && result.text === "") continue;
       if (typeof result[field] !== "string" || result[field].length === 0) {
         throw new ProtocolError("INVALID_HOST_RESULT", `host returned invalid ${field}`);
       }
@@ -544,6 +586,7 @@ export class ModelBroker {
     if (canonicalActualModel(result.provider, result.model) !== request.model || result.agentId !== this.config.dedicatedAgentId) {
       throw new ProtocolError("HOST_ATTRIBUTION_MISMATCH", "host attribution differs from the requested route");
     }
+    if (result.text === "") throw emptyCompletion(request, result);
     if (request.requiredControls) this.#validateProviderControlProof(request, result.providerControlProof);
     const usage = result.usage ?? {};
     const normalizedUsage = {
@@ -610,15 +653,24 @@ export class ModelBroker {
         || Object.keys(failure).sort().join(",") !== "httpStatus,state,version"
         || failure.version !== "0.1" || failure.state !== "provider_completed_failure"
         || !Number.isSafeInteger(failure.httpStatus)
-        || !(failure.httpStatus === 429 || failure.httpStatus >= 500 && failure.httpStatus <= 599)
+        || !(failure.httpStatus === 402 || failure.httpStatus === 429
+             || failure.httpStatus >= 500 && failure.httpStatus <= 599)
         || result.provider !== request.model.split("/", 1)[0]
         || canonicalActualModel(result.provider, result.model) !== request.model
         || result.agentId !== this.config.dedicatedAgentId) {
       throw new ProtocolError("INVALID_HOST_RESULT", "host returned an invalid provider failure proof");
     }
-    const code = failure.httpStatus === 429 ? "RATE_LIMITED" : "PROVIDER_INTERNAL_ERROR";
-    return this.#failure(request, requestHash, "fresh", code,
-      `provider returned retryable HTTP ${failure.httpStatus}`, false,
+    // 402 is the provider refusing to start for want of credit (DeepSeek's
+    // "Insufficient Balance", live from 2026-10-04).  It is not retryable on
+    // the same profile -- nothing changes until the owner tops the account up
+    // -- so it gets its own code rather than the 5xx one, and Dalton cools the
+    // profile and tells the owner which account to fund.
+    const code = failure.httpStatus === 402 ? "PROVIDER_INSUFFICIENT_BALANCE"
+      : failure.httpStatus === 429 ? "RATE_LIMITED" : "PROVIDER_INTERNAL_ERROR";
+    const message = failure.httpStatus === 402
+      ? "provider returned HTTP 402 (account balance exhausted or billing required)"
+      : `provider returned retryable HTTP ${failure.httpStatus}`;
+    return this.#failure(request, requestHash, "fresh", code, message, false,
       { authority: "openclaw-model-broker", state: "provider_completed_failure", version: "0.1" });
   }
 

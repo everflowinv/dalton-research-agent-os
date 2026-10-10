@@ -1,19 +1,99 @@
-# Dalton Core：契约规格（slices 1–7 与 Phase 8–10 增量）
+# Dalton 系统设计与数据规则
 
-本仓库是独立于 OpenClaw 的 Dalton Core 原型。它冻结可迁移的语义和 interchange contract，
-并可通过受限 broker 接入 OpenClaw 模型。只读导入器能归档 `workspace-chem`、Coverage OS
-database 和 cron 定义，但归档不代表新系统采用旧约束、旧研究结论或旧执行方式。domain 对象
-使用 `schema_version: "0.1"`，writer RPC
-使用 `protocol_version: "0.1"`；不可变对象用新的 `id`/version 追加，不通过原地
-覆盖形成历史。
+[项目介绍与使用方法](README.md) · [当前能力与运行状态](docs/PROJECT_STATUS.md)
+
+Dalton 把一项持续的公司研究组织成相互衔接的工作：收集资料、提炼事实、建立模型、形成观点，再根据新资料修订。每次正式修订都保存当时采用的材料、假设和判断，便于分析师回看变化的原因。
+
+语言模型负责阅读、归纳和提出研究假设。程序根据已记录的数据、模型口径与公式计算财务预测和估值。分析师设定研究方向，在工作台查看结果、调整情景权重，并处理需要判断的事项。
+
+前半部分解释研究流程和模块分工；后半部分规定接口字段、版本关系与执行规则，供维护系统和接入新模块时核对。
+
+## 一项研究如何推进
+
+研究项目保存行业、公司范围、研究目标、来源设置和预算。后台调度器据此安排资料获取、研读、建模和跟踪任务。
+
+资料采集模块保存原始文件和获取记录。研读时，系统把选中的材料及其出处交给语言模型；生成的事实、引用和研究草稿随后进入相应的数字检查与独立核验。正式记录保存版本号和引用关系，界面可以沿着这些关系展示所依据的资料。
+
+财务计算模块读取公司的申报数据、模型规格和假设，按季度及财年口径计算收入、利润、股数、现金流和 EPS。情景估值使用相应的盈利依据、估值参数和条件。概率调整形成新的情景版本；完整的估值输入齐备时，程序计算加权目标价与期望回报。
+
+新资料到达后，系统判断它影响哪些产品和章节。更新完成后，后续跟踪会比较预测与实际数，把需要解释的差异转为研究问题，并汇入后续版本与周报。
+
+例如，一份新业绩稿改变了公司对全年收入的指引。系统保存这份原文，提取指引对应的期间和口径，核对它与原先预测的差异。相关的研究判断和模型假设可以随之更新；分析师在公司页查看变化，并打开原始出处。缺少税费或股数依据的计算项仍显示缺项说明，已有数据继续可查。
+
+## 模块与记录
+
+| 模块 | 职责 | 主要记录 |
+| --- | --- | --- |
+| 项目与任务 | 保存研究方向，安排有预算和输入范围的工作 | CoverageMission、WorkOrder |
+| 资料采集 | 获取原文，保存来源、期间和文件身份 | ConnectorInvocation、Artifact、SourceEnvelope |
+| 研读与核验 | 提炼事实，检查数字、出处和观点引用 | Claim、Evidence、VerificationRecord |
+| 研究产品 | 保存公司档案、行业框架、初筛及投资论点 | Dossier、IndustryFramework、Thesis、Deliverable |
+| 财务与情景 | 按模型规格和假设计算，记录估值条件 | ForecastModel、Scenario、Valuation |
+| 跟踪与复盘 | 比较新旧事实、预测与实际数，形成后续问题 | ResearchEvent、Reconciliation、ResearchQuestion |
+| 工作台 | 展示研究内容，接收提问、情景配置与分析师决定 | 问答上下文、决策和操作记录 |
+| 执行与费用 | 选择模型、预留预算、记录真实调用和结算 | RoutingPolicy、ModelInvocation、Usage、Cost |
+
+正式研究对象采用追加版本的方式保存，修订指向前一版及本次引用的材料。缓存、任务租约、当前版本指针和界面草稿按各自的规则更新。
+
+研究记录的写入由专门的写入服务（writer）接收并检查。网页控制服务读取研究状态，将修改请求交给 writer；后台调度服务负责安排任务。模型接入层（broker）把已选定的请求交给供应商，返回实际模型身份、结果与费用信息。
+
+## 财务模型与情景
+
+模型规格说明业务驱动因素、计算口径和假设依据。预测覆盖未来至少八个季度，并按公司财年归集。分部数据采用可核对的业务划分；科目缺失或分类衔接不足时，结果保留具体缺项。
+
+季度 EPS、年度 EPS 与未来十二个月 EPS 分别遵循对应的利润、股数和期间口径。同一财年的情景计算与年度模型使用可比的年度依据。公司的自由现金流调整项也需要绑定其披露口径。
+
+情景保存条件、估值期间、概率及依据。分析师在工作台提交悲观、基准、乐观情景的整数概率，总和为 100%，同时填写修改理由。财务底稿和情景版本分别保存，便于比较。
+
+## 新资料何时进入修订
+
+普通研报和销售笔记先积累为待处理材料，达到批量条件后更新。新一季重要披露或纪要、实质性的预期变化，也可以形成更新理由。首次起草、明确修订、引用纠错和研究方法变更各有对应的处理路径。
+
+公司档案与行业框架按具体章节记录实际使用的输入。成功发布，或独立核验及其余检查通过、但没有新证据可形成正式版本时，记录这次已处理的材料；模型运行期间晚到的材料留待下一次处理。普通更新仍遵循档案与行业框架各自的时间间隔。
+
+默认规则在新增三份券商研报或销售笔记时形成批量更新理由；距离该章节上次成功处理已满十四天且仍有待处理资料时，也进入复查。新的本公司电话会纪要、业绩稿或年报，以及达到阈值的一致预期变化，另有更新路径。默认一致预期阈值为 EPS 3%、收入 2%、目标价 5%；模型 EPS 在相同期间、单位和计算方法下变化超过 5% 时形成更新理由，期间或计算口径改变则单独记为口径更新。
+
+普通档案更新间隔为三小时，行业框架为七天。首次起草、明确修订、引用纠错和真实研究方法绑定变更有对应例外；重要材料可以提前进入更新检查，预算、授权和失败冷却仍适用。相同且已核验的输入不会因正文改写或时间流逝再次形成模型调用。未读资料及运行期间晚到的资料继续等待处理。
+
+## 模型调用与出版
+
+每次调用显式记录思考强度。普通用途默认 low，初筛、投资备忘录、深度认知审核和行业框架的起草默认 medium，独立核验使用 low。按用途修改设置时保存理由和政策版本。
+
+管理员可以设置一类任务共用的模型顺序，也可以为某个具体环节单独指定。单独指定的环节保留自己的顺序；修改共用默认顺序时，仍沿用这些明确设置。保存后的配置同步到各活跃研究项目。实际调用按保存的候选顺序选择，并检查各模型的输入容量、功能和任务预算；当前不可用的候选记录具体原因，再检查后面的候选。
+
+预算在调用前预留，调用结果按真实发送与费用状态结算。起草、核验和回退调用分别留有记录。
+
+出版处理另设原稿限额：同一原稿在滚动 24 小时内最多两次准备运行、六次模型调用。语言修订最多两轮，未变化且已核验的章节可复用缓存；合并后的完整文本再次核验。结果未完成时保留草稿和具体原因。
+
+## 项目与研究问题
+
+分析师可以新建项目并填写初始目标。信息完整时形成首版任务书，信息不足时先保存草稿。管理员可以暂停项目、归档并恢复，或在确认项目名称及待处理事项后删除；每次生命周期操作保存操作者、时间和理由。
+
+研究问题集中保存其主题、回答条件、所需来源和当前状态。回答与相应公司、期间及核验后的事实关联。资料缺口形成具体的获取或跟进需求；未审阅候选的到期规则与问题本身的生命周期分别处理。
+
+规划输入保留每家覆盖公司的开放问题。需要从原文读取数字时，任务明确指标含义、期间、单位和计算口径，并绑定所读原文的具体版本。开始阅读、生成候选答案、通过核验和正式入库分别记录；所有要求的数字完成核验并入库后，对应的数字要求才结束。新版本原文到达后，仍保留未完成任务所绑定的旧版原文。
+
+同一版本原文仍有数字问题未解时，下一轮规划同时看到已核验完成的指标范围和仍缺的证据。已完成指标保留定义、期间、口径及正式结果的出处；不同定义的问题继续分别处理。压缩研究背景时，可以合并重复的来源信息和历史统计，具体的缺证据原因与已完成范围仍随任务保留。
+
+数字任务结束时，系统分别记录已取得的数字和仍缺的证据。经核验确认本次没有取得所需数字时，下一轮可在原预算内，针对同一研究目标和同一版本原文，调整期间、单位或计算口径，安排一次新的取数。例如，原文未直接披露同比增速时，可以改读已披露的收入金额。新任务保留调整依据；原来尚未回答的同比问题继续记为缺项。
+
+模型未返回内容等技术问题在自动重试结束后交给管理员检查。任务汇总用于说明进展，已有逐项卡片的事项按明细计数。改变研究范围或追加已经用尽的资料额度仍由分析师决定。
+
+年报附件作为独立原文保存，与母申报文件建立关联。附件有自己的文件身份和引用位置，研究内容可以直接引用该原件。
+
+## 接口与数据契约
+
+以下按接口说明版本、引用关系和执行边界。基础执行与账本保留各自已冻结的协议；后续研究产品和财务模块采用自己的版本。兼容读取旧记录时保留原始字段和 hash，新版本的发布检查按对应模块执行。
+
+只读迁移器可归档旧 workspace、Coverage 数据库和 cron 定义，归档不会自动采用旧约束、研究结论或执行方式。具体系统运行状态见 [PROJECT_STATUS](docs/PROJECT_STATUS.md)，这里规定源码接口与数据规则。
 
 ## 已冻结契约
 
 ### 通用规则
 
-- 九十四份 JSON Schema 都是 Draft 2020-12 文档，根对象有
-  `additionalProperties: false`。
-- 每个对象都有 `schema_version`、稳定 `id` 和 `created_at`；引用字段使用稳定
+- 正式 JSON Schema 位于 [`contracts/`](contracts/) 及对应包内 schema 文件；这些契约使用 Draft 2020-12，
+  对象的闭合字段由各自 schema 的 `additionalProperties: false` 和对应 validator 检查。
+- 基础版本化对象保存 `schema_version`、稳定 `id` 和 `created_at`；具体对象的字段与版本以其 schema 为准。引用字段使用稳定
   ref 字符串，时间字段保持 RFC 3339 形式的字符串（具体时区策略留给实现层）。
 - 角色、capability、runtime、provider 和 model 都是字符串/引用，不能由本契约
   固化为角色 enum。
@@ -83,13 +163,18 @@ EvidenceRelation。三种 relation 都只满足“证据链存在”的结构 ga
 支持结论、contested claim 是否可用于某类决策，由 verifier 和版本化 governance
 policy 判断，不在存储层硬编码。
 
-0.1 只允许提交 `ThesisVersion`，且 verification 是不可关闭的结构约束；
+基础 Ledger commit 0.1 路径只允许提交 `ThesisVersion`，且 verification 是不可关闭的结构约束；
 `required_verification: false` 会被拒绝。若未来某类 decision 允许免验证，必须用
 新 contract version 定义它的 provenance 和 event 语义，不能借 policy 值绕过。
 
 同一 `policy_ref` 的历史生效区间可以重叠；执行和回放都以当时的 active pointer
 以及 verification/committed event 固定的 policy version 为准，不按时间区间猜测
 唯一版本。区间负责判断某个已指向版本能否生效，pointer 负责选择版本。
+
+当前 `ThesisVersion` reader 兼容 0.1、0.2 与 0.3。0.3 将观点绑定到研究问题，区分 `house` / `counter`、
+命题方向、`active` / `broken`、带期限的证伪条件与分歧记录；新写入由
+[`thesis_question_model`](src/dalton_core/thesis_question_model.py) 检查这些绑定。旧版本继续保留原字段与 hash，
+读取时不补造观点立场或证伪条件。
 
 ### CapabilityProposal
 
@@ -215,6 +300,17 @@ attempt 不能 A→B→A 循环。verifier 需要 family independence 时，同 
 `credential_slot_refs` 必须由可信 credential controller 注入；worker 自报的 slot 不构成
 可用认证。Router 不读取 token，也不调用模型。
 
+模型设置分为共用档位默认和环节单独指定两层。保存档位顺序只更新该档位的默认链，
+`purpose_overrides.mode=explicit` 的单独选择保持优先；选择“使用档位默认顺序”才解除该环节的
+单独指定。其他档位的旧直接配置与允许模型过滤条件保持原样。已退役的 Agenda 和论点影响
+环节保留历史策略读取，不代表当前默认顺序，也不提供修改入口。保存后读回固定的新策略版本，
+明确保存的环节顺序和共用默认顺序不被自动长上下文偏好改写。容量不足的模型仍按原顺序被跳过，随后尝试符合条件的模型。
+实际调度仍检查能力、认证、预算及核验家族；显示同名模型的网关强度预设不等于每次调用的实际强度。
+
+新保存的默认链通过精确策略标记授权，历史策略的档位链与允许模型过滤交集不变。
+旧运行版本可读取该字段形状，但不一定执行同样的默认授权和旧直接配置保护规则。
+回退运行版本时，须同时恢复已审阅的原配置策略指针，不能只因策略 JSON 可读就认定路由等价。
+
 ### 按需 Capability Catalog
 
 `CapabilityDescriptor` 是版本化、带 namespace 的轻量能力目录。它分开保存检索摘要、
@@ -315,8 +411,14 @@ coordinator 的 plan-bound RunnerRequest 与 Connector Runner 实际执行请求
 冒充。`ConnectorCompletionReceipt` 0.2 因此同时绑定 coordinator request ref/hash 和 actual runner request
 ref/hash；0.1 继续兼容旧 fixture，但不能作为真实 authority resolution 的成功 receipt。
 
-当前 networked slice 只冻结公开、无凭据、只读的 SEC `submissions/CIK....json` `list_filings` canary，并只在
-隔离临时 authority 中运行一条单步 WorkOrder。它不部署、不接 Agenda、不授权凭据，也不写正式 Research Ledger。
+P2 首次 networked canary 的验证范围是公开、无凭据、只读的 SEC `submissions/CIK....json` `list_filings`，
+只在隔离临时 authority 中运行一条单步 WorkOrder；该验证接口不部署、不接 Agenda、不授权凭据，也不写正式 Research Ledger。
+
+当前来源路径另外支持 SEC companyfacts、申报面表、项目来源发现和公开网页获取，并通过各自的来源身份、
+静态 adapter、配额、raw artifact 与核验边界进入后续研究。相关实现见
+[`sec_public_adapter`](src/dalton_core/sec_public_adapter.py)、[`mission_statement_lane`](src/dalton_core/mission_statement_lane.py)、
+[`mission_source_discovery`](src/dalton_core/mission_source_discovery.py) 和 [`public_web_core_fetch`](src/dalton_core/public_web_core_fetch.py)。
+发现范围由项目来源计划与授权决定，不等于所有项目都自动获取同一类文件。
 candidate staging 没有 Research Ledger handle；即使 source/numeric verification 通过，candidate 的语义仍是
 `unverified`，必须经过后续人工 review 才能讨论正式 commit。
 
@@ -370,8 +472,9 @@ Scheduler 是独立 SQLite authority，不存在跨库原子性；journal 与按
 Settlement、Artifact、SourceEnvelope 和 ResultEnvelope。W2 恢复不持久化 Scheduler lease token：先做
 indeterminate 结算，再由 Scheduler 自己让 lease 到期重排。
 
-当前只允许 `auth_mode=none` 的 recorded fixture adapter。credential grant、真实网络 transport、SSRF
-防护和 writer RPC 属于后续 slice。
+P0-2b recorded transport 验证接口只接收 `auth_mode=none` 的 recorded fixture adapter；它本身不授予凭据或
+运行任意网络 adapter。当前真实 transport 与 writer RPC 由静态来源接入路径分别实现，公开网页获取另有 host、
+大小与来源检查；允许哪种 operation、host 和认证方式仍由对应 connector profile、policy 与可信 runner 决定。
 
 ### OpenClaw model broker adapter
 
@@ -396,11 +499,16 @@ identity 的私有 state directory。
 `succeeded`，并生成确定性 usage ref；provider cost 只作为 uncommitted telemetry，必须再
 进入 Usage/Cost authority。broker 不持 Dalton DB path 或 writer token。
 
-broker 已作为本机 linked plugin 安装，operator policy 只允许六条 exact model route，并把
-agent override 限定到 Dalton dedicated agent。六条 route 已分别做真实 completion smoke test；
-broker 仍不是 commit boundary，模型输出必须回到 Core verification/writer。当前 broker、可信
-controller 与普通 worker 仍运行在同一 OS identity，正式 hostile-worker 隔离仍需要独立
+broker 的 operator policy 使用 exact model allowlist，并把 agent override 限定到 Dalton dedicated agent；
+具体 route 集合由当时的配置与版本化 model profile 共同决定。安装状态和 completion smoke 结果属于运行验收记录，
+不由固定 route 数量定义接口。broker 仍不是 commit boundary，模型输出必须回到 Core verification/writer。
+同一 OS identity 下的 broker、controller 与 worker 不能提供 hostile-worker 隔离，正式敌对进程隔离仍需要独立
 OS/container identity。
+
+请求显式携带 `thinkingLevel`。有 provider-controlled contract 的用途还绑定供应商实际执行的 schema、token 与费用上限，
+返回 proof 必须与请求相符。费用控制上限不超过该调用的实际 admission reservation、WorkOrder 与 profile 约束；
+若已知实际 telemetry 超额，保留完整 usage 和实际费用并记录违约，不能截断为较小预留金额。
+见 [`cockpit_model`](src/dalton_core/cockpit_model.py) 与 [`openclaw_model_adapter`](src/dalton_core/openclaw_model_adapter.py)。
 
 ### Legacy Dalton 影子迁移
 
@@ -428,13 +536,15 @@ caller-controlled 最终路径写入，避免 hardlink/symlink TOCTOU 污染 aut
 只读 projection DB；不拿 Core DB path、Scheduler mutation 权限或 writer token。API 不返回 prompt、raw usage、storage
 locator、完整 outputs 或 credential。成本按 currency 分组，不能用当前价格或汇率重算历史。
 网页用通俗中文显示总任务、任务树、Scheduler 状态、模型/usage、能力批准状态和 artifact
-metadata；批准、暂停、取消仍属于未来 command service，不塞进 query API。
+metadata。这个 legacy Dashboard query API 保持只读，不接收批准、暂停或取消操作。当前分析师操作由
+下述 Owner cockpit 与 workspace 生命周期服务接收，经身份、session、CSRF 及 writer 的对应权限检查执行。
 
 ### 常驻 controller 与静态看板插件
 
-`daltond` 是确定性常驻控制进程，不是长生命周期 LLM session。它只负责 Scheduler lease
-回收、authority 变更检测、projection rebuild、内建插件重试和 owner-only heartbeat；当前
-版本不 claim research WorkOrder，也不冒充 Agenda Engine、worker coordinator 或 verifier。
+`daltond` 是确定性常驻控制进程，不是长生命周期 LLM session。它负责 Scheduler lease 回收、authority 变更检测、
+projection rebuild、内建插件重试和 owner-only heartbeat；当前还通过有界 planner 安排研究车道并收敛子任务回执。
+controller 不把自己的 tick 当成研究结论或独立核验，具体研究调用与写入仍由相应任务和 authority 执行。
+legacy AgendaCoordinator 是单独的可选控制面，未启用时显示 `retired`；见 [`service`](src/dalton_core/service.py)。
 LaunchAgent 只对 writer 和 controller 设置 `RunAtLoad + KeepAlive`，研究 worker 仍按
 WorkOrder 启动并在完成后退出。
 
@@ -450,11 +560,15 @@ heartbeat 的 `starting / running / degraded / stopping` 是服务健康状态�
 
 ### Phase 1 Agenda Shadow
 
+本节规定 legacy Agenda shadow 的独立接口，保留其历史记录与回放语义。当前 canonical 研究问题通过
+[`research_question_backlog`](src/dalton_core/research_question_backlog.py)、问题身份及维护模块管理；
+它与本节的 AgendaCycle、Discord outbox 和 timeout feedback 分开处理。
+
 Phase 1 冻结 `Mandate`、`PriorityOverride`、`ResearchQuestion`、`AgendaCycle` 和
 `AgendaDecision`。AgendaDecision 与 cycle event 只追加；agenda 运营记录不走 Thesis commit
 gate，也不能直接改 Evidence、Claim、Thesis 或 Model。
 
-controller 每日最多启动一个试点公司 cycle。legacy adapter 只读旧 Coverage SQLite 的一致快照，
+在启用这个 legacy Agenda shadow 接口时，controller 每日最多启动一个试点公司 cycle。legacy adapter 只读旧 Coverage SQLite 的一致快照，
 输出小型 `PerceptionSnapshot`；Agenda 只认该契约，不引用旧库字段。LLM 只能提出 3—6 个问题、
 回答标准、可追溯 source refs、展示理由，以及四个 0—3 整数 feature。feature schema 闭合，越界、
 缺字段、未知 source 或非严格 JSON 都 fail closed。权重由版本化 agenda policy 持有；最终 score、
@@ -485,15 +599,16 @@ governance token，且数据库只保存登录名的 SHA-256 派生 subject，�
 已送达 decision 在 24 小时内没有任何显式 human feedback 时，由第二个 automation-only principal 写入
 `source=auto_accept_timeout` 的 agree。这个结果可作为有效默认接受，但 projection 必须与 human agree
 分列；它不计入 `labeled_decisions` 或人工认可率。后到的显式 human feedback 覆盖有效展示，但不能删除
-历史 timeout event。policy、mandate、pause 等人类治理操作仍使用一次性 token CLI：签发、执行一个 RPC、
-立即移除，token 配置不得保留 live human principal。
+历史 timeout event。该 shadow 接口的人类治理 CLI 使用一次性 token：签发、执行一个 RPC、立即移除，
+token 配置不得保留 live human principal。当前工作台的治理入口另由认证后的 human session 发往 writer，
+不会借用这些 automation timeout event 作为人工批准。
 
 ### 冻结词表
 
 `Verdict` 只有五个值：`pass`、`conditional_pass`、`revise`、`blocked`、`reject`。
 `ValueKind` 只有五个值：`observed`、`assumption`、`derived_deterministic`、
 `estimate`、`simulation`。value kind 不在实体 schema 中重复建模，但 Python
-类型将其作为 Model IR 后续契约的冻结词表。
+类型保留这组基础词表；当前财务计算与情景采用下述各自的字段和版本，不能把基础词表当作其全部合同。
 
 ### Independence predicate
 
@@ -649,7 +764,9 @@ hash 绑定、closed shape、fail closed）原样适用。
   `autonomy{automation_principal, human_checkpoints, may_write}`、`budget`。
   `may_write` 是自动化的写入范围词表：`evidence`、`claim`、`claim_challenge`、`deliverable`、
   `forecast_line`、`model_run`、`research_question`、`observation`、`stage_record`、
-  `forecast_reconciliation`、`source_discovery`。
+  `forecast_reconciliation`、`source_discovery`。这是 P9a 首批范围；当前完整可授权词表见
+  [`coverage_mission.AUTOMATION_WRITE_SCOPES`](src/dalton_core/coverage_mission.py)，还包括市场、估值、档案、
+  论点修订候选、研究任务与 conviction 等范围。词表中存在某项不代表当前任务已经授予该项权限。
 - 阶段账本：`coverage_mission_stage_records`（append-only，`entered` / `gate_passed` /
   `gate_failed`）。阶段顺序冻结：进入第 k 阶段必须先 `gate_passed` 第 k−1 阶段；
   `human_checkpoint=true` 的阶段，`gate_passed` 只接受 `human:` actor。
@@ -676,7 +793,8 @@ hash 绑定、closed shape、fail closed）原样适用。
   已给出的 `quote_id`，`normalized_statement` **不得断言数字**（期间标签除外），最多五条。
 - `TranscriptCorrectionSetVersion`：`review_scope` 增加 `automation_verified_raw_span`
   （与人类的 `verified_raw_span` 对称，actor 必须是 `automation:`）；`document_ref` 允许
-  `alphaengine-doc:` 与 `public-web-document:` 两种血统；网页的 `source_content_hash` 是
+  初期 `alphaengine-doc:` 与 `public-web-document:` 两种血统；当前文档读取还包含已核验的 SEC 申报与独立年报附件，
+  具体可接入来源由 `document_extraction.verified_original` 和来源合同检查。网页的 `source_content_hash` 是
   确定性渲染的 hash，不是原始字节。
 - policy 规则 `research-auto-commit:mission-document-qualitative:v1`：定性候选自动准入的
   唯一路径，要求同一 `automation:` 主体、无数字断言、非套话、引文精确且 claim-eligible、
@@ -685,8 +803,10 @@ hash 绑定、closed shape、fail closed）原样适用。
 **Claim 挑战与退役（P10b）**
 
 - `claim_retirement_challenges`：append-only。`reason_code ∈ {subject_absent_from_source,
-  boilerplate_disclaimer, human_judgment}`，确定性检测器带 `detector_ref`；
-  自动化不得提 `human_judgment`。
+  boilerplate_disclaimer, human_judgment}` 是首批原因，确定性检测器带 `detector_ref`；自动化不得提 `human_judgment`。
+  当前还支持 `citation_support_rejected` 和 `issuer_misattribution`：前者重读绑定到 exact Claim 的独立核验 verdict，
+  后者在写入时按原文归属输入重跑检测器，不能用未经记录的意见代替证明。见
+  [`claim_retirement`](src/dalton_core/claim_retirement.py)。
 - `claim_retirement_decisions`：每条被挑战的 Claim 一条决定，`retired` | `kept`；
   自动化只能 `retired`，且权威在写入时**重跑检测器**；人可两者皆可。
 - ClaimVersion 契约不变、账本不改写：所有读取路径（问答、清单、交付物）跳过已退役版本，
@@ -696,33 +816,159 @@ hash 绑定、closed shape、fail closed）原样适用。
 
 - `mission_deliverable_versions` + pointer：每个交付物一条版本链，按 hash 绑定写作时的任务版本
   与 playbook 版本；`kind` 取自任务 `deliverables` 词表。
-- 章节形状 closed：`{title, body, claim_refs, numbers[{text, claim_version_ref, period}], gaps}`。
-  **数字纪律由权威强制**：正文里的每个数字必须出现在该节 `numbers` 并绑定一条定量 Claim；
-  期间标签不算数字；引用的 Claim 必须未退役；全空文档（空壳）拒绝发布。
+- 首版章节形状是 closed 的 `{title, body, claim_refs, numbers[{text, claim_version_ref, period}], gaps}`。
+  当前 validator 保留这条 Claim 路径，并支持带绑定的模型 cell、原文 passage、pack number、声明预测及确定性 derivation；
+  可选字段由对应闭合 validator 检查。
+- **数字纪律由权威强制**：正文数字必须在本节 `numbers` 中有可验证的来源或算式；期间标签单独处理，
+  引用的 Claim 必须未退役，算式操作数除允许的计算常数外必须在本节有来源，声明的单位换算与显示舍入要重算。
+  全空文档拒绝发布。具体来源形状与计算规则见 [`mission_deliverable`](src/dalton_core/mission_deliverable.py)。
 - 出口门自评由结构检查产生（资料底座清单、发布时的数字校验、实际写出的章节与引用数），
   结果写入阶段账本，不向模型询问它自己的作品。
 
 **Owner cockpit（ADR-0006）**
 
-- 单一 tailnet HTTP 面，Tailscale 身份 + session + CSRF；五个视图（目标 / 方向 / 日志 /
-  问答 / 审批）。控制进程**不持有 Core 写句柄**：读 Core 只读，写一律经 writer 以 owner 的
+- 单一 tailnet HTTP 面，Tailscale 身份 + session + CSRF。ADR-0006 的初版包含目标 / 方向 / 日志 /
+  问答 / 审批五视图；当前 `/v2` 工作台还提供公司、行业、财务、论点及设置、管理员等页面，按模块注册，
+  见 [`cockpit_v2/routes`](src/dalton_core/cockpit_v2/routes.py)。控制进程**不持有 Core 写句柄**：读 Core 只读，写一律经 writer 以 owner 的
   human principal 执行。
-- cockpit 的模型调用（问答、目标与方向草稿、交付物起草）走与抽取同一条 routing policy、
-  同一个 broker、同一本日预算账本（按任务上限准入），并且是 scheduler WorkOrder，可重放。
+- cockpit 的模型调用（问答、目标与方向草稿、交付物起草）与抽取共用 Scheduler、ModelRouter、broker 和
+  日预算执行机制；各用途按当时的版本化 routing policy 和用途配置选择路线，并且是可重放的 WorkOrder。
+
+## 研究产品输入、核验与修订
+
+公司档案与行业框架的重写门按具体单元执行。`verified-unit-input-consumption:0.1` 收据独立于正式产品版本，
+按 state、产品、目标、单元和来源公司集合隔离；行业框架的目标还包含行业身份。收据保存发送前的精确输入 hash、
+实际引用和原文 hash、producer/verifier 引用及成功结果。只有真正入 prompt 且能证明原文 hash 的资料被消费；
+整体材料包的高水位、裸 Claim 来源引用及旧产品的发布时间都不能替代已读证明。
+
+发布成功，或独立核验与适用的本地门通过但没有新证据可以形成正式版本时，追加输入收据。后一种情况仅排除
+不适用的 novelty 检查；来源、数字、结构和独立性检查保留。失败、held 和 carry-forward 单元不消费资料。
+旧单元时间只衡量年龄，未能证明已读的历史资料继续 pending；调用期间晚到或未进入 prompt 的资料也保持 pending。
+
+相同已核验语义输入先去重，包括尚未生成正式单元的情况；旧正文及其派生 prompt hash 不制造新的资料身份。
+明确修订和退役引用纠错保留各自的入口。真实方法或治理绑定改变实际输入 hash 时允许更新；该绑定下已核验的
+相同输入仍去重，即使没有形成新正式版本。模型 EPS 阈值上下文单独记录强版本/hash、季度窗口、
+单位和计算方法，不冒充已读原文；同口径比较与期间/方法变动分别形成理由，只有实际新 prompt 输入就绪才进入调用。
+
+调度的轻量只读 probe 观察来源到达、产品/模型 authority 版本、已处理收据与十四天到期边界。
+完整检查按输入变化或三十分钟刷新，缓存刷新时点本身不加入付费启动签名。普通三小时/七天间隔与
+重要材料路径分别处理，授权、任务预算、原有日费用账本和失败冷却继续生效。见
+[`redraft_policy`](src/dalton_core/redraft_policy.py)、[`research_product_consumption`](src/dalton_core/research_product_consumption.py)、
+[`mission_dossier_lane`](src/dalton_core/mission_dossier_lane.py) 和
+[`mission_industry_framework_lane`](src/dalton_core/mission_industry_framework_lane.py)。
+
+研究文章的数字合同、不同模型家族的独立核验、文章质量评分分别保存结果。
+质量评分版本独立于原文和冻结材料包；新评分器追加版本，不覆盖旧评分。数字和事实身份按指标、期间、单位、主体与
+来源绑定检查，未知归属不冒充通过；外部多公司材料缺少句级主体证明时记录待核对原因。
+见 [`research_quality_score`](src/dalton_core/research_quality_score.py)。
+
+### 计划周报与首次研究进展
+
+周报计划 0.1 固定证据包及公司补充版本，0.2 在每个报告窗口刷新这些版本。0.3 增加真实研究任务的
+`mission_ref`，允许尚未建立研究证据包的任务先形成研究进展周报；0.1/0.2 的序列化与 hash 保持原契约。
+
+研究进展路径只适用于相关研究范围确实没有证据包版本或当前指针的情况。已有相关证据包时仍走研究周报路径；
+证据包损坏、计划引用错误或缺少已绑定的公司补充资料都不能转为进展周报。不同产业或公司范围互不重叠的研究项目分别判断。
+
+进展快照绑定报告截止时的真实任务版本、公司范围和报告窗口，保存正式事实版本、资料发现、研究处理、档案和模型的
+实际记录引用与 hash，并读取已登记的资料需求、预测对账与后续研究事项。缺少或不完整的登记明确显示，不按零计数，
+也不推导投资立场、行业判断或预测。任务目标、处理状态与未关闭事项按已登记内容呈现。
+
+进展周报由本地确定性程序生成，不调用模型，只在工作台保存 Markdown 和精确投递回执。研究与进展两种周报共用
+同一周报身份及实际计划时刻的发布配额；时间的不同 UTC 写法不能产生第二份报告。旧研究周报的记录、hash 和外键不改动，
+新进展记录使用独立追加表。报告窗口与实际创建、投递时刻分别保存。见
+[`mission_progress_weekly`](src/dalton_core/mission_progress_weekly.py)、
+[`weekly_brief_coordinator`](src/dalton_core/weekly_brief_coordinator.py) 与
+[`weekly_brief_workspace_plan`](src/dalton_core/weekly_brief_workspace_plan.py)。
+
+## 当前财务与观点模块
+
+以下是已接入执行与写入门的模块规则。模型能否产生完整结果取决于已持有的来源、规格和假设；缺项保留具体原因。
+
+### 预测起点、季节性与历史版本
+
+新模型从最新已申报实际之后的连续季度开始，10-Q、10-K 及可验证的 8-K 初步实际共同决定期间边界。
+预测至少八个季度，或到下一财年末，取更长窗口；不能把已报告季度当作前向预测。季节性公司采用有历史和目标季度
+对齐依据的同比或季节因子方法。旧记录继续按原字段和 hash 读取；`rules_upgrade` 会检查同输入的旧模型，
+在新规则或报告边界改变时重新进入生成流程，缺资料时说明缺口。财报实际化保留既有未到期预测，再补足尾期。
+
+实现与门禁见 [`model_forecast_driver`](src/dalton_core/model_forecast_driver.py)、
+[`company_model_forecast`](src/dalton_core/company_model_forecast.py)、
+[`company_model_forecast_cli`](src/dalton_core/company_model_forecast_cli.py) 和
+[`forecast_seasonality`](src/dalton_core/forecast_seasonality.py)。模型规格当前为 0.4，财务结构当前为 0.6；
+预测记录分别保留 0.1/0.2 及结构化 0.3/0.4 reader，具体字段以对应 validator 为准。
+
+### 业务驱动、三表和公司现金流
+
+收入、成本和费用由模型规格声明的业务驱动及公式计算。模型假设带来源或明确的判断依据；D&A 采用资产与 capex 的
+roll-forward，利息采用债务余额与利率机制，缺基础行时留下执行原因。非核心营业外结果缺项可以使税后利润或 EPS 不可得，
+已有来源的核心营业利润仍独立计算。公司定义 FCF 与系统 FCF 分开，融资租赁、软件及合同成本等调整项按公司披露口径
+绑定和计算。新发布重放执行合同，并通过经济一致性检查。
+
+见 [`forecast_financial_execution`](src/dalton_core/forecast_financial_execution.py)、
+[`forecast_company_fcf`](src/dalton_core/forecast_company_fcf.py)、
+[`company_financial_statement_structure`](src/dalton_core/company_financial_statement_structure.py) 和
+[`economic_invariants`](src/dalton_core/economic_invariants.py)。
+
+### 股份、年度投影与 EPS 口径
+
+季度 diluted EPS 使用对应季度的归母分子和稀释股份依据。年度投影要求完整四季度归母利润，直接申报的年度值优先；
+显式 `annual_growth_from_filed` 股份预测保存直接年度来源、截至日期、增长率与复利步数。历史季度日权重结果
+不冒充直接年度稀释股份，年度 EPS 不按四季度 EPS 简单相加；混合实际与预测的年度保留混合标识。
+
+NTM 四季度恰好覆盖一个完整财年时，消费同模型版本的正式年度 projection；跨财年窗口采用明确的季度利润与股份方法。
+`eps_basis` 只有在真实公式、申报身份和 proof 支持时才标记 GAAP；core/adjusted 保存自己的定义，未知则保留 unknown，
+跨口径比较显示不可比。见 [`company_model_annual_projection`](src/dalton_core/company_model_annual_projection.py)、
+[`annual_share_forecast`](src/dalton_core/annual_share_forecast.py)、
+[`valuation_forward`](src/dalton_core/valuation_forward.py) 和 [`model_eps_basis`](src/dalton_core/model_eps_basis.py)。
+
+### 敏感性、情景与收益风险
+
+敏感性重放驱动变化及依赖的财务结果。新情景组是悲观、基准、乐观三个可观察分区，阈值连续且互斥，绑定模型版本/hash、
+估值快照及十二个月期限。概率保存依据，修改概率需要理由；系统自身的论点加强/减弱事件不能充当经济触发条件。
+估值消费同口径盈利、PE、价格及股息输入，计算目标价与期望回报。收益风险门来自版本化 conviction policy，
+新策略包含 `min_upside_downside_ratio`，旧记录仍可读取。
+
+见 [`forecast_sensitivity`](src/dalton_core/forecast_sensitivity.py)、[`scenario_rules`](src/dalton_core/scenario_rules.py)、
+[`scenario_valuation`](src/dalton_core/scenario_valuation.py)、[`company_scenario`](src/dalton_core/company_scenario.py) 和
+[`conviction_policy`](src/dalton_core/conviction_policy.py)。
+
+### 本所观点、复盘与财务导出
+
+活跃本所观点和反向观点按研究问题分别展示，依据和证伪条件绑定到相应观点；broken 或尚未完整绑定的历史论点不自动成为
+生效本所观点。预测与实际实现的差异记录保留模型时间、期间、指标、单位和身份，形成后续研究需求，不自动重写旧模型。
+财务导出保存公式、假设及来源；金额、股份、销量、单价和 EPS 行使用各自单位，年度分子与股份来自对应正式投影。
+
+系统复核记录另行追加，保留原请求和人的决定。预测偏差按公司、指标与期间归组，输入绑定原始比较记录、实际披露证据及模型规格。只有正式新模型消费这些输入、受影响预测单元可计算且财务核验通过，才能记录自动完成。后台处理、管理员诊断和可选反馈分别展示；需要修改权限或预算的事项保留人的决策入口。中文定稿维护不计入分析师决策数。数字研究先明确必须回答的指标、期间、单位及公司，再逐项检索原文并交由另一模型家族核验。核验通过的数字与结论可以入库；部分数字仍缺失时，整项问题保持等待证据。继续阅读可以使用新原件，或同一原件中此前未读到的段落。继续阅读的请求会核对新原件或新段落，单纯改写问题或等待一段时间不构成新证据。研究反思由研究规划流程读取完整状态并记录对应的计划、执行与结果。进入计划时记录“系统已接手”，执行中保留尚缺的证据。只有所需证据逐项满足原问题、相应研究产出正式入库并通过核验，才能记录完成；数值问题还需核对指标、期间、单位和公司身份。公司档案和行业框架的专项复核在完成执行衔接前保持等待状态。
+
+见 [`house_view`](src/dalton_core/house_view.py)、[`thesis_question_model`](src/dalton_core/thesis_question_model.py)、
+[`model_cell_reconciliation`](src/dalton_core/model_cell_reconciliation.py)、
+[`research_followup`](src/dalton_core/research_followup.py)、[`research_followup_automation`](src/dalton_core/research_followup_automation.py) 和 [`fund_xlsx_export`](src/dalton_core/fund_xlsx_export.py)。
+
+### 原文身份、补充资料与券商表格
+
+SEC 财报 context v4 保留完整维度和期间身份；追加 context authority 用已持有 raw hash 重放并绑定新 context，不改旧行或
+旧 proof。模型采用的分部划分先按明确身份选择，再检查完整成员与集团桥。Exhibit 13 年报附件作为独立原文保存并与母申报
+关联，抽取和研读按附件自己的 hash 取回原文。缺口进入材料请求或研究跟进，由相应来源 lane 获取和处理。
+
+券商表格先确定性解析；解析不足时，有界模型 fallback 与不同模型家族的独立核验绑定同一原文、公司、财期、币种和单位。
+接受结果按本地合同再验，解析失败和费用回执单独保存。见 [`statement_context`](src/dalton_core/statement_context.py)、
+[`sec_annual_report_exhibit`](src/dalton_core/sec_annual_report_exhibit.py)、
+[`document_extraction`](src/dalton_core/document_extraction.py)、[`material_requests`](src/dalton_core/material_requests.py)、
+[`mission_consensus_lane`](src/dalton_core/mission_consensus_lane.py) 和 [`street_estimate_tables`](src/dalton_core/street_estimate_tables.py)。
 
 ## 占位契约（本 slice 不冻结）
 
-以下对象只在架构文档中定义方向，暂不伪装成已实现契约：Model IR
-datapoint/computation/scenario、CommitRecord、完整 bridge command-event、Excel exporter、
-Tier 1/2/3 computation contract、
+早期 slice 未冻结、当前仍未形成完整通用契约的架构方向包括：完整通用 Model IR 编译与
+Tier 1/2/3 computation contract、CommitRecord、完整 bridge command-event、
 实际 capability sandbox backend/monitoring，以及尚未选定的生产级存储/队列/runtime（Postgres、Temporal、
-Pi、DeepSeek Harness 等）。本 walking skeleton 可使用 SQLite，但不把 SQLite
+Pi、DeepSeek Harness 等）。当前实现使用 SQLite，但不把 SQLite
 写成 Dalton 的长期架构不变式。
 
 ## E1 / E2 验证映射
 
-整体 slice 的 E1 由 store/integration tests 与本目录的 E2 contract tests 共同
-覆盖；以下只把确实尚未实现的语义标为排除项：
+下表保留基础 slice 及已列增量的 E1/E2 验证映射，E1 来自 store/integration tests，E2 来自 contract tests。
+它不是当前全部研究模块的唯一测试清单；新增财务与批量更新测试族列在表尾。真实 hostile-code sandbox 仍为排除项。
 
 | 语义 | 验证层 | 本 slice 验证物 |
 | --- | --- | --- |
@@ -764,8 +1010,14 @@ Pi、DeepSeek Harness 等）。本 walking skeleton 可使用 SQLite，但不把
 | 阶段驱动、资料底座清单与按缺口排序的获取/阅读顺序 | E1 | `tests/test_mission_stage.py` |
 | Claim 挑战/退役：检测器、写入时重跑、账本不变与读取路径过滤 | E1 | `tests/test_claim_retirement.py` |
 | 交付物数字纪律、退役 Claim 不可引用、版本链与出口门结构自评 | E1 | `tests/test_mission_deliverable.py` |
-| cockpit 五视图、只读 Core、经 writer 写入与受预算约束的模型调用 | E1/E2 | `tests/test_cockpit_plane.py`、`tests/test_agenda_control.py` |
+| cockpit 初版五视图及工作台读写边界、只读 Core、经 writer 写入与受预算约束的模型调用 | E1/E2 | `tests/test_cockpit_plane.py`、`tests/test_agenda_control.py` |
+| 预测滚动/季节性、执行机制及发布检查 | E1/E2 | `tests/test_forecast_rolling_seasonality.py`、`tests/test_forecast_financial_execution.py` |
+| 财务结构、年度 EPS/股份与现金流投影 | E1/E2 | `tests/test_financial_structure_forecast_consumer.py`、`tests/test_structured_cash_flow_companion.py` |
+| 场景条件、概率、估值与敏感性 | E1/E2 | `tests/test_scenario*.py`、`tests/test_forecast_sensitivity*.py` |
+| 财务 XLSX、模板、公式及来源重放 | E1/E2 | `tests/test_fund_xlsx*.py` |
+| 单元消费收据、材料阈值、同输入去重与调度唤醒 | E1/E2 | `tests/test_research_product_batching.py`、`tests/test_dossier_lane.py`、`tests/test_industry_framework_lane.py` |
 | 实际 hostile-code sandbox backend 与自动 monitoring | E1 | 本 slice 排除 |
+| 计划周报、首次进展快照、真实政策授权、本地投递与跨类型同时间配额 | E1/E2 | `tests/test_mission_progress_weekly.py`、`tests/test_mission_progress_weekly_authority.py`、`tests/test_mission_progress_weekly_contract.py` |
 
 本目录不会通过 schema 或 `from_dict` 冒充实际 sandbox backend；Scheduler 和 commit service 的
 组件时序由 E1 测试验证。影子迁移只建立可审计迁移基线，不代表 live cutover 已完成。

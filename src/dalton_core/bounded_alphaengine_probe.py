@@ -25,8 +25,13 @@ ALPHAENGINE_PROFILE_REFS: tuple[str, ...] = (
     ALPHAENGINE_PROFILE_REF,
     "connector-profile:alphaengine-search-library:v1",
 )
+SEARCH_PROFILE_REF = "connector-profile:alphaengine-search-library:v1"
 TRAILING_WINDOW = timedelta(hours=24)
 MAX_CALLS_PER_WINDOW = 30
+#: Who the bounded planner's probes are launched as.  The acquisition ticket
+#: records it; the Core's connector receipts do not, so the probe's own cap is
+#: counted through the tickets (``count_recent_probe_calls``).
+PROBE_CALLER_REF = "automation:bounded-planner"
 _DOCUMENT_REF_RE = re.compile(r"^alphaengine-doc:[0-9]+$")
 
 
@@ -39,12 +44,16 @@ def _utcnow() -> datetime:
 
 
 def count_recent_alphaengine_calls(
-    connection: Any, *, as_of: datetime | None = None
+    connection: Any, *, as_of: datetime | None = None,
+    profile_refs: tuple[str, ...] = ALPHAENGINE_PROFILE_REFS,
 ) -> int:
+    """Trailing-window AlphaEngine calls, all profiles unless narrowed."""
+
     now = as_of or _utcnow()
     window_start = (now - TRAILING_WINDOW).isoformat(timespec="microseconds")
     now_text = now.isoformat(timespec="microseconds")
-    placeholders = ",".join("?" for _ in ALPHAENGINE_PROFILE_REFS)
+    profile_refs = tuple(profile_refs)
+    placeholders = ",".join("?" for _ in profile_refs)
     row = connection.execute(
         "SELECT ("
         "SELECT COUNT(*) FROM connector_physical_attempts a "
@@ -59,10 +68,66 @@ def count_recent_alphaengine_calls(
         "AND NOT EXISTS (SELECT 1 FROM connector_quota_settlements s "
         "WHERE s.reservation_ref=r.reservation_id)"
         ")",
-        (*ALPHAENGINE_PROFILE_REFS, window_start,
-         *ALPHAENGINE_PROFILE_REFS, window_start, now_text, now_text),
+        (*profile_refs, window_start,
+         *profile_refs, window_start, now_text, now_text),
     ).fetchone()
     return int(row[0])
+
+
+def recent_probe_documents(launcher: Any, *, as_of: datetime | None = None) -> set[str]:
+    """Documents the bounded planner's probes launched in the trailing window."""
+
+    tickets_dir = getattr(launcher, "tickets_dir", None)
+    if tickets_dir is None:
+        return set()
+    from pathlib import Path
+    import json
+
+    now = as_of or _utcnow()
+    floor = now - TRAILING_WINDOW
+    documents: set[str] = set()
+    for path in Path(tickets_dir).glob("*/ticket.json"):
+        try:
+            record = json.loads(path.read_text(encoding="utf-8"))
+            started = datetime.fromisoformat(
+                str(record.get("started_at")).replace("Z", "+00:00"))
+        except (OSError, ValueError, TypeError, AttributeError):
+            continue
+        if started.tzinfo is None:
+            started = started.replace(tzinfo=timezone.utc)
+        if (record.get("actor_ref") == PROBE_CALLER_REF and started >= floor
+                and isinstance(record.get("document_ref"), str)):
+            documents.add(record["document_ref"])
+    return documents
+
+
+def count_recent_probe_calls(
+    connection: Any, launcher: Any, *, as_of: datetime | None = None,
+) -> int:
+    """Trailing-window AlphaEngine calls made by the bounded planner's probes.
+
+    2026-10-07 (batch r): the probe cap used to be compared with *every*
+    AlphaEngine call, so once discovery had run its searches and acquisitions
+    the probe was blocked although it had made none.  Only the calls of the
+    documents a probe launched count here; a probe still in flight counts as
+    one call so a burst cannot overshoot.
+    """
+
+    documents = recent_probe_documents(launcher, as_of=as_of)
+    if not documents:
+        return 0
+    now = as_of or _utcnow()
+    window_start = (now - TRAILING_WINDOW).isoformat(timespec="microseconds")
+    marks = ",".join("?" for _ in documents)
+    row = connection.execute(
+        "SELECT COUNT(*) FROM connector_physical_attempts a "
+        "JOIN connector_invocations i ON i.connector_invocation_id=a.connector_invocation_ref "
+        "JOIN connector_call_specs c ON c.call_spec_id=i.call_spec_ref "
+        "WHERE i.connector_profile_ref=? AND a.started_at >= ? "
+        f"AND json_extract(c.record_json,'$.parameters.document_ref') IN ({marks})",
+        (ALPHAENGINE_PROFILE_REF, window_start, *sorted(documents)),
+    ).fetchone()
+    return max(int(row[0]), len(documents))
 
 
 def document_in_authority(connection: Any, document_ref: str) -> bool:
@@ -97,15 +162,23 @@ def execute_alphaengine_probe(
     max_pages: int = 20,
     max_calls_per_window: int = MAX_CALLS_PER_WINDOW,
     as_of: datetime | None = None,
+    max_probe_calls_per_window: int | None = None,
 ) -> dict[str, Any]:
-    """Execute one AlphaEngine document probe; returns a ResultEnvelope wire."""
+    """Execute one AlphaEngine document probe; returns a ResultEnvelope wire.
 
-    if (isinstance(max_calls_per_window, bool)
-            or not isinstance(max_calls_per_window, int)
-            or max_calls_per_window < 0):
-        raise BoundedAlphaEngineProbeError(
-            "max_calls_per_window must be a non-negative integer"
-        )
+    ``max_calls_per_window`` bounds every AlphaEngine call (the mission's
+    window, which searches and acquisitions share); ``max_probe_calls_per_window``
+    bounds only the calls the probes themselves made.
+    """
+
+    for name, value in (("max_calls_per_window", max_calls_per_window),
+                        ("max_probe_calls_per_window", max_probe_calls_per_window)):
+        if value is None and name == "max_probe_calls_per_window":
+            continue
+        if isinstance(value, bool) or not isinstance(value, int) or value < 0:
+            raise BoundedAlphaEngineProbeError(
+                f"{name} must be a non-negative integer"
+            )
 
     metadata = work_order.get("metadata") or {}
     if metadata.get("permission_scope") != PROBE_PERMISSION_SCOPE:
@@ -152,10 +225,22 @@ def execute_alphaengine_probe(
             "code": "ALPHAENGINE_PROBE_BUDGET_EXCEEDED",
             "message": (
                 f"{spent} AlphaEngine calls in the trailing 24h window; "
-                f"configured probe cap is {max_calls_per_window}"
+                f"the mission's AlphaEngine cap is {max_calls_per_window}"
             ),
         }
         return envelope
+    if max_probe_calls_per_window is not None:
+        probes = count_recent_probe_calls(connection, launcher, as_of=as_of)
+        if probes >= max_probe_calls_per_window:
+            envelope["status"] = "failed"
+            envelope["error"] = {
+                "code": "ALPHAENGINE_PROBE_BUDGET_EXCEEDED",
+                "message": (
+                    f"{probes} probe calls in the trailing 24h window; "
+                    f"configured probe cap is {max_probe_calls_per_window}"
+                ),
+            }
+            return envelope
 
     import time as _time
 
@@ -196,7 +281,11 @@ __all__ = [
     "ALPHAENGINE_PROFILE_REFS",
     "BoundedAlphaEngineProbeError",
     "MAX_CALLS_PER_WINDOW",
+    "PROBE_CALLER_REF",
+    "SEARCH_PROFILE_REF",
     "TRAILING_WINDOW",
     "count_recent_alphaengine_calls",
+    "count_recent_probe_calls",
+    "recent_probe_documents",
     "execute_alphaengine_probe",
 ]

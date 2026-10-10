@@ -1,7 +1,7 @@
 """Replay the recheck's near-duplicate rule over what it committed -- read-only, no model.
 
     PYTHONPATH=src .venv/bin/python scripts/replay_recheck_near_duplicates.py \\
-        --state-dir /Volumes/EveSSD/Dalton/legacy-state/dalton-core \\
+        --state-dir <state-dir> \\
         --since 2026-09-27T09:00 --out /tmp/recheck-near-duplicates.json
 
 For every Claim the outage recheck committed since ``--since`` (read from the

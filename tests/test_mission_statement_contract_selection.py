@@ -40,6 +40,13 @@ class StatementContractSelectionTests(unittest.TestCase):
         v3 = self.write(3, "approved")
         self.assertEqual(self.selected(), str(v3))
 
+    def test_proposed_v4_preserves_v3_and_approved_v4_is_preferred(self):
+        v3 = self.write(3, "approved")
+        self.write(4, "proposed")
+        self.assertEqual(self.selected(), str(v3))
+        v4 = self.write(4, "approved")
+        self.assertEqual(self.selected(), str(v4))
+
     def test_installed_lane_requests_annual_and_quarterly_coverage(self):
         self.write(2, "approved")
         argv = argv_fragment(self.context)

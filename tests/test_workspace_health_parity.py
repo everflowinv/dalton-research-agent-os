@@ -129,6 +129,66 @@ class ParityTests(unittest.TestCase):
                  "2026-09-27T01:00:01+00:00"))
         ledger.commit(); ledger.close()
 
+    def test_a_lane_registered_in_code_but_not_live_on_the_writer_is_a_gap(self):
+        # Batch t (2026-10-07): after a release switch owner_delivery said
+        # "no owner delivery lane on this writer" in all three environments.
+        self._mission()
+        self._tick([("owner_delivery", "unconfigured",
+                     {"reason": "no owner delivery lane on this writer"})])
+        rows = check_lanes(self._env())
+        row = next(row for row in rows if row["check"] == "owner_delivery")
+        self.assertEqual(row["status"], "gap")
+        self.assertIn("registered in code but not live on this writer", row["detail"])
+        # A registered tick lane the running writer does not report at all is
+        # the same gap.
+        missing = next(row for row in rows if row["check"] == "scenario_proposal")
+        self.assertEqual(missing["status"], "gap")
+        self.assertIn("did not report it", missing["detail"])
+
+    def test_a_lane_held_because_there_is_no_mission_is_live_not_a_gap(self):
+        # Batch u (2026-10-07, ws-e399 before its first mission): 19 lanes
+        # held "no mission" were reported as not live on an older release.
+        self._tick([
+            ("conviction_call", "held", {"reason": "no mission",
+                                         "reason_code": "lane_unconfigured_hold"}),
+            ("mission_reopen", "held", {"reason": "no active mission",
+                                        "reason_code": "lane_unconfigured_hold"}),
+            ("valuation_snapshot", "held", {"reason": "这台 Core 上还没有 coverage mission",
+                                            "reason_code": "lane_unconfigured_hold"}),
+            ("mission_tracking", "unconfigured", {"reason": "no mission"}),
+            ("mission_source_discovery", "unconfigured", {
+                "reason": "discovery plan is unusable: [Errno 2] No such file or directory: "
+                          "'/x/discovery-plans/a.json'"}),
+            ("owner_delivery", "unconfigured",
+             {"reason": "no owner delivery lane on this writer"}),
+        ])
+        rows = {row["check"]: row for row in check_lanes(self._env())}
+        for key in ("conviction_call", "mission_reopen", "valuation_snapshot",
+                    "mission_tracking", "mission_source_discovery"):
+            self.assertEqual(rows[key]["status"], "pending", key)
+            self.assertNotIn("not live", rows[key]["detail"], key)
+            self.assertNotIn("release older", rows[key]["detail"], key)
+        # A missing writer argument is still a gap, without blaming the release.
+        self.assertEqual(rows["owner_delivery"]["status"], "gap")
+        self.assertIn("not live on this writer", rows["owner_delivery"]["detail"])
+        self.assertNotIn("release older", rows["owner_delivery"]["detail"])
+        # A lane absent from the writer's tick is the one case the release is older.
+        self.assertEqual(rows["scenario_proposal"]["status"], "gap")
+        self.assertIn("release older than the lane", rows["scenario_proposal"]["detail"])
+
+    def test_a_stale_plist_is_not_a_gap_when_the_writer_runs_the_lane(self):
+        import plistlib
+
+        self._mission()
+        self._tick([("owner_delivery", "not_granted", {"reason": "这个环境还没有开通飞书推送"})])
+        plist = self.state.parent / "writer.plist"
+        plist.write_bytes(plistlib.dumps({"ProgramArguments": ["python", "--db", "x"]}))
+        env = Environment("test", self.state, plist_path=plist)
+        self.addCleanup(env.close)
+        row = next(row for row in check_lanes(env) if row["check"] == "owner_delivery")
+        self.assertNotEqual(row["status"], "gap")
+        self.assertIn("derives them from code at startup", row["detail"])
+
     def test_an_empty_queue_without_maintenance_is_flagged(self):
         self._mission()
         self._tick([("document_extraction", "idle", {"awaiting": 0})])

@@ -189,6 +189,78 @@ class DiscoveryCandidateSelectionTests(unittest.TestCase):
         self.assertLess(len(prompt.encode()),120000*4)
 
 
+    @staticmethod
+    def page(results):
+        payload = {"results": results}
+        raw = canonical_json({"result": {"content": [{"type": "text",
+                                                       "text": canonical_json(payload)}]}}).encode()
+        base = {"id": "source-envelope:long-tags",
+                "raw_response_hash": hashlib.sha256(raw).hexdigest(),
+                "source_record_refs": [f"alphaengine-doc:{row['doc_id']}" for row in results]}
+        return raw, {**base, "content_hash": content_hash(base)}
+
+    def test_an_overlong_tag_list_is_truncated_keeping_the_covered_companies(self):
+        # 2026-09-29: legacy's DXC/CTSH and ws-7d's AMZN/GOOGL/META/MSFT pages
+        # carried "companies" lists of 22-193 issuers; the whole page was
+        # refused and every acquisition behind it stalled.
+        crowd = [f"Issuer {index} Inc." for index in range(190)]
+        crowd[150:150] = ["Microsoft Corporation"]
+        crowd[40:40] = ["Amazon.Com, Inc."]
+        raw, envelope = self.page([
+            {"doc_id": "daily", "title": "Cantor Daily Research Highlights", "companies": crowd},
+            {"doc_id": "plain", "title": "Meta note", "companies": ["Meta Platforms, Inc."]},
+        ])
+        terms = ["MSFT", "Microsoft", "AMZN", "Amazon", "META"]
+        view = candidate_view(raw, envelope, priority_terms=terms)
+        daily, plain = view["candidates"]
+        self.assertEqual(daily["companies"][:2], ["Amazon.Com, Inc.", "Microsoft Corporation"])
+        self.assertEqual(len(daily["companies"]), 5)
+        self.assertTrue(daily["companies_truncated"])
+        self.assertEqual(daily["companies_original_count"], len(crowd))
+        self.assertEqual(daily["companies_covered_kept"], 2)
+        self.assertEqual(daily["companies_hash"], hashlib.sha256(json.dumps(
+            crowd, ensure_ascii=False, separators=(",", ":")).encode()).hexdigest())
+        self.assertEqual(view["long_list_projection"]["max_source_items"], 20)
+        # Deterministic: the same page and the same mission, the same view.
+        self.assertEqual(candidate_view(raw, envelope, priority_terms=list(reversed(terms))), view)
+        # A short list is exactly what it always was: no new keys.
+        self.assertEqual(plain["companies"], ["Meta Platforms, Inc."])
+        self.assertNotIn("companies_original_count", plain)
+        # Without mission names the source order decides.
+        bare = candidate_view(raw, envelope)
+        self.assertEqual(bare["candidates"][0]["companies"], crowd[:5])
+        # The selector still accepts the view.
+        selected = validate_selection(json.dumps({"selected": [{
+            "document_ref": "alphaengine-doc:daily", "reason": "sector read-through"}]}), view)
+        self.assertEqual(len(selected["selected"]), 1)
+
+    def test_every_covered_company_survives_truncation_up_to_the_bound(self):
+        crowd = [f"Issuer {index} Inc." for index in range(30)] + [
+            f"Covered {index} Corp." for index in range(8)]
+        raw, envelope = self.page([{"doc_id": "many", "companies": crowd}])
+        view = candidate_view(raw, envelope,
+                              priority_terms=[f"Covered {index}" for index in range(8)])
+        self.assertEqual(view["candidates"][0]["companies"],
+                         [f"Covered {index} Corp." for index in range(8)])
+
+    def test_views_of_pages_within_the_old_bound_keep_their_hash(self):
+        # Persisted selections are keyed by the view hash; a page the old code
+        # accepted must project byte for byte as before.
+        raw, envelope = self.fixture()
+        view = candidate_view(raw, envelope, priority_terms=["International Business Machines"])
+        self.assertEqual(view, candidate_view(raw, envelope))
+        self.assertNotIn("long_list_projection", view)
+        # The hash b500da99 (before the long-list path) gave this page.
+        self.assertEqual(view["content_hash"],
+                         "68184f6e89e1324ea22192e9dd78a1790ca64c38c7b633fbb11f005e6799e942")
+
+    def test_a_malformed_tag_list_is_still_refused(self):
+        raw, envelope = self.page([{"doc_id": "bad", "companies": ["A"] * 25 + [7]}])
+        with self.assertRaisesRegex(CandidateSelectionError, "candidate companies is invalid"):
+            candidate_view(raw, envelope)
+        self.assertTrue(CandidateSelectionError.deterministic)
+
+
 if __name__ == "__main__": unittest.main()
 
 

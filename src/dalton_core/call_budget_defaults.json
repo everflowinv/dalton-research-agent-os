@@ -37,16 +37,16 @@
       "timeout_seconds": 240
     },
     "debate_map": {
-      "max_cost_usd": 1.0,
-      "max_input_tokens": 80000,
-      "max_output_tokens": 8000,
-      "timeout_seconds": 240
+      "max_cost_usd": 14.0,
+      "max_input_tokens": 600000,
+      "max_output_tokens": 16000,
+      "timeout_seconds": 900
     },
     "debate_map_verifier": {
-      "max_cost_usd": 1.0,
-      "max_input_tokens": 80000,
-      "max_output_tokens": 4000,
-      "timeout_seconds": 240
+      "max_cost_usd": 14.0,
+      "max_input_tokens": 600000,
+      "max_output_tokens": 16000,
+      "timeout_seconds": 900
     },
     "deep_insight_gate": {
       "max_cost_usd": 1.0,
@@ -73,16 +73,16 @@
       "timeout_seconds": 600
     },
     "dossier": {
-      "max_cost_usd": 1.0,
-      "max_input_tokens": 120000,
-      "max_output_tokens": 3000,
-      "timeout_seconds": 180
+      "max_cost_usd": 14.0,
+      "max_input_tokens": 600000,
+      "max_output_tokens": 16000,
+      "timeout_seconds": 900
     },
     "dossier_verifier": {
-      "max_cost_usd": 1.0,
-      "max_input_tokens": 120000,
-      "max_output_tokens": 3000,
-      "timeout_seconds": 180
+      "max_cost_usd": 14.0,
+      "max_input_tokens": 600000,
+      "max_output_tokens": 16000,
+      "timeout_seconds": 900
     },
     "earnings_calibration": {
       "max_cost_usd": 1.0,
@@ -120,6 +120,12 @@
       "max_output_tokens": 1500,
       "timeout_seconds": 180
     },
+    "event_triage": {
+      "max_cost_usd": 1.0,
+      "max_input_tokens": 60000,
+      "max_output_tokens": 1000,
+      "timeout_seconds": 120
+    },
     "industry_framework": {
       "max_cost_usd": 1.0,
       "max_input_tokens": 120000,
@@ -132,17 +138,29 @@
       "max_output_tokens": 3000,
       "timeout_seconds": 180
     },
+    "initial_screen": {
+      "max_cost_usd": 14.0,
+      "max_input_tokens": 600000,
+      "max_output_tokens": 16000,
+      "timeout_seconds": 900
+    },
+    "initial_screen_verifier": {
+      "max_cost_usd": 14.0,
+      "max_input_tokens": 600000,
+      "max_output_tokens": 16000,
+      "timeout_seconds": 900
+    },
     "investment_memo": {
-      "max_cost_usd": 1.0,
-      "max_input_tokens": 120000,
-      "max_output_tokens": 6000,
-      "timeout_seconds": 300
+      "max_cost_usd": 14.0,
+      "max_input_tokens": 600000,
+      "max_output_tokens": 16000,
+      "timeout_seconds": 900
     },
     "investment_memo_verifier": {
-      "max_cost_usd": 1.0,
-      "max_input_tokens": 120000,
-      "max_output_tokens": 6000,
-      "timeout_seconds": 300
+      "max_cost_usd": 14.0,
+      "max_input_tokens": 600000,
+      "max_output_tokens": 16000,
+      "timeout_seconds": 900
     },
     "metric_discovery_extraction": {
       "max_cost_usd": 1.0,
@@ -153,7 +171,7 @@
     "mission_directed_document_draft": {
       "max_cost_usd": 1.0,
       "max_input_tokens": 64000,
-      "max_output_tokens": 4096,
+      "max_output_tokens": 16000,
       "timeout_seconds": 600
     },
     "mission_directed_document_verifier": {
@@ -189,7 +207,7 @@
     "registered_annual_report_draft": {
       "max_cost_usd": 1.0,
       "max_input_tokens": 64000,
-      "max_output_tokens": 4096,
+      "max_output_tokens": 16000,
       "timeout_seconds": 600
     },
     "registered_annual_report_verifier": {
@@ -197,6 +215,12 @@
       "max_input_tokens": 64000,
       "max_output_tokens": 4096,
       "timeout_seconds": 600
+    },
+    "scenario_proposal": {
+      "max_cost_usd": 1.0,
+      "max_input_tokens": 40000,
+      "max_output_tokens": 6000,
+      "timeout_seconds": 240
     },
     "thesis_reflection": {
       "max_cost_usd": 1.0,

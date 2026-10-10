@@ -530,8 +530,12 @@ class SearchCadenceTests(_VersionHarness):
         now = datetime(2026, 9, 25, 12, tzinfo=timezone.utc)
         self._dispatch(self.v2, "succeeded", (now - timedelta(days=1)).isoformat())
         spec = {"spec_ref": SPEC, "rediscovery_interval_days": 7, "retry_interval_days": 1}
+        # The fixture dispatch's own plan: the same plan across mission versions.
         lane = SimpleNamespace(missions=self.m, clock=lambda: now, source_ref="source:alphaengine",
-                               search_launcher=None, store=self.h.h.core)
+                               search_launcher=None, store=self.h.h.core,
+                               plan={"id": "discovery-plan:fixture", "content_hash": "0" * 64})
+        lane._query_changed_since = lambda *args: (
+            MissionSourceDiscoveryCoordinator._query_changed_since(lane, *args))
 
         def block():
             current = self.m.active_mission(REF)["id"]

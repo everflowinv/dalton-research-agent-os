@@ -4,7 +4,7 @@ build-backend = "setuptools.build_meta"
 
 [project]
 name = "dalton-core"
-version = "0.1.0.dev0"
+version = "0.11.0"
 description = "Runtime-independent control kernel prototype for Dalton Research Agent OS"
 requires-python = ">=3.11"
 
@@ -83,6 +83,7 @@ dalton-model-forecast = "dalton_core.company_model_forecast_cli:main"
 dalton-forecast-sensitivity = "dalton_core.forecast_sensitivity_cli:main"
 dalton-research-quality = "dalton_core.research_quality_cli:main"
 dalton-research-reflection = "dalton_core.research_cycle_reflection_cli:main"
+dalton-research-followup = "dalton_core.research_followup_cli:main"
 dalton-sales-notes = "dalton_core.sales_notes_cli:main"
 dalton-company-wiki = "dalton_core.company_wiki_cli:main"
 dalton-prior-research = "dalton_core.prior_research_cli:main"
@@ -117,10 +118,15 @@ dalton_core = [
   "zero-base-review-verifier-provider-output-v0.1.schema.json",
   "earnings-verifier-provider-output-v0.1.schema.json",
   "quality-verifier-provider-output-v0.1.schema.json",
+  "initial-screen-verifier-provider-output-v0.1.schema.json",
+  "street-estimate-verifier-provider-output-v0.1.schema.json",
   "investment-memo-verifier-provider-output-v0.1.schema.json",
   "debate-map-verifier-provider-output-v0.1.schema.json",
   "conviction-call-verifier-provider-output-v0.1.schema.json",
+  "conviction-call-verifier-provider-output-v0.2.schema.json",
   "annual-report-verifier-provider-output-v0.1.schema.json",
+  "mission-document-verifier-provider-output-v0.2.schema.json",
+  "mission-document-numeric-verifier-provider-output-v0.1.schema.json",
   "research-localization-verifier-provider-output-v0.1.schema.json",
   "claim-support-verifier-provider-output-v0.1.schema.json",
   "call_budget_defaults.json",
@@ -129,6 +135,21 @@ dalton_core = [
   "dashboard.html",
   "cockpit_control.html",
   "cockpit_control_legacy.html",
+  "cockpit_weekly_brief.html",
+  # ADR-0016: the v2 workbench's static files, its pages and the two
+  # extension directories (administrator interface, financial charts).
+  "cockpit_v2/*.html",
+  "cockpit_v2/*.css",
+  "cockpit_v2/*.js",
+  "cockpit_v2/pages/*.js",
+  "cockpit_v2/admin/*.html",
+  "cockpit_v2/admin/*.css",
+  "cockpit_v2/admin/*.js",
+  "cockpit_v2/admin/*.mjs",
+  "cockpit_v2/charts/*.html",
+  "cockpit_v2/charts/*.css",
+  "cockpit_v2/charts/*.js",
+  "cockpit_v2/charts/*.mjs",
 ]
 
 [tool.setuptools.data-files]

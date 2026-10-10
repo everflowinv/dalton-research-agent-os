@@ -103,7 +103,7 @@ class WorkerStdoutSummaryTests(unittest.TestCase):
     def test_no_branch_prints_the_raw_checkpoint(self):
         source = inspect.getsource(prep.run_worker)
         self.assertNotIn("print(json.dumps(result", source)
-        self.assertEqual(source.count("worker_stdout_summary(result"), 2)
+        self.assertEqual(source.count("worker_stdout_summary(result"), 3)
 
 
 if __name__ == "__main__":

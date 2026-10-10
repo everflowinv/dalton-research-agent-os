@@ -635,21 +635,32 @@ class OutputRubricTests(unittest.TestCase):
                     section["aspect"] = "business_model"
                 self.assertTrue(self._conclusion_findings(section))
 
-    def test_historical_target_fact_does_not_allow_an_authors_conclusion(self):
+    def test_historical_target_fact_does_not_allow_an_unlabelled_conclusion(self):
+        # Batch D: a view labelled as ours is allowed (see the next test); a
+        # verdict with no owner, or an unsupported target statement, is not.
         for text in (
             "分析师下调目标价，所以建议买入。",
             "分析师下调目标价；我们的目标价为 USD 50。",
-            "我们预计分析师下调目标价。",
-            "分析师下调目标价，但我们认为低估。",
             "分析师未下调目标价。",
             "分析师将下调目标价。",
-            "Our price target is USD 50.",
             "Analysts lowered their price target; we should buy.",
         ):
             with self.subTest(text=text):
                 section = drafted("history_of_price_drivers", "claim-version:a", text,
                                   source_text="Analysts lowered their price target.")
                 self.assertTrue(self._conclusion_findings(section))
+
+    def test_a_view_labelled_as_ours_is_allowed(self):
+        # Owner decision 2026-10-09: views, watch prices and reasons are allowed.
+        for text in (
+            "我们认为估值低估，观察价对应 18 倍。",
+            "分析师下调目标价，但我们认为低估。",
+            "Our price target is USD 50.",
+        ):
+            with self.subTest(text=text):
+                section = drafted("history_of_price_drivers", "claim-version:a", text,
+                                  source_text="Analysts lowered their price target.")
+                self.assertEqual(self._conclusion_findings(section), [])
 
     def test_a_criterion_the_policy_never_mentions_is_a_finding(self):
         record = body(drafted_sections={
@@ -688,7 +699,7 @@ class OutputRubricTests(unittest.TestCase):
                 "check": "no_investment_conclusion", "reason": ""}],
         })
         block = variant("claim-version:v")
-        block["slots"][0]["sentences"][0]["text"] = "我们认为市场给的目标价太低。"
+        block["slots"][0]["sentences"][0]["text"] = "市场给的目标价太低。"
         record = body(
             drafted_sections={"business_model": drafted("business_model", "claim-version:a")},
             variant_block=block)
@@ -753,11 +764,16 @@ class OutputRubricTests(unittest.TestCase):
                 "criterion_hash": content_hash(criteria[2]),
                 "check": "no_investment_conclusion", "reason": ""}],
         })
-        section = drafted("business_model", "claim-version:a", "我们认为估值低估。")
+        section = drafted("business_model", "claim-version:a", "估值低估。")
         record = body(drafted_sections={"business_model": section})
         findings = output_rubric_findings(record, constitution=constitution(criteria=criteria),
                                           policy=mapped)
         self.assertEqual([item["code"] for item in findings], ["investment_conclusion"])
+        # The same verdict labelled as our judgement is a view, and allowed.
+        section = drafted("business_model", "claim-version:a", "我们认为估值低估。")
+        record = body(drafted_sections={"business_model": section})
+        self.assertEqual(output_rubric_findings(
+            record, constitution=constitution(criteria=criteria), policy=mapped), [])
 
 
 class QualityArtefactTests(unittest.TestCase):

@@ -12,7 +12,8 @@ from typing import Any
 
 
 def export_download(core_db: str | Path, company_ref: str, format: str,
-                    *, mission_ref: str, company_label: str | None = None) -> dict[str, Any]:
+                    *, mission_ref: str, company_label: str | None = None,
+                    template_version_ref: str | None = None) -> dict[str, Any]:
     if format not in {"html", "xlsx"}:
         raise ValueError("unsupported research export format")
     suffix = hashlib.sha256(company_ref.encode()).hexdigest()[:12]
@@ -33,7 +34,8 @@ def export_download(core_db: str | Path, company_ref: str, format: str,
             from .fund_xlsx_export import export_company_workbook
 
             manifest = export_company_workbook(
-                core_db, company_ref, target, mission_ref=mission_ref)
+                core_db, company_ref, target, mission_ref=mission_ref,
+                template_version_ref=template_version_ref)
             media_type = "application/vnd.openxmlformats-officedocument.spreadsheetml.sheet"
         raw = target.read_bytes()
     return {

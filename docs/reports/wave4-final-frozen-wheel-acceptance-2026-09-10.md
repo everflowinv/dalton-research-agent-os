@@ -2,7 +2,7 @@
 
 ## Frozen input
 
-- Checkout: `/Users/everflow/Projects/dalton-wave4-final-acceptance-worktree`
+- Checkout: `$HOME/Projects/dalton-wave4-final-acceptance-worktree`
 - Commit: `f1d61b8ad7c0d9a94830cead535570d6b0a5e7a5`
 - The checkout was clean before and after acceptance. No source file, worktree,
   live state, or deployment state was changed.

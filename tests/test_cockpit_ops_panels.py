@@ -381,6 +381,34 @@ class FourPanelTests(PanelCase):
         self.assertGreaterEqual(panel["other"], 1)
         self.assertNotIn("something_new", LANE_STATUS_BUCKET_OF)
 
+    def test_live_lane_words_are_bucketed_and_every_row_is_in_the_sentence(self) -> None:
+        # P2-2: live legacy reported dispatched/waiting/not_applicable/recorded;
+        # they fell into ``other`` and out of the headline sentence.
+        self.lanes({
+            "claim_index": {"status": "dispatched"},
+            "industry_framework": {"status": "waiting"},
+            "mission_reflection": {"status": "not_applicable"},
+            "mission_tracking": {"status": "recorded"},
+            "mission_document_research": {"status": "resumed"},
+        })
+        heartbeat = json.loads(self.c.heartbeat.read_text(encoding="utf-8"))
+        heartbeat["weekly_brief"]["state"] = "brand_new_word"
+        self.c.heartbeat.write_text(json.dumps(heartbeat), encoding="utf-8")
+        view = self.plane.overview()
+        panel, rows = view["ops"]["lanes"], view["activity"]["lanes"]
+        for word, bucket in (("dispatched", "running"), ("resumed", "running"),
+                             ("waiting", "idle"), ("not_applicable", "idle"),
+                             ("recorded", "idle")):
+            self.assertEqual(LANE_STATUS_BUCKET_OF[word], bucket)
+        self.assertEqual(panel["other_statuses"], {"brand_new_word": 1})
+        self.assertIn("1 项状态未归类", panel["note"])
+        self.assertEqual(sum(panel["counts"].values()) + panel["other"], len(rows))
+        # Every row the sentence is about is counted in it: running, idle,
+        # stuck, not configured and unclassified add up to the page.
+        import re
+        said = sum(int(n) for n in re.findall(r"(\d+) 项", panel["note"]))
+        self.assertEqual(said, len(rows))
+
     def test_terminal_recovery_and_duplicate_have_honest_buckets(self) -> None:
         self.lanes({
             "industry_framework": {"status": "terminal", "reason": "content refusal"},

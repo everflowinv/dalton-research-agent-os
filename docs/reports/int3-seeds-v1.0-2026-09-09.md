@@ -1,5 +1,7 @@
 # INT3 — seeds, switches and the schema set — v1.0 — 2026-09-09
 
+历史技术评审：保留当时结论与局限；当前运行状态见 [项目状态](../PROJECT_STATUS.md)。原始操作证据私有保存。
+
 Branch `int3-seeds`, worktree `~/Projects/dalton-int3-seeds-worktree`, base main
 `0fdbfab`, merged with main `9813b44` before this was written — the rehearsal
 author's own fix (`3f21dbe`) and W3's revision loop landed first, and §1.1 and
@@ -10,7 +12,7 @@ only. No launchd agent was started or stopped, no live broker socket opened, no
 network call and no model call made.
 
 This closes the four findings the deploy rehearsal left open
-(`docs/reports/ops-deploy-rehearsal-v1.0-2026-09-09.md` §3.3, §3.4, §5.1 and
+(the original deployment rehearsal, privately archived, §3.3, §3.4, §5.1 and
 §3.1's last paragraph). INT1 and INT2 had already landed most of the seed
 blocks; what was left was the part a comment cannot do.
 

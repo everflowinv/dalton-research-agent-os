@@ -450,6 +450,9 @@ class AgendaStore:
         self.connection: sqlite3.Connection = store.connection
         self.connection.executescript(_SCHEMA_PATH.read_text(encoding="utf-8"))
         self._migrate_phase1_delivery_schema()
+        columns = {row[1] for row in self.connection.execute("PRAGMA table_info(agenda_candidates)")}
+        if "canonical_question_version_ref" not in columns:
+            self.connection.execute("ALTER TABLE agenda_candidates ADD COLUMN canonical_question_version_ref TEXT REFERENCES backlog_question_versions(version_id)")
         self._ensure_paused_bootstrap()
 
     def _migrate_phase1_delivery_schema(self) -> None:
@@ -969,6 +972,8 @@ class AgendaStore:
         if len({item["candidate_id"] for item in normalized}) != len(normalized):
             raise AgendaValidationError("candidate ids must be unique")
         request_hash = content_hash({"cycle_id": cycle_id, "candidates": normalized, "actor_ref": actor_ref})
+        from .research_question_backlog import ResearchQuestionBacklog
+        backlog = ResearchQuestionBacklog(self.store)
         with self.store._transaction() as cur:
             duplicate = self._idem(cur, idempotency_key, "add_agenda_candidates", request_hash)
             if duplicate is not None:
@@ -978,18 +983,16 @@ class AgendaStore:
             refs: list[str] = []
             created_at = _now()
             for item in normalized:
-                question_ref = "research-question:" + content_hash({"company_ref": item["company_ref"], "question": item["question"]})[:32]
-                question_version_ref = f"research-question-version:{content_hash({**item, 'cycle_id': cycle_id})[:32]}"
-                prior_row = cur.execute("SELECT v.* FROM research_question_pointer p JOIN research_question_versions v ON v.version_id=p.version_id WHERE p.question_ref=?", (question_ref,)).fetchone()
-                if prior_row is None:
-                    version_number, prior = 1, None
-                    question_wire = self._record({"schema_version": SCHEMA_VERSION, "id": question_version_ref, "question_ref": question_ref, "version": 1, "prior_version_ref": None, "company_ref": item["company_ref"], "question": item["question"], "answer_criteria": item["answer_criteria"], "state": "open", "defer_until": None, "wake_condition": None, "source_refs": item["source_refs"], "actor_ref": actor_ref, "created_at": created_at})
-                    cur.execute("INSERT INTO research_question_versions(version_id,question_ref,version_number,prior_version_id,company_ref,question,answer_criteria,state,defer_until,wake_condition,source_refs_json,actor_ref,record_json,content_hash,created_at) VALUES(?,?,?,?,?,?,?,?,?,?,?,?,?,?,?)", (question_version_ref, question_ref, version_number, prior, item["company_ref"], item["question"], item["answer_criteria"], "open", None, None, canonical_json(item["source_refs"]), actor_ref, canonical_json(question_wire), question_wire["content_hash"], created_at))
-                    cur.execute("INSERT INTO research_question_pointer(question_ref,version_id) VALUES(?,?)", (question_ref, question_version_ref))
-                else:
-                    question_version_ref = prior_row["version_id"]
+                cycle = read_exact_agenda_cycle(cur, cycle_id)
+                question = backlog.record_question(
+                    mandate_version_ref=cycle["mandate_version_ref"],
+                    company_ref=item["company_ref"], question=item["question"],
+                    answer_criteria=item["answer_criteria"], source_refs=item["source_refs"],
+                    actor_ref=actor_ref, _cursor=cur,
+                )
+                question_version_ref = question["question_version_ref"]
                 candidate_wire = self._record({"schema_version": SCHEMA_VERSION, "id": item["candidate_id"], "cycle_ref": cycle_id, "question_version_ref": question_version_ref, "proposed_question": item["question"], "answer_criteria": item["answer_criteria"], "features": item["features"], "rationale": item["rationale"], "source_refs": item["source_refs"], "valid": True, "rejection_reason": None, "actor_ref": actor_ref, "created_at": created_at})
-                cur.execute("INSERT INTO agenda_candidates(candidate_id,cycle_id,question_version_ref,proposed_question,answer_criteria,features_json,rationale,source_refs_json,valid,rejection_reason,actor_ref,created_at,content_hash) VALUES(?,?,?,?,?,?,?,?,?,?,?,?,?)", (item["candidate_id"], cycle_id, question_version_ref, item["question"], item["answer_criteria"], canonical_json(item["features"]), item["rationale"], canonical_json(item["source_refs"]), 1, None, actor_ref, created_at, candidate_wire["content_hash"]))
+                cur.execute("INSERT INTO agenda_candidates(candidate_id,cycle_id,canonical_question_version_ref,proposed_question,answer_criteria,features_json,rationale,source_refs_json,valid,rejection_reason,actor_ref,created_at,content_hash) VALUES(?,?,?,?,?,?,?,?,?,?,?,?,?)", (item["candidate_id"], cycle_id, question_version_ref, item["question"], item["answer_criteria"], canonical_json(item["features"]), item["rationale"], canonical_json(item["source_refs"]), 1, None, actor_ref, created_at, candidate_wire["content_hash"]))
                 refs.append(item["candidate_id"])
             event = self._cycle_event(cur, cycle_id, "candidates_ready", "candidate_generation_completed", {"candidate_refs": refs}, actor_ref)
             result = {"status": "fresh", "cycle_id": cycle_id, "candidate_refs": refs, "event": event}
@@ -1111,6 +1114,49 @@ class AgendaStore:
     def _outbox_wire(row: sqlite3.Row) -> dict[str, Any]:
         return {**dict(row), "payload": json.loads(row["payload_json"])}
 
+    @staticmethod
+    def _replay_weekly_brief(
+        cur: sqlite3.Cursor, message_id: str, normalized: Mapping[str, Any],
+    ) -> dict[str, Any] | None:
+        """The already-enqueued message for this cycle, when it is the same issue.
+
+        A weekly issue is frozen at publication (``issue_version_hash``); its
+        Markdown is a rendering of it.  When the renderer's wording changes
+        after an issue went out, re-running the cycle rebuilds a body whose
+        bytes differ while the issue does not.  That is the same message --
+        the owner already has it -- so it replays (no second send, no error).
+        Identity is cycle + issue version + issue hash + brief + destination;
+        any of those differing is a real conflict and returns ``None``.
+        """
+
+        row = cur.execute(
+            "SELECT message_id,payload_json,payload_hash FROM agenda_outbox_messages "
+            "WHERE message_id=? AND topic='weekly_brief.issue'",
+            (message_id,),
+        ).fetchone()
+        if row is None:
+            return None
+        stored = json.loads(row["payload_json"])
+        identity = (
+            "cycle_ref", "issue_version_ref", "issue_version_hash",
+            "brief_ref", "destination_ref",
+        )
+        if any(stored.get(key) != normalized[key] for key in identity):
+            return None
+        event = cur.execute(
+            "SELECT * FROM agenda_outbox_events WHERE message_id=? "
+            "ORDER BY event_seq DESC LIMIT 1",
+            (message_id,),
+        ).fetchone()
+        return {
+            "status": "replayed", "message_id": row["message_id"],
+            "payload_hash": row["payload_hash"],
+            "outbox_state": None if event is None else event["state"],
+            "artifact_sha256": stored.get("artifact_sha256"),
+            "rendered_artifact_sha256": normalized["artifact_sha256"],
+            "artifact_drift": stored.get("artifact_sha256") != normalized["artifact_sha256"],
+        }
+
     def enqueue_weekly_brief(
         self,
         *,
@@ -1179,8 +1225,15 @@ class AgendaStore:
             duplicate = self._idem(
                 cur, idempotency_key, "enqueue_weekly_brief", request_hash
             )
-            if duplicate is not None:
+            if duplicate is not None and duplicate.get("status") != "conflict":
                 return duplicate
+            if duplicate is not None:
+                # The cycle's message exists but the re-rendered request no
+                # longer byte-matches it (renderer wording changed after the
+                # issue was published).  The issue itself is frozen: if it is
+                # the same issue, this is a replay, not a new message.
+                replay = self._replay_weekly_brief(cur, message_id, normalized)
+                return replay if replay is not None else duplicate
             try:
                 cur.execute(
                     "INSERT INTO agenda_outbox_messages("
@@ -1193,6 +1246,9 @@ class AgendaStore:
                     ),
                 )
             except sqlite3.IntegrityError as exc:
+                replay = self._replay_weekly_brief(cur, message_id, normalized)
+                if replay is not None:
+                    return replay
                 raise AgendaConflict("weekly brief outbox message already exists") from exc
             event = self._outbox_event(cur, message_id, "pending", actor_ref=actor_ref)
             result = {
@@ -1525,7 +1581,7 @@ class AgendaStore:
             "cycle": dict(row),
             "state": events[-1]["state"],
             "events": [dict(item) for item in events],
-            "candidates": [dict(item) for item in candidates],
+            "candidates": [{**dict(item), "question_version_ref": item["canonical_question_version_ref"] or item["question_version_ref"]} for item in candidates],
             "decision": None if decision is None else dict(decision),
         }
 

@@ -425,8 +425,8 @@ class PreserveExistingTransitionTests(unittest.TestCase):
                 "model_broker_plugin_before_path": old,
             })
         if managed_web_search:
-            legacy = ("/Users/everflow/Projects/dalton-research-agent-os/"
-                      "integrations/openclaw-web-search-broker")
+            legacy = str(Path.home() / "Projects/dalton-research-agent-os" /
+                         "integrations/openclaw-web-search-broker")
             source = self.root / "source/integrations/openclaw-web-search-broker"
             source.mkdir(parents=True)
             (source / "index.mjs").write_text("export const version = 1;\n")
@@ -515,8 +515,8 @@ class PreserveExistingTransitionTests(unittest.TestCase):
                     "work_dir": "/state/research-publication-work",
                     "output_directory": "/state/research-localization", "workers": 4,
                     "chunk_chars": 4500, "max_cost_per_call": 1.0, "draft_attempts": 2,
-                    "publication_gate": {"release_pointer": "/Users/everflow/Projects/dalton-owner-activation-20260910/current-release.json",
-                    "runtime_pointer": "/Users/everflow/Projects/dalton-owner-activation-20260910/current-runtime-config.json",
+                    "publication_gate": {"release_pointer": str(Path.home() / "Projects/dalton-owner-activation-20260910/current-release.json"),
+                    "runtime_pointer": str(Path.home() / "Projects/dalton-owner-activation-20260910/current-runtime-config.json"),
                     "expected_release_ref": "foundation-r25", "expected_source_commit": "e" * 40}}
             write(path, value); authorities[name] = path
         seed = assets / "research-localization/index.json"

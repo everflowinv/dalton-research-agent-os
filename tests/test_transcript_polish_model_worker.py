@@ -131,7 +131,11 @@ class FakeAdapter:
         raise AssertionError("fresh worker should not replay")
 
     def execute(self, work: WorkOrder, route: dict, selected: dict):
-        text = json.dumps(self.candidate_wire, separators=(",", ":"))
+        # A callable reply is answered from the exact WorkOrder it was asked
+        # (the directed-document verifier echoes its request's candidate_ref).
+        wire = (self.candidate_wire(work) if callable(self.candidate_wire)
+                else self.candidate_wire)
+        text = json.dumps(wire, separators=(",", ":"))
         invocation = ModelInvocation(
             schema_version="0.1",
             id="invocation:test-transcript-" + content_hash({

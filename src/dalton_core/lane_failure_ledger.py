@@ -56,6 +56,25 @@ EVENTS: frozenset[str] = PARK_EVENTS | CLEAR_EVENTS | {"terminal", "held", "not_
 
 _FAILURE_CLASSES = frozenset({DEPENDENCY_UNAVAILABLE, CONTENT_REFUSED, NOT_PERMITTED, TRANSIENT})
 
+# 2026-10-09 (ops noise): a parked item whose dependency came back, or that
+# has not been parked again for a while, stops counting as "waiting".  Live,
+# legacy showed 「模型调用预算：20 项等待处理，模型服务：7 项等待处理」 for items
+# first parked 2026-09-14..24 whose model budget and chains had recovered weeks
+# before: the dependency_ok that would release them was written by *another*
+# lane, and the fold only honoured its own lane's.
+#
+# The release is still an event, appended (``resumed`` with one of the two
+# rules below), never an edit: :func:`release_stale_parks` writes them, and
+# until it has run the fold applies the same two rules on read, so the
+# cockpit's count is right the moment this code is deployed.
+AUTO_RESOLVED_RULE = "parked_dependency_recovered"
+AUTO_ARCHIVED_RULE = "parked_expired_no_recurrence"
+AUTO_RELEASE_RULES: frozenset[str] = frozenset({AUTO_RESOLVED_RULE, AUTO_ARCHIVED_RULE})
+#: A parked item not parked again for this many days is archived.  A lane that
+#: still cannot get through parks it again on its next attempt, so archiving
+#: cannot hide a live outage for longer than one attempt.
+DEFAULT_PARKED_EXPIRY_DAYS = 7
+
 
 def _utc(value: datetime) -> str:
     return value.astimezone(timezone.utc).isoformat(timespec="microseconds")
@@ -240,6 +259,29 @@ class LaneFailureLedger:
         sql += "ORDER BY recorded_at, rowid"
         return [dict(row) for row in self.connection.execute(sql, params).fetchall()]
 
+    def release_stale_parks(
+        self, *, now: datetime | None = None,
+        expiry_days: int | None = DEFAULT_PARKED_EXPIRY_DAYS,
+    ) -> list[dict[str, Any]]:
+        """Append a ``resumed`` event for every parked item the fold would
+        release (dependency recovered elsewhere, or expired).  Idempotent: an
+        item released once is no longer parked, so a second run appends
+        nothing.  Returns the releases written."""
+
+        if self.read_only:
+            raise LaneFailureLedgerError("the lane failure ledger is read_only")
+        moment = (now or self.clock()).astimezone(timezone.utc)
+        rows = self.events(now=moment)
+        written = []
+        for release in stale_parks(rows, now=moment, expiry_days=expiry_days):
+            result = self.append_event(
+                lane=release["lane"], item_key=release["item_key"], event="resumed",
+                failure_class=DEPENDENCY_UNAVAILABLE, dependency=release["dependency"],
+                reason=release["reason"], rule=release["rule"],
+                status=release["resolution"], at=moment)
+            written.append({**release, "event_id": result["event_id"]})
+        return written
+
     def parked_by_dependency(
         self, window: Any = None, *, now: datetime | None = None,
     ) -> dict[str, Any]:
@@ -269,19 +311,107 @@ class LaneFailureLedger:
         ]
 
 
+def _parse_at(value: Any) -> datetime | None:
+    if not isinstance(value, str) or not value:
+        return None
+    try:
+        parsed = datetime.fromisoformat(value.replace("Z", "+00:00"))
+    except ValueError:
+        return None
+    return parsed if parsed.tzinfo else parsed.replace(tzinfo=timezone.utc)
+
+
+def _release_words(resolution: str, dependency: str, *, recovered_at: str | None = None,
+                   recovered_lane: str | None = None, days: int | None = None) -> str:
+    if resolution == "resolved":
+        return (f"dependency {dependency} recovered: a probe succeeded in lane "
+                f"{recovered_lane} at {recovered_at}; released automatically")
+    return (f"not parked again for {days} days; archived automatically "
+            "(a lane that still cannot get through parks it again)")
+
+
+def stale_parks(
+    rows: Iterable[Mapping[str, Any]], *, now: datetime | None = None,
+    expiry_days: int | None = DEFAULT_PARKED_EXPIRY_DAYS,
+) -> list[dict[str, Any]]:
+    """The parked items the fold would release, and why.
+
+    ``resolved``: a ``dependency_ok`` for the item's dependency was recorded
+    after the item was last parked -- in any lane, because a dependency (the
+    model budget, a model chain, SEC) is shared.  ``archived``: not parked
+    again for ``expiry_days``.  ``now`` defaults to the newest event, so the
+    answer is a function of the rows alone.
+    """
+
+    rows = list(rows)
+    folded = _fold(rows, release=None)
+    parked = folded["parked"]
+    if not parked:
+        return []
+    recovered: dict[str, tuple[str, str]] = {}
+    newest: str = ""
+    for row in rows:
+        at = str(row.get("recorded_at") or "")
+        newest = max(newest, at)
+        if row.get("event") == "dependency_ok":
+            dependency = str(row.get("dependency") or UNKNOWN_DEPENDENCY)
+            if at >= recovered.get(dependency, ("", ""))[0]:
+                recovered[dependency] = (at, str(row.get("lane") or ""))
+    moment = now or _parse_at(newest)
+    out = []
+    for entry in parked.values():
+        dependency = entry["dependency"]
+        last = entry["last_seen"]
+        base = {"lane": entry["lane"], "item_key": entry["item_key"],
+                "dependency": dependency, "first_seen": entry["first_seen"],
+                "last_seen": last, "attempts": entry["attempts"]}
+        seen = recovered.get(dependency)
+        if dependency != UNKNOWN_DEPENDENCY and seen is not None and seen[0] > last:
+            out.append({**base, "resolution": "resolved", "rule": AUTO_RESOLVED_RULE,
+                        "recovered_at": seen[0], "recovered_lane": seen[1],
+                        "reason": _release_words("resolved", dependency,
+                                                 recovered_at=seen[0], recovered_lane=seen[1])})
+            continue
+        last_at = _parse_at(last)
+        if (expiry_days is not None and moment is not None and last_at is not None
+                and moment - last_at > timedelta(days=int(expiry_days))):
+            out.append({**base, "resolution": "archived", "rule": AUTO_ARCHIVED_RULE,
+                        "reason": _release_words("archived", dependency, days=int(expiry_days))})
+    out.sort(key=lambda item: (item["lane"], item["item_key"]))
+    return out
+
+
 def summarise_events(
     rows: Iterable[Mapping[str, Any]], *, window: tuple[str, str] | None = None,
+    now: datetime | None = None,
+    expiry_days: int | None = DEFAULT_PARKED_EXPIRY_DAYS,
 ) -> dict[str, Any]:
     """Fold lane failure events into the parked-item backlog.
 
     Kept as a function on rows rather than a method on a connection so the
     cockpit, a test and a report can all run the same fold over the same rows,
     and so the fold is exercised without a database.
+
+    Parked items released automatically -- by an appended ``resumed`` event
+    with an auto-release rule, or by the same two rules applied on read
+    (:func:`stale_parks`) -- are not counted as waiting; they are listed under
+    ``released_items`` with the reason.  ``expiry_days=None`` turns the
+    read-side rules off (the appended events still count).
     """
 
+    rows = list(rows)
+    pending = {(item["lane"], item["item_key"]): item
+               for item in stale_parks(rows, now=now, expiry_days=expiry_days)}
+    folded = _fold(rows, release=pending)
+    return _backlog(folded, window=window)
+
+
+def _fold(rows: Iterable[Mapping[str, Any]], *,
+          release: Mapping[tuple[str, str], Mapping[str, Any]] | None) -> dict[str, Any]:
     parked: dict[tuple[str, str], dict[str, Any]] = {}
     terminal: dict[tuple[str, str], dict[str, Any]] = {}
     permissions: dict[tuple[str, str], dict[str, Any]] = {}
+    released: dict[tuple[str, str], dict[str, Any]] = {}
     events = 0
     for row in rows:
         events += 1
@@ -311,7 +441,16 @@ def summarise_events(
                 if entry["dependency"] == dependency and other[0] == lane:
                     parked.pop(other, None)
         elif event == "resumed":
-            parked.pop(key, None)
+            entry = parked.pop(key, None)
+            rule = str(row.get("rule") or "")
+            if entry is not None and rule in AUTO_RELEASE_RULES:
+                released[key] = {
+                    "lane": lane, "item_key": item, "dependency": entry["dependency"],
+                    "first_seen": entry["first_seen"], "last_seen": entry["last_seen"],
+                    "attempts": entry["attempts"], "released_at": at, "rule": rule,
+                    "resolution": ("resolved" if rule == AUTO_RESOLVED_RULE else "archived"),
+                    "reason": str(row.get("reason") or ""), "recorded": True,
+                }
         elif event == "terminal":
             parked.pop(key, None)
             terminal[key] = {
@@ -334,7 +473,21 @@ def summarise_events(
             parked.pop(key, None)
             terminal.pop(key, None)
             permissions.pop(key, None)
+        if event in PARK_EVENTS:
+            released.pop(key, None)
+    for key, item in (release or {}).items():
+        entry = parked.pop(key, None)
+        if entry is not None:
+            released[key] = {**item, "released_at": None, "recorded": False}
+    return {"parked": parked, "terminal": terminal, "permissions": permissions,
+            "released": released, "events": events}
 
+
+def _backlog(folded: Mapping[str, Any], *, window: tuple[str, str] | None) -> dict[str, Any]:
+    parked = folded["parked"]
+    terminal = folded["terminal"]
+    permissions = folded["permissions"]
+    events = folded["events"]
     by_dependency: dict[str, dict[str, Any]] = {}
     for entry in parked.values():
         bucket = by_dependency.setdefault(entry["dependency"], {
@@ -370,6 +523,11 @@ def summarise_events(
         "terminal_count": len(terminal_rows),
         "permission_items": permission_rows,
         "permission_count": len(permission_rows),
+        # Parked items that stopped waiting without a lane resuming them by
+        # name: the dependency came back elsewhere, or they expired.
+        "released_items": sorted(folded["released"].values(),
+                                 key=lambda row: (row["lane"], row["item_key"])),
+        "released_count": len(folded["released"]),
     }
 
 
@@ -394,6 +552,12 @@ class LedgerWriter:
     def append_dependency_ok(self, **kwargs: Any) -> dict[str, Any]:
         with LaneFailureLedger(self.path) as ledger:
             return ledger.append_dependency_ok(**kwargs)
+
+    def release_stale_parks(self, **kwargs: Any) -> list[dict[str, Any]]:
+        if not self.path.is_file():
+            return []
+        with LaneFailureLedger(self.path) as ledger:
+            return ledger.release_stale_parks(**kwargs)
 
     def events(self, **kwargs: Any) -> list[dict[str, Any]]:
         if not self.path.is_file():
@@ -444,7 +608,11 @@ def lane_budget(
 
 
 __all__ = [
+    "AUTO_ARCHIVED_RULE",
+    "AUTO_RELEASE_RULES",
+    "AUTO_RESOLVED_RULE",
     "CLEAR_EVENTS",
+    "DEFAULT_PARKED_EXPIRY_DAYS",
     "DEFAULT_FILENAME",
     "EVENTS",
     "PARK_EVENTS",
@@ -455,5 +623,13 @@ __all__ = [
     "LedgerWriter",
     "default_path",
     "lane_budget",
+    "release_stale_parks",
+    "stale_parks",
     "summarise_events",
 ]
+
+
+def release_stale_parks(state_dir: str | Path, **kwargs: Any) -> list[dict[str, Any]]:
+    """The writer's sweep: append the auto-release events for one state dir."""
+
+    return LedgerWriter(default_path(state_dir)).release_stale_parks(**kwargs)

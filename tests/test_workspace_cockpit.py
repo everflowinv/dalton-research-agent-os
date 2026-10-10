@@ -77,6 +77,51 @@ class WorkspaceCockpitTests(unittest.TestCase):
         self.assertEqual(result["mode"], "legacy")
         self.assertIsNone(result["workspace_id"])
 
+    def legacy_host(self, *, state_inside_host: bool):
+        """A host root with a renamed legacy environment, like ~/.dalton live."""
+        import json
+        host = self.host / "dot-dalton"
+        (host / "legacy-display").mkdir(parents=True)
+        (host / "legacy-display" / "display.json").write_text(json.dumps(
+            {"display_name": "美国 IT 服务研究", "content_hash": "0" * 64}))
+        manager = host / "manager.json"
+        manager.write_text(json.dumps({"host_root": str(host)}))
+        state = (host / "legacy-state" if state_inside_host
+                 else self.host / "Application Support" / "Dalton" / "state" / "dalton-core")
+        state.mkdir(parents=True)
+        return SimpleNamespace(
+            core_db=state / "core.sqlite", state_dir=state,
+            scheduler_db=state / "scheduler.sqlite",
+            heartbeat_path=state / "run" / "heartbeat.json",
+            journal_path=state / "cockpit.sqlite",
+            workspace_manager_config_path=manager)
+
+    def test_legacy_name_comes_from_manager_host_root_without_env(self):
+        # P1-4: the live legacy plist sets no DALTON_STATE_DIR and its state
+        # directory is not inside the host root; the header said 研究系统.
+        config = self.legacy_host(state_inside_host=False)
+        result = cockpit_workspace_context(
+            config, writer_socket=config.state_dir / "writer.sock",
+            token_config=config.state_dir / "writer-tokens.json", environ={})
+        self.assertEqual(result["mode"], "legacy")
+        self.assertEqual(result["name"], "美国 IT 服务研究")
+
+    def test_legacy_name_from_state_dir_when_no_manager_is_configured(self):
+        config = self.legacy_host(state_inside_host=True)
+        config.workspace_manager_config_path = None
+        result = cockpit_workspace_context(
+            config, writer_socket=config.state_dir / "writer.sock",
+            token_config=config.state_dir / "writer-tokens.json", environ={})
+        self.assertEqual(result["name"], "美国 IT 服务研究")
+
+    def test_legacy_without_any_display_file_has_no_name(self):
+        config = self.legacy_host(state_inside_host=False)
+        (config.workspace_manager_config_path.parent / "legacy-display" / "display.json").unlink()
+        result = cockpit_workspace_context(
+            config, writer_socket=config.state_dir / "writer.sock",
+            token_config=config.state_dir / "writer-tokens.json", environ={})
+        self.assertIsNone(result["name"])
+
     def test_fresh_workspace_overview_reports_no_mission_without_fake_progress(self):
         bootstrap(self.one.state_dir, self.one.config_path,
                   workspace_manifest=self.one.manifest_path)

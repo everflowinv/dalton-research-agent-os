@@ -9,10 +9,10 @@ by taking the state directory's grandparent.  All nine first called
 layout asks is "which installation is this directory *part of*", and the two
 stop agreeing the moment the state directory is a symlink.  On the legacy
 environment ``~/Library/Application Support/Dalton/state`` points at
-``/Volumes/EveSSD/Dalton/legacy-state``, because the state moved to an external
+``/external/Dalton/legacy-state``, because the state moved to an external
 volume while the installation did not: the config, the LaunchAgents and the
 owner's ``service.json`` all stayed in ``~/Library/Application Support/Dalton``.
-Resolving first therefore derived ``/Volumes/EveSSD/Dalton/config/service.json``
+Resolving first therefore derived ``/external/Dalton/config/service.json``
 -- a path that has never existed -- and every stage pinned in ``service.json``
 read as ``unconfigured`` on legacy while reading correctly on a workspace
 environment, whose state directory happens not to be a symlink.

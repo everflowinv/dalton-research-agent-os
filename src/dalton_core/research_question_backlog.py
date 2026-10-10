@@ -51,6 +51,7 @@ from __future__ import annotations
 import json
 import sqlite3
 import uuid
+from contextlib import nullcontext
 from datetime import datetime, timezone
 from pathlib import Path
 from typing import Any, Mapping, Sequence
@@ -62,6 +63,7 @@ from .agenda import (
 from .contracts import ClaimVersion
 from .research_review import validate_claim_version_v0_2
 from .store import canonical_json, content_hash
+from .research_question_identity import canonical_question_key, KEY_SCHEMA
 
 
 SCHEMA_VERSION = "0.1"
@@ -81,9 +83,9 @@ QUESTION_STATES = (
 # Exactly the frozen machine; terminal states have no outgoing transitions.
 _QUESTION_TRANSITIONS = {
     None: {"open"},
-    "open": {"selected"},
-    "selected": {"planned"},
-    "planned": {"in_progress"},
+    "open": {"selected", "retired"},
+    "selected": {"planned", "retired"},
+    "planned": {"in_progress", "retired"},
     "in_progress": {"answered", "blocked", "retired"},
     "answered": set(),
     "blocked": set(),
@@ -191,6 +193,22 @@ def question_ref_for(mandate_ref: str, company_ref: str, question: str) -> str:
     )[:32]
 
 
+def _canonical_alias(cursor, digest):
+    row = cursor.execute("SELECT * FROM backlog_canonical_aliases WHERE canonical_hash=?", (digest,)).fetchone()
+    if row is None:
+        return None
+    wire = _reverify_record(row["record_json"], {"canonical_hash": digest,
+        "question_ref": row["question_ref"]}, name="QuestionCanonicalAlias")
+    if wire["content_hash"] != row["content_hash"] or content_hash(wire["canonical_key"]) != digest:
+        raise ResearchQuestionConflict("canonical question alias drifted")
+    return wire
+
+
+def _verified_alias_exists(cursor, question_ref):
+    rows = cursor.execute("SELECT canonical_hash FROM backlog_canonical_aliases WHERE question_ref=?", (question_ref,)).fetchall()
+    return any(_canonical_alias(cursor, row[0]) is not None for row in rows)
+
+
 def _reverify_record(
     record_json: Any, columns: Mapping[str, Any], *, name: str
 ) -> dict[str, Any]:
@@ -267,10 +285,17 @@ def read_exact_backlog_question(cursor: Any, question_ref: str) -> dict[str, Any
     except ResearchQuestionValidationError as exc:
         raise ResearchQuestionConflict("ResearchQuestion canonical record is invalid") from exc
     if (
-        identity.get("identity_schema") != _IDENTITY_SCHEMA
+        identity.get("identity_schema") not in {_IDENTITY_SCHEMA, KEY_SCHEMA}
         or content_hash(identity) != wire["identity_hash"]
     ):
         raise ResearchQuestionConflict("ResearchQuestion identity binding is invalid")
+    if identity["identity_schema"] == KEY_SCHEMA:
+        if set(identity) != {"identity_schema", "mandate_ref", "company_ref", "canonical_key"}:
+            raise ResearchQuestionConflict("canonical identity has an invalid closed shape")
+        key = identity["canonical_key"]
+        if (not isinstance(key, dict) or set(key) != {"schema_version", "issuer", "accession_or_fact", "metric", "period", "doc_kinds"}
+                or key["schema_version"] != KEY_SCHEMA or key["issuer"] != identity["company_ref"]):
+            raise ResearchQuestionConflict("canonical identity key drifted")
     expected_ref = "research-question:" + content_hash(identity)[:32]
     if wire["id"] != expected_ref or expected_ref != row["question_ref"]:
         raise ResearchQuestionConflict("ResearchQuestion ref drifted from its identity binding")
@@ -344,7 +369,9 @@ def read_exact_backlog_question_version(cursor: Any, version_ref: str) -> dict[s
     if (
         identity.get("mandate_ref") != wire["mandate_ref"]
         or identity.get("company_ref") != wire["company_ref"]
-        or identity.get("question") != wire["question"]
+        or (identity.get("identity_schema") == _IDENTITY_SCHEMA
+            and identity.get("question") != wire["question"]
+            and not _verified_alias_exists(cursor, wire["question_ref"]))
     ):
         raise ResearchQuestionConflict(
             "ResearchQuestionVersion drifted from its question identity binding"
@@ -674,7 +701,7 @@ def _read_exact_agenda_candidate(cursor: Any, candidate_ref: str) -> dict[str, A
         "schema_version": "0.1",
         "id": row["candidate_id"],
         "cycle_ref": row["cycle_id"],
-        "question_version_ref": row["question_version_ref"],
+        "question_version_ref": (row["canonical_question_version_ref"] if "canonical_question_version_ref" in row.keys() else None) or row["question_version_ref"],
         "proposed_question": row["proposed_question"],
         "answer_criteria": row["answer_criteria"],
         "features": _json_column(
@@ -793,6 +820,26 @@ def _read_exact_event_history(
                 f"backlog question history transition {prior!r} -> "
                 f"{event['state']!r} is invalid"
             )
+        acceptance = event["metadata"].get("answer_acceptance")
+        if event["state"] == "answered" and acceptance is not None:
+            from .research_question_acceptance import answer_acceptance
+            version = read_exact_backlog_question_version(cursor, acceptance["question_version_ref"])
+            bindings = [_read_exact_claim_version(cursor, ref) for ref in event["metadata"]["claim_version_refs"]]
+            try:
+                exact = answer_acceptance(cursor, version, bindings)
+            except ValueError as exc:
+                raise ResearchQuestionConflict("stored answer no longer satisfies its exact acceptance") from exc
+            if exact != acceptance:
+                raise ResearchQuestionConflict("stored answer acceptance drifted")
+        if event["state"] == "retired" and prior != "in_progress":
+            metadata = event["metadata"]
+            if (event["actor_ref"] != "automation:research-question-maintenance"
+                    or metadata.get("maintenance_kind") not in {"operations", "outside_scope"}
+                    or not metadata.get("requestor_terminal_reason")):
+                raise ResearchQuestionConflict("early retirement lacks maintenance authority")
+            version = read_exact_backlog_question_version(cursor, metadata["question_version_ref"])
+            if version["question_ref"] != question_ref or version["content_hash"] != metadata["question_version_hash"]:
+                raise ResearchQuestionConflict("maintenance retirement question binding drifted")
         events.append(event)
         prior = event["state"]
     if revalidate_plan:
@@ -901,6 +948,24 @@ class ResearchQuestionBacklog:
         self.store = store
         self.connection: sqlite3.Connection = store.connection
         self.connection.executescript(_SCHEMA_PATH.read_text(encoding="utf-8"))
+        self._seed_canonical_aliases()
+
+    def _seed_canonical_aliases(self):
+        """Append links for old identities without rewriting a byte of authority."""
+        rows = self.connection.execute("SELECT v.version_id FROM backlog_question_pointer p JOIN backlog_question_versions v ON v.version_id=p.version_id ORDER BY v.created_at,v.version_id").fetchall()
+        if not rows:
+            return
+        with self.store._transaction() as cur:
+            for row in rows:
+                head = read_exact_backlog_question_version(cur, row["version_id"])
+                key = canonical_question_key(head["company_ref"], head["question"], head["answer_criteria"], head["source_refs"])
+                canonical = {"mandate_ref": head["mandate_ref"], **key}
+                digest = content_hash(canonical)
+                if _canonical_alias(cur, digest) is not None:
+                    continue
+                wire = self._record({"canonical_hash": digest, "canonical_key": canonical,
+                    "question_ref": head["question_ref"], "actor_ref": "automation:question-canonical-migration", "created_at": _now()})
+                cur.execute("INSERT INTO backlog_canonical_aliases VALUES(?,?,?,?)", (digest, head["question_ref"], canonical_json(wire), wire["content_hash"]))
 
     @staticmethod
     def _record(base: Mapping[str, Any]) -> dict[str, Any]:
@@ -977,6 +1042,8 @@ class ResearchQuestionBacklog:
         actor_ref: str,
         idempotency_key: str | None = None,
         mission_binding: Mapping[str, str] | None = None,
+        canonical_key: Mapping[str, Any] | None = None,
+        _cursor: Any = None,
     ) -> dict[str, Any]:
         """Record one question under an exact MandateVersion.
 
@@ -988,10 +1055,16 @@ class ResearchQuestionBacklog:
 
         mandate_version_ref = _text(mandate_version_ref, "mandate_version_ref")
         company_ref = _text(company_ref, "company_ref")
+        # 2026-10-06: no new research question for a company the owner paused,
+        # nor any during an emergency stop (owner_levers).
+        from .owner_levers import assert_admission_open
+
+        assert_admission_open(self.connection, company_ref)
         question = _text(question, "question")
         answer_criteria = _text(answer_criteria, "answer_criteria")
         source_refs = _refs(source_refs, "source_refs")
         actor_ref = _text(actor_ref, "actor_ref")
+        key = canonical_question_key(company_ref, question, answer_criteria, source_refs, canonical_key)
         request = {
             "mandate_version_ref": mandate_version_ref,
             "company_ref": company_ref,
@@ -1009,6 +1082,8 @@ class ResearchQuestionBacklog:
                 for key in ("ref", "hash")
             }
             request["mission_binding"] = mission_binding
+        if canonical_key is not None:
+            request["canonical_key"] = key
         request_hash = content_hash(request)
         # Authority constructors initialize schemas with executescript; keep
         # them outside BEGIN so they cannot commit the question transaction.
@@ -1016,7 +1091,9 @@ class ResearchQuestionBacklog:
         if mission_binding is not None:
             from .coverage_mission import CoverageMissionAuthority
             missions = CoverageMissionAuthority(self.store)
-        with self.store._transaction() as cur:
+        if _cursor is not None and (not isinstance(_cursor, sqlite3.Cursor) or _cursor.connection is not self.connection or not self.connection.in_transaction):
+            raise ResearchQuestionConflict("borrowed question cursor requires the writer transaction")
+        with (self.store._transaction() if _cursor is None else nullcontext(_cursor)) as cur:
             # A coverage mission explicitly binds an industry mandate and its
             # company universe. Validate that authority, not a caller-provided
             # expansion of scope. Unbound backlog calls retain exact scope.
@@ -1046,14 +1123,35 @@ class ResearchQuestionBacklog:
                 raise ResearchQuestionConflict(
                     "company_ref is outside the exact MandateVersion scope"
                 )
-            question_ref = question_ref_for(
-                mandate["mandate_ref"], company_ref, question
-            )
+            canonical = {"mandate_ref": mandate["mandate_ref"], **key}
+            digest = content_hash(canonical)
+            alias = _canonical_alias(cur, digest)
+            legacy_ref = question_ref_for(mandate["mandate_ref"], company_ref, question)
+            legacy = cur.execute("SELECT 1 FROM backlog_questions WHERE question_ref=?", (legacy_ref,)).fetchone()
+            identity = {"identity_schema": KEY_SCHEMA, "mandate_ref": mandate["mandate_ref"],
+                        "company_ref": company_ref, "canonical_key": key}
+            if key["metric"] == "unclassified" and canonical_key is None:
+                identity = question_identity(mandate["mandate_ref"], company_ref, question)
+            question_ref = (alias["question_ref"] if alias else legacy_ref if legacy else
+                            "research-question:" + content_hash(identity)[:32])
             existing = cur.execute(
                 "SELECT * FROM backlog_questions WHERE question_ref=?",
                 (question_ref,),
             ).fetchone()
             created_at = _now()
+            if alias is None and existing is None and key["metric"] != "unclassified":
+                for prior_row in cur.execute("SELECT v.version_id FROM backlog_question_pointer p JOIN backlog_question_versions v ON v.version_id=p.version_id WHERE v.mandate_ref=? AND v.company_ref=? ORDER BY v.created_at,v.version_id", (mandate["mandate_ref"], company_ref)).fetchall():
+                    prior = read_exact_backlog_question_version(cur, prior_row[0])
+                    prior_key = canonical_question_key(company_ref, prior["question"], prior["answer_criteria"], prior["source_refs"])
+                    if prior_key == key:
+                        question_ref = prior["question_ref"]
+                        existing = cur.execute("SELECT * FROM backlog_questions WHERE question_ref=?", (question_ref,)).fetchone()
+                        break
+            if alias is None and existing is not None:
+                alias_wire = self._record({"canonical_hash": digest, "canonical_key": canonical,
+                    "question_ref": question_ref, "actor_ref": actor_ref, "created_at": created_at})
+                cur.execute("INSERT INTO backlog_canonical_aliases VALUES(?,?,?,?)", (digest, question_ref,
+                    canonical_json(alias_wire), alias_wire["content_hash"]))
             if existing is not None:
                 read_exact_backlog_question(cur, question_ref)
                 head = cur.execute(
@@ -1078,9 +1176,9 @@ class ResearchQuestionBacklog:
                     "source_refs": head_wire["source_refs"],
                 }
                 if canonical_json(incoming_content) != canonical_json(head_content):
-                    raise ResearchQuestionConflict(
-                        "question identity is already bound to different content"
-                    )
+                    result = self._revise_question(cur, head_wire, incoming_content, actor_ref)
+                    self._save_idem(cur, idempotency_key, "record_backlog_question", request_hash, result)
+                    return result
                 return {
                     "status": "duplicate",
                     "question_ref": question_ref,
@@ -1090,7 +1188,6 @@ class ResearchQuestionBacklog:
             version_ref = "research-question-version:" + content_hash({
                 "question_ref": question_ref, "version": 1,
             })[:32]
-            identity = question_identity(mandate["mandate_ref"], company_ref, question)
             identity_hash = content_hash(identity)
             question_wire = self._record({
                 "schema_version": SCHEMA_VERSION,
@@ -1109,6 +1206,10 @@ class ResearchQuestionBacklog:
                     created_at,
                 ),
             )
+            alias_wire = self._record({"canonical_hash": digest, "canonical_key": canonical,
+                "question_ref": question_ref, "actor_ref": actor_ref, "created_at": created_at})
+            cur.execute("INSERT INTO backlog_canonical_aliases VALUES(?,?,?,?)", (digest, question_ref,
+                canonical_json(alias_wire), alias_wire["content_hash"]))
             version_wire = self._record({
                 "schema_version": SCHEMA_VERSION,
                 "id": version_ref,
@@ -1157,6 +1258,21 @@ class ResearchQuestionBacklog:
                 cur, idempotency_key, "record_backlog_question", request_hash, result
             )
             return result
+
+    def _revise_question(self, cur, prior, incoming, actor_ref):
+        state = self._latest_state(cur, prior["question_ref"])
+        if state != "open" and any(incoming[k] != prior[k] for k in ("answer_criteria", "source_refs")):
+            raise ResearchQuestionConflict("a selected or terminal question cannot change its frozen answer/source requirements")
+        number = prior["version"] + 1
+        ref = "research-question-version:" + content_hash({"question_ref": prior["question_ref"], "version": number})[:32]
+        wire = self._record({**{k: v for k, v in prior.items() if k != "content_hash"},
+            **incoming, "id": ref, "version": number, "prior_version_ref": prior["id"],
+            "actor_ref": actor_ref, "created_at": _now()})
+        cur.execute("INSERT INTO backlog_question_versions(version_id,question_ref,version_number,prior_version_id,mandate_ref,company_ref,question,answer_criteria,source_refs_json,actor_ref,record_json,content_hash,created_at) VALUES(?,?,?,?,?,?,?,?,?,?,?,?,?)",
+            (ref, wire["question_ref"], number, prior["id"], wire["mandate_ref"], wire["company_ref"], wire["question"], wire["answer_criteria"], canonical_json(wire["source_refs"]), actor_ref, canonical_json(wire), wire["content_hash"], wire["created_at"]))
+        cur.execute("UPDATE backlog_question_pointer SET version_id=? WHERE question_ref=?", (ref, wire["question_ref"]))
+        return {"status": "revised", "question_ref": wire["question_ref"], "question_version_ref": ref,
+                "state": self._latest_state(cur, wire["question_ref"])}
 
     def _head(self, cur: sqlite3.Cursor, question_ref: str) -> dict[str, Any]:
         read_exact_backlog_question(cur, question_ref)
@@ -1506,10 +1622,16 @@ class ResearchQuestionBacklog:
             bindings = [
                 _read_exact_claim_version(cur, ref) for ref in claim_version_refs
             ]
+            from .research_question_acceptance import answer_acceptance
+            try:
+                acceptance = answer_acceptance(cur, self._head(cur, question_ref), bindings)
+            except ValueError as exc:
+                raise ResearchQuestionConflict(str(exc)) from exc
             created_at = _now()
             event = self._event(
                 cur, question_ref, "answered", "formal_claim_bound",
                 {
+                    "answer_acceptance": acceptance,
                     "claim_version_refs": claim_version_refs,
                     "claim_version_hashes": [
                         binding["claim_version_hash"] for binding in bindings
@@ -1610,6 +1732,8 @@ class ResearchQuestionBacklog:
             if duplicate is not None:
                 return duplicate
             read_exact_backlog_question(cur, question_ref)
+            if self._latest_state(cur, question_ref) != "in_progress":
+                raise ResearchQuestionConflict("only an in_progress question can be retired directly")
             event = self._event(
                 cur, question_ref, "retired", reason, {}, actor_ref
             )
@@ -1646,9 +1770,16 @@ class ResearchQuestionBacklog:
                 (question_ref,),
             ).fetchall()
         ]
+        request_row = cursor.execute("SELECT * FROM backlog_material_request_links WHERE question_version_ref=?", (head["id"],)).fetchone()
+        waiting = None
+        if request_row is not None:
+            waiting = _reverify_record(request_row["record_json"], {"question_version_ref": head["id"], "question_version_hash": head["content_hash"], "request_ref": request_row["request_ref"]}, name="QuestionMaterialRequestLink")
+            if waiting["content_hash"] != request_row["content_hash"]:
+                raise ResearchQuestionConflict("question material request link drifted")
         return {
             "question_ref": question_ref,
             "identity": identity,
+            "waiting_material_request": waiting,
             "head": head,
             "state": events[-1]["state"] if events else None,
             "events": events,

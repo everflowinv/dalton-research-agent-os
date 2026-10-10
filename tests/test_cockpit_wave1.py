@@ -254,7 +254,8 @@ class MarketCardTests(Wave1Case):
         # The range change names the day it is measured from, because a
         # percentage whose window the reader cannot see is unusable.
         self.assertEqual((market["change_percent"], market["change_since"]),
-                         (10.0, "2026-09-10"))
+                         (None, None))
+        self.assertEqual(market["change_status"], "unavailable")
         self.assertEqual([row["days"] for row in market["changes"]], [5, 30, 90])
         self.assertTrue(all(row["status"] == "unavailable"
                             for row in market["changes"]))
@@ -403,7 +404,9 @@ class QualityAndJournalTests(Wave1Case):
         deliverable = self.publish_deliverable(body="Revenue improved.")
         hidden = self.plane.document(deliverable["id"])
         self.assertEqual(hidden["publication_status"], "pending_language_review")
-        self.assertEqual(hidden["sections"], [])
+        # 2026-10-09: the unreviewed draft stays readable under a badge.
+        self.assertEqual(hidden["sections"][0]["body"], "Revenue improved.")
+        self.assertEqual(hidden["draft_label"], "初稿（待审核签发）")
         self.assertEqual(hidden["content_hash"], deliverable["content_hash"])
 
         mission = self.c.h.missions.active_mission("coverage-mission:us-it-services")
@@ -434,7 +437,8 @@ class QualityAndJournalTests(Wave1Case):
         self.assertEqual(historical["sections"][0]["body"], "营业收入有所改善。")
         fresh = self.plane.document(second["id"])
         self.assertEqual(fresh["publication_status"], "pending_language_review")
-        self.assertEqual(fresh["sections"], [])
+        self.assertEqual(fresh["sections"][0]["body"], "Revenue weakened.")
+        self.assertEqual(fresh["draft_label"], "初稿（待审核签发）")
 
     def test_a_score_with_no_judge_is_the_checks_alone(self) -> None:
         deliverable = self.publish_deliverable()
@@ -795,6 +799,31 @@ class ClaimIndexViewTests(Wave1Case):
         by_source = self.plane.claims(importance="management_statement")
         self.assertEqual(len(by_source["items"]), 1)
 
+    def test_the_claims_page_states_its_count_basis_against_the_cards(self) -> None:
+        # P2-1: the card counted 2,539 and this page 2,304 with nothing to say
+        # why.  The page now carries the card's number and names the gap.
+        filed = self.add_claim(statement="收入 1,000 百万美元（10-Q）。",
+                               created_at="2026-09-01T00:00:00+00:00")
+        news = self.add_claim(statement="媒体报道收入约 1,000 百万美元。",
+                              created_at="2026-09-02T00:00:00+00:00")
+        self.index(filed, importance="filing", group="revenue-q3")
+        self.index(news, importance="news", group="revenue-q3")
+        listing = self.plane.claims()
+        overview = self.plane.overview()
+        self.assertEqual(listing["all_versions_total"], overview["totals"]["claims"])
+        self.assertEqual(overview["totals"]["claims_basis"], "all_versions")
+        self.assertGreater(listing["all_versions_total"], listing["total"])
+        self.assertIn("含重复版本共", listing["count_basis"])
+        self.assertIn("公司卡片", listing["count_basis"])
+        company = filed["subject_ref"]
+        card = next(c for c in overview["companies"] if c["company_ref"] == company)
+        self.assertEqual(card["claims"]["basis"], "all_versions")
+        self.assertEqual(self.plane.claims(company_ref=company)["all_versions_total"],
+                         card["claims"]["total"])
+        everything = self.plane.claims(canonical_only=False)
+        self.assertEqual(everything["total"], everything["all_versions_total"])
+        self.assertIsNone(self.plane.claims(importance="filing")["all_versions_total"])
+
     def test_an_untagged_claim_is_shown_and_says_it_is_untagged(self) -> None:
         tagged = self.add_claim(statement="收入 1,000 百万美元。")
         self.index(tagged)
@@ -885,7 +914,7 @@ class PageVocabularyTests(unittest.TestCase):
         self.assertIn("function invariantRefusal", page)
         self.assertIn("forecast_model_version", page)
         self.assertIn("sensitivity_projection", page)
-        self.assertIn("Object.values(m.invariants||{})", page)
+        self.assertIn("Object.entries(m.invariants||{})", page)
 
     def test_the_buttons_are_drawn_only_when_the_binding_allows_them(self) -> None:
         page = self.PAGE.read_text(encoding="utf-8")
@@ -915,7 +944,7 @@ class PageVocabularyTests(unittest.TestCase):
         self.assertIn("function approvalSummary(value)", page)
         self.assertIn("thesis_version_ref:match[1]", page)
         self.assertIn("const localized=FINAL_RESEARCH_KINDS", page)
-        self.assertIn("finalResearchText(it.summary):displayText(it.summary)", page)
+        self.assertIn("finalResearchText(it.summary,finalState(it)):displayText(it.summary)", page)
         self.assertIn("original_summary:it.summary", page)
         self.assertIn("technicalDetails(summary.technical?", page)
 

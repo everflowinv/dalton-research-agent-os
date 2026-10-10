@@ -126,18 +126,9 @@ GEOGRAPHIC_AXES = frozenset({
 })
 COUNTRY_MEMBER_PREFIX = "country:"
 
-# Operating segments need not partition the consolidated entity.  Alphabet's
-# 10-K (accession 0001652044-26-000018) splits CostsAndExpenses 2023 into
-# Google Services 176,685 and Google Cloud 31,372 -- 208,057 -- against a
-# consolidated 223,101: Other Bets and "Alphabet-level activities" carry the
-# other 15,044 and neither is filed as a member of that line.  The filer says
-# so in the same period, on srt:ConsolidationItemsAxis, by reporting operating
-# income for us-gaap:CorporateNonSegmentMember, and it files
-# us-gaap:AllOtherSegmentsMember on the segment axis for revenue.  Such a gap is
-# either reconciled exactly by a declared reconciling amount for the same line
-# and period, or -- when the filer has declared members or non-segment amounts
-# this breakdown leaves out -- it is not checkable and is ``not_applicable``.
-# A breakdown with no such declaration that misses its total still fails.
+# Operating segments may leave out company-level amounts. A disclosed gap
+# must reconcile exactly; declared missing members are findings, never an
+# exemption from the publication gate.
 BUSINESS_SEGMENT_AXES = frozenset({
     "srt:SegmentAxis",
     "srt:StatementBusinessSegmentsAxis",
@@ -155,6 +146,13 @@ RECONCILING_MEMBERS = frozenset({
     "srt:ConsolidationEliminationsMember",
     "us-gaap:ConsolidationEliminationsMember",
 })
+# A bridge combines segment revenue/costs, each member's filed operating
+# income, and company-level operating income. Multi-dimensional facts retain
+# their full context identity. Amounts are never assigned to members by size
+# or by a coincidentally matching margin.
+ALL_OTHER_MEMBERS = frozenset({"us-gaap:AllOtherSegmentsMember"})
+OPERATING_SEGMENT_MEMBERS = frozenset({"us-gaap:OperatingSegmentsMember"})
+OPERATING_INCOME_CONCEPT = "us-gaap:OperatingIncomeLoss"
 
 # Durable identity for the closed semantics used to admit a forecast. This is
 # deliberately narrower than a source-code or release hash: only a change to
@@ -173,12 +171,10 @@ RECONCILING_MEMBERS = frozenset({
 # Version 8 reads an ISO ``country:`` member beside regional members on one
 # geographic axis as a possible "of which" country (see
 # ``GEOGRAPHIC_AXES``), not as a sixth disjoint region.
-# Version 9 lets a segment breakdown fall short of its consolidated line when
-# the gap is exactly a declared reconciling amount, and reads it as
-# ``not_applicable`` when the filer declared, for the same period, segment
-# members or non-segment amounts the breakdown leaves out (see
-# ``RECONCILING_MEMBERS``).
-FORECAST_INVARIANT_CONTRACT_REF = "forecast-economic-invariants:9"
+# Versions 9/10 admitted declared incomplete segment bridges as uncovered.
+# Version 11 requires every disclosed bridge to close, reports differences
+# and missing members, and maps operating income by context identity only.
+FORECAST_INVARIANT_CONTRACT_REF = "forecast-economic-invariants:11"
 FORECAST_INVARIANT_CONTRACT = {
     "schema_version": "forecast-economic-invariant-contract-0.1",
     "contract_ref": FORECAST_INVARIANT_CONTRACT_REF,
@@ -188,8 +184,12 @@ FORECAST_INVARIANT_CONTRACT = {
         "members_must_be_unique": True,
         "geographic_country_members": "partition-or-nested-in-region:v1",
         "unallocated_residual": (
-            "declared-reconciling-item-or-declared-incomplete-members:v1"),
+            "declared-reconciling-items-or-fail-with-gap-and-missing-members:v2"),
         "reconciling_members": sorted(RECONCILING_MEMBERS),
+        "segment_bridge": (
+            "segments+all-other+corporate-non-segment=group-by-member-identity-or-fail:v2"),
+        "all_other_members": sorted(ALL_OTHER_MEMBERS),
+        "member_mapping": "complete-context-identity-only:no-value-ranking:v1",
     },
     # The model validator is part of admission just as the economic checks
     # are. Version the optional cost-slot wire here so a run refused by the
@@ -668,28 +668,10 @@ def _domain(quantities: Sequence[Mapping[str, Any]]) -> InvariantResult:
 
 
 def _segment_sum(groups: Sequence[Mapping[str, Any]]) -> InvariantResult:
-    """The parts add to the whole, within a filer's rounding.
-
-    Only where both exist. A consolidated line with no breakdown is not a
-    failure, and a breakdown with no consolidated line to check it against is
-    nothing to check -- both are ``not_applicable`` rather than a pass, because
-    a pass would read as "the segments were checked".
-
-    A breakdown that misses its total passes when the gap is exactly a
-    reconciling amount the filer declared for the same line and period (one
-    item, or all of them together).  It is not checkable -- counted neither
-    as checked nor as a finding -- when the filer declared, for the same
-    period, members of the same axis this breakdown leaves out, or (on a
-    business-segment axis) amounts that belong to no segment.  Another axis's
-    breakdown of the same line and period that agrees to the unit with such an
-    uncheckable segment breakdown covers the same partial scope and is not
-    checkable either.  Anything else that misses is still a failure.
-    """
+    """Every disclosed partition or bridge must close, or fail explicitly."""
 
     findings: list[str] = []
     checked = 0
-    excused: list[str] = []
-    partial_scope: list[tuple[Any, Any, Decimal]] = []
     pending: list[tuple[Mapping[str, Any], Decimal, Decimal, int]] = []
     with localcontext() as ctx:
         ctx.prec = _PRECISION
@@ -698,55 +680,48 @@ def _segment_sum(groups: Sequence[Mapping[str, Any]]) -> InvariantResult:
             parts = [(_decimal(part.get("value")), str(part.get("member")))
                      for part in (group.get("parts") or [])]
             usable = [(value, member) for value, member in parts if value is not None]
-            if total is None or len(usable) < 2 or len(usable) != len(parts):
+            if total is None or not parts:
                 continue
             summed = sum((value for value, _ in usable), Decimal(0))
-            if _close(summed, total):
+            if len(usable) != len(parts):
                 checked += 1
+                missing = sorted(member for value, member in parts if value is None)
+                findings.append(f"{group.get('line')} for {group.get('period')}: "
+                                f"missing values for members {', '.join(missing)}; "
+                                f"known segments add to {summed}; difference {total - summed}")
                 continue
-            if _nested_countries_close(group, usable, total):
+            bridge = group.get("bridge")
+            if isinstance(bridge, Mapping):
+                assessment = _segment_bridge_assessment(group)
                 checked += 1
+                if assessment["status"] != PASS:
+                    findings.append(f"{group.get('line')} for {group.get('period')} on axis "
+                                    f"{group.get('axis')}: {len(usable)} segments add to {summed} "
+                                    f"and the consolidated line is {total}; difference {total - summed}; "
+                                    + "; ".join(assessment["findings"]))
                 continue
-            if _reconciled(group, summed, total):
+            if (_close(summed, total) or _nested_countries_close(group, usable, total)
+                    or _reconciled(group, summed, total)):
                 checked += 1
-                continue
-            why = _incomplete_members(group)
-            if why is not None:
-                excused.append(why)
-                if str(group.get("axis")) in BUSINESS_SEGMENT_AXES:
-                    partial_scope.append(
-                        (group.get("line"), group.get("period"), summed))
                 continue
             pending.append((group, summed, total, len(usable)))
         for group, summed, total, count in pending:
-            if any(line == group.get("line") and period == group.get("period")
-                   and _close(summed, scope)
-                   for line, period, scope in partial_scope):
-                excused.append(
-                    f"{group.get('line')} for {group.get('period')} on axis "
-                    f"{group.get('axis')} adds to {summed}, exactly what the "
-                    "segment breakdown that omits declared amounts adds to")
-                continue
             checked += 1
+            why = _incomplete_members(group)
+            reconciliation = sum((_decimal(item.get("value")) or Decimal(0)
+                                  for item in group.get("reconciling_items") or ()), Decimal(0))
+            missing = why or "missing members: not identified in the disclosed context"
             findings.append(
                 f"{group.get('line')} for {group.get('period')} on axis "
                 f"{group.get('axis')}: {count} segments add to {summed} "
-                f"and the consolidated line is {total}")
+                f"and the consolidated line is {total}; difference {total - summed}; "
+                f"unreconciled difference {total - summed - reconciliation}; {missing}")
     if findings:
-        return InvariantResult(
-            SEGMENT_SUM, FAIL, findings=tuple(findings), checked=checked)
-    excused_reason = None if not excused else (
-        f"{len(excused)} breakdown(s) not checkable against the consolidated "
-        f"line: {'; '.join(excused[:3])}"
-        + (f"; and {len(excused) - 3} more" if len(excused) > 3 else ""))
+        return InvariantResult(SEGMENT_SUM, FAIL, findings=tuple(findings), checked=checked)
     if not checked:
-        return InvariantResult(
-            SEGMENT_SUM, NOT_APPLICABLE, checked=0,
-            reason=excused_reason or (
-                "no line has both a consolidated figure and a breakdown to "
-                "check it against"))
-    return InvariantResult(
-        SEGMENT_SUM, PASS, checked=checked, reason=excused_reason)
+        return InvariantResult(SEGMENT_SUM, NOT_APPLICABLE, checked=0,
+                               reason="no line has both a consolidated figure and a breakdown to check it against")
+    return InvariantResult(SEGMENT_SUM, PASS, checked=checked)
 
 
 def _reconciled(group: Mapping[str, Any], summed: Decimal, total: Decimal) -> bool:
@@ -781,6 +756,91 @@ def _incomplete_members(group: Mapping[str, Any]) -> str | None:
             return (f"{head} leaves out amounts the filer reports for the same "
                     f"period outside any segment ({', '.join(sorted(non_segment))})")
     return None
+
+
+def _segment_bridge_assessment(group: Mapping[str, Any]) -> dict[str, Any]:
+    """Check identities and arithmetic; anonymous amounts are never assigned."""
+
+    bridge = group.get("bridge") or {}
+    findings: list[str] = []
+
+    def amounts(parts: Any, label: str) -> dict[str, Decimal]:
+        out: dict[str, Decimal] = {}
+        for part in parts or ():
+            if not isinstance(part, Mapping):
+                findings.append(f"{label}: missing member identity")
+                continue
+            value = _decimal(part.get("value"))
+            member = str(part.get("member") or "")
+            if not member or value is None:
+                findings.append(f"{label}: missing member identity or value ({member or 'unknown'})")
+            elif member in out:
+                findings.append(f"{label}: duplicate member {member}")
+            else:
+                out[member] = value
+        return out
+
+    with localcontext() as ctx:
+        ctx.prec = _PRECISION
+        revenue = amounts(bridge.get("revenue_parts"), "segment revenue")
+        costs = amounts(bridge.get("cost_parts"), "segment costs")
+        segments = amounts(bridge.get("segment_operating_income"), "segment operating income")
+        corporate = amounts(bridge.get("corporate_operating_income"), "corporate operating income")
+        r_total, c_total, operating = (_decimal(bridge.get(key)) for key in
+                                     ("revenue_total", "cost_total", "operating_income"))
+        missing = sorted((set(revenue) | set(costs)) - set(segments))
+        if missing:
+            findings.append("missing operating income members: " + ", ".join(missing))
+        extra = sorted(set(segments) - set(revenue))
+        if extra:
+            findings.append("missing revenue members: " + ", ".join(extra))
+        if bridge.get("unmapped_operating_income"):
+            findings.append("operating income facts lack segment identity; value matching is prohibited")
+        if not corporate:
+            findings.append("missing corporate member: us-gaap:CorporateNonSegmentMember")
+        if None in (r_total, c_total, operating):
+            findings.append("missing consolidated revenue, costs or operating income")
+        else:
+            difference = r_total - c_total - operating
+            if not _close(r_total - c_total, operating):
+                findings.append(f"group revenue minus costs differs from operating income by {difference}")
+            income_gap = operating - sum(segments.values(), Decimal(0)) - sum(corporate.values(), Decimal(0))
+            if not _close(sum(segments.values(), Decimal(0)) + sum(corporate.values(), Decimal(0)), operating):
+                findings.append(f"segment plus corporate operating income difference {income_gap}")
+        matched: dict[str, str] = {}
+        derived: dict[str, str] = {}
+        for member in sorted(set(revenue) & set(costs) & set(segments)):
+            difference = revenue[member] - costs[member] - segments[member]
+            if not _close(revenue[member] - costs[member], segments[member]):
+                findings.append(f"member {member}: revenue minus costs differs from its operating income by {difference}")
+            matched[member] = format(segments[member], "f")
+        for member in sorted(set(revenue) - set(costs)):
+            if member in ALL_OTHER_MEMBERS and member in segments:
+                derived[member] = format(revenue[member] - segments[member], "f")
+            else:
+                findings.append(f"missing cost member: {member}")
+        for member in sorted(set(costs) - set(revenue)):
+            findings.append(f"missing revenue member: {member}")
+        if findings:
+            return {"status": FAIL, "findings": findings}
+        corporate_total = sum(corporate.values(), Decimal(0))
+        residual_revenue = r_total - sum(revenue.values(), Decimal(0))
+        residual_costs = c_total - sum(costs.values(), Decimal(0)) - sum((Decimal(v) for v in derived.values()), Decimal(0))
+        return {"status": PASS, "findings": [], "bridge": {
+            "operating_income": format(operating, "f"),
+            "segment_operating_income_matched": matched,
+            "derived_all_other_costs": derived,
+            "corporate_operating_income": format(corporate_total, "f"),
+            "corporate_revenue_minus_costs": format(residual_revenue - residual_costs, "f"),
+        }}
+
+
+def segment_bridge(group: Mapping[str, Any]) -> dict[str, Any] | None:
+    """The closed bridge, mapped by filed member identity; else None."""
+
+    if not isinstance(group.get("bridge"), Mapping):
+        return None
+    return _segment_bridge_assessment(group).get("bridge")
 
 
 def _nested_countries_close(
@@ -1012,6 +1072,10 @@ def segment_groups(rows: Sequence[Mapping[str, Any]]) -> list[dict[str, Any]]:
     axis_members: dict[tuple[str, str, str], set[str]] = {}
     reconciling: dict[tuple[str, str, str], list[dict[str, Any]]] = {}
     non_segment: dict[tuple[str, str], set[str]] = {}
+    # Operating income per segment retains its complete identity, including
+    # an optional operating-segments consolidation marker.
+    segment_income: dict[tuple[str, str], list[dict[str, Any]]] = {}
+    unmapped_income: dict[tuple[str, str], list[Any]] = {}
     for row in rows:
         concept = str(row.get("concept") or "")
         end = str(row.get("period_end") or "")
@@ -1021,10 +1085,30 @@ def segment_groups(rows: Sequence[Mapping[str, Any]]) -> list[dict[str, Any]]:
         axis = row.get("dimension_axis")
         key = (concept, start, end)
         member = str(row.get("dimension_member") or "")
+        dimensions = row.get("dimensions")
+        operating_member = None
+        if isinstance(dimensions, Mapping):
+            business = [(a, m) for a, m in dimensions.items() if a in BUSINESS_SEGMENT_AXES]
+            other = {a: m for a, m in dimensions.items() if a not in BUSINESS_SEGMENT_AXES}
+            if (len(business) == 1 and len(other) <= 1
+                    and all(a in CONSOLIDATION_ITEMS_AXES and m in OPERATING_SEGMENT_MEMBERS
+                            for a, m in other.items())
+                    and row.get("dimension_count") == len(dimensions)):
+                operating_member = str(business[0][1])
+        elif axis in BUSINESS_SEGMENT_AXES and row.get("dimension_count") == 1:
+            operating_member = member
+        if operating_member and isinstance(dimensions, Mapping):
+            axis = next(a for a in dimensions if a in BUSINESS_SEGMENT_AXES)
+            member = operating_member
+        effective_count = 1 if operating_member else row.get("dimension_count")
+        if concept == OPERATING_INCOME_CONCEPT and start and operating_member:
+            item = {"member": operating_member, "value": row.get("value")}
+            if item not in segment_income.setdefault((start, end), []):
+                segment_income[(start, end)].append(item)
         if not axis and not row.get("is_breakdown"):
             consolidated[key] = row.get("value")
         elif (start and axis and str(axis) in ADDITIVE_SEGMENT_AXES
-              and row.get("dimension_count") == 1):
+              and effective_count == 1):
             parts.setdefault((*key, str(axis)), []).append({
                 "member": member,
                 "value": row.get("value"),
@@ -1037,6 +1121,11 @@ def segment_groups(rows: Sequence[Mapping[str, Any]]) -> list[dict[str, Any]]:
             reconciling.setdefault(key, []).append(
                 {"member": member, "value": row.get("value")})
             non_segment.setdefault((start, end), set()).add(member)
+        elif (start and axis and str(axis) in CONSOLIDATION_ITEMS_AXES
+              and member in OPERATING_SEGMENT_MEMBERS and concept == OPERATING_INCOME_CONCEPT
+              and row.get("dimension_count") == 2):
+            if operating_member is None:
+                unmapped_income.setdefault((start, end), []).append(row.get("value"))
     out: list[dict[str, Any]] = []
     for (concept, start, end, axis), members in sorted(parts.items()):
         if (concept, start, end) not in consolidated:
@@ -1070,7 +1159,56 @@ def segment_groups(rows: Sequence[Mapping[str, Any]]) -> list[dict[str, Any]]:
         if axis in BUSINESS_SEGMENT_AXES and non_segment.get((start, end)):
             group["non_segment_members"] = sorted(non_segment[(start, end)])
         out.append(group)
+    _attach_bridges(out, consolidated, reconciling, segment_income, unmapped_income)
     return out
+
+
+# These are statement concepts, not a ranking of amounts. Unknown company
+# concepts remain unbridged until their statement identity is available.
+_BRIDGE_REVENUE_CONCEPTS = frozenset({
+    "us-gaap:Revenues", "us-gaap:RevenueFromContractWithCustomerExcludingAssessedTax",
+    "us-gaap:RevenueFromContractWithCustomerIncludingAssessedTax", "us-gaap:SalesRevenueNet",
+})
+_BRIDGE_COST_CONCEPTS = frozenset({"us-gaap:CostsAndExpenses"})
+
+
+def _attach_bridges(groups: list[dict[str, Any]], consolidated: Mapping[tuple[str, str, str], Any],
+                    reconciling: Mapping[tuple[str, str, str], Sequence[Mapping[str, Any]]],
+                    segment_income: Mapping[tuple[str, str], Sequence[Mapping[str, Any]]],
+                    unmapped_income: Mapping[tuple[str, str], Sequence[Any]]) -> None:
+    """Attach attempts by statement identity even when their arithmetic fails."""
+
+    by_period: dict[tuple[str, str], list[dict[str, Any]]] = {}
+    for group in groups:
+        if str(group.get("axis")) in BUSINESS_SEGMENT_AXES and ".." in str(group.get("period")):
+            by_period.setdefault((str(group["period"]), str(group["axis"])), []).append(group)
+    for (period, _axis), members in sorted(by_period.items()):
+        start, end = period.split("..", 1)
+        revenues = [g for g in members if g["line"] in _BRIDGE_REVENUE_CONCEPTS]
+        costs = [g for g in members if g["line"] in _BRIDGE_COST_CONCEPTS]
+        # Distinct presentations cannot be paired by whichever numbers happen
+        # to agree; leave their own partitions to the ordinary sum check.
+        if len(revenues) != 1 or len(costs) != 1:
+            continue
+        revenue, cost = revenues[0], costs[0]
+        corporate = [dict(item) for item in reconciling.get((OPERATING_INCOME_CONCEPT, start, end)) or ()
+                     if item.get("member") == "us-gaap:CorporateNonSegmentMember"]
+        if not (corporate or segment_income.get((start, end)) or unmapped_income.get((start, end))):
+            continue
+        bridge = {
+            "kind": "operating_income",
+            "revenue_line": revenue["line"], "revenue_total": revenue["total"],
+            "revenue_parts": [dict(item) for item in revenue["parts"]],
+            "cost_line": cost["line"], "cost_total": cost["total"],
+            "cost_parts": [dict(item) for item in cost["parts"]],
+            "operating_income": consolidated.get((OPERATING_INCOME_CONCEPT, start, end)),
+            "segment_operating_income": sorted((dict(item) for item in segment_income.get((start, end)) or ()),
+                                                key=lambda item: item["member"]),
+            "unmapped_operating_income": list(unmapped_income.get((start, end)) or ()),
+            "corporate_operating_income": corporate,
+        }
+        revenue["bridge"] = bridge
+        cost["bridge"] = bridge
 
 
 def _result_line(record: Mapping[str, Any], ref: str) -> Mapping[str, Any] | None:
@@ -1641,6 +1779,223 @@ class EconomicInvariantAuthority:
         return {**stored, "status_kind": "fresh"}
 
 
+    def record_version(self, report: InvariantReport) -> dict[str, Any]:
+        """Append the report for the exact output version it judged.
+
+        Pass or refusal alike: this ledger is what "the verdict for this
+        version" means.  The same report for the same version is one row.
+        """
+
+        if not isinstance(report, InvariantReport):
+            raise EconomicInvariantValidationError(
+                "a version verdict is recorded from an InvariantReport")
+        record = {**report.as_dict(), "verdict_scope": "exact_version",
+                  "created_at": _now()}
+        record["content_hash"] = content_hash(
+            {key: value for key, value in record.items() if key != "created_at"})
+        with self._transaction() as cur:
+            cur.execute(
+                "INSERT OR IGNORE INTO economic_invariant_version_verdicts"
+                "(output_ref,rule_ref,output_kind,company_ref,status,subject_hash,"
+                "record_json,content_hash,created_at) VALUES(?,?,?,?,?,?,?,?,?)",
+                (report.output_ref, report.rule_ref, report.output_kind,
+                 report.company_ref, report.status, report.subject_hash or "",
+                 canonical_json(record), record["content_hash"], record["created_at"]))
+        return record
+
+
+# ---------------------------------------------------------------------------
+# batch an: verdicts by exact version, and what a reader may call "covered"
+# ---------------------------------------------------------------------------
+
+#: How one rule's result reads.  ``not_applicable`` or ``checked == 0`` is
+#: 「未覆盖」 -- the rule had nothing to look at -- and never 「通过」.
+COVERAGE_PASS = "pass"
+COVERAGE_FAIL = "fail"
+COVERAGE_UNCOVERED = "uncovered"
+COVERAGE_LABELS: dict[str, str] = {
+    COVERAGE_PASS: "通过", COVERAGE_FAIL: "未通过", COVERAGE_UNCOVERED: "未覆盖",
+}
+#: A published output whose exact version has no verdict.
+NO_VERDICT_LABEL = "该版本没有经济不变量检查结论（未验证）"
+
+
+def coverage_status(result: Mapping[str, Any]) -> str:
+    """``pass`` / ``fail`` / ``uncovered`` for one rule's stored result."""
+
+    status = str(result.get("status") or "")
+    if status == FAIL:
+        return COVERAGE_FAIL
+    try:
+        checked = int(result.get("checked") or 0)
+    except (TypeError, ValueError):
+        checked = 0
+    if status == NOT_APPLICABLE or checked <= 0:
+        return COVERAGE_UNCOVERED
+    return COVERAGE_PASS if status == PASS else COVERAGE_UNCOVERED
+
+
+def _ro_table(connection: Any, name: str) -> bool:
+    try:
+        return connection.execute(
+            "SELECT 1 FROM sqlite_master WHERE type='table' AND name=?", (name,)
+        ).fetchone() is not None
+    except sqlite3.Error:
+        return False
+
+
+def _loads(text: Any) -> dict[str, Any] | None:
+    try:
+        value = json.loads(text)
+    except (TypeError, ValueError):
+        return None
+    return value if isinstance(value, dict) else None
+
+
+def verdict_for_output(connection: Any, output_ref: str) -> dict[str, Any] | None:
+    """The stored verdict for exactly ``output_ref``, or ``None``.
+
+    In order: the exact-version ledger; a refusal-chain row naming this
+    output; the invariant report a forecast model version's filing proof
+    carries.  A verdict on any *other* version of the same output is not
+    returned -- it covers that version, not this one.
+    """
+
+    if _ro_table(connection, "economic_invariant_version_verdicts"):
+        row = connection.execute(
+            "SELECT record_json FROM economic_invariant_version_verdicts WHERE output_ref=? "
+            "ORDER BY created_at DESC LIMIT 1", (output_ref,)).fetchone()
+        if row is not None:
+            record = _loads(row[0])
+            if record is not None:
+                return {**record, "verdict_source": "exact_version"}
+    if _ro_table(connection, "economic_invariant_verdicts"):
+        row = connection.execute(
+            "SELECT record_json FROM economic_invariant_verdicts WHERE output_ref=? "
+            "ORDER BY version_number DESC LIMIT 1", (output_ref,)).fetchone()
+        if row is not None:
+            record = _loads(row[0])
+            if record is not None:
+                return {**record, "verdict_source": "refusal_chain"}
+    if _ro_table(connection, "forecast_model_filing_proofs"):
+        row = connection.execute(
+            "SELECT record_json FROM forecast_model_filing_proofs WHERE model_version_id=?",
+            (output_ref,)).fetchone()
+        proof = None if row is None else _loads(row[0])
+        report = (proof or {}).get("invariant_report")
+        if isinstance(report, Mapping) and report.get("output_ref") in (None, output_ref):
+            return {**dict(report), "output_ref": output_ref, "verdict_source": "filing_proof"}
+    return None
+
+
+def publication_gate(connection: Any, output_ref: str) -> dict[str, Any]:
+    """May ``output_ref`` be shown as a current result?
+
+    Only with a verdict for this exact version that is not a refusal.  No
+    verdict is ``unverified`` (shown as 「未验证」), never a pass.
+    """
+
+    verdict = verdict_for_output(connection, output_ref)
+    if verdict is None:
+        return {"output_ref": output_ref, "publishable": False, "status": "unverified",
+                "label": NO_VERDICT_LABEL}
+    if verdict.get("status") == UNAVAILABLE:
+        return {"output_ref": output_ref, "publishable": False, "status": "refused",
+                "label": "该版本未通过经济不变量检查，没有发布",
+                "verdict_source": verdict.get("verdict_source")}
+    uncovered = [str(item.get("invariant")) for item in verdict.get("results") or ()
+                 if isinstance(item, Mapping) and coverage_status(item) == COVERAGE_UNCOVERED]
+    return {"output_ref": output_ref, "publishable": True, "status": "verified",
+            "label": ("该版本已检查" + (f"；{len(uncovered)} 项规则未覆盖" if uncovered else "")),
+            "uncovered": uncovered, "verdict_source": verdict.get("verdict_source")}
+
+
+def rule_coverage(verdict: Mapping[str, Any] | None) -> list[dict[str, Any]]:
+    """Per rule: checked count, whether it applied, and how it reads."""
+
+    by_rule = {str(item.get("invariant")): item for item in (verdict or {}).get("results") or ()
+               if isinstance(item, Mapping)}
+    out = []
+    for name in INVARIANTS:
+        item = by_rule.get(name)
+        if item is None:
+            out.append({"invariant": name, "label": INVARIANT_LABELS[name], "checked": 0,
+                        "applicable": False, "status": None,
+                        "coverage": COVERAGE_UNCOVERED,
+                        "display_status": COVERAGE_LABELS[COVERAGE_UNCOVERED],
+                        "reason": None if verdict else NO_VERDICT_LABEL})
+            continue
+        coverage = coverage_status(item)
+        try:
+            checked = int(item.get("checked") or 0)
+        except (TypeError, ValueError):
+            checked = 0
+        out.append({"invariant": name, "label": INVARIANT_LABELS[name], "checked": checked,
+                    "applicable": item.get("status") != NOT_APPLICABLE and checked > 0,
+                    "status": item.get("status"), "coverage": coverage,
+                    "display_status": COVERAGE_LABELS[coverage],
+                    "reason": item.get("reason")})
+    return out
+
+
+#: output kind -> (table, id column, chain column, company column)
+_OUTPUT_TABLES: dict[str, tuple[str, str, str, str]] = {
+    FORECAST_MODEL: ("forecast_model_versions", "version_id", "model_ref", "company_ref"),
+    SENSITIVITY_PROJECTION: ("sensitivity_projections", "projection_id", "projection_ref",
+                             "company_ref"),
+}
+
+
+def coverage_report(connection: Any, company_ref: str | None = None) -> dict[str, dict[str, Any]]:
+    """company -> output kind -> the current version's per-rule coverage.
+
+    Read for the *current* version of each output only: a verdict on an older
+    model is reported as such (``verdict_for_current`` false) and its rules
+    read 「未覆盖」 for the current version.
+    """
+
+    out: dict[str, dict[str, Any]] = {}
+    for kind, (table, id_col, chain_col, company_col) in _OUTPUT_TABLES.items():
+        if not _ro_table(connection, table):
+            continue
+        sql = (f"SELECT t.{id_col} AS id, t.{company_col} AS company_ref, t.created_at AS created_at "
+               f"FROM {table} t JOIN (SELECT {chain_col} AS chain, MAX(version_number) AS top "
+               f"FROM {table} GROUP BY {chain_col}) h ON h.chain=t.{chain_col} "
+               "AND h.top=t.version_number")
+        params: tuple[Any, ...] = ()
+        if company_ref is not None:
+            sql += f" WHERE t.{company_col}=?"
+            params = (company_ref,)
+        for row in connection.execute(sql, params).fetchall():
+            current = str(row[0])
+            verdict = verdict_for_output(connection, current)
+            older = None
+            if verdict is None and _ro_table(connection, "economic_invariant_verdicts"):
+                prior = connection.execute(
+                    "SELECT output_ref FROM economic_invariant_verdicts WHERE company_ref=? "
+                    "AND output_kind=? ORDER BY version_number DESC LIMIT 1",
+                    (row[1], kind)).fetchone()
+                older = None if prior is None else prior[0]
+            rules = rule_coverage(verdict)
+            applicable = [item for item in rules if item["applicable"]]
+            failed = [item for item in rules if item["coverage"] == COVERAGE_FAIL]
+            gate = publication_gate(connection, current)
+            out.setdefault(str(row[1]), {})[kind] = {
+                "output_kind": kind, "output_kind_label": OUTPUT_KIND_LABELS[kind],
+                "output_ref": current, "verdict_for_current": verdict is not None,
+                "verdict_source": None if verdict is None else verdict.get("verdict_source"),
+                "older_verdict_output_ref": older,
+                "publication": gate,
+                "rules": rules,
+                "checked_rules": len(applicable), "total_rules": len(rules),
+                "failed_rules": len(failed),
+                "display_summary": (
+                    NO_VERDICT_LABEL if verdict is None else
+                    f"{len(applicable)}/{len(rules)} 项规则有可检查的数据；其余显示为未覆盖，不算通过"),
+            }
+    return out
+
+
 def gate(
     store: Any, report: InvariantReport, *,
     actor_ref: str = ACTOR_REF,
@@ -1656,14 +2011,19 @@ def gate(
 
     stored = None
     if store is not None:
-        stored = EconomicInvariantAuthority(store).record(
+        authority = EconomicInvariantAuthority(store)
+        stored = authority.record(
             report, actor_ref=actor_ref, mission_version_ref=mission_version_ref)
+        # Batch an: the exact version's verdict, pass or refusal.
+        authority.record_version(report)
     if report.failures:
         raise EconomicInvariantRefused(report)
     return stored
 
 
 __all__ = [
+    "COVERAGE_FAIL", "COVERAGE_LABELS", "COVERAGE_PASS", "COVERAGE_UNCOVERED", "NO_VERDICT_LABEL",
+    "coverage_report", "coverage_status", "publication_gate", "rule_coverage", "verdict_for_output",
     "ABSOLUTE_TOLERANCE",
     "ACTOR_REF",
     "AVAILABLE",
@@ -1706,6 +2066,6 @@ __all__ = [
     "gate",
     "measure_band",
     "projection_subject",
-    "segment_groups",
+    "segment_bridge", "segment_groups",
     "valuation_subject",
 ]

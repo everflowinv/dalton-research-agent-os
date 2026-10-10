@@ -4,8 +4,16 @@ The provider transport already projects an HTTP response into an assistant
 result with ``stopReason == "error"`` and a numeric-string ``errorCode``.  The
 2026.9.3 plugin facade currently drops that result by returning an empty text
 completion.  This exact-version patch exports only a closed, non-sensitive
-failure union for HTTP 429 and 5xx responses.  Exceptions and other errors keep
-their existing conservative path.
+failure union for HTTP 402, 429 and 5xx responses.  Exceptions and other errors
+keep their existing conservative path.
+
+HTTP 402 joined on 2026-10-07: DeepSeek answers an exhausted account balance
+with ``402 Payment Required`` (live /tmp/openclaw: every deepseek-flash call
+from 2026-10-04 on).  Without the bridge the facade turns that into an empty
+text completion and the broker can only say ``INVALID_HOST_RESULT: host
+returned invalid text``, which reads exactly like a reasoning model that
+thought through its output cap.  The status is the only thing exported -- never
+the provider's error body.
 """
 from __future__ import annotations
 
@@ -37,12 +45,35 @@ PREVIOUS = '''\t\tif (params.providerControls && !providerControlProof) throw ne
 \t\t\t}
 \t\t});
 \t\tconst text = result.content.filter((c) => c.type === "text").map((c) => c.text).join("");'''
-PATCHED = '''\t\tconst providerAdmissionStatus = result.stopReason === "error" && typeof result.errorCode === "string" && /^[45]\\d\\d$/.test(result.errorCode) ? Number(result.errorCode) : void 0;
+#: The 2026-09 bridge (429/5xx only), live on hosts patched before 2026-10-07.
+ADMISSION = '''\t\tconst providerAdmissionStatus = result.stopReason === "error" && typeof result.errorCode === "string" && /^[45]\\d\\d$/.test(result.errorCode) ? Number(result.errorCode) : void 0;
 \t\tif (params.providerControls && !providerControlProof) {
 \t\t\tif (providerAdmissionStatus !== void 0) throw createLlmCompleteError("PROVIDER_ADMISSION_FAILED", `Plugin LLM completion failed: provider admission returned HTTP ${providerAdmissionStatus} before control proof.`);
 \t\t\tthrow new Error("Plugin LLM completion failed: provider controls were not enforced by the selected transport.");
 \t\t}
 \t\tconst returnedHttpStatus = result.stopReason === "error" && typeof result.errorCode === "string" && /^(?:429|5\\d\\d)$/.test(result.errorCode) ? Number(result.errorCode) : void 0;
+\t\tif (returnedHttpStatus !== void 0) return finalizePluginLlmCompletion({
+\t\t\tcfg,
+\t\t\thostPluginId: pluginPolicyId,
+\t\t\tsuppressUsage: false,
+\t\t\trawUsage: result.usage,
+\t\t\tlogger,
+\t\t\tresult: {
+\t\t\t\tfailure: { version: "0.1", state: "provider_completed_failure", httpStatus: returnedHttpStatus },
+\t\t\t\tprovider: prepared.selection.provider,
+\t\t\t\tmodel: prepared.selection.modelId,
+\t\t\t\tagentId,
+\t\t\t\texecution: { mode: "direct-provider", owner: { kind: "provider", id: prepared.selection.provider } },
+\t\t\t\taudit
+\t\t\t}
+\t\t});
+\t\tconst text = result.content.filter((c) => c.type === "text").map((c) => c.text).join("");'''
+PATCHED = '''\t\tconst providerAdmissionStatus = result.stopReason === "error" && typeof result.errorCode === "string" && /^[45]\\d\\d$/.test(result.errorCode) ? Number(result.errorCode) : void 0;
+\t\tif (params.providerControls && !providerControlProof) {
+\t\t\tif (providerAdmissionStatus !== void 0) throw createLlmCompleteError("PROVIDER_ADMISSION_FAILED", `Plugin LLM completion failed: provider admission returned HTTP ${providerAdmissionStatus} before control proof.`);
+\t\t\tthrow new Error("Plugin LLM completion failed: provider controls were not enforced by the selected transport.");
+\t\t}
+\t\tconst returnedHttpStatus = result.stopReason === "error" && typeof result.errorCode === "string" && /^(?:402|429|5\\d\\d)$/.test(result.errorCode) ? Number(result.errorCode) : void 0;
 \t\tif (returnedHttpStatus !== void 0) return finalizePluginLlmCompletion({
 \t\t\tcfg,
 \t\t\thostPluginId: pluginPolicyId,
@@ -76,13 +107,14 @@ def apply(root: Path, *, check: bool) -> bool:
     original_bytes = path.read_bytes()
     source = original_bytes.decode("utf-8")
     original_count, previous_count, patched_count = source.count(ORIGINAL), source.count(PREVIOUS), source.count(PATCHED)
+    admission_count = source.count(ADMISSION)
     if patched_count == 1:
-        if original_count:
-            raise ValueError("provider failure bridge contains its original anchor")
+        if original_count or admission_count:
+            raise ValueError("provider failure bridge contains an older anchor")
         return False
     if patched_count:
         raise ValueError("provider failure bridge is duplicated")
-    if original_count + previous_count != 1:
+    if original_count + previous_count + admission_count != 1:
         raise ValueError("OpenClaw provider failure bridge anchor changed")
     if check:
         raise ValueError("provider failure bridge is missing")
@@ -92,7 +124,8 @@ def apply(root: Path, *, check: bool) -> bool:
                                          dir=path.parent, prefix=f".{path.name}.",
                                          delete=False) as handle:
             candidate = Path(handle.name)
-            anchor = PREVIOUS if previous_count else ORIGINAL
+            anchor = (ADMISSION if admission_count else
+                      PREVIOUS if previous_count else ORIGINAL)
             handle.write(source.replace(anchor, PATCHED, 1))
         checked = subprocess.run(["node", "--check", str(candidate)], text=True,
                                  capture_output=True, check=False)

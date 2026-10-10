@@ -234,16 +234,48 @@ class ProjectionLadderTests(unittest.TestCase):
                 self.assertLessEqual(len(company["readable_documents"]), keep)
 
     def test_every_rung_still_accounts_for_every_document(self):
-        served = self.projections(self.heavy_inventory())
+        from dalton_core.store import content_hash, canonical_json
+        original = self.heavy_inventory()
+        before = canonical_json(original)
+        served = self.projections(original)
         checked = 0
         for keep, projected in served.items():
             if keep >= READABLE_KEEP_PER_COMPANY:
                 continue
+            self.assertEqual(projected["content_hash"], original["content_hash"])
             for company in projected["companies"]:
-                summary = company["readable_documents_summary"]
-                self.assertEqual(summary["retained_recent"] + summary["aggregated"], 30)
-                self.assertTrue(summary["omitted_rows_hash"])
+                source = next(c for c in original["companies"]
+                              if c["company_ref"] == company["company_ref"])
+                ordered = sorted(source["readable_documents"],
+                    key=lambda d: (str(d.get("doc_date") or ""), str(d["document_ref"])), reverse=True)
+                retained = len(company["readable_documents"])
+                self.assertEqual([d["document_ref"] for d in company["readable_documents"]],
+                                 [d["document_ref"] for d in ordered[:retained]])
+                omitted = [{k:v for k,v in d.items() if k not in {
+                    "original_preview", "preview_proof_ref", "preview_proof_hash",
+                    "authority_ref", "authority_hash", "source_content_hash", "operations"}}
+                    for d in ordered[retained:]]
+                expected = {"retained_recent": retained, "aggregated": len(omitted),
+                    "by_kind": {"unknown": len(omitted)},
+                    "earliest_doc_date": min(d["doc_date"] for d in omitted),
+                    "latest_doc_date": max(d["doc_date"] for d in omitted),
+                    "omitted_rows_hash": content_hash(omitted)}
+                if "compact_historical_summaries" in projected["prompt_projection"]["stages_applied"]:
+                    expected = {k: expected[k] for k in ("aggregated", "omitted_rows_hash")}
+                if "readable_documents_summary" in company:
+                    self.assertEqual(company["readable_documents_summary"], expected)
+                    aggregated = expected["aggregated"]
+                else:
+                    # The final audit compaction shares summary hashes while
+                    # retaining every category's exact count. It does not lose
+                    # the omitted document identities' binding.
+                    counts = company["historical_counts"]
+                    aggregated = counts["readable_documents_summary"]
+                    self.assertEqual(counts["content_hash"], content_hash({
+                        "readable_documents_summary": expected}))
+                self.assertEqual(retained + aggregated, 30)
                 checked += 1
+        self.assertEqual(canonical_json(original), before)
         self.assertGreater(checked, 0)
 
     def test_a_bound_nothing_can_reach_still_refuses_before_routing(self):

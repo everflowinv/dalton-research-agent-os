@@ -84,7 +84,9 @@ class LocalizationStoreTests(unittest.TestCase):
         publish_attachment(self.directory,self.product,self.candidate)
         result=localize_library(self.connection,{'products':[self.product]})['products'][0]
         self.assertEqual(result['publication_status'],'pending_language_review')
-        self.assertEqual(result['sections'],[])
+        # 2026-10-09: the unreviewed draft stays readable under a badge.
+        self.assertEqual(result['sections'],self.product['sections'])
+        self.assertEqual(result['draft_label'],'初稿（待审核签发）')
         self.assertEqual(result['status'],'available')
         self.assertEqual(result['approval'],self.product['approval'])
         self.assertFalse(has_reviewed_attachment(self.directory,self.product))

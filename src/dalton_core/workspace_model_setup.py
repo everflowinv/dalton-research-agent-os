@@ -299,6 +299,71 @@ def _validate_bundle(value: Mapping[str, Any]) -> dict[str, Any]:
     return dict(value)
 
 
+def latest_budget_policy_id(budget_policies: Any) -> str | None:
+    """The head of the day-budget lineage: the version no other version succeeds.
+
+    A lineage is a chain (``prior_version_id``), so the head is the one id that
+    is nobody's prior.  Should a bundle ever carry two heads, the most recently
+    created wins -- the same answer the owner's last budget save gave.  ``None``
+    for an empty or malformed list; the caller keeps what it had.
+    """
+
+    if not isinstance(budget_policies, (list, tuple)):
+        return None
+    rows = [row for row in budget_policies if isinstance(row, Mapping)
+            and isinstance(row.get("policy_version_id"), str)]
+    priors = {row.get("prior_version_id") for row in rows}
+    heads = [row for row in rows if row["policy_version_id"] not in priors]
+    if not heads:
+        return None
+    return str(max(heads, key=lambda row: str(row.get("created_at") or ""))[
+        "policy_version_id"])
+
+
+def _lineage_order(budget_policies: Any) -> list[dict[str, Any]]:
+    """Each version after its prior, whatever order the bundle lists them in.
+
+    Exported bundles are sorted by ``created_at``, which is a lineage order
+    only while no two versions share a timestamp; the ledger refuses a version
+    whose prior is not registered yet, so the order is made explicit here.
+    """
+
+    pending = [dict(row) for row in budget_policies]
+    placed: set[str] = set()
+    ordered: list[dict[str, Any]] = []
+    while pending:
+        ready = [row for row in pending
+                 if row.get("prior_version_id") in (None, *placed)]
+        if not ready:
+            ordered.extend(pending)  # a broken lineage fails loudly in the ledger
+            break
+        for row in ready:
+            ordered.append(row)
+            placed.add(row["policy_version_id"])
+            pending.remove(row)
+    return ordered
+
+
+def installed_budget_policy_id(budget_db: str | Path) -> str | None:
+    """The head of the day-budget lineage a workspace's ledger actually holds."""
+
+    path = Path(budget_db).expanduser()
+    if not path.is_file():
+        return None
+    connection = sqlite3.connect(f"file:{path}?mode=ro", uri=True, timeout=5)
+    try:
+        rows = connection.execute(
+            "SELECT policy_version_id, prior_version_id, created_at "
+            "FROM thesis_impact_budget_policies").fetchall()
+    except sqlite3.Error:
+        return None
+    finally:
+        connection.close()
+    return latest_budget_policy_id([
+        {"policy_version_id": row[0], "prior_version_id": row[1], "created_at": row[2]}
+        for row in rows])
+
+
 def _require_local(path: Path, workspace: WorkspacePaths, name: str) -> None:
     if path.parent != workspace.state_dir:
         raise WorkspaceModelSetupError(f"{name} must be directly inside workspace state")
@@ -345,7 +410,15 @@ def install_runtime_template(workspace_manifest: str | Path,
     _require_local(router_path, workspace, "model router")
     _require_local(budget_path, workspace, "budget ledger")
     prepared: dict[str, tuple[Path, dict[str, Any]]] = {}
+    # 2026-09-30: every lane starts on the head of the day-budget lineage the
+    # bundle carries, not on whatever version each exported config happened
+    # to pin.  A template exported while a lane still named an older version
+    # (production:3, $180) would otherwise give the new environment two day
+    # caps at once -- the head the service pins and the old one in the lanes.
+    budget_head = latest_budget_policy_id(bundle["budget_policies"])
     for name, template in sorted(bundle["configs"].items()):
+        if budget_head is not None:
+            template = {**template, "budget_policy_ref": budget_head}
         if (not isinstance(name, str) or Path(name).name != name
                 or not name.endswith("model-config.json")):
             raise WorkspaceModelSetupError("unsafe model config file name")
@@ -367,7 +440,7 @@ def install_runtime_template(workspace_manifest: str | Path,
         for policy in bundle["policies"]:
             router.register_policy(policy)
     with ThesisImpactBudgetStore(budget_path) as budget:
-        for policy in bundle["budget_policies"]:
+        for policy in _lineage_order(bundle["budget_policies"]):
             budget.register_policy(
                 policy_version_id=policy["policy_version_id"],
                 day_cap_micros=policy["day_cap_micros"],
@@ -380,7 +453,7 @@ def install_runtime_template(workspace_manifest: str | Path,
     return {"status": "installed", "workspace_id": workspace.workspace_id,
             "template_hash": bundle["content_hash"], "model_calls": 0,
             "router_db": str(router_path), "budget_db": str(budget_path),
-            "configs": installed}
+            "budget_policy_ref": budget_head, "configs": installed}
 
 
 def main(argv: list[str] | None = None) -> int:

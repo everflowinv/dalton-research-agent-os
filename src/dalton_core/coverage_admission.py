@@ -19,7 +19,7 @@ from .store import DaltonStore, canonical_json, content_hash
 
 
 SCHEMA_VERSION = "0.1"
-THESIS_SCHEMA_VERSION = "0.2"
+THESIS_SCHEMA_VERSION = "0.3"
 CONFIDENCE_LEVELS = frozenset({"low", "medium", "high"})
 VERIFICATION_KINDS = frozenset({"numeric", "semantic", "numeric_and_semantic"})
 THESIS_CONTENT_FIELDS = frozenset({
@@ -190,9 +190,11 @@ def validate_driver_pack_version(value: Mapping[str, Any]) -> dict[str, Any]:
     return wire
 
 
-def validate_thesis_content(value: Mapping[str, Any]) -> dict[str, Any]:
+def validate_thesis_content(value: Mapping[str, Any], *, require_question: bool = False) -> dict[str, Any]:
+    from .thesis_question_model import QUESTION_FIELDS, validate_question_fields
     wire = dict(value)
-    if set(wire) != THESIS_CONTENT_FIELDS:
+    expected = THESIS_CONTENT_FIELDS | QUESTION_FIELDS if require_question or "question_ref" in wire else THESIS_CONTENT_FIELDS
+    if set(wire) != expected:
         raise CoverageAdmissionValidationError("thesis content has an invalid closed shape")
     for field in ("statement", "mechanism", "implied_expectation", "change_reason"):
         wire[field] = _text(wire[field], field)
@@ -200,6 +202,11 @@ def validate_thesis_content(value: Mapping[str, Any]) -> dict[str, Any]:
         raise CoverageAdmissionValidationError("confidence must be low, medium, or high")
     for field in ("claim_refs", "catalyst_refs", "falsifier_refs"):
         wire[field] = _refs(wire[field], field)
+    if "question_ref" in wire:
+        try:
+            validate_question_fields(wire)
+        except ValueError as exc:
+            raise CoverageAdmissionValidationError(str(exc)) from exc
     return wire
 
 
@@ -397,7 +404,7 @@ class CoverageAdmissionAuthority:
         mandate_version_hash = _sha256(mandate_version_hash, "mandate_version_hash")
         driver_pack_version_ref = _text(driver_pack_version_ref, "driver_pack_version_ref")
         driver_pack_version_hash = _sha256(driver_pack_version_hash, "driver_pack_version_hash")
-        thesis_content = validate_thesis_content(content)
+        thesis_content = validate_thesis_content(content, require_question=True)
         actor_ref = _human(actor_ref, "actor_ref")
         idempotency_key = _text(idempotency_key, "idempotency_key")
         request = {
@@ -609,6 +616,14 @@ class CoverageAdmissionAuthority:
             thesis_version_id: str | None = None
             decision_time = _now()
             if verdict == "admit":
+                from .thesis_question_model import require_current_question, require_evidence, record_disagreement
+                try:
+                    require_evidence(self.store, content)
+                    require_current_question(self.connection, content, thesis_ref=candidate_row["thesis_ref"],
+                                             industry_ref=candidate_row["industry_ref"],
+                                             industry_thesis=str(candidate_row["company_ref"]).startswith("industry:"))
+                except ValueError as exc:
+                    raise CoverageAdmissionConflict(str(exc)) from exc
                 if cur.execute(
                     "SELECT 1 FROM current_pointers WHERE thesis_id=?",
                     (candidate_row["thesis_ref"],),
@@ -710,6 +725,7 @@ class CoverageAdmissionAuthority:
                         actor_ref, created_at,
                     ),
                 )
+                record_disagreement(self.store, cur, thesis_wire)
                 event_id = self.store._insert_event(
                     cur,
                     "admitted",

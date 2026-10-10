@@ -167,10 +167,8 @@ class DocumentPromotionTests(unittest.TestCase):
                           'basis': 'reported', 'cited_match_indexes': [0]},
             'missing': [],
         })
-        verifier_adapter = fixtures.RouteBoundCountingFakeAdapter({
-            'schema_version': '0.1', 'verdict': 'pass',
-            'verified_statement': statement, 'findings': [],
-        })
+        verifier_adapter = fixtures.RouteBoundCountingFakeAdapter(
+            fixtures.passing_verifier_reply)
         executor, draft, verifier = self._executor(
             fixture, authority, draft_adapter=draft_adapter,
             verifier_adapter=verifier_adapter)

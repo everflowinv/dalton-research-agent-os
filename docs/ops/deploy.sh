@@ -2,9 +2,18 @@
 # 部署 main 当前的 HEAD：先构建 release，再执行切换。所有长命令都写在这里，避免终端粘贴时把长行拆断。
 # 用法：zsh ~/Projects/dalton-research-agent-os/docs/ops/deploy.sh
 set -e
-cd ~/Projects/dalton-research-agent-os
+REPO=${REPO:-"$HOME/Projects/dalton-research-agent-os"}
+cd "$REPO"
 # pypi 偶尔超时：放宽 pip 超时；构建失败时清掉半成品目录（没有 release-manifest.json、也没被任何服务引用），最多重试 3 次。
 export PIP_DEFAULT_TIMEOUT=60 PIP_RETRIES=8
+# 发布必须从干净的 HEAD 构建：先检查，不干净就直接说明是哪些文件（这不是网络问题，重试没有用）。
+DIRTY=$(git status --porcelain)
+if [[ -n $DIRTY ]]; then
+  echo "!! 工作树不干净，不能构建发布。下面这些文件未提交：" >&2
+  echo "$DIRTY" >&2
+  echo "   把上面的输出发给我，我来提交或移走后再部署。" >&2
+  exit 1
+fi
 OUT=/tmp/dalton-build-$(date -u +%Y%m%dT%H%M%SZ).json
 MARK=$(mktemp /tmp/dalton-build-start.XXXXXX)   # 只清理这次构建期间新建的目录，旧发布（回滚目标）一律不碰
 for attempt in 1 2 3; do
@@ -32,8 +41,13 @@ print("health ok:", h.get("ok"), "| every_agent_on_target:", h.get("every_agent_
       "| heartbeat_advanced:", h.get("controller_heartbeat_advanced"), "| writer_socket:", h.get("writer_socket_readable"))
 acts = (d.get("applied") or {}).get("actions", [])
 retried_ok = {a.split("retry ", 1)[1].split(" ->")[0] for a in acts if a.startswith("retry ") and a.rstrip().endswith("-> 0")}
+# bootout 返回 3（No such process）只说明服务本来就没在跑，随后的 bootstrap 才是关键，不算失败。
+not_loaded = [a for a in acts if " bootout " in a and "No such process" in a]
 bad = [a for a in acts if "->" in a and not a.rstrip().endswith("-> 0")
-       and not a.startswith("retry ") and a.split(" ->")[0] not in retried_ok]
+       and not a.startswith("retry ") and a.split(" ->")[0] not in retried_ok
+       and a not in not_loaded]
+if not_loaded:
+    print("切换前本来就没在运行（已重新拉起）：", len(not_loaded), "个")
 print("首次失败但重试成功：", len(retried_ok), "个" if retried_ok else "")
 print("仍然失败的 launchctl：", bad or "无")
 print("完整输出:", sys.argv[1])

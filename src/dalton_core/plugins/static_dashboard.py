@@ -28,6 +28,15 @@ class StaticDashboardError(RuntimeError):
 
 _EMBED_MARKER = "const EMBEDDED_DATA = null;"
 
+#: 2026-09-30 (cockpit review P1-3): how many work items of each workflow tree
+#: the static page embeds.  The page (``dashboard.html`` ``renderTasks``)
+#: shows the ten most recently updated work items across all embedded trees
+#: and reads nothing else from them, so the newest ten of each tree are
+#: exactly what it can display.  Before this the whole tree was embedded:
+#: legacy's ``workflow:projection-unassigned`` holds every unassigned work
+#: item ever projected, 48 of the page's 51 MB.
+EMBEDDED_TREE_ITEMS = 10
+
 
 def _safe_script_json(value: Any) -> str:
     encoded = json.dumps(
@@ -65,10 +74,31 @@ def dashboard_snapshot(projection_db: str | Path) -> dict[str, Any]:
         for row in workflows["data"][:8]:
             workflow_ref = row["workflow_ref"]
             encoded = urllib.parse.quote(workflow_ref, safe="")
-            data[f"/v1/workflows/{encoded}/tree"] = service.workflow_tree(workflow_ref)
+            data[f"/v1/workflows/{encoded}/tree"] = _embedded_tree(
+                service.workflow_tree(workflow_ref))
         return data
     finally:
         service.close()
+
+
+def _embedded_tree(tree: Mapping[str, Any]) -> dict[str, Any]:
+    """The part of one workflow tree the static page can show, and a count.
+
+    Same envelope, ``data`` still a list of work items -- only the
+    ``EMBEDDED_TREE_ITEMS`` most recently updated, in the tree's own order --
+    plus ``total_items`` / ``embedded_items`` so the snapshot says it is a
+    summary rather than passing one off as the whole tree.
+    """
+
+    items = list(tree.get("data") or [])
+    kept = items
+    if len(items) > EMBEDDED_TREE_ITEMS:
+        newest = sorted(range(len(items)),
+                        key=lambda index: str(items[index].get("updated_at") or ""),
+                        reverse=True)[:EMBEDDED_TREE_ITEMS]
+        kept = [items[index] for index in sorted(newest)]
+    return {**tree, "data": kept, "total_items": len(items),
+            "embedded_items": len(kept)}
 
 
 def render_static_dashboard(
@@ -293,4 +323,12 @@ class StaticDashboardPlugin:
         self.last_render = rendered
         published = None if self.publisher is None else self.publisher.publish(self.output_path)
         self.last_publish = published
-        return {"render": rendered, "publish": published}
+        # 2026-09-30 (P1-3): say in the heartbeat whether this page goes public
+        # at all.  ``publish: null`` alone read like a failed upload; with the
+        # flag off (the default, and legacy's setting) it is a local page only.
+        # Turning it on is the owner's decision, in service.json.
+        return {"render": rendered, "publish": published,
+                "public_publish": (
+                    "enabled" if self.publisher is not None else
+                    "disabled: public_publish_enabled is not true in service.json; "
+                    "the page is rendered locally only")}

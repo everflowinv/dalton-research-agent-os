@@ -345,6 +345,7 @@ def argv_fragment(context: Any) -> list[str]:
 
 LANE = register_lane(LaneSpec(
     operation="dispatch_earnings_season",
+    failure_ledger="earnings_season",
     order=117,
     driver_key="earnings_season",
     handler=dispatch,

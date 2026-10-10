@@ -27,6 +27,7 @@ from dalton_core.agenda_control import (
     _parse_time,
 )
 from dalton_core.cockpit_plane import CockpitConflict, CockpitError
+from dalton_core.cockpit_v2.routes import SHELL_HTML
 from dalton_core.observability import ObservabilityStore
 from dalton_core.store import DaltonStore
 from tests.agenda_fixtures import register_perception
@@ -581,8 +582,13 @@ class AgendaControlTests(unittest.TestCase):
             cases = (
                 (CockpitError(owner_words), 400, "cockpit", owner_words),
                 (CockpitConflict(conflict_words), 409, "conflict", conflict_words),
+                # P2-9: an English refusal still carries a Chinese sentence.
                 (CockpitError("decision must be approve or reject"), 400,
-                 "cockpit", None),
+                 "cockpit", "这项决定只能是「批准」或「拒绝」。"),
+                (CockpitError("some internal wording nobody mapped"), 400,
+                 "cockpit", "请求没有被接受：参数不正确或已经过期，没有执行。"),
+                (CockpitConflict("stale revision"), 409, "conflict",
+                 "这项操作与当前状态冲突，没有执行；请刷新后再试。"),
             )
             for index, (error, status, name, shown) in enumerate(cases):
                 with self.subTest(error=str(error)):
@@ -617,19 +623,35 @@ class AgendaControlTests(unittest.TestCase):
                 "Host": "dalton.example.ts.net",
                 "Tailscale-User-Login": LOGIN,
             }
+            # Batch ad: "/" is the v2 shell (ADR-0016 addendum).
             connection.request("GET", "/", headers=headers)
             response = connection.getresponse()
-            html = response.read().decode("utf-8")
+            shell = response.read()
             cookie = response.getheader("Set-Cookie").split(";", 1)[0]
             self.assertEqual(response.status, 200)
+            self.assertEqual(shell, SHELL_HTML.read_bytes())
+            # The previous cockpit moved to /legacy, byte for byte.
+            connection.request("GET", "/legacy", headers=headers)
+            response = connection.getresponse()
+            html = response.read().decode("utf-8")
+            self.assertEqual(response.status, 200)
+            self.assertEqual(html, Path(agenda_control.__file__).with_name(
+                "cockpit_control.html").read_text(encoding="utf-8"))
             self.assertIn("Dalton 投研工作台", html)
             self.assertIn("/v1/cockpit/overview", html)
-            # The review-oriented page stays reachable for operators at /legacy.
-            connection.request("GET", "/legacy", headers=headers)
+            # The review-oriented page stays reachable for operators at /legacy/review.
+            connection.request("GET", "/legacy/review", headers=headers)
             legacy = connection.getresponse().read().decode("utf-8")
             self.assertIn("Dalton Cockpit", legacy)
             self.assertIn("Promise.allSettled", legacy)
             self.assertNotIn("async function load(){try{", legacy)
+            # Browsers request /favicon.ico regardless of the inline icon.
+            connection.request("GET", "/favicon.ico", headers=headers)
+            response = connection.getresponse()
+            icon = response.read()
+            self.assertEqual(response.status, 200)
+            self.assertEqual(response.getheader("Content-Type"), "image/svg+xml")
+            self.assertTrue(icon.startswith(b"<svg"))
             connection.request(
                 "GET", "/v1/research-review",
                 headers={**headers, "Cookie": cookie},
@@ -813,7 +835,7 @@ class AgendaControlTests(unittest.TestCase):
         self.assertEqual(rows[0]["verdict"], "agree")
 
     def test_retired_agenda_view_still_serves_history_and_says_it_is_retired(self):
-        # ADR-0009: the plane is retired, not deleted. ``/legacy`` keeps
+        # ADR-0009: the plane is retired, not deleted. ``/legacy/review`` keeps
         # answering with the decisions that were delivered -- an append-only
         # history is not emptied because its producer stopped -- and the same
         # payload carries the retirement so the page cannot read as a live

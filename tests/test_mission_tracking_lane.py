@@ -2,6 +2,8 @@
 
 from __future__ import annotations
 
+from tests.thesis_question_fixtures import formal_content
+
 import json
 import subprocess
 import sys
@@ -311,7 +313,7 @@ class DivergenceRunTests(P14aHarness):
             mandate_version_hash=self.state["mandate"]["content_hash"],
             driver_pack_version_ref=self.state["pack"]["id"],
             driver_pack_version_hash=self.state["pack"]["content_hash"],
-            content={
+            content=formal_content(self.store, {
                 "statement": "AI-led reinvention offsets soft discretionary consulting.",
                 "mechanism": "Bookings lead revenue by two to four quarters.",
                 "confidence": "medium",
@@ -320,7 +322,7 @@ class DivergenceRunTests(P14aHarness):
                 "catalyst_refs": ["catalyst:quarterly-results"],
                 "falsifier_refs": ["falsifier:x"],
                 "change_reason": "fixture",
-            },
+            }, question="question:" + thesis_ref, industry=("industry:us-it-services" if str(company_ref).startswith("industry:") else None)),
             actor_ref="human:coverage-owner",
             idempotency_key=f"thesis-admission-candidate:{thesis_ref}",
         )

@@ -54,6 +54,15 @@ DRIVER_KEY = "mission_conviction"
 # The one outcome that changes what the next tick sees: a proposal now exists
 # under this fingerprint, so the selector skips the company on its own.
 PUBLISHED_STATUS = "fresh"
+# Completed content verdicts: held for this (company, evidence) until either
+# moves, never redrafted on a timer.  ``policy_refused`` and ``no_call`` are
+# governed answers (batch t): one paid draft per evidence, not three.
+CONTENT_VERDICTS: frozenset[str] = frozenset({
+    "refused", "verifier_rejected", "rubric_failed", "no_variant_view",
+    "policy_refused", "no_call",
+})
+NO_DRAFTABLE_COMPANY = ("没有可起草的公司（v2 需要生效的投资论点和按最新股价计算的"
+                        "估值快照；v1 需要有出处的与市场分歧）")
 
 
 def _business_key(company_ref: str, fingerprint: str, launcher: Any = None) -> str:
@@ -62,9 +71,11 @@ def _business_key(company_ref: str, fingerprint: str, launcher: Any = None) -> s
     contract = verifier_provider_contract_fingerprint(
         "conviction_call_verifier")
     from .conviction_call_draft import TASK_HASH
+    from .conviction_call_draft_v2 import TASK_HASH_V2
     from .model_route_recovery import configured_business_key
     return configured_business_key(
-        f"{company_ref}|{fingerprint}|verifier_contract:{contract}|draft_task:{TASK_HASH}", launcher)
+        f"{company_ref}|{fingerprint}|verifier_contract:{contract}|draft_task:{TASK_HASH}"
+        f"|draft_task_v2:{TASK_HASH_V2}", launcher)
 
 
 class MissionConvictionLaneCoordinator:
@@ -77,8 +88,13 @@ class MissionConvictionLaneCoordinator:
         launcher: Any,
         mission: Callable[[], dict[str, Any] | None],
         failure_ledger_dir: Any | None = None,
+        state_dir: Any | None = None,
     ) -> None:
         self.store = store
+        # Where the runs' summaries live, for the v2 daily drafting cap.
+        self.state_dir = state_dir if state_dir is not None else (
+            failure_ledger_dir if failure_ledger_dir is not None
+            else getattr(launcher, "state_dir", None))
         self.launcher = launcher
         self.mission = mission
         self._open: str | None = None
@@ -89,6 +105,9 @@ class MissionConvictionLaneCoordinator:
         # is nearly always a deploy, which is the likeliest thing to have fixed
         # whatever it was.
         self.budget = lane_budget(DRIVER_KEY, state_dir=failure_ledger_dir)
+        # Companies answered "no call today" on their current evidence,
+        # rebuilt every tick by ``_choose``.
+        self.no_calls: dict[str, str] = {}
 
     # -- settling ---------------------------------------------------------
 
@@ -147,9 +166,7 @@ class MissionConvictionLaneCoordinator:
             # repeatedly launching the same refused draft on a timer.
             failure_status = (
                 f"content_refused:{call_status}"
-                if call_status in {
-                    "refused", "verifier_rejected", "rubric_failed", "no_variant_view",
-                }
+                if call_status in CONTENT_VERDICTS
                 else str(call_status or settled.get("status"))
             )
             settled["failure"] = record_controlled_failure(
@@ -195,29 +212,58 @@ class MissionConvictionLaneCoordinator:
 
         from datetime import datetime, timezone
 
+        self.no_calls = {}
         from .conviction_call import (
             ConvictionCallAuthority, precheck, table_exists, week_key,
         )
-        from .conviction_call_cli import fingerprint_of, gate_inputs
+        from .conviction_call_cli import (
+            active_gate, daily_cap_hold, drafting_spend_today, fingerprint_of,
+            fingerprint_v2, gate_inputs, gate_inputs_v2, precheck_for,
+        )
+        from .conviction_call_draft_v2 import NO_CALL_PREFIX, policy_no_call_reason
+        from .conviction_policy import effective_policy
 
         now = datetime.now(timezone.utc).isoformat(timespec="microseconds")
+        v2 = active_gate(self.store.connection) == "v2"
+        cap_hold = None
+        if v2:
+            policy = effective_policy(self.store.connection)
+            if self.state_dir is not None:
+                from pathlib import Path as _Path
+                cap_hold = daily_cap_hold(
+                    drafting_spend_today(_Path(self.state_dir)), policy["policy"])
         authority = (
             ConvictionCallAuthority(self.store) if table_exists(self.store.connection)
             else None
         )
         blocked: tuple[str, str, str] | None = None
         for company_ref in self._members(mission):
-            inputs = gate_inputs(self.store, company_ref)
-            gate = precheck(
-                company_ref=company_ref,
-                theses=inputs["theses"],
-                open_debates=inputs["open_debates"],
-                consensus_gap=inputs["consensus_gap"],
-                dossier_variant_view=inputs["dossier_variant_view"],
-            )
-            if not gate["eligible"]:
-                continue
-            fingerprint = fingerprint_of(inputs, gate)
+            if v2:
+                # ADR-0013: an active thesis and a current valuation snapshot.
+                inputs = gate_inputs_v2(self.store, company_ref,
+                                        industry_ref=mission.get("industry_ref"))
+                gate = precheck_for(inputs, company_ref, policy)
+                if not gate["eligible"]:
+                    continue
+                no_call = policy_no_call_reason(policy["policy"], gate["theses"])
+                if no_call is not None:
+                    # Settled for free: the policy cannot admit any call on
+                    # these theses, so no child and no paid draft.
+                    self.no_calls[company_ref] = no_call
+                    continue
+                fingerprint = fingerprint_v2(inputs, gate)
+            else:
+                inputs = gate_inputs(self.store, company_ref)
+                gate = precheck(
+                    company_ref=company_ref,
+                    theses=inputs["theses"],
+                    open_debates=inputs["open_debates"],
+                    consensus_gap=inputs["consensus_gap"],
+                    dossier_variant_view=inputs["dossier_variant_view"],
+                )
+                if not gate["eligible"]:
+                    continue
+                fingerprint = fingerprint_of(inputs, gate)
             if authority is not None:
                 if any(record["evidence_fingerprint"] == fingerprint
                        for record in authority.proposals(company_ref)):
@@ -240,9 +286,18 @@ class MissionConvictionLaneCoordinator:
 
                         or self.budget.blocked(business_key))
             if decision is not None:
-                blocked = blocked or (company_ref, fingerprint,
-                                      decision.classification.reason)
+                status = str(decision.classification.status or "")
+                reason = str(decision.classification.reason or "")
+                if status == "content_refused:no_call" or reason.startswith(NO_CALL_PREFIX):
+                    # The governed answer for this evidence; not a hold.
+                    self.no_calls[company_ref] = reason
+                    continue
+                blocked = blocked or (company_ref, fingerprint, reason)
                 continue
+            if cap_hold is not None:
+                # The day's drafting budget is spent: the company is due, and
+                # waits for tomorrow rather than being skipped for good.
+                return company_ref, fingerprint, cap_hold
             return company_ref, fingerprint, None
         if blocked is not None:
             return blocked
@@ -261,9 +316,13 @@ class MissionConvictionLaneCoordinator:
             return {"status": "unavailable", "settled": settled,
                     "reason": f"{type(exc).__name__}: {exc}"}
         if company_ref is None:
-            return {"status": "idle", "settled": settled,
-                    "reason": "no covered company can be shown to differ from the "
-                              "market today"}
+            if self.no_calls:
+                # Every due company has its answer for today: no call.
+                return {"status": "idle", "settled": settled,
+                        "no_calls": dict(self.no_calls),
+                        "reason": "；".join(
+                            f"{_label(ref, mission)}{text}" for ref, text in self.no_calls.items())}
+            return {"status": "idle", "settled": settled, "reason": NO_DRAFTABLE_COMPANY}
         if held is not None:
             return {"status": "held", "company_ref": company_ref,
                     "settled": settled, "reason": held}
@@ -284,6 +343,14 @@ class MissionConvictionLaneCoordinator:
             "evidence_fingerprint": fingerprint, "ticket_ref": ticket["id"],
             "settled": settled,
         }
+
+
+def _label(company_ref: str, mission: Any = None) -> str:
+    for member in (mission or {}).get("universe") or ():
+        if isinstance(member, dict) and member.get("company_ref") == company_ref \
+                and member.get("ticker"):
+            return f"{member['ticker']} "
+    return f"{str(company_ref).rsplit(':', 1)[-1]} "
 
 
 # -- the lane ---------------------------------------------------------------
@@ -308,6 +375,7 @@ def dispatch(server: Any, params: Any) -> dict[str, Any]:
         coordinator = MissionConvictionLaneCoordinator(
             store=server.store, launcher=launcher, mission=mission,
             failure_ledger_dir=getattr(server, "state_dir", None),
+            state_dir=getattr(server, "state_dir", None),
         )
         server.lane_state[LAUNCHER_KWARG] = coordinator
     return coordinator.dispatch_once()
@@ -353,6 +421,7 @@ def argv_fragment(context: Any) -> list[str]:
 # file, and they are named in the report's integration list.
 LANE = register_lane(LaneSpec(
     operation="dispatch_conviction_call",
+    failure_ledger="mission_conviction",
     # 141: after the crowd-source feed at 140, which is one of the places a
     # market narrative comes from, and before the research-task lane at 150.
     # A call written before the week's sales notes and posts were read would

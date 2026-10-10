@@ -20,6 +20,7 @@ from pathlib import Path
 from typing import Any, Callable, Mapping
 
 from .child_tickets import adopt_finished_child
+from .data_foundation import REASON_CODE as FOUNDATION_REASON_CODE
 from .lane_registry import LaneSpec, register_lane
 from .launch_drain import _pid_alive
 from .store import canonical_json
@@ -230,6 +231,7 @@ class InitialScreenCoordinator:
                     "drafted": (ticket.get("summary") or {}).get("drafted"),
                     "gate": ((ticket.get("summary") or {}).get("gate") or {}).get("passed"),
                     "failure_reason": (ticket.get("summary") or {}).get("failure_reason"),
+                    "reason_code": (ticket.get("summary") or {}).get("reason_code"),
                 }
         signature = self._signature()
         if latest is not None and latest.get("idle_signature") == signature:
@@ -248,7 +250,15 @@ class InitialScreenCoordinator:
                     # ledger, where nothing was wrong. The hold is right either
                     # way (an hour, then it retries); the reason has to say
                     # which case it is.
-                    failed = (result.get("last") or {}).get("status") == "failed"
+                    last = result.get("last") or {}
+                    failed = last.get("status") == "failed"
+                    # 2026-10-02: a data-foundation hold says what is missing,
+                    # every tick, instead of "the ledger has not moved" --
+                    # which was true for fifteen days and told nobody why.
+                    if not failed and last.get("reason_code") == FOUNDATION_REASON_CODE:
+                        return {**result, "status": "held", "signature": signature,
+                                "reason_code": FOUNDATION_REASON_CODE,
+                                "reason": str(last.get("failure_reason") or "")[:1500]}
                     return {**result, "status": "held", "signature": signature,
                             "reason": ("上一轮跑失败了，等一轮再重试"
                                        if failed else

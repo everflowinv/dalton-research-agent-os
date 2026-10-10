@@ -41,6 +41,7 @@ are read only to check their shape and are never put in a row.
 from __future__ import annotations
 
 import json
+import re
 import sqlite3
 from collections.abc import Mapping, Sequence
 from pathlib import Path
@@ -57,8 +58,8 @@ SIGN_RULES_FIX = ("python scripts/sign_auto_commit_rules.py --state-dir {state} 
                   "[--rehearse /tmp/x] --apply --actor human:owner")
 SIGN_PLAN_FIX = ("python scripts/sign_research_plan_auto_start.py --state-dir {state} "
                  "--apply --actor human:owner")
-BUDGET_FIX = ("cockpit 预算设置保存一次（writer 操作 set_research_budget_authority_chain），"
-              "它会把 closed research_budget 写进 policy/mandate/constitution/mission")
+BUDGET_FIX = ("在「管理员设置 → 预算与费用 → 研究预算上限」保存一次（写入服务操作 "
+              "set_research_budget_authority_chain），它会把研究预算写进 policy/mandate/constitution/mission")
 
 #: Lanes that check the governance policy themselves, and what they check.
 #: ``sec`` is ``sec_company_facts_lane.check_core_governance_rules`` verbatim.
@@ -82,12 +83,25 @@ LANE_PLAN_RULES: dict[str, tuple[str, ...]] = {
 }
 #: Tick statuses that mean the lane did what a healthy lane does.
 _HEALTHY_TICK = {"idle", "launched", "busy", "dispatched", "waiting", "duplicate",
-                 "recorded", "queued", "settled", "entered", "ok", "committed"}
+                 "recorded", "queued", "settled", "entered", "ok", "committed",
+                 # 2026-10-06: the owner paused it (owner_levers) -- shown in
+                 # the owner_levers section, not alarmed on as a lane fault.
+                 "paused"}
 _UNCONFIGURED_CODES = {"lane_unconfigured_hold"}
 #: A discovery coordinator deferred this many ticks running is a warning: the
 #: tick's fair shares and starved-first order should reach it well before.
 DISCOVERY_DEFERRED_WARN_TICKS = 3
 _DISCOVERY_LANE = "mission_source_discovery"
+#: Acquisition words (``discovery_coordinator_state``) that hold a queue.
+_SELECTION_HOLD_WORDS = frozenset({"selection_pending", "selection_unavailable"})
+#: This many settled discovery searches of one source failing in a row is a
+#: warning; a transient failure is followed by a success well before.
+DISCOVERY_SEARCH_FAILURE_WARN = 3
+_SEARCH_FAILURE_SCAN = 50
+_DISCOVERY_SOURCE_NAMES = {"source:alphaengine": "alphaengine",
+                           "source:sec-edgar": "sec_filings_index",
+                           "source:web-search": "web_search",
+                           "source:guidepoint": "guidepoint"}
 
 
 def _row(section: str, check: str, status: str, detail: str,
@@ -104,6 +118,7 @@ def _connect_ro(path: Path) -> sqlite3.Connection | None:
         return None
     try:
         connection = sqlite3.connect(f"file:{path}?mode=ro", uri=True, timeout=5)
+        connection.execute("PRAGMA query_only=ON")
     except sqlite3.Error:
         return None
     connection.row_factory = sqlite3.Row
@@ -137,7 +152,8 @@ class Environment:
         self.service_config = (Path(service_config).expanduser() if service_config
                                else service_config_path(self.state))
         self.plist_path = Path(plist_path).expanduser() if plist_path else None
-        self.core = _connect_ro(self.state / "core.sqlite")
+        from .workspace_lifecycle import state_for_core
+        self.core = (_connect_ro(self.state / "core.sqlite") if state_for_core(self.state) == "active" else None)
         self.mission: dict[str, Any] | None = None
         self.constitution: dict[str, Any] | None = None
         self.mandate: dict[str, Any] | None = None
@@ -214,9 +230,16 @@ def check_governance(env: Environment) -> list[dict[str, Any]]:
     for item in governance_baseline_checks(env.policy, mission=env.mission, fix_command=fix):
         status = item["status"]
         if env.mission is None and status == GAP:
-            status = PENDING
-            item = {**item, "fix": "首个研究任务发布时由创建流程签入（workspace_mission_setup."
-                                   "ensure_first_mission_auto_commit_policy）"}
+            # 2026-09-30 (d1): not "pending".  These nine (six auto-commit
+            # rules, two plan auto-start rules, the closed research budget)
+            # are signed in by the creation flow itself when the first
+            # mission is published; there is nothing for the owner to do
+            # about them, and 38 "pending" rows on a blank workspace (ws-e399)
+            # read like 38 things left undone.  The one real next step is the
+            # ``mission`` row below, which stays pending.
+            status = INFO
+            item = {**item,
+                    "detail": "首个研究任务发布时自动签入，无需手工处理：" + item["detail"]}
         if item["check"] == "policy.research_budget" and status == GAP and env.mission is not None:
             item = {**item, "fix": BUDGET_FIX}
         rows.append(_row(section, item["check"], status, item["detail"], item.get("fix")))
@@ -227,7 +250,7 @@ def check_governance(env: Environment) -> list[dict[str, Any]]:
                          f"content: {specific} (not part of the runtime baseline)"))
     if env.mission is None:
         rows.append(_row(section, "mission", PENDING, "no coverage mission is published yet",
-                         fix="在 cockpit 里确认首个研究任务"))
+                         fix="在投研工作台「研究设置 → 研究目标」确认首个研究任务"))
         return rows
     if env.mission_count > 1:
         rows.append(_row(section, "mission", WARN,
@@ -295,6 +318,42 @@ def _last_ticks(env: Environment) -> dict[str, dict[str, Any]]:
     return result
 
 
+#: A lane that ran and is waiting for its inputs says so in these words
+#: (``{"status": "unconfigured", "reason": "no mission"}`` from most mission
+#: lanes; the writer remembers it as ``held`` / ``lane_unconfigured_hold``).
+#: That lane is loaded and live -- it is not a missing writer argument.
+_WAITING_ON_MISSION = re.compile(
+    r"\bno (?:active |current |published )?(?:coverage )?mission\b"
+    r"|\bno (?:active |current |research )?plan(?: yet)?\b"
+    # The first mission installs the discovery plans (writer
+    # ``_install_discovery_plans``); before it the file is not there yet.
+    r"|plan is unusable: \[Errno 2\] No such file"
+    r"|还没有 ?coverage mission|没有生效的 ?CoverageMission|没有当前的研究任务",
+    re.IGNORECASE)
+
+
+def _tick_waits_on_mission(tick: Mapping[str, Any]) -> bool:
+    reason = str(tick.get("reason") or "")
+    # "no research plan launcher on this writer" is a missing argument.
+    if "on this writer" in reason:
+        return False
+    return bool(_WAITING_ON_MISSION.search(reason))
+
+
+def _tick_lacks_launcher(tick: Mapping[str, Any]) -> bool:
+    """The running writer did not load this lane (its argument is missing).
+
+    ``unconfigured`` -- or the writer's ``lane_unconfigured_hold`` memory of
+    it -- is that, unless the lane says it is waiting for a mission or a plan:
+    then it is loaded and ran.  ``held`` / ``pending`` / ``waiting`` on any
+    other reason is a live lane too.
+    """
+
+    unconfigured = (tick.get("reason_code") in _UNCONFIGURED_CODES
+                    or str(tick.get("word")) == "unconfigured")
+    return unconfigured and not _tick_waits_on_mission(tick)
+
+
 def _lane_configured(spec: Any, context: Any) -> bool | None:
     if spec.argv_fragment is None:
         return None
@@ -346,12 +405,41 @@ def check_lanes(env: Environment) -> list[dict[str, Any]]:
         if configured is False:
             status = PENDING if env.mission is None else WARN
             problems.append("a freshly rendered writer would not run it (its inputs are absent)")
+        plist_lacks: list[str] = []
         if installed is not None and configured and spec.argv_fragment is not None:
             flags = {token for token in spec.argv_fragment(context) if token.startswith("--")}
-            if flags - installed:
-                status = GAP
-                problems.append("the installed writer plist lacks " + ", ".join(sorted(flags - installed))
-                                + " -- re-render the writer (deploy) to pick it up")
+            plist_lacks = sorted(flags - installed)
+        # Batch t: the writer derives lane flags its plist lacks from code at
+        # startup (``lane_registry.derived_lane_argv``), so a stale plist alone
+        # is not a gap.  What is a gap is a lane registered in code that the
+        # *running* writer did not load: its tick says it is unconfigured, or
+        # the tick does not report it at all.
+        not_live = None
+        release_older = False
+        if spec.driver_key is not None and ticks:
+            if tick is None:
+                # The running controller does not know the lane at all: its
+                # code predates the lane's registration.
+                not_live = "the last controller tick did not report it"
+                release_older = True
+            elif configured is not False and _tick_lacks_launcher(tick):
+                not_live = f"the running writer says {tick['word']}: {tick['reason']}"
+        if not_live is not None:
+            status = GAP
+            problems.append(
+                "registered in code but not live on this writer (" + not_live + ")"
+                + (" -- its plist also lacks " + ", ".join(plist_lacks) if plist_lacks else "")
+                + (" -- the writer is running a release older than the lane; deploy "
+                   "(release switch restarts it) to pick it up" if release_older else
+                   " -- the running writer has no launcher for it (its lane argument is "
+                   "missing); the writer derives lane arguments from code at startup, so "
+                   "restart it and check what the lane needs on disk"))
+            tick = None  # already said; the tick block below would repeat it
+        elif plist_lacks:
+            if status == OK:
+                status = INFO
+            problems.append("the installed writer plist lacks " + ", ".join(plist_lacks)
+                            + " (the writer derives them from code at startup)")
         missing = _rules_missing(env, key) if env.mission is not None else []
         if missing:
             status = GAP
@@ -359,7 +447,13 @@ def check_lanes(env: Environment) -> list[dict[str, Any]]:
         if tick is not None:
             word = str(tick["word"])
             reason = tick["reason"]
-            if tick["reason_code"] in _UNCONFIGURED_CODES or word == "unconfigured":
+            if _tick_waits_on_mission(tick):
+                # Live: the lane ran and is waiting for a mission / plan.
+                if status == OK:
+                    status = PENDING if env.mission is None else WARN
+                problems.append(f"live, waiting for a mission or its plan "
+                                f"(last tick: {word}: {reason})")
+            elif tick["reason_code"] in _UNCONFIGURED_CODES or word == "unconfigured":
                 if status == OK:
                     status = PENDING if env.mission is None else WARN
                 problems.append(f"last tick: {word}: {reason}")
@@ -376,7 +470,7 @@ def check_lanes(env: Environment) -> list[dict[str, Any]]:
                 if status == OK:
                     status = INFO
                 problems.append(f"last tick: {tick['status']}: {reason}")
-        elif spec.driver_key is not None and ticks:
+        elif spec.driver_key is not None and ticks and not_live is None:
             if status == OK:
                 status = WARN
             problems.append("the last controller tick did not report this lane "
@@ -394,7 +488,46 @@ def check_lanes(env: Environment) -> list[dict[str, Any]]:
     if env.mission is not None and "document_extraction" in ticks:
         rows.append(_maintenance_with_empty_queue(ticks["document_extraction"]))
     rows.extend(_discovery_coordinator_rows(env))
+    rows.extend(_discovery_search_failure_rows(env))
+    rows.extend(connector_health_rows(env))
+    if env.mission is not None:
+        rows.extend(_initial_screen_foundation_rows(env))
     return rows
+
+
+def _initial_screen_foundation_rows(env: Environment, *,
+                                    now: Any | None = None) -> list[dict[str, Any]]:
+    """Companies whose Initial Screen has waited on missing readings too long.
+
+    2026-10-02 (ws-7d): the drafting lane's tick said ``idle`` for fifteen
+    days while every company waited on transcripts, a 10-K and broker notes
+    that were never going to arrive by themselves.  ``held`` is a healthy
+    word here and stays one; what is not healthy is the same company held on
+    the same gap for days, so that is the row.
+    """
+
+    from datetime import datetime, timezone
+
+    from .data_foundation import ESCALATE_AFTER, latest_summary, overdue
+
+    moment = now or datetime.now(timezone.utc)
+    blocks = overdue(latest_summary(env.state), now=moment)
+    if not blocks:
+        return []
+    owner = [block for block in blocks if block.get("needs_owner")]
+    detail = "; ".join(
+        f"{block.get('ticker')} 等了 {block.get('days_waiting')} 天，缺 "
+        + "、".join(f"{item.get('label')}（{item.get('cause_label')}）"
+                   for item in block.get("items") or ())
+        for block in blocks)
+    return [_row(
+        "lanes", "initial_screen_foundation", WARN,
+        f"{len(blocks)} 家公司的初筛超过 {ESCALATE_AFTER.days} 天卡在资料底座：{detail}"[:1500],
+        ("投研工作台「待我处理」里逐家列出了缺什么、为什么没进来、该谁处理"
+         + ("；其中需要你决定的：" + "、".join(str(block.get("ticker")) for block in owner)
+            if owner else "；都会自动补齐，只是慢")),
+        companies=[block.get("company_ref") for block in blocks],
+    )]
 
 
 def _discovery_coordinator_history(env: Environment, limit: int) -> list[dict[str, Any]]:
@@ -469,7 +602,150 @@ def _discovery_coordinator_rows(env: Environment, *,
                 f"last tick: {state.get('status')}"
                 + (f", deferred {run} tick(s) running" if run else ""),
                 deferred_ticks=run))
+        rows.extend(_selection_hold_rows(name, history, threshold))
     return rows
+
+
+def _selection_held(state: Mapping[str, Any]) -> bool:
+    return (state.get("acquisition_status") in _SELECTION_HOLD_WORDS
+            or (isinstance(state.get("selection_quarantined"), int)
+                and not isinstance(state.get("selection_quarantined"), bool)
+                and state["selection_quarantined"] > 0))
+
+
+def _selection_hold_rows(name: str, history: Sequence[Mapping[str, Any]],
+                         threshold: int) -> list[dict[str, Any]]:
+    """Warn when a coordinator's acquisitions sat behind candidate selection.
+
+    2026-09-29: both environments' AlphaEngine acquisitions answered
+    ``selection_pending: CandidateSelectionError`` for days while the
+    coordinator's own word was ``idle``, so this report said nothing.  A
+    quarantine is the fix working, and still worth a look: it is a discovery
+    nobody will read until the rule or the owner releases it.
+    """
+
+    run = 0
+    for tick in history:
+        if not _selection_held(tick["coordinators"].get(name) or {}):
+            break
+        run += 1
+    if not run:
+        return []
+    state = history[0]["coordinators"].get(name) or {}
+    check = f"{_DISCOVERY_LANE}.{name}.selection"
+    quarantined = state.get("selection_quarantined")
+    what = (f"{state.get('acquisition_status')}: {state.get('acquisition_reason') or 'no reason given'}"
+            if state.get("acquisition_status") else "")
+    if isinstance(quarantined, int) and quarantined > 0:
+        what = (what + "; " if what else "") + f"{quarantined} discovery(ies) quarantined"
+    if run >= threshold:
+        return [_row(
+            "lanes", check, WARN,
+            f"acquisition held by candidate selection {run} ticks running ({what})",
+            fix=("python -m dalton_core.discovery_selection_quarantine --state-dir <state> list; "
+                 "a quarantine lapses when the selection rules version changes, or: ... release "
+                 "--discovery-ref <ref> --actor human:<owner> --reason '...' [--apply]"),
+            selection_held_ticks=run)]
+    return [_row("lanes", check, OK, f"held {run} tick(s) running ({what})",
+                 selection_held_ticks=run)]
+
+
+def _discovery_search_failure_rows(env: Environment, *,
+                                   threshold: int = DISCOVERY_SEARCH_FAILURE_WARN) -> list[dict[str, Any]]:
+    """Warn when a source's last ``threshold`` discovery searches all failed.
+
+    ws-7d's SEC filings index failed every search from 2026-09-27 with
+    ``LeaseNotUsable: capability approval changed after lease issuance``; each
+    failure settles one dispatch minutes after it launched, so the coordinator
+    was ``idle`` on every tick and nothing here said so.  The settled
+    dispatches in the Core are the record of what each search did.
+    """
+
+    if env.core is None:
+        return []
+    try:
+        sources = [row[0] for row in env.core.execute(
+            "SELECT DISTINCT source_ref FROM coverage_mission_discovery_dispatches")]
+    except sqlite3.Error:
+        return []
+    rows = []
+    for source_ref in sorted(str(x) for x in sources if x):
+        try:
+            recent = env.core.execute(
+                "SELECT status, failure_reason, updated_at FROM coverage_mission_discovery_dispatches "
+                "WHERE source_ref=? AND status IN ('succeeded','failed') "
+                "ORDER BY updated_at DESC LIMIT ?", (source_ref, _SEARCH_FAILURE_SCAN)).fetchall()
+        except sqlite3.Error:
+            continue
+        run = 0
+        for row in recent:
+            if row["status"] != "failed":
+                break
+            run += 1
+        name = _DISCOVERY_SOURCE_NAMES.get(source_ref, source_ref)
+        check = f"{_DISCOVERY_LANE}.{name}.searches"
+        if run >= threshold:
+            reason = str(recent[0]["failure_reason"] or "no reason recorded")
+            rows.append(_row(
+                "lanes", check, WARN,
+                f"the last {run}{'+' if run == len(recent) else ''} discovery searches for "
+                f"{source_ref} all failed (latest {recent[0]['updated_at']}: {reason[:200]})",
+                fix=_search_failure_fix(reason), failed_searches=run))
+        elif recent:
+            rows.append(_row(
+                "lanes", check, OK,
+                f"last search {recent[0]['status']} at {recent[0]['updated_at']}"
+                + (f", {run} failure(s) running" if run else ""),
+                failed_searches=run))
+    return rows
+
+
+def connector_health_rows(env: Environment) -> list[dict[str, Any]]:
+    """2026-10-08: a host-tool source whose login the provider stopped accepting.
+
+    ``<state>/connector-health/`` (``connector_health``) holds one record per
+    source the coordinator put on a ``provider_auth`` hold.  Held is a warning
+    -- every search and acquisition of that source is paused until the owner
+    re-logs in -- and a record that recovered is an ``ok`` row saying when.
+    """
+
+    from .connector_health import HELD, SOURCE_APPS, read_records
+
+    rows = []
+    for record in read_records(env.state):
+        source_ref = str(record.get("source_ref") or "")
+        name = _DISCOVERY_SOURCE_NAMES.get(source_ref, source_ref)
+        check = f"connector_health.{name}.login"
+        if record.get("status") == HELD:
+            blocked = record.get("blocked") or {}
+            message = str((record.get("last_detail") or {}).get("message") or "")
+            rows.append(_row(
+                "lanes", check, WARN,
+                f"{source_ref} login lapsed (provider_auth) since {record.get('since')}: "
+                f"{int(blocked.get('search') or 0)} search(es) and "
+                f"{int(blocked.get('acquisition') or 0)} acquisition(s) refused; held until "
+                f"{record.get('hold_until')}, probes {int(record.get('probes') or 0)}"
+                + (f"; provider said: {message[:160]}" if message else ""),
+                fix=(f"owner: re-login / refresh in {SOURCE_APPS.get(source_ref, source_ref)}; "
+                     "the coordinator probes every 15 min and resumes by itself"),
+                failure_class="provider_auth", since=record.get("since"),
+                hold_until=record.get("hold_until")))
+        else:
+            rows.append(_row(
+                "lanes", check, OK,
+                f"{source_ref} login accepted (last hold recovered at {record.get('recovered_at')})"))
+    return rows
+
+
+def _search_failure_fix(reason: str) -> str:
+    if "[provider_auth]" in reason or "刷新 token" in reason:
+        return ("the provider refused the login/session (provider_auth): the owner re-logs in "
+                "the host app (AlphaEngine Desktop); the coordinator resumes after its probe")
+    if "approval changed after lease issuance" in reason:
+        return ("the published descriptor's approval receipt no longer matches the governance "
+                "record: PYTHONPATH=src python scripts/check_capability_approval_receipts.py "
+                "--state-dir <state> (read-only)")
+    return "read the failed dispatch's ticket summary (coverage_mission_discovery_dispatches.ticket_ref)"
 
 
 def _maintenance_with_empty_queue(tick: Mapping[str, Any]) -> dict[str, Any]:
@@ -543,10 +819,34 @@ def check_authorization(env: Environment) -> list[dict[str, Any]]:
              "lanes skip these companies"),
             fix="the writer retries the resolution every 5 minutes "
                 "(sec-company-resolution-status.json); check its 'pending' reasons"))
+        rows.append(_company_ref_canonical_row(env))
     else:
         rows.append(_row(section, "mission", PENDING, "no mission to authorize lanes yet"))
     rows.append(_core_principal(env))
     return rows
+
+
+def _company_ref_canonical_row(env: Environment) -> dict[str, Any]:
+    """Mission companies whose ``company:sec-cik:`` CIK is not ten digits.
+
+    Information, not a gap: the ref is the company's identity in append-only
+    history (legacy DXC ``company:sec-cik:001688568``) and every table uses
+    the same spelling; new refs are minted with ten digits and lookups that
+    can meet both spellings compare by CIK (``same_company_ref``).
+    """
+
+    from .mission_company_cik import canonical_company_ref, is_canonical_company_ref
+
+    odd = [str(item.get("company_ref")) for item in (env.mission or {}).get("universe") or []
+           if isinstance(item, Mapping) and not is_canonical_company_ref(item.get("company_ref"))]
+    if not odd:
+        return _row("authorization", "mission.universe.company_ref_canonical", OK,
+                    "every company:sec-cik: ref carries a ten-digit CIK")
+    return _row("authorization", "mission.universe.company_ref_canonical", INFO,
+                "non-canonical company ref(s) kept as recorded (append-only): "
+                + ", ".join(f"{ref} (canonical {canonical_company_ref(ref)})" for ref in odd)
+                + "; lookups match either spelling",
+                noncanonical=odd)
 
 
 def _unresolved_ciks(env: Environment) -> list[str]:
@@ -675,6 +975,43 @@ def _routing_policies(router_db: Path) -> set[str] | None:
         connection.close()
 
 
+def model_cooldown_rows(env: Environment, *, now: Any | None = None) -> list[dict[str, Any]]:
+    """One info row: which models this environment's router is not offering.
+
+    2026-10-07: deepseek-v4-flash cooled fourteen times in a row (HTTP 402,
+    seen as INVALID_HOST_RESULT) and nothing an operator reads said so.  The
+    same reader as the owner's to-do list (``needs_human.model_cooldowns``),
+    so the two never disagree.  Info, not a gap: a cooldown is routing doing
+    its job; the to-do list carries the decision.
+    """
+
+    from datetime import datetime, timezone
+
+    from .needs_human import model_cooldowns
+
+    service = env.service or {}
+    router = Path(str(service.get("model_router_db") or env.state / "model-router.sqlite"))
+    if not router.is_file():
+        return [_row("config", "model_cooldowns", INFO, f"没有模型路由库（{router.name}）")]
+    moment = now if now is not None else datetime.now(timezone.utc)
+    active = model_cooldowns(router, now=moment)
+    if not active:
+        return [_row("config", "model_cooldowns", INFO, "没有模型在冷却")]
+    parts = []
+    for entry in active:
+        blocked = "、".join(f"{block['purpose']}×{block['skips']}"
+                           for block in entry.get("blocks") or []) or "无"
+        parts.append(
+            f"{entry['name']}：{entry['failure_code_label']}（{entry['reason_label']}），"
+            f"自 {entry['failing_since']} 起，至 {entry['until']}，"
+            f"第 {entry.get('cooldowns_in_run')} 轮；受影响环节 {blocked}")
+    return [_row("config", "model_cooldowns", INFO,
+                 f"{len(active)} 个模型在冷却：" + "；".join(parts),
+                 cooldowns=[{key: entry.get(key) for key in (
+                     "profile_id", "reason", "failure_code", "failing_since",
+                     "started_at", "until", "streak")} for entry in active])]
+
+
 def check_config(env: Environment) -> list[dict[str, Any]]:
     section = "config"
     rows: list[dict[str, Any]] = []
@@ -712,9 +1049,73 @@ def check_config(env: Environment) -> list[dict[str, Any]]:
         rows.append(_row(section, path.name, OK if not problems else GAP,
                          "; ".join(problems) or "parses; routing policy present",
                          fix="scripts/align_model_routing.py --apply, or re-run workspace model setup"))
+    rows.extend(_event_triage_rows(env))
+    rows.extend(model_cooldown_rows(env))
+    rows.extend(alphaengine_query_form_rows(env))
+    rows.extend(sec_plan_spec_rows(env))
     if env.mission is not None:
         rows.extend(_mission_plan_rows(env))
         rows.extend(_policy_file_rows(env))
+    return rows
+
+
+def _event_triage_rows(env: Environment) -> list[dict[str, Any]]:
+    """The screen in front of the event judge: where it routes, what it decided.
+
+    ``event_triage`` rides the judge's configuration under its own purpose,
+    which is the cheap tier.  A pinned policy with a cheap chain routes it
+    there; one without routes it single-shot by the policy's own order, which
+    still works but is the owner's to know.  The ledger half is a count, so a
+    parity run shows both environments screening (or neither).
+    """
+
+    from .event_triage import AUDIT_SHARE, TRIAGE_PURPOSE, audit_report
+    from .model_fallback_chain import purpose_tiers
+
+    config_path = env.state / "event-judgement-model-config.json"
+    value, _error = _json(config_path)
+    if not isinstance(value, dict):
+        return []
+    rows: list[dict[str, Any]] = []
+    tier = purpose_tiers().get(TRIAGE_PURPOSE)
+    chain = None
+    router = _connect_ro(Path(str(value.get("model_router_db") or "")))
+    if router is not None:
+        try:
+            row = router.execute(
+                "SELECT policy_json FROM model_routing_policy_versions "
+                "WHERE policy_version_ref=?", (value.get("routing_policy_ref"),)).fetchone()
+            if row is not None:
+                from .model_router import declared_tier_chain
+
+                policy = json.loads(row[0])
+                override = (policy.get("purpose_overrides") or {}).get(TRIAGE_PURPOSE) or {}
+                chain = tuple(override.get("chain") or ()) or declared_tier_chain(policy, tier)
+        except (sqlite3.Error, ValueError, TypeError):
+            chain = None
+        finally:
+            router.close()
+    share = f"{AUDIT_SHARE * 100:.0f}%"
+    rows.append(_row(
+        "config", "event_triage.route", OK if chain else WARN,
+        (f"{TRIAGE_PURPOSE} -> {tier}: {', '.join(chain)}; audit sample {share}"
+         if chain else
+         f"{TRIAGE_PURPOSE}: the pinned policy declares no {tier} chain; it routes "
+         f"single-shot by the policy's order (audit sample {share})"),
+        fix="在「管理员设置 → AI 服务 → 各档位的 AI 服务选择顺序」给事件研判配置低价档位（cheap）的服务"))
+    if env.core is not None:
+        try:
+            report = audit_report(env.core)
+        except sqlite3.Error:
+            report = {"present": False}
+        if report.get("present"):
+            rows.append(_row(
+                "config", "event_triage.ledger", WARN if report["audit_misses"] else INFO,
+                f"{report['groups']} groups {report['by_outcome_route']}; audited and judged "
+                f"{report['audited_groups_judged']}, missed {len(report['audit_misses'])}; "
+                f"triage cost {report['triage_cost_micros'] / 1e6:.4f} USD",
+                fix="审计样本里有被初筛放过、研判却不是 NO_CHANGE 的组：看 audit_misses，考虑调高抽样或收紧初筛",
+                audit_misses=report["audit_misses"] or None))
     return rows
 
 
@@ -766,6 +1167,137 @@ def _mission_plan_rows(env: Environment) -> list[dict[str, Any]]:
                          f"plan {plan.get('id')} for {plan.get('mission_ref')}"
                          + (f"; companies outside the universe: {foreign}" if foreign else ""),
                          fix="regenerate the plan from the active mission"))
+    return rows
+
+
+def alphaengine_query_form_rows(env: Environment) -> list[dict[str, Any]]:
+    """Per AlphaEngine spec: are the forms the code's, and what does the owner govern?
+
+    2026-10-06 (owner decision A): the query forms are rendered from
+    ``alphaengine_query_forms`` in every environment; the approved plan file
+    governs the budget, each spec's lookback and intervals, and the company
+    names.  A plan file that still carries its own forms is ``info`` (they are
+    ignored), not a warning; an environment whose plan cannot be rendered from
+    the code forms is ``warn``.  The governed fields are printed so drift
+    between environments is visible side by side.
+    """
+
+    from .alphaengine_query_forms import ALPHAENGINE_QUERY_FORMS_HASH, query_form_report
+    from .macos_launchagent import _alphaengine_discovery_plan
+    from .mission_source_discovery import load_discovery_plan
+
+    prefix = "alphaengine.query_forms"
+    try:
+        path = _alphaengine_discovery_plan(env.state)
+    except Exception as exc:  # noqa: BLE001 - reported
+        return [_row("config", prefix, WARN,
+                     f"the AlphaEngine plan selector does not resolve: {type(exc).__name__}: "
+                     f"{str(exc)[:160]}", fix="the owner re-approves the selector")]
+    if not path.is_file():
+        return [_row("config", prefix, PENDING if env.mission is None else INFO,
+                     f"no approved AlphaEngine plan ({path.name}); the first-mission publish "
+                     f"writes one with governed fields only, rendered with code forms "
+                     f"{ALPHAENGINE_QUERY_FORMS_HASH[:12]}")]
+    try:
+        report = query_form_report(load_discovery_plan(path))
+    except Exception as exc:  # noqa: BLE001 - reported
+        return [_row("config", prefix, WARN,
+                     f"{path.name} cannot be rendered: {type(exc).__name__}: {str(exc)[:160]}",
+                     fix="the owner publishes a valid plan")]
+    head = (f"plan {report['plan_ref']} ({path.name}, schema {report['schema_version']}, "
+            f"approved {report['approved_plan_hash'][:12]}, renders "
+            f"{str(report.get('effective_plan_hash'))[:12]}); "
+            f"max_calls_24h={report['budget'].get('max_calls_24h')} "
+            f"search_floor={report['budget'].get('search_floor_calls')}")
+    rows = []
+    for spec in report["specs"]:
+        governed = (f"lookback_days={spec.get('lookback_days')} "
+                    f"rediscovery_interval_days={spec.get('rediscovery_interval_days')} "
+                    f"retry_interval_days={spec.get('retry_interval_days')} "
+                    f"(优先看这家: {spec.get('priority_rediscovery_interval_days')}/"
+                    f"{spec.get('priority_retry_interval_days')}d)")
+        if spec["rendered_from"] != "code":
+            status = WARN
+            why = report.get("reason") or "the code has no forms for this spec"
+            forms = f"renders the plan file's own forms ({why}): {spec.get('plan_forms')}"
+        elif spec.get("plan_forms") is None:
+            status, forms = OK, "code forms; the plan file carries none"
+        elif spec.get("plan_forms_differ"):
+            status = INFO
+            forms = (f"code forms; the plan file's forms differ and are ignored: "
+                     f"{spec['plan_forms']} -> {spec['code_forms']}")
+        else:
+            status, forms = OK, "code forms; the plan file's forms are the same"
+        rows.append(_row("config", f"{prefix}.{spec['spec_ref']}", status,
+                         f"{forms}; {governed}; {head}",
+                         fix="this plan predates code-owned forms: the owner re-publishes "
+                             "it at schema 0.6/0.7 with company names"))
+    if report.get("names_unresolved"):
+        rows.append(_row("config", f"{prefix}.names", WARN,
+                         f"companies named only by ticker, which no AlphaEngine title uses: "
+                         f"{report['names_unresolved']}",
+                         fix="the owner must publish these companies' names (plan companies "
+                             "or the packaged name table)"))
+    elif report.get("names_filled"):
+        rows.append(_row("config", f"{prefix}.names", INFO,
+                         f"ticker-only plan names rendered from the name table: "
+                         f"{report['names_filled']}"))
+    return rows
+
+
+def sec_plan_spec_rows(env: Environment) -> list[dict[str, Any]]:
+    """Per SEC spec: the code-owned spec set against the approved plan file.
+
+    2026-10-08 (ADR-0015): the SEC discovery specs and their forms are
+    rendered from ``sec_plan_specs`` in every environment, the same way
+    AlphaEngine query forms are; the approved file governs the budget, the
+    company list and each spec's intervals where it carries the spec.  A spec
+    the code adds to a file that lacks it (legacy's 8-K) is ``info`` and says
+    which intervals it runs with, so drift is visible side by side.
+    """
+
+    from .macos_launchagent import _sec_discovery_plan
+    from .mission_source_discovery import load_discovery_plan
+    from .sec_plan_specs import SEC_PLAN_SPECS_HASH, sec_plan_report
+
+    prefix = "sec.plan_specs"
+    try:
+        path = _sec_discovery_plan(env.state)
+    except Exception as exc:  # noqa: BLE001 - reported
+        return [_row("config", prefix, WARN,
+                     f"the SEC plan selector does not resolve: {type(exc).__name__}: {str(exc)[:160]}",
+                     fix="the owner re-approves the selector")]
+    if not path.is_file():
+        return [_row("config", prefix, PENDING if env.mission is None else INFO,
+                     f"no approved SEC plan ({path.name}); the first-mission publish writes "
+                     f"the code's spec set {SEC_PLAN_SPECS_HASH[:12]}")]
+    try:
+        report = sec_plan_report(load_discovery_plan(path))
+    except Exception as exc:  # noqa: BLE001 - reported
+        return [_row("config", prefix, WARN,
+                     f"{path.name} cannot be rendered: {type(exc).__name__}: {str(exc)[:160]}",
+                     fix="the owner publishes a valid SEC plan")]
+    head = (f"plan {report['plan_ref']} ({path.name}, approved {report['approved_plan_hash'][:12]}, "
+            f"renders {report['effective_plan_hash'][:12]}, code specs {report['specs_hash'][:12]}); "
+            f"max_calls_24h={report['budget'].get('max_calls_24h')}")
+    rows = []
+    for spec in report["specs"]:
+        items = f" items={','.join(spec['item_filter'])}" if spec.get("item_filter") else ""
+        governed = (f"form={spec['form']}{items} lookback_days={spec['lookback_days']} "
+                    f"rediscovery_interval_days={spec['rediscovery_interval_days']} "
+                    f"retry_interval_days={spec['retry_interval_days']} "
+                    f"(intervals from {spec['intervals_from']})")
+        drift = spec["drift"]
+        if drift == "none":
+            status, what = OK, "in the plan file and the code"
+        elif drift == "added_by_code":
+            status, what = INFO, "added by code (the plan file does not carry it)"
+        elif drift == "form_from_code":
+            status, what = INFO, f"form from code (the plan file says {spec['plan_form']})"
+        else:
+            status, what = INFO, "plan file only (the code does not declare it); runs as the file says"
+        rows.append(_row("config", f"{prefix}.{spec['spec_ref']}", status,
+                         f"{what}; {governed}; {head}"))
     return rows
 
 
@@ -842,15 +1374,92 @@ def check_host(env: Environment, *, source_state_dir: str | Path | None = None,
     return rows
 
 
+def check_owner_levers(env: Environment) -> list[dict[str, Any]]:
+    """What the owner has paused or stopped here, from the receipts (read-only).
+
+    2026-10-06 (vision-gap #11).  An emergency stop is a ``warn`` -- research
+    is deliberately not running and whoever reads this report should know
+    before they go looking for a fault; a paused company or lane is ``info``
+    with the owner's own reason and expiry.
+    """
+
+    from .owner_levers import lever_state_for_state_dir, paused_sentence
+
+    state = lever_state_for_state_dir(env.state)
+    rows: list[dict[str, Any]] = []
+    emergency = state.get("emergency")
+    if emergency:
+        rows.append(_row("owner_levers", "emergency_stop", WARN,
+                         f"{paused_sentence(emergency)} by {emergency.get('actor_ref')} "
+                         f"at {emergency.get('created_at')} ({emergency.get('id')})",
+                         fix="在「管理员设置 → 运行控制 → 暂停所有研究（紧急停机）」点「恢复全部运行」"))
+    else:
+        rows.append(_row("owner_levers", "emergency_stop", OK, "not set"))
+    for kind in ("companies", "lanes"):
+        for ref, receipt in sorted((state.get(kind) or {}).items()):
+            rows.append(_row("owner_levers", f"paused_{kind[:-1] if kind == 'lanes' else 'company'}",
+                             INFO, f"{ref}: {paused_sentence(receipt)} ({receipt.get('id')})"))
+    for receipt in state.get("expired") or ():
+        rows.append(_row("owner_levers", "auto_resumed", INFO,
+                         f"{receipt.get('scope_ref')}: pause expired at {receipt.get('until')}"))
+    rows.append(_row("owner_levers", "receipts", INFO,
+                     f"{state.get('receipt_count', 0)} owner lever receipt(s)"))
+    return rows
+
+
+def check_verifier_independence(env: Environment, *, now: Any = None) -> list[dict[str, Any]]:
+    """Which verified draft stages cannot be independently verified right now.
+
+    2026-10-08.  One ``warn`` naming every (draft -> verifier) pair whose
+    effective chains are in conflict (or only independent once a cooldown
+    ends) in this environment, or one ``info`` when there is none.  Read-only
+    (``verifier_independence.environment_report``); the fix is the cockpit
+    card that reorders the draft stage.
+    """
+
+    from datetime import datetime, timezone
+
+    from .verifier_independence import conflict_rows, environment_report, status_label
+
+    moment = now or datetime.now(timezone.utc)
+    report = environment_report(env.state, now=moment)
+    if not report.get("available"):
+        return [_row("verifier_independence", "pairs", WARN,
+                     str(report.get("reason") or "unreadable"))]
+    bound = [row for row in report["pairs"] if row.get("status") != "unbound"]
+    conflicts = conflict_rows(report)
+    if not conflicts:
+        return [_row("verifier_independence", "pairs", INFO,
+                     f"{len(bound)} bound verified pair(s), none in conflict")]
+    detail = "; ".join(
+        f"{row['draft_purpose']} -> {row['verifier_purpose']}: "
+        f"{status_label(row.get('evaluation') or {'status': row['status']})}"
+        + (f" (refused {row['refusals_48h'] + row['refusals_unrecorded_48h']} in 48 h)"
+           if row["refusals_48h"] or row["refusals_unrecorded_48h"] else "")
+        for row in conflicts)
+    return [_row("verifier_independence", "pairs", WARN,
+                 f"{len(conflicts)} of {len(bound)} bound verified pair(s) in conflict: {detail}",
+                 fix="在「管理员设置 → AI 服务 → 核验独立性 · 起草服务顺序」填入推荐顺序后保存")]
+
+
 # -- the report -----------------------------------------------------------------------------
 
 
 def check_environment(env: Environment, *, source_state_dir: str | Path | None = None,
                       manager_config_path: str | Path | None = None,
                       include_host: bool = True) -> dict[str, Any]:
+    from .workspace_lifecycle import state_for_core, archive_integrity, retained_integrity
+    lifecycle = state_for_core(env.state)
+    if lifecycle != "active":
+        integrity = archive_integrity(env.state.parent.parent.parent.parent, env.state.parent.parent.name) if lifecycle == "archived" else retained_integrity(env.state) if lifecycle == "paused" else {"status": "deleted"}
+        return {"schema_version": SCHEMA_VERSION, "environment": env.name, "state_dir": str(env.state),
+                "service_config": str(env.service_config), "lifecycle": lifecycle, "mission_ref": None,
+                "mission_version": None, "active_policy": None, "counts": {INFO if integrity["status"] != "invalid" else GAP: 1},
+                "rows": [_row("lifecycle", "integrity", INFO if integrity["status"] != "invalid" else GAP,
+                              f"{lifecycle}: {integrity['status']}")] }
     rows: list[dict[str, Any]] = []
     for step in (check_governance, check_authorization, check_mission_reviews, check_lanes,
-                 check_config):
+                 check_config, check_owner_levers, check_verifier_independence):
         try:
             rows.extend(step(env))
         except Exception as exc:  # noqa: BLE001 - one broken section must not hide the rest
