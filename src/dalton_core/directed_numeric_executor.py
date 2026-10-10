@@ -266,8 +266,9 @@ def _record_numeric(executor,admission,works):
         from .directed_numeric_figure_support import MEASURE_CONFLICT_CONTRACT
         body['measure_conflict_contract']=MEASURE_CONFLICT_CONTRACT
     if supports:
-        from .directed_numeric_figure_support import SUPPORT_CONTRACT
-        body.update(figure_support_contract=SUPPORT_CONTRACT,figure_supports=supports)
+        from .directed_numeric_figure_support import SUPPORT_CONTRACT, REGISTERED_RENDER_SUPPORT_CONTRACT
+        contract=REGISTERED_RENDER_SUPPORT_CONTRACT if any(s['schema_version']==REGISTERED_RENDER_SUPPORT_CONTRACT for s in supports) else SUPPORT_CONTRACT
+        body.update(figure_support_contract=contract,figure_supports=supports)
     body['content_hash']=content_hash(body)
     return body
 
@@ -347,10 +348,12 @@ def read_numeric_result(executor,admission,works,formal):
         raise DirectedNumericError('numeric result duplicates or drops target proof')
     supports={}
     if 'figure_support_contract' in receipt or 'figure_supports' in receipt:
-        from .directed_numeric_figure_support import SUPPORT_CONTRACT
+        from .directed_numeric_figure_support import SUPPORT_CONTRACT, SUPPORT_CONTRACTS
         items=receipt.get('figure_supports')
-        if receipt.get('figure_support_contract')!=SUPPORT_CONTRACT or not isinstance(items,list) or not items:
+        if receipt.get('figure_support_contract') not in SUPPORT_CONTRACTS or not isinstance(items,list) or not items:
             raise DirectedNumericError('numeric Figure support contract is invalid')
+        if any(item.get('schema_version') not in SUPPORT_CONTRACTS or (receipt['figure_support_contract']==SUPPORT_CONTRACT and item.get('schema_version')!=SUPPORT_CONTRACT) for item in items):
+            raise DirectedNumericError('numeric Figure support version differs from receipt')
         supports={item['target_ref']:item for item in items}
         if len(supports)!=len(items) or not set(supports).issubset(completed):
             raise DirectedNumericError('numeric Figure support targets differ from completion')

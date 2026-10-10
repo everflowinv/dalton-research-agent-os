@@ -1,7 +1,7 @@
 """Versioned proof of one typed answer supported by an existing exact Figure.
 
 Different retrieval windows are not different facts. Both windows must still be
-replayed from the same immutable registered original; no quote comparison is
+replayed from registered renderings of the same immutable original bytes; no quote comparison is
 silently discarded, and no old Figure or canonical evidence is rewritten.
 """
 from __future__ import annotations
@@ -12,6 +12,8 @@ from .store import canonical_json, content_hash
 from .directed_numeric_research import CONTRACT_REF, DirectedNumericError, normalize_targets
 
 SUPPORT_CONTRACT = 'directed-numeric-figure-support:0.1'
+REGISTERED_RENDER_SUPPORT_CONTRACT = 'directed-numeric-figure-support:0.2'
+SUPPORT_CONTRACTS = frozenset({SUPPORT_CONTRACT, REGISTERED_RENDER_SUPPORT_CONTRACT})
 MEASURE_CONFLICT_CONTRACT = 'directed-numeric-measure-conflict:0.1'
 MEASURE_CONFLICT_REASON = ('numeric_measure_identity_conflict: metric conflicts with the verified answer; '
     'keep target open; propose an explicit measure via normal admission, never relabel the old fact.')
@@ -25,6 +27,47 @@ class NumericMeasureIdentityConflict(DirectedNumericError):
 FACT_FIELDS = ('metric_ref', 'as_reported_label', 'period', 'value', 'unit',
                'currency', 'scale', 'basis')
 _QUOTE = re.compile(r'quote:([0-9]+):([0-9]+):([0-9a-f]{16})\Z')
+
+
+
+def _held_registered_read(registry, request, held, match):
+    """Only two official local renderers may prove a held historical window.
+
+    The admission's registration remains the new answer's identity. An older
+    admission and a newer Figure can name different normalized renderings of
+    the same fetched bytes. No caller supplies an alternate registration and
+    no substring/number matching relocates the declared quote coordinates.
+    """
+    original=registry.read(request)
+    exact=lambda read: (read['text']==held['citation_text'] and
+        hashlib.sha256(read['text'].encode()).hexdigest()[:16]==match.group(3))
+    if exact(original):
+        return original, None
+    expected=request['registration'];authority=expected['source_authority']
+    adapter=registry.acquired_document_adapter
+    if authority['kind']!='coverage-mission-acquired-document' or adapter is None:
+        raise DirectedNumericError('existing Figure quote differs from registered original')
+    from .document_research import validate_registration
+    for legacy in (False, True):
+        registration,_text=adapter.materialize_record(record_id=authority['ref'],
+            acquisition_ticket_ref=expected['acquisition_ticket_ref'],legacy=legacy)
+        registration=validate_registration(registration)
+        if registration['content_hash']==expected['content_hash']:
+            continue
+        # Raw-source authority, issuer, scope and acquisition are identical;
+        # only the official normalized rendering identity may differ.
+        keys=('source_ref','document_ref','manifest_hash','source_authority',
+              'acquisition_ticket_ref','raw_source','access_policy_ref',
+              'retention_policy_ref','terms_policy_ref')
+        if any(registration[k]!=expected[k] for k in keys):
+            raise DirectedNumericError('held Figure registered rendering binds a different original')
+        read=registry.read({**request,'registration':registration})
+        if exact(read):
+            return read, {'held_read_contract':REGISTERED_RENDER_SUPPORT_CONTRACT,
+                'held_registration_ref':registration['id'],
+                'held_document_version_hash':registration['content_hash'],
+                'held_raw_source_hash':content_hash(registration['raw_source'])}
+    raise DirectedNumericError('existing Figure quote differs from registered original')
 
 
 def figure_support(*, connection, registry, admission, target, figure,
@@ -80,11 +123,8 @@ def figure_support(*, connection, registry, admission, target, figure,
         'purpose', 'research_question', 'registration', 'policy_ref', 'policy_hash')}
     request.update(schema_version=READ_REQUEST_SCHEMA_VERSION, operation=READ_OPERATION,
                    source_start=start, source_end=end)
-    old_read = registry.read(request)
+    old_read, held_registration = _held_registered_read(registry,request,held,match)
     old_text = old_read['text']
-    if (old_text != held['citation_text']
-            or hashlib.sha256(old_text.encode()).hexdigest()[:16] != match.group(3)):
-        raise DirectedNumericError('existing Figure quote differs from registered original')
     # Each side must prove its own reported number and label. A conflict is
     # diagnostic only after the old fact also binds true original bytes.
     from .claim_index_figures import _numeric_candidate
@@ -93,7 +133,7 @@ def figure_support(*, connection, registry, admission, target, figure,
                              numeric_contract_ref=figure_numeric_contract(held['verified_by']))
     current_text = quote_map[expected['quote_id']]
     body = {
-        'schema_version': SUPPORT_CONTRACT,
+        'schema_version': REGISTERED_RENDER_SUPPORT_CONTRACT if held_registration else SUPPORT_CONTRACT,
         'admission_ref': admission['id'], 'admission_hash': admission['content_hash'],
         'target_ref': target['target_ref'], 'target_hash': content_hash(target),
         'metric_definition_hash': target['metric_definition_hash'],
@@ -109,6 +149,8 @@ def figure_support(*, connection, registry, admission, target, figure,
         'verified_fact_hash': content_hash({k: expected[k] for k in FACT_FIELDS}),
         'draft_proof_hash': draft['content_hash'], 'verifier_proof_hash': verifier['content_hash'],
     }
+    if held_registration:
+        body.update(held_registration)
     differing = [key for key in FACT_FIELDS if held[key] != expected[key]]
     if differing:
         conflict = {**body, 'schema_version': MEASURE_CONFLICT_CONTRACT,
