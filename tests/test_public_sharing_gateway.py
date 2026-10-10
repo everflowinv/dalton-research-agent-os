@@ -153,6 +153,60 @@ class SharingNetworkTests(unittest.TestCase):
         bad=dict(dto,workspace_id='foreign')
         with self.assertRaises(ValueError):self.gateway.workspace_urls(json.dumps({'items':[bad]}).encode(),'/v1/cockpit/workspaces',self.targets)
 
+    def test_real_storage_symlink_registry_landing_and_escape_guards(self):
+        from dalton_core.workspace import workspace_manifest, WorkspaceError
+        host=self.root/'fleet';host.mkdir()
+        storage=self.root/'synthetic-storage'/'workspaces';storage.mkdir(parents=True)
+        (host/'workspaces').symlink_to(storage,target_is_directory=True)
+        release=self.root/'release';release.mkdir()
+        binding=self.apps[0].config.shared_gateway
+        manager={'host_root':str(host),'release_path':str(release),'release_ref':'release:sha256:'+'a'*64,
+                 'owner_login':'owner@example.com','tailscale_host':'example.ts.net','tailscale_executable':'/bin/false',
+                 'launch_agents_dir':str(self.root/'agents'),'ports':[18791], 'shared_gateway':binding}
+        self.cfg.manager_config.write_text(json.dumps(manager));self.cfg.manager_config.chmod(0o600)
+        wire=workspace_manifest(host,'synthetic-project',18791,'release:sha256:'+'a'*64,release)
+        self.assertEqual(Path(wire['workspace_root']),storage.resolve()/'synthetic-project')
+        manifest=Path(wire['workspace_root'])/'workspace.json';manifest.parent.mkdir()
+        manifest.write_text(json.dumps(wire))
+        service=Path(wire['config_path']);service.parent.mkdir()
+        control=replace(self.apps[0].config,port=18791,writer_socket=Path(wire['writer_socket']))
+        service.write_text(json.dumps({'control':{'enabled':True,'config':json.loads(json.dumps(asdict(control),default=str))},
+                                      'workspace':{'manifest_path':str(manifest)}}))
+        requests=host/'creation-requests';requests.mkdir()
+        (requests/'project.json').write_text(json.dumps({'workspace_id':wire['workspace_id'],'slug':wire['slug'],
+            'name':'Synthetic project','status':'running','lifecycle':'active'}))
+        gateway=Gateway(self.cfg)
+        self.assertFalse(host.is_symlink())
+        self.assertEqual([row.slug for row in gateway.registry()],['synthetic-project'])
+        server=self.start(handler(gateway))
+        status,headers,_=self.request('/bootstrap',method='POST',data={'credential':self.share},server=server)
+        self.assertEqual(status,200)
+        cookie=headers['Set-Cookie'].split(';',1)[0]
+        status,_,body=self.request('/',cookies=cookie,server=server)
+        self.assertEqual(status,200);self.assertIn(b'/dalton/w/synthetic-project/',body)
+        # Hash drift stays rejected even when directory identity is canonical.
+        drift={**wire,'slug':'foreign'};manifest.write_text(json.dumps(drift))
+        with self.assertRaises(WorkspaceError):gateway.registry()
+        manifest.write_text(json.dumps(wire))
+        # A per-project symlink must not turn canonical comparison into an
+        # escape permission, even with a fully valid foreign manifest/hash.
+        outside=self.root/'outside';outside.mkdir()
+        foreign=workspace_manifest(outside,'escaped-project',18792,'release:sha256:'+'a'*64,release)
+        foreign_manifest=Path(foreign['workspace_root'])/'workspace.json'
+        foreign_manifest.parent.mkdir(parents=True);foreign_manifest.write_text(json.dumps(foreign))
+        link=storage/'escaped-project';link.symlink_to(foreign_manifest.parent,target_is_directory=True)
+        with self.assertRaisesRegex(ValueError,'workspace root differs from registry'):gateway.registry()
+        link.unlink()
+        # A valid rehashed manifest cannot claim a different slug through an
+        # alias to another project's directory.
+        alias=storage/'synthetic-alias';alias.symlink_to(manifest.parent,target_is_directory=True)
+        renamed={k:v for k,v in wire.items() if k!='content_hash'};renamed['slug']='synthetic-alias'
+        renamed['content_hash']=content_hash(renamed);manifest.write_text(json.dumps(renamed))
+        with self.assertRaisesRegex(ValueError,'workspace root differs from registry'):gateway.registry()
+        alias.unlink();manifest.write_text(json.dumps(wire))
+        self.assertEqual([row.slug for row in gateway.registry()],['synthetic-project'])
+        self.assertEqual(json.loads(service.read_text())['control']['config']['shared_gateway'],binding)
+
     def test_registry_reads_real_manifest_and_creation_journal_and_lifecycle(self):
         from dalton_core.workspace import workspace_manifest
         host=self.root/'fleet';release=self.root/'release';release.mkdir()

@@ -178,14 +178,15 @@
     if (REFUSED.test(s)) return ["err", "没有生效"];
     if (ACCEPTED.test(s) && r.action === "workspace_lifecycle") return ["", "操作已受理，当前结果见项目卡"];
     if (ACCEPTED.test(s)) return ["", "已受理，正在处理"];
+    if (r.host_settings) return r.host_settings.status === "pending" ? ["warn", "共用设置已保存，部分项目待应用"] : ["", "共用设置已保存"];
     if ((r.environments || []).some(e => e.result === "failed")) return ["err", "部分研究项目未同步"];
-    if (r.action === "model_select") return /^(applied|fresh|published|updated|duplicate|unchanged|recorded)$/.test(s)
+    if (r.action === "model_select") return /^(saved|applied|fresh|published|updated|duplicate|unchanged|recorded)$/.test(s)
       ? ["", "配置已保存"] : ["warn", "保存结果待确认"];
     return ["", "已完成"];
   }
   function receiptNode(out) {
     const r = out.receipt || {};
-    const [kind, head] = receiptHeadline({ ...r, status: r.status || (out.result || {}).status || r.receipt_outcome || out.status });
+    const [kind, head] = receiptHeadline({ ...r, host_settings: r.host_settings || (out.result || {}).host_settings, status: r.status || (out.result || {}).status || r.receipt_outcome || out.status });
     const box = h("div", { class: `adm-receipt${kind ? " " + kind : ""}`, role: "status", dataset: { role: "receipt" } },
       h("b", null, `${head}：${r.action_label || r.action}`), " · ", when(r.at), h("br"),
       `理由：${txt(r.reason)}`,
@@ -539,6 +540,9 @@
       label: `${modelChoiceName(models, c)}${c.family_label ? " · " + c.family_label : ""}${verifierOnly ? (c.verifier_eligible ? " · 可独立核验" : " · 不可核验") : ""}${c.cooldown ? " · " + (c.cooldown.badge || "冷却中") : ""}${c.note ? "（" + c.note + "）" : ""}`,
     }));
   }
+  function hostVersion(models) {
+    return models.host_settings ? { expected_host_settings_hash: models.host_settings.desired_hash } : {};
+  }
   function tierCard(models, card) {
     const info = modelChoiceIndex(models);
     (card.chain || []).forEach(l => { if (!info.has(l.model)) info.set(l.model, { display_name: l.display_name }); });
@@ -556,13 +560,13 @@
       tech("档位标识", card.tier),
       editor.node,
       writeForm({ action: "model_select", label: `保存「${card.label}」的选择顺序（共用默认）`, danger: true,
-        payload: () => ({ tier: card.tier, mode: "explicit", chain: [...editor.picked] }),
+        payload: () => ({ tier: card.tier, mode: "explicit", chain: [...editor.picked], ...hostVersion(models) }),
         validate: () => (editor.picked.length ? null : "顺序至少需要一个服务"),
         confirmTitle: `保存「${card.label}」的共用默认顺序？`,
         confirmText: body => `新顺序：${body.chain.map(id => describeModel(models, info)(id).name).join(" → ") || "（空）"}。这会更新本机全部研究项目中按该档位选择的环节，保留单独指定的环节${card.requires_restart ? "；部分环节需重启后才生效" : ""}。各项目结果见回执。`,
         after: () => reload("ai") }),
       writeForm({ action: "model_select", label: "恢复档位的系统推荐顺序（共用默认）", primary: false, danger: true,
-        payload: { tier: card.tier, mode: "tier" },
+        payload: { tier: card.tier, mode: "tier", ...hostVersion(models) },
         confirmText: `「${card.label}」的共用默认将恢复为系统推荐顺序，单独指定的环节保持不变。保存会同步到全部研究项目，本卡未保存的修改会丢弃。`, after: () => reload("ai") })));
   }
   function thinkingLabel(level) {
@@ -612,15 +616,15 @@
           p.thinking_override ? h("p", { class: "adm-meta" }, `上次理由：${p.thinking_override.reason}`) : null,
           writeForm({ action: "model_select", label: "保存思考强度（全部研究项目）", primary: false,
             extra: h("label", { class: "adm-field" }, h("span", null, "思考强度"), thinking),
-            payload: () => ({ purpose: p.purpose, thinking_level: thinking.value }), after: () => reload("ai") })),
+            payload: () => ({ purpose: p.purpose, thinking_level: thinking.value, ...hostVersion(models) }), after: () => reload("ai") })),
         editor.node,
         writeForm({ action: "model_select", label: `为「${p.label}」单独指定顺序`,
           key: `model_select:purpose:${p.purpose}`, defaultReason: proposal && proposal.reason || "",
           confirmText: body => `「${p.label}」的新顺序：${body.chain.map(id => describeModel(models, info)(id).name).join(" → ")}。保存会同步到全部研究项目。`,
-          payload: () => ({ purpose: p.purpose, mode: "explicit", chain: [...editor.picked] }),
+          payload: () => ({ purpose: p.purpose, mode: "explicit", chain: [...editor.picked], ...hostVersion(models) }),
           validate: () => (editor.picked.length ? null : "顺序至少需要一个服务"), after: () => reload("ai") }),
         writeForm({ action: "model_select", label: "使用档位默认顺序", primary: false,
-          payload: { purpose: p.purpose, mode: "tier" }, after: () => reload("ai") }),
+          payload: { purpose: p.purpose, mode: "tier", ...hostVersion(models) }, after: () => reload("ai") }),
         cb.editable && eff.max_output_tokens != null ? h("div", null, h("h3", null, `高级：单次回答长度上限（${budgetScope}）`),
           h("p", { class: "adm-explain" }, `${sharedBudget ? "保存会同步全部研究项目与新建项目。下一批任务采用，运行中批次完成后切换。" : "这项长度设置仅修改当前研究项目。"}当前每次调用最多输出 ${count(eff.max_output_tokens)} 个 token（输入最多 ${count(eff.max_input_tokens)} 个 token，超过 ${txt(eff.timeout_seconds)} 秒未完成即放弃）。推理模型的思考也计入输出上限，上限太小时可能只思考、不给出正文。`),
           writeForm({ action: "model_budget", label: `保存回答长度上限（${budgetScope}）`, primary: false, extra: h("label", { class: "adm-field" }, h("span", null, "单次回答长度上限（token，正整数）"), out),
@@ -781,6 +785,7 @@
       return row && (row.configuration_error || row.pin_note) || "该环节在当前研究项目不能单独调整。";
     };
     swap(p, issuesCard(aiIssues(models, verifier, notices)),
+      models.host_settings ? h("p", { class: "adm-explain" }, models.host_settings.note) : null,
       notices.length ? section("AI 服务变动通知", "标为已读只表示看过这条通知，不代表接受当前配置。",
         notices.map(n => h("div", { class: "adm-row" }, h("div", { class: "grow" }, n.message),
           writeForm({ action: "model_notice_ack", label: "标为已读", primary: false, defaultReason: "已查看", payload: { ref: n.ref }, after: () => reload("ai") })))) : null,
@@ -1110,14 +1115,15 @@
   }
 
   // ---------- 预算与费用 ---------------------------------------------------------------
-  function budgetCapsForm(mission, poolsNote) {
+  function budgetCapsForm(mission, poolsNote, host) {
     if (!mission) return empty("还没有发布研究目标：发布后才有研究预算。");
     const b = mission.budget || {};
     /* Review M10: every field checked here by the server's rule -- money a
        positive amount, counts whole numbers, blank only where it means 不限. */
-    const fields = [["max_daily_cost_usd", "每天总费用上限（美元 / 天，大于 0）", "0.01", "money"],
+    const fields = [["max_daily_paid_calls", "模型调用上限（次 / 天，整数）", "1", "count"],
+                    ["max_daily_cost_usd", "每天总费用上限（美元 / 天，大于 0）", "0.01", "money"],
                     ["max_alphaengine_calls_24h", "AlphaEngine 搜索上限（次 / 24 小时，整数）", "1", "count"],
-                    ["max_daily_document_reads", "阅读原文上限（份 / 天，整数；留空＝不限）", "1", "optional"]];
+                    ["max_daily_document_reads", "阅读原文上限（份 / 天，整数；留空保留现有上限）", "1", "optional"]];
     const inputs = {};
     const extra = fields.map(([key, label, step]) => { inputs[key] = h("input", { type: "number", min: "0", step, value: b[key] ?? "", "aria-label": label });
       return h("label", { class: "adm-field" }, h("span", null, label), inputs[key]); });
@@ -1134,14 +1140,14 @@
       }
       return null;
     };
-    return h("div", null, h("p", { class: "adm-explain" }, `真正会拦截调用的只有三道上限：每天总费用、AlphaEngine 搜索次数、每天阅读原文份数；达到任何一道，当天不再发起相应调用，次日（UTC 零点）自动恢复。${poolsNote || ""}`),
+    return h("div", null, h("p", { class: "adm-explain" }, `每天总费用、模型调用次数、AlphaEngine 搜索次数和阅读原文份数各有上限。达到上限后，当天暂停相应调用；每日用量在 UTC 零点重新计数。次数设为 0 时，相应调用保持关闭，直到您调高上限。${poolsNote || ""}`),
       writeForm({ action: "research_budget", label: "保存研究预算上限", extra,
-        confirmText: "新的预算上限会写入本项目研究目标的授权记录并立即生效（只影响当前研究项目）。",
+        confirmText: "新的上限会保存为全部研究项目和新建项目的共用设置。运行中的调用继续按原授权结算；暂停或离线项目恢复后先应用设置再接新任务。",
         validate: check,
-        payload: () => { const budget = { max_daily_paid_calls: b.max_daily_paid_calls, max_daily_cost_usd: Number(inputs.max_daily_cost_usd.value || 0),
+        payload: () => { const budget = { max_daily_paid_calls: Number(inputs.max_daily_paid_calls.value), max_daily_cost_usd: Number(inputs.max_daily_cost_usd.value || 0),
           max_alphaengine_calls_24h: Number(inputs.max_alphaengine_calls_24h.value || "0"), pools_enforcement: pools.checked ? "off" : "on" };
           const reads = inputs.max_daily_document_reads.value.trim(); if (reads !== "") budget.max_daily_document_reads = Number(reads);
-          return { mission_ref: mission.mission_ref, budget, expected_mission_hash: mission.hash }; },
+          return { mission_ref: mission.mission_ref, budget, expected_mission_hash: mission.hash, ...(host ? { expected_host_settings_hash: host.desired_hash } : {}) }; },
         after: () => reload("budget") }));
   }
   function costTables(c) {
@@ -1214,7 +1220,9 @@
   async function loadBudget(p) {
     const [costs, models] = await Promise.all([getJson("/v2/data/admin/costs"), getJson("/v1/cockpit/models").catch(() => ({ purposes: [] }))]);
     swap(p, issuesCard(budgetIssues(costs)),
-      section("研究预算上限", "本项目每天最多花多少、最多查多少；达到上限当天停止，次日自动恢复。", budgetCapsForm(costs.mission)),
+      section("研究预算上限", "全部研究项目与新建项目共用；达到上限暂停相应调用，次日按日额度恢复。",
+        costs.host_settings ? h("p", { class: "adm-explain" }, costs.host_settings.note) : null,
+        budgetCapsForm(costs.mission, null, costs.host_settings)),
       section("费用：今天与近 7 天", txt(costs.note, ""), costTables(costs)),
       section("各环节调用上限（技术参数）", "每次 AI 调用的费用、回答长度与超时上限；与上面的业务预算分开，一般不需要调整。",
         h("details", { class: "adm-more" }, h("summary", null, "展开各环节调用上限"), purposeCaps(models))));

@@ -2182,6 +2182,22 @@ class CockpitModel:
              ) -> dict[str, Any]:
         """Run configured paid retries without retaining prior call contexts."""
 
+        from .host_research_reconcile import resolved_model_config
+        from copy import copy
+        resolved = resolved_model_config(Path(self.scheduler_db).parent, self.config, purpose)
+        local = copy(self)
+        local.config = dict(resolved)
+        return local._call_resolved(purpose=purpose, request_id=request_id, prompt=prompt, mission=mission,
+            producer_route_decision_refs=producer_route_decision_refs,
+            _dossier_recovery_parent=_dossier_recovery_parent,
+            _model_spec_request_identity=_model_spec_request_identity,
+            _structured_output_repair=_structured_output_repair)
+
+    def _call_resolved(self, *, purpose: str, request_id: str, prompt: str,
+                       mission: Mapping[str, Any], producer_route_decision_refs: Sequence[str] = (),
+                       _dossier_recovery_parent: Mapping[str, Any] | None = None,
+                       _model_spec_request_identity: Mapping[str, Any] | None = None,
+                       _structured_output_repair: Mapping[str, Any] | None = None) -> dict[str, Any]:
         while True:
             outcome = self._call_once(
                 purpose=purpose,

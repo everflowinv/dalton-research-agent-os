@@ -139,6 +139,10 @@ def draft_first_mission(
     goal = _text(goal, "goal")
     foundation = _foundation(method_foundation, workspace)
     defaults = dict(foundation["mission_defaults"])
+    from .host_research_settings import defaults_for_workspace
+    host_budget, host_hash = defaults_for_workspace(workspace.state_dir)
+    if host_budget:
+        defaults["budget_ceilings"] = {**defaults.get("budget_ceilings", {}), **host_budget}
     industry_name = industry.strip() if isinstance(industry, str) and industry.strip() else _industry_from_goal(goal)
     company_candidates = list(companies) if companies is not None else _companies_from_goal(goal)
     universe = _company_rows(company_candidates)
@@ -186,6 +190,8 @@ def draft_first_mission(
         "setup_state": "review_required" if issues else "ready_for_confirmation",
         "review_issues": issues, "mission_body": body,
     }
+    if host_hash is not None:
+        proposal_body["host_settings_hash"] = host_hash
     return {**proposal_body, "content_hash": content_hash(proposal_body)}
 
 
@@ -299,6 +305,10 @@ def publish_first_mission(
     actor_ref = _text(actor_ref, "actor_ref")
     if _HUMAN.fullmatch(actor_ref) is None:
         raise WorkspaceMissionSetupError("actor_ref must use the human: namespace")
+    from .host_research_settings import defaults_for_workspace
+    host_budget, host_hash = defaults_for_workspace(workspace.state_dir)
+    if host_hash is not None and (wire.get("host_settings_hash") != host_hash or any(wire["mission_body"].get("budget", {}).get(k) != v for k, v in host_budget.items())):
+        raise WorkspaceMissionSetupError("共用预算默认值已更新，请重新起草研究目标")
     body = dict(wire["mission_body"])
     bindings = dict(prepare_bindings(proposal, actor_ref))
     body["bindings"] = bindings

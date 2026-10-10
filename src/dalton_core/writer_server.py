@@ -3393,6 +3393,10 @@ class WriterServer:
         if unknown:
             raise ProtocolError("unknown operation parameter")
         params = self._authorized_params(principal, operation, request.params)
+        if (operation.startswith("dispatch_") or operation in {"set_model_selection",
+                "set_research_budget_authority_chain", "admit_coverage_model_run"}):
+            from .host_research_reconcile import reconcile_writer
+            reconcile_writer(self)
         method = getattr(self, f"_op_{operation}", None)
         if method is None:
             # P14-0: a registered lane brings its own handler, so a new lane

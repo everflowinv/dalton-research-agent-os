@@ -67,7 +67,13 @@ def _now() -> datetime:
 # registered, or one whose record drifted, still fails on the first read.
 _BUDGET_RETRY_ATTEMPTS = 3
 _BUDGET_RETRY_BACKOFF_SECONDS = 0.5
-_BUDGET_RETRYABLE_TEXT = ("locked", "busy", "wal requires existing wal/shm")
+_BUDGET_RETRYABLE_TEXT = (
+    "locked", "busy", "wal requires existing wal/shm",
+    # The cold fallback can itself lose the checkpoint/sidecar race. Retry
+    # from ordinary live mode=ro; never weaken the guarded immutable read.
+    "cold wal snapshot requires absent wal/shm",
+    "cold wal authority changed during immutable snapshot",
+)
 
 
 def _budget_read_is_retryable(exc: BaseException) -> bool:

@@ -665,16 +665,17 @@ POOL_LABELS = {
 
 
 def costs(plane: Any) -> dict[str, Any]:
-    key = str(plane.config.state_dir)
+    host = (plane._host_settings_view() if hasattr(plane, "_host_settings_view") else None)
+    key = str(plane.config.state_dir) + str(None if host is None else host.get("desired_hash"))
     now = time.monotonic()
     with _cost_lock:
         hit = _cost_cache.get(key)
         if hit is not None and now - hit[0] < COST_TTL_SECONDS:
-            return hit[1]
+            return {**hit[1], "host_settings": host}
     value = _costs(plane)
     with _cost_lock:
         _cost_cache[key] = (now, value)
-    return value
+    return {**value, "host_settings": host}
 
 
 def thinking_cost_comparison(budget_db: str | Path, since_day: str,

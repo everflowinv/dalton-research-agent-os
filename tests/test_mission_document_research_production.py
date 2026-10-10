@@ -49,7 +49,23 @@ def _child_diagnostics(launcher, ticket_ref):
             with candidate.open('rb') as handle:
                 handle.seek(max(0,candidate.stat().st_size-8192))
                 files[name]=handle.read(8192).decode('utf-8',errors='replace')
-    text=canonical_json({'ticket_ref':ticket_ref,'files':files})
+    state={}
+    try:
+        ticket=json.loads(files.get('ticket.json','{}'))
+        config_path=ticket.get('configuration',{}).get('draft_model_config',{}).get('path')
+        if config_path:
+            config=json.loads(Path(config_path).read_text(encoding='utf-8'))
+            budget=Path(config['budget_db'])
+            with budget.open('rb') as handle:
+                header=handle.read(100)
+            state={'observed_after_child_exit':True,'path':str(budget),'size':budget.stat().st_size,
+                   'journal_bytes':list(header[18:20]),
+                   'sidecars':{suffix:{'exists':Path(str(budget)+suffix).exists(),
+                       'size':Path(str(budget)+suffix).stat().st_size if Path(str(budget)+suffix).exists() else None}
+                       for suffix in ('-wal','-shm')}}
+    except (OSError,ValueError,KeyError,TypeError) as exc:
+        state={'status':'unavailable','error_type':type(exc).__name__}
+    text=canonical_json({'ticket_ref':ticket_ref,'files':files,'budget_file_state':state})
     destination=os.environ.get('DALTON_TEST_DIAGNOSTICS_DIR')
     if destination:
         output=Path(destination)/'mission-document-research';output.mkdir(parents=True,exist_ok=True)
@@ -744,3 +760,24 @@ class ChildDiagnosticsTests(unittest.TestCase):
             self.assertTrue(diagnostic['files']['run.log'].endswith('exact failure tail'))
             self.assertIn('synthetic replay refusal',diagnostic['files']['summary.json'])
             self.assertEqual(json.loads((destination/'mission-document-research/exact-ticket.json').read_text()),diagnostic)
+
+    def test_budget_sidecar_diagnostics_read_only_and_explicitly_post_exit(self):
+        from types import SimpleNamespace
+        with tempfile.TemporaryDirectory() as directory:
+            root=Path(directory);ticket=root/'exact-ticket'/'ticket.json';ticket.parent.mkdir()
+            budget=root/'budget.sqlite'
+            with sqlite3.connect(budget) as connection:
+                connection.execute('PRAGMA journal_mode=WAL')
+                connection.execute('CREATE TABLE fixture(value)')
+            connection.close()
+            Path(str(budget)+'-wal').write_bytes(b'partial-sidecar-marker')
+            config=root/'model.json';config.write_text(canonical_json({'budget_db':str(budget)}))
+            ticket.write_text(canonical_json({'configuration':{'draft_model_config':{'path':str(config)}}}))
+            before={p.name:p.read_bytes() for p in root.iterdir() if p.is_file()}
+            with mock.patch.dict(os.environ,{'DALTON_TEST_DIAGNOSTICS_DIR':''}):
+                state=json.loads(_child_diagnostics(SimpleNamespace(_ticket_path=lambda ref:ticket),'exact-ticket'))['budget_file_state']
+            self.assertTrue(state['observed_after_child_exit'])
+            self.assertEqual(state['journal_bytes'],[2,2])
+            self.assertEqual(state['sidecars']['-wal'],{'exists':True,'size':len(b'partial-sidecar-marker')})
+            self.assertEqual(state['sidecars']['-shm'],{'exists':False,'size':None})
+            self.assertEqual({p.name:p.read_bytes() for p in root.iterdir() if p.is_file()},before)

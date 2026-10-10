@@ -618,16 +618,27 @@ class CockpitSaveTests(unittest.TestCase):
         return plane
 
     def test_a_save_reports_the_environment_it_could_not_reach(self) -> None:
-        plane = self._plane()
-        # The other environment has no writer listening, which is the ordinary
-        # case for a workspace the owner has not opened today.
+        from types import SimpleNamespace
+        from tests.test_host_research_settings import HostSettingsTests
+        from dalton_core.cockpit_plane import CockpitPlane
+        from dalton_core.host_research_settings import load
+        fixture = HostSettingsTests()
+        fixture.setUp(); self.addCleanup(fixture.doCleanups)
+        desired = fixture.seed()
+        plane = object.__new__(CockpitPlane)
+        plane.config = SimpleNamespace(state_dir=fixture.state, workspace_manager_config_path=fixture.manager)
+        plane.journal = SimpleNamespace(record_event=lambda **kwargs: None)
+        # The saved intent commits even while the actual target writer is stopped.
         result = plane.select_model("owner@example.com", {
-            "tier": "brain", "mode": "explicit",
-            "chain": ["profile:claude-fable-5-1"]})
-        self.assertEqual(result["sync"]["status"], "partial")
-        self.assertIn("1 个环境未同步", result["reload_note"])
-        # And the local save is still a save.
-        self.assertEqual(result["status"], "published")
+            "tier": "brain", "mode": "explicit", "chain": ["profile:claude-fable-5-1"],
+            "expected_host_settings_hash": desired['content_hash']})
+        self.assertEqual(result["sync"]["status"], "pending")
+        self.assertEqual(len(result['sync']['failed']), 1)
+        self.assertIn("1个项目", result["reload_note"])
+        self.assertEqual(result["status"], "saved")
+        self.assertEqual(load(fixture.manager)['selections']['tiers']['brain']['chain'],
+                         ['profile:claude-fable-5-1'])
+
 
 
 if __name__ == "__main__":

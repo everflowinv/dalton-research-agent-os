@@ -89,7 +89,13 @@ class Gateway:
         for path in sorted((root/'workspaces').glob('*/workspace.json')):
             workspace=load_workspace_manifest(path)
             if workspace.lifecycle not in {'active','paused'}:continue
-            if workspace.workspace_root!=root/'workspaces'/workspace.slug:raise ValueError('workspace root differs from registry')
+            # The host's workspaces directory may be a registered storage
+            # symlink. Compare canonical roots, while rejecting a per-workspace
+            # symlink that escapes that directory or aliases another slug.
+            workspace_directory=(root/'workspaces').resolve()
+            expected_root=(workspace_directory/workspace.slug).resolve()
+            if (workspace.workspace_root!=expected_root or expected_root.parent!=workspace_directory
+                    or expected_root.name!=workspace.slug):raise ValueError('workspace root differs from registry')
             if workspace.slug in slugs or workspace.cockpit_port in seen:raise ValueError('ambiguous workspace route')
             # Creation journal and manifest must agree on lifecycle/identity.
             records=[]

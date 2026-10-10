@@ -8789,6 +8789,7 @@ class CockpitPlane:
             "schema_version": SCHEMA_VERSION,
             "eligibility_enforced": CHAIN_ELIGIBILITY_ENFORCED,
             "policy_version_ref": None,
+            "host_settings": self._host_settings_view(),
             "purposes": purposes,
             "tier_cards": sorted(tier_cards.values(), key=lambda card: card["tier"]),
             "modes": [{"value": mode,
@@ -9331,7 +9332,7 @@ class CockpitPlane:
                 detail=json.dumps(budget, ensure_ascii=False), login=login,
                 refs={"purpose": purpose, "kind": kind, "revision": result["policy"]["revision"]})
             return result
-        if self.config.workspace_manager_config_path is not None:
+        if getattr(getattr(self, "config", None), "workspace_manager_config_path", None) is not None:
             raise CockpitError("全部项目共用预算已启用，请刷新后使用共享策略版本保存")
         result = self._governance(login, "set_model_call_budget", {
             "purpose": purpose, "budget": budget, "kind": kind,
@@ -9341,6 +9342,41 @@ class CockpitPlane:
                                   detail=json.dumps(budget, ensure_ascii=False), login=login,
                                   refs={"purpose": purpose, "revision": result.get("revision")})
         return result
+
+    def _host_settings_view(self) -> dict[str, Any]:
+        from .host_research_reconcile import status
+        try:
+            return status(self.config.workspace_manager_config_path)
+        except (OSError, ValueError, RuntimeError):
+            return {"scope": "all_workspaces", "status": "unavailable",
+                    "desired_hash": None, "pending": [],
+                    "note": "共用设置暂时读不出来，请刷新后再保存。"}
+
+    def _save_host_settings(self, login: str, value: Mapping[str, Any], *,
+                            selection=None, budget=None) -> dict[str, Any]:
+        from .workspace_manager import _config, _is_admin
+        from .host_research_settings import save, HostSettingsConflict, HostSettingsError
+        from .host_research_reconcile import fan_out
+        manager = self.config.workspace_manager_config_path
+        if not _is_admin(_config(manager), login):
+            raise CockpitError("只有管理员可以保存全部项目的共用设置")
+        expected = value.get("expected_host_settings_hash")
+        if expected is not None:
+            expected = _sha(expected, "共用设置版本")
+        try:
+            result = save(manager, actor_ref=_subject_for_login(login), expected_hash=expected,
+                          selection=selection, research_budget=budget,
+                          source_state_dir=self.config.state_dir)
+        except HostSettingsConflict as exc:
+            raise CockpitConflict(str(exc)) from exc
+        except (HostSettingsError, OSError, ValueError) as exc:
+            raise CockpitError(str(exc)) from exc
+        sync = fan_out(manager, result["desired"])
+        self.journal.record_event(kind="model_budget" if budget is not None else "model_selection",
+            title="已保存全部项目的共用设置", detail=sync["note"] + (" 理由：" + str(value["reason"]) if value.get("reason") else ""), login=login,
+            refs={"desired_hash": result["desired"]["content_hash"], "revision": result["desired"]["revision"]})
+        return {"status": result["status"], "sync": sync, "host_settings": sync["host_settings"],
+                "desired_hash": result["desired"]["content_hash"], "reload_note": sync["note"]}
 
     def set_research_budget(self, login: str, value: Mapping[str, Any]) -> dict[str, Any]:
         if not isinstance(value, Mapping):
@@ -9352,6 +9388,13 @@ class CockpitPlane:
             raise CockpitError("研究预算字段不完整")
         if "pools_enforcement" in budget and budget["pools_enforcement"] not in ("on", "off"):
             raise CockpitError("分项预算池的执行开关只接受 on 或 off")
+        if getattr(getattr(self, "config", None), "workspace_manager_config_path", None) is not None:
+            from .host_research_settings import current_mission
+            mission = current_mission(self.config.state_dir)
+            if (mission is None or mission["mission_ref"] != value.get("mission_ref")
+                    or mission["content_hash"] != value.get("expected_mission_hash")):
+                raise CockpitConflict("研究目标已更新，请刷新后再保存预算")
+            return self._save_host_settings(login, value, budget=budget)
         result = self._governance(login, "set_research_budget_authority_chain", {
             "mission_ref": _text(value.get("mission_ref"), "mission_ref", maximum=160),
             "budget": dict(budget),
@@ -9420,6 +9463,8 @@ class CockpitPlane:
             except CallBudgetError as exc:
                 raise CockpitError(str(exc)) from exc
             params = {"purpose": purpose, "thinking_level": level, "reason": reason}
+            if getattr(getattr(self, "config", None), "workspace_manager_config_path", None) is not None:
+                return self._save_host_settings(login, value, selection=params)
             result = self._governance(login, "set_model_selection", params, failure="思考强度没有生效")
             sync = self._sync_model_selection(login, params)
             self.journal.record_event(kind="model_selection",
@@ -9456,6 +9501,9 @@ class CockpitPlane:
             params: dict[str, Any] = {"tier": tier, "mode": mode}
             if mode == "explicit":
                 params["chain"] = [_text(item, "chain[]", maximum=256) for item in chain]
+            if getattr(getattr(self, "config", None), "workspace_manager_config_path", None) is not None:
+                return {**self._save_host_settings(login, value, selection=params),
+                        "tier": tier, "label": MODEL_TIER_LABELS[tier]}
             result = self._governance(
                 login, "set_model_selection", params, failure="这个选择没有生效")
             sync = self._sync_model_selection(login, params)
@@ -9473,6 +9521,9 @@ class CockpitPlane:
         params = {"purpose": purpose, "mode": mode}
         if mode == "explicit":
             params["chain"] = [_text(item, "chain[]", maximum=256) for item in chain]
+        if getattr(getattr(self, "config", None), "workspace_manager_config_path", None) is not None:
+            return {**self._save_host_settings(login, value, selection=params),
+                    "purpose": purpose, "label": PURPOSE_LABELS.get(purpose, purpose)}
         result = self._governance(
             login, "set_model_selection", params, failure="这个选择没有生效")
         sync = self._sync_model_selection(login, params)

@@ -126,6 +126,45 @@ class MissionDocumentModelAuthorityTests(unittest.TestCase):
                 resolver()
         self.assertEqual((len(opens), waits), (3, [0.5, 0.5]))
 
+    def test_cold_sidecar_transition_retries_normal_read_without_immutable_live_read(self):
+        from unittest.mock import patch
+        fixture=self._fixture()
+        module,flaky,opens=self._flaky_budget(1,sqlite3.OperationalError('read_only WAL requires existing WAL/SHM; no sidecars were created'))
+        waits=[]
+        # The live owner already has provisioned both sidecars. The first RO
+        # preflight loses the earlier transition; the cold guard must refuse.
+        before=fixture.budget.policy('budget-policy:mission-annual:1')
+        with patch.object(module,'ThesisImpactBudgetStore',flaky):
+            actual=module._installed_budget_policy(fixture.budget.path,'budget-policy:mission-annual:1',stage='draft',sleep=waits.append)
+        self.assertEqual(actual,before)
+        self.assertEqual((len(opens),waits),(2,[0.5]))
+
+    def test_cold_changed_snapshot_retries_normal_read_and_preserves_policy(self):
+        from unittest.mock import patch
+        from contextlib import contextmanager
+        fixture=self._fixture()
+        module,flaky,opens=self._flaky_budget(1,sqlite3.OperationalError('read_only WAL requires existing WAL/SHM; no sidecars were created'))
+        waits=[]
+        flaky.policy_from_connection=module.ThesisImpactBudgetStore.policy_from_connection
+        @contextmanager
+        def changed(_path):
+            yield fixture.budget.connection
+            raise sqlite3.OperationalError('cold WAL authority changed during immutable snapshot')
+        with patch.object(module,'ThesisImpactBudgetStore',flaky),patch('dalton_core.readonly_sqlite.connect_cold_wal_snapshot',changed):
+            actual=module._installed_budget_policy(fixture.budget.path,'budget-policy:mission-annual:1',stage='draft',sleep=waits.append)
+        self.assertEqual(actual,fixture.budget.policy('budget-policy:mission-annual:1'))
+        self.assertEqual((len(opens),waits),(2,[0.5]))
+
+    def test_persistent_partial_sidecars_remain_refused_after_original_bounded_retries(self):
+        from unittest.mock import patch
+        fixture=self._fixture()
+        module,flaky,opens=self._flaky_budget(99,sqlite3.OperationalError('read_only WAL requires existing WAL/SHM; no sidecars were created'))
+        waits=[]
+        with patch.object(module,'ThesisImpactBudgetStore',flaky):
+            with self.assertRaisesRegex(MissionDocumentModelAuthorityError,'cold WAL snapshot requires absent WAL/SHM'):
+                module._installed_budget_policy(fixture.budget.path,'budget-policy:mission-annual:1',stage='draft',sleep=waits.append)
+        self.assertEqual((len(opens),waits),(3,[0.5,0.5]))
+
     def test_cleanly_closed_wal_policy_is_read_without_creating_sidecars(self):
         """A child may start in the cold interval between budget writers."""
 

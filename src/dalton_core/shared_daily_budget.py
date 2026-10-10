@@ -58,6 +58,7 @@ from typing import Any
 from .store import content_hash
 
 SCHEMA_VERSION = "dalton-shared-daily-budget-policy-0.1"
+ZERO_COUNTS_SCHEMA_VERSION = "dalton-shared-daily-budget-policy-0.2"
 BINDING_SCHEMA_VERSION = "dalton-shared-daily-budget-binding-0.1"
 #: The file each environment keeps beside its day ledger, naming the host
 #: policy it is bound to. Written by ``scripts/bind_shared_daily_budget.py``.
@@ -108,7 +109,7 @@ def validate_shared_daily_budget_policy(value: Mapping[str, Any]) -> dict[str, A
         raise SharedDailyBudgetError("shared daily budget policy has an invalid closed shape")
     wire = dict(value)
     asserted = wire.pop("content_hash")
-    if wire.get("schema_version") != SCHEMA_VERSION or asserted != content_hash(wire):
+    if wire.get("schema_version") not in {SCHEMA_VERSION, ZERO_COUNTS_SCHEMA_VERSION} or asserted != content_hash(wire):
         raise SharedDailyBudgetError("shared daily budget policy identity or hash is invalid")
     if (not isinstance(wire.get("revision"), int) or isinstance(wire["revision"], bool)
             or wire["revision"] < 1):
@@ -120,8 +121,12 @@ def validate_shared_daily_budget_policy(value: Mapping[str, Any]) -> dict[str, A
     if not isinstance(wire.get("actor_ref"), str) or not wire["actor_ref"].startswith("human:"):
         raise SharedDailyBudgetError("shared daily budget policy actor_ref is invalid")
     _positive_number(wire["max_daily_cost_usd"], "max_daily_cost_usd")
-    _positive_int(wire["max_daily_paid_calls"], "max_daily_paid_calls")
-    _positive_int(wire["max_alphaengine_calls_24h"], "max_alphaengine_calls_24h")
+    for field in ("max_daily_paid_calls", "max_alphaengine_calls_24h"):
+        if wire["schema_version"] == ZERO_COUNTS_SCHEMA_VERSION:
+            if type(wire[field]) is not int or wire[field] < 0:
+                raise SharedDailyBudgetError(f"{field} must be a non-negative integer")
+        else:
+            _positive_int(wire[field], field)
     return {**wire, "content_hash": asserted}
 
 
@@ -148,7 +153,7 @@ def load_shared_daily_budget_policy(path: str | Path) -> dict[str, Any]:
 def policy_wire(
     *, max_daily_cost_usd: float, max_daily_paid_calls: int,
     max_alphaengine_calls_24h: int, revision: int, prior_hash: str | None,
-    updated_at: str, actor_ref: str,
+    updated_at: str, actor_ref: str, schema_version: str = SCHEMA_VERSION,
 ) -> dict[str, Any]:
     """Build one complete, hashed policy record.
 
@@ -157,7 +162,7 @@ def policy_wire(
     """
 
     wire = {
-        "schema_version": SCHEMA_VERSION,
+        "schema_version": schema_version,
         "max_daily_cost_usd": max_daily_cost_usd,
         "max_daily_paid_calls": max_daily_paid_calls,
         "max_alphaengine_calls_24h": max_alphaengine_calls_24h,
