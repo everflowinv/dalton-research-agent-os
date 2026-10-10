@@ -1065,6 +1065,8 @@ class MissionDocumentResearchCoordinator:
             draft_model_config_path=self.launcher.draft_model_config_path,
             verifier_model_config_path=self.launcher.verifier_model_config_path,
             clock=self.clock,
+            selected_document_refs=(inquiry["directed_document"]["document_ref"],)
+            if isinstance(inquiry.get("directed_document"), Mapping) else None,
         ) as (authority, registrations):
             return admit_directed_inquiry(
                 authority=authority, registrations=registrations,

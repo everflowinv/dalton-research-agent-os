@@ -224,7 +224,8 @@ def validate_inventory_config(value: Any) -> dict[str, Any]:
 
 
 def _required_numeric_originals(*, core: Any, mission: Mapping[str, Any],
-                               registry: Any, purpose: str) -> tuple[list[tuple[str, dict[str, Any]]], list[dict[str, Any]]]:
+                               registry: Any, purpose: str,
+                               selected_document_refs: tuple[str, ...] | None = None) -> tuple[list[tuple[str, dict[str, Any]]], list[dict[str, Any]]]:
     """Strongly replay old registrations still required by exact numeric feedback.
 
     A current rendering is an additional capability, not a substitute for an
@@ -236,6 +237,8 @@ def _required_numeric_originals(*, core: Any, mission: Mapping[str, Any],
     from .document_research import validate_registration
     from .store import canonical_json
 
+    if selected_document_refs == ():
+        return [], []
     feedback = read_document_research_feedback(core, mission)
     if feedback.get("status") != "available":
         return [], []  # The existing state feedback separately discloses this failure.
@@ -247,6 +250,8 @@ def _required_numeric_originals(*, core: Any, mission: Mapping[str, Any],
         if company not in allowed:
             raise ValueError("numeric original feedback escaped mission coverage")
         for requirement in numeric_requirements(observations, limit=None)["requirements"]:
+            if selected_document_refs is not None and requirement["document_ref"] not in selected_document_refs:
+                continue
             binding = requirement["replaces_numeric_rejection"]
             try:
                 proof = numeric_rejection(core.connection, binding["admission_ref"])

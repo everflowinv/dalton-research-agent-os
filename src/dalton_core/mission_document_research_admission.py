@@ -18,7 +18,7 @@ from .model_router import ModelRouter
 from .readonly_sqlite import connect_read_only
 from .research_question_backlog import ResearchQuestionBacklog
 from .research_task import inquiry_content_hash, inquiry_ref_for
-from .store import canonical_json
+from .store import canonical_json, content_hash
 
 
 class MissionDocumentAdmissionHostError(RuntimeError):
@@ -65,6 +65,7 @@ def open_mission_document_admission_authority(
     draft_model_config_path: str | Path | None = None,
     verifier_model_config_path: str | Path | None = None,
     clock: Any = None,
+    selected_document_refs: tuple[str, ...] | None = None,
 ) -> Iterator[tuple[MissionDocumentResearchAuthority, dict[str, dict[str, Any]]]]:
     """Open read-only Router/Scheduler inputs and the writer-owned authority."""
 
@@ -72,12 +73,30 @@ def open_mission_document_admission_authority(
     inventory = load_document_inventory_authority(
         core=store, mission=mission, state_dir=state,
         config_path=document_config_path,
+        **({} if selected_document_refs is None else {"selected_document_refs":selected_document_refs}),
     )
     registry = inventory.get("registry")
     if registry is None:
         raise MissionDocumentAdmissionHostError(
             "document research inventory is not configured"
         )
+    if selected_document_refs is not None:
+        # Exact source registration needs no optional previews/statement notes,
+        # but must retain the same strongly readable historical versions a
+        # pending numeric requirement names. Never alias it to the new render.
+        import json
+        from .document_research_inventory import (
+            CONFIG_FILENAME, _required_numeric_originals, validate_inventory_config,
+        )
+        config_file = Path(document_config_path) if document_config_path is not None else state / CONFIG_FILENAME
+        config = validate_inventory_config(json.loads(config_file.read_text(encoding="utf-8")))
+        if config_file.is_symlink() or inventory["config_hash"] != content_hash(config):
+            raise MissionDocumentAdmissionHostError("document research configuration changed during selection")
+        originals, _failures = _required_numeric_originals(
+            core=store, mission=mission, registry=registry, purpose=config["purpose"],
+            selected_document_refs=selected_document_refs)
+        for _company, registration in originals:
+            inventory["registration_by_hash"][registration["content_hash"]]=registration
     registrations = _registration_index(inventory.get("registration_by_hash"))
     setup_error: Exception | None = None
     try:
