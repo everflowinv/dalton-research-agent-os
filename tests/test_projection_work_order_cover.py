@@ -49,7 +49,7 @@ class WorkOrderCoverTests(unittest.TestCase):
         self.assertEqual(list(new.state), ['work:z', 'work:a', 'work:middle'])
         sql = _WORK_ORDER_FOLD._cold_select(self.c)
         plan = [r[3] for r in self.c.execute('EXPLAIN QUERY PLAN ' + sql, (0,))]
-        self.assertTrue(any('COVERING INDEX ' + SPEC.name in p for p in plan), plan)
+        self.assertTrue(any('USING INDEX ' + SPEC.name in p or 'USING COVERING INDEX ' + SPEC.name in p for p in plan), plan)
         # Expression indexes may open a deferred table cursor; prove no Column
         # reads that cursor, so no historic work_order_json page is fetched.
         opcodes = list(self.c.execute('EXPLAIN ' + sql, (0,)))

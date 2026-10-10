@@ -1914,7 +1914,8 @@ def claim_period_display_label(value: Any) -> str | None:
         year = int(raw_year)
         if year < 100:
             year += 2000
-        return f"{year}年{'\u4e0a' if raw_half == '1' else '\u4e0b'}半年"
+        half = "上" if raw_half == "1" else "下"
+        return f"{year}年{half}半年"
     text = re.sub(
         r"\b([12])H(\d{2,4})\b",
         lambda m: half_year(m[1], m[2]), text, flags=re.IGNORECASE)

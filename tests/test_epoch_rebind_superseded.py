@@ -166,24 +166,28 @@ class OwnerReentryVisibilityTests(unittest.TestCase):
                 "operation": "authorize_mission_document_reentry", "status": "granted"},
                 ensure_ascii=False, sort_keys=True)))
 
-    def test_the_card_says_when_the_last_press_failed_and_why(self):
+    def test_technical_exhaustion_keeps_failure_proof_without_owner_action(self):
         from dalton_core.needs_human import held_lanes
 
         card = next(item for item in held_lanes(None, state_dir=self.state)
                     if item["detail"].get("admission_ref") == self.ADMISSION)
-        self.assertIn("上次恢复（2026年10月9日 19:49）后的研究在 2026年10月9日 19:53 再次失败",
-                      card["action"])
-        self.assertIn("unresolved prior epoch", card["action"])
-        self.assertEqual(card["detail"]["last_reentry"]["run_status"], "failed")
+        self.assertFalse(card["actionable"])
+        self.assertEqual(card["responsibility"], "administrator")
+        self.assertIn("管理员检查执行凭证", card["action"])
+        self.assertIn("原调用与费用记录保留", card["action"])
+        last = card["detail"]["last_reentry"]
+        self.assertEqual(last["run_status"], "failed")
+        self.assertIn("unresolved prior epoch", last["run_error"])
 
-    def test_a_waiting_grant_says_so_and_offers_no_second_press(self):
+    def test_a_waiting_grant_remains_technical_and_offers_no_second_press(self):
         from dalton_core.needs_human import held_lanes
 
         (self.runs / f"{self.stem}.json").write_text(json.dumps({
             "admission_ref": self.ADMISSION, "granted_at": "2026-10-09T12:00:00+00:00"}))
         card = next(item for item in held_lanes(None, state_dir=self.state)
                     if item["detail"].get("admission_ref") == self.ADMISSION)
-        self.assertIn("不必重复点", card["action"])
+        self.assertFalse(card["actionable"])
+        self.assertEqual(card["responsibility"], "administrator")
         self.assertEqual([door["door"] for door in card["detail"]["owner_doors"]], ["withdraw"])
 
     def test_the_admin_list_shows_cockpit_presses_with_their_result(self):

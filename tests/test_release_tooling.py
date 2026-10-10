@@ -380,8 +380,32 @@ class LogRotateLaunchAgentTemplateTests(unittest.TestCase):
             parser.parse_args(["--log-dir", "/l", "apply"])
 
 
+class MountInfoTests(unittest.TestCase):
+    def test_macos_flags_are_parsed_without_querying_the_runner_mounts(self):
+        from types import SimpleNamespace
+        for flags, expected in (
+            ("apfs, local", (False, False, False)),
+            ("apfs, local, read-only, noowners", (True, True, False)),
+            ("smbfs, nodev", (False, False, True)),
+        ):
+            with self.subTest(flags=flags), unittest.mock.patch.object(
+                migrate_state_dir.subprocess, "run",
+                return_value=SimpleNamespace(stdout=f"fixture on / (apfs, local)\nfixture on /Volumes/Test ({flags})\n"),
+            ) as run:
+                found = migrate_state_dir.mount_info(Path("/Volumes/Test/state"))
+                self.assertEqual(found["mount_point"], "/Volumes/Test")
+                self.assertEqual((found["read_only"], found["no_owners"], found["network"]), expected)
+                self.assertEqual(run.call_args.args[0], ["/sbin/mount"])
+
+
 class MigrationPlanTests(unittest.TestCase):
     def setUp(self):
+        mount = unittest.mock.patch.object(migrate_state_dir, "mount_info", return_value={
+            "mount_point": "/", "flags": ["apfs", "local"], "filesystem": "apfs",
+            "read_only": False, "no_owners": False, "network": False,
+        })
+        mount.start()
+        self.addCleanup(mount.stop)
         self.tmp = tempfile.TemporaryDirectory()
         self.addCleanup(self.tmp.cleanup)
         self.root = Path(self.tmp.name).resolve()

@@ -293,6 +293,27 @@ def _assert_initial_screen(progress: dict[str, Any]) -> dict[str, Any]:
     } for item in companies]}
 
 
+
+def _wait_initial_screen(authority: CoverageMissionAuthority,
+                         mission: dict[str, Any]) -> dict[str, Any]:
+    """Discovery settling does not mean the next mission-stage tick has run."""
+    deadline = time.monotonic() + 20
+    last: dict[str, Any] = {}
+    while time.monotonic() < deadline:
+        last = authority.mission_progress(mission["mission_ref"])
+        if last["mission_version_ref"] != mission["id"]:
+            raise RuntimeError("controller workspace mission authority differs")
+        companies = last.get("companies") or []
+        if companies and all(
+            item.get("current_stage") == "initial_screen"
+            and item.get("current_status") == "entered"
+            and item.get("record_count", 0) >= 1 for item in companies
+        ):
+            return last
+        time.sleep(0.05)
+    raise RuntimeError(f"mission authority did not record initial_screen/entered: {last!r}")
+
+
 def run_acceptance(output: Path) -> dict[str, Any]:
     output = output.expanduser().resolve()
     if output.exists() or output.is_symlink():
@@ -357,11 +378,9 @@ def run_acceptance(output: Path) -> dict[str, Any]:
                 raise RuntimeError("workspace A proposal entered workspace B authority")
 
             with DaltonStore(a.state_dir / "core.sqlite") as store:
-                progress_a = CoverageMissionAuthority(store).mission_progress(
-                    mission_a["mission_ref"])
+                progress_a = _wait_initial_screen(CoverageMissionAuthority(store), mission_a)
             with DaltonStore(b.state_dir / "core.sqlite") as store:
-                progress_b = CoverageMissionAuthority(store).mission_progress(
-                    mission_b["mission_ref"])
+                progress_b = _wait_initial_screen(CoverageMissionAuthority(store), mission_b)
             if (progress_a["mission_version_ref"] != mission_a["id"]
                     or progress_b["mission_version_ref"] != mission_b["id"]):
                 raise RuntimeError("controller workspace mission authority differs")

@@ -935,6 +935,7 @@ class RepairPlannerTests(unittest.TestCase):
         listener.setsockopt(socket.SOL_SOCKET, socket.SO_REUSEADDR, 1)
         listener.bind(("127.0.0.1", 0))
         port = listener.getsockname()[1]
+        listener.listen()
         try:
             self.assertTrue(self.script.cockpit_port_busy(port))
         finally:

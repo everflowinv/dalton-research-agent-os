@@ -1259,7 +1259,8 @@ def _product_text(record: Any, *, limit: int) -> str:
         if isinstance(value, Mapping):
             title = value.get("title") or value.get("heading") or value.get("question")
             if isinstance(title, str) and title.strip() and depth > 0:
-                lines.append(f"§{re.sub(r'\s+', ' ', title.strip())}")
+                normalized_title = re.sub(r"\s+", " ", title.strip())
+                lines.append(f"§{normalized_title}")
                 total += len(lines[-1])
             for child_key, child in value.items():
                 if child_key in _SKIP_KEYS:

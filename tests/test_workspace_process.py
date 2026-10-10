@@ -13,7 +13,7 @@ from concurrent.futures import ThreadPoolExecutor
 from pathlib import Path
 
 from dalton_core.macos_launchagent import render
-from dalton_core.workspace import create_workspace_manifest
+from dalton_core.workspace import WorkspaceError, create_workspace_manifest
 from dalton_core.workspace_process import install_workspace, workspace_plan
 from dalton_core.workspace_release import install_release, validate_release
 from dalton_core.store import content_hash
@@ -332,6 +332,29 @@ class WorkspaceLaunchAgentTests(unittest.TestCase):
 
 
 class ImmutableReleaseTests(unittest.TestCase):
+    def test_only_generated_internal_lib64_alias_is_removed(self):
+        from dalton_core.workspace_release import drop_venv_novelty_aliases, _inventory
+        with tempfile.TemporaryDirectory() as directory:
+            root = Path(directory)
+            (root / "lib").mkdir()
+            alias = root / "lib64"
+            alias.symlink_to("lib", target_is_directory=True)
+            drop_venv_novelty_aliases(root)
+            self.assertFalse(alias.is_symlink())
+            self.assertTrue((root / "lib").is_dir())
+            for target in ("../outside", str(root / "lib")):
+                alias.symlink_to(target, target_is_directory=True)
+                drop_venv_novelty_aliases(root)
+                self.assertTrue(alias.is_symlink())
+                with self.assertRaisesRegex(WorkspaceError, "symbolic link"):
+                    _inventory(root)
+                alias.unlink()
+            (root / "lib").rmdir()
+            (root / "lib").symlink_to(root.parent, target_is_directory=True)
+            alias.symlink_to("lib", target_is_directory=True)
+            drop_venv_novelty_aliases(root)
+            self.assertTrue(alias.is_symlink())
+
     def test_real_offline_venv_console_script_runs_after_atomic_move(self):
         with tempfile.TemporaryDirectory() as directory:
             root = Path(directory)

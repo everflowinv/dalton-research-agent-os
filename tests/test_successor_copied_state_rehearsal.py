@@ -36,7 +36,7 @@ from tests.test_successor_config_transition import PreserveExistingTransitionTes
 
 class PublicationStateCopyTests(unittest.TestCase):
     def setUp(self):
-        self.root = Path(tempfile.mkdtemp(dir="/private/tmp"))
+        self.root = Path(tempfile.mkdtemp(dir="/tmp"))
         self.addCleanup(shutil.rmtree, self.root, ignore_errors=True)
         self.live_state = self.root / "live/state"
         self.live_agents = self.root / "live/LaunchAgents"
@@ -281,7 +281,7 @@ class SuccessorCopiedStateRehearsalTests(unittest.TestCase):
         packet = root / "main-packet"; packet.mkdir()
         source = root / "source"; source.mkdir()
         live = root / "live"; live.mkdir()
-        temp = Path(tempfile.mkdtemp(dir="/private/tmp"))
+        temp = Path(tempfile.mkdtemp(dir="/tmp"))
         temp.rmdir()
         self.addCleanup(shutil.rmtree, temp, ignore_errors=True)
         before = b'{"principals":[{"id":"core","operations":["a"]}]}\n'

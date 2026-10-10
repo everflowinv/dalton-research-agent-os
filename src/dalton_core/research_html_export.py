@@ -742,10 +742,16 @@ def render_research_html(
                             if shown != _gap_raw_text(raw)]
             if changed_gaps:
                 technical_text += "\n待补项原始记录：\n" + "\n".join(changed_gaps)
+            chart_html = _chart(nums, claims, f"chart-{pi}-{si}",
+                                subject_ref=product.get("subject_ref")) if nums else ""
+            table_html = (
+                '<div class="tablewrap"><table><thead><tr><th>期间</th><th>结构化数据</th></tr></thead><tbody>'
+                + table + '</tbody></table></div>'
+            ) if table else ""
             chunks.append(
                 (f'<article class="draft"><p class="watermark">{_esc(draft_label)}</p>' if draft
                  else '<article>')
-                + f'<h3>{_esc(shown_title)}</h3><p class="prose">{_esc(shown_body)}</p>{_chart(nums, claims, f"chart-{pi}-{si}", subject_ref=product.get("subject_ref")) if nums else ""}{("<div class=\"tablewrap\"><table><thead><tr><th>期间</th><th>结构化数据</th></tr></thead><tbody>"+table+"</tbody></table></div>") if table else ""}<details class="refs"><summary>技术详情与来源（{len(technical_refs)}）</summary><code>{_esc(technical_text)}</code></details><p class="gaps">待补资料：{_esc("；".join(shown for _, shown in gap_rows) or "当前未记录待补项")}</p></article>'
+                + f'<h3>{_esc(shown_title)}</h3><p class="prose">{_esc(shown_body)}</p>{chart_html}{table_html}<details class="refs"><summary>技术详情与来源（{len(technical_refs)}）</summary><code>{_esc(technical_text)}</code></details><p class="gaps">待补资料：{_esc("；".join(shown for _, shown in gap_rows) or "当前未记录待补项")}</p></article>'
             )
         if not chunks:
             chunks = [

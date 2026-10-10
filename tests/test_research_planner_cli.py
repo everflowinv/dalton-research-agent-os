@@ -287,7 +287,8 @@ class PlannerChildTests(unittest.TestCase):
         sent_prompt = model.return_value.call.call_args.kwargs["prompt"]
         for company in built["companies"]:
             self.assertIn(company["readable_documents"][0]["document_ref"], sent_prompt)
-        self.assertIn("without original_preview was not shown", sent_prompt)
+        self.assertIn("no original_preview means content was not shown", sent_prompt)
+        self.assertIn("infer no content and claim no read", sent_prompt)
 
     def test_the_lease_outlasts_the_call_it_covers(self):
         # The scheduler's default lease is 30s and its ceiling 60; a planner

@@ -83,7 +83,9 @@ class UITextDiscoveryTests(unittest.TestCase):
         refs = [row["batch_ref"] for row in second["batches"]]
         self.assertEqual(refs[0], first_ref)
         self.assertEqual(len(refs), 2)
-        manifest = json.loads(next((self.state / "manifests").glob("*.json")).read_text())
+        manifest = next(json.loads(path.read_text())
+                        for path in (self.state / "manifests").glob("*.json")
+                        if json.loads(path.read_text())["batch_ref"] == first_ref)
         source = manifest["entries"][0]["sources"][0]
         self.assertEqual(source["roles"], ["canonical_claim", "library_claim_source"])
 

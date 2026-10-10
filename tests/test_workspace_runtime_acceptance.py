@@ -3,10 +3,37 @@ import tempfile
 import unittest
 from pathlib import Path
 
-from scripts.run_workspace_runtime_acceptance import run_acceptance
+from types import SimpleNamespace
+from unittest.mock import Mock, patch
+
+from scripts.run_workspace_runtime_acceptance import run_acceptance, _wait_initial_screen
 
 
 class WorkspaceRuntimeAcceptanceTests(unittest.TestCase):
+    def test_discovery_success_still_waits_for_formal_stage_entry(self):
+        mission = {"mission_ref": "mission:fixture", "id": "mission-version:fixture"}
+        waiting = {"mission_version_ref": mission["id"], "companies": []}
+        entered = {"mission_version_ref": mission["id"], "companies": [{
+            "current_stage": "initial_screen", "current_status": "entered", "record_count": 1}]}
+        authority = SimpleNamespace(mission_progress=Mock(side_effect=[waiting, entered]))
+        with patch("scripts.run_workspace_runtime_acceptance.time.sleep"), patch(
+            "scripts.run_workspace_runtime_acceptance.time.monotonic", return_value=0):
+            self.assertEqual(_wait_initial_screen(authority, mission), entered)
+        self.assertEqual(authority.mission_progress.call_args_list,
+                         [unittest.mock.call(mission["mission_ref"])] * 2)
+
+    def test_stage_wait_is_bounded_and_wrong_mission_is_not_a_success(self):
+        mission = {"mission_ref": "mission:fixture", "id": "mission-version:fixture"}
+        authority = SimpleNamespace(mission_progress=Mock(return_value={
+            "mission_version_ref": mission["id"], "companies": []}))
+        with patch("scripts.run_workspace_runtime_acceptance.time.sleep"), patch(
+            "scripts.run_workspace_runtime_acceptance.time.monotonic", side_effect=[0, 0, 21]):
+            with self.assertRaisesRegex(RuntimeError, "initial_screen/entered"):
+                _wait_initial_screen(authority, mission)
+        authority.mission_progress.return_value = {"mission_version_ref": "mission-version:foreign"}
+        with self.assertRaisesRegex(RuntimeError, "workspace mission authority differs"):
+            _wait_initial_screen(authority, mission)
+
     def test_two_real_engines_keep_processing_and_refuse_cross_namespace_inputs(self):
         with tempfile.TemporaryDirectory(dir="/tmp") as directory:
             output = Path(directory) / "receipt"
