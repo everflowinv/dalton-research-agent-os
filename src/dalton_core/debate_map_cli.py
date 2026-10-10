@@ -20,7 +20,7 @@ from pathlib import Path
 from typing import Any
 
 from .cockpit_model import CockpitModel, CockpitModelError
-from .call_budget import resolve_call_budget, resolve_run_budget
+from .call_budget import resolve_call_budget, resolve_run_budget, freeze_shared_budget_policy
 from .coverage_mission import CoverageMissionAuthority
 from .debate_map import (
     DebateMapAuthority,
@@ -242,7 +242,7 @@ def run_debate_map(
             summary.update({"status": "succeeded", "map_status": "gated",
                             "failure_reason": "no model configured"})
             return summary
-        config = json.loads(Path(model_config_path).expanduser().read_text(encoding="utf-8"))
+        config = freeze_shared_budget_policy(json.loads(Path(model_config_path).expanduser().read_text(encoding="utf-8")))
         producer_budget = resolve_call_budget(config, "debate_map", defaults={
             "max_input_tokens": MAX_INPUT_TOKENS, "max_output_tokens": MAX_OUTPUT_TOKENS,
             "max_cost_usd": MAX_COST_USD, "timeout_seconds": TIMEOUT_SECONDS})

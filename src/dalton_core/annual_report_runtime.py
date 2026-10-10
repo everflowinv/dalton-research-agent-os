@@ -7,7 +7,7 @@ import stat
 from pathlib import Path
 from typing import Any, Mapping
 
-from .call_budget import resolve_call_budget, resolve_run_budget
+from .call_budget import resolve_call_budget, resolve_run_budget, freeze_shared_budget_policy
 from .model_transport import (
     broker_frame_execution_binding,
 )
@@ -69,7 +69,7 @@ def load_annual_report_model_config(path: str | Path, label: str) -> dict[str, A
     # budget, so validate this owner policy without inventing a retry ceiling.
     base.pop("transport_retry", None)
     try:
-        config = validate_model_config(base)
+        config = freeze_shared_budget_policy(validate_model_config(base))
         config["provider_retry"] = (
             None if retry is None else validate_provider_retry(retry)
         )

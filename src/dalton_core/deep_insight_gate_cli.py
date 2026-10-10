@@ -66,7 +66,7 @@ from pathlib import Path
 from typing import Any, Callable, Collection, Mapping, Sequence
 
 from .cockpit_model import CockpitModel
-from .call_budget import resolve_call_budget, resolve_run_budget
+from .call_budget import resolve_call_budget, resolve_run_budget, freeze_shared_budget_policy
 from .company_dossier import load_policy, policy_hash
 from .company_dossier_cli import number_material, table_exists
 from .coverage_mission import CoverageMissionAuthority
@@ -1476,8 +1476,8 @@ def run_gate(
                             "failure_reason": "no model configured"})
             return summary
 
-        config = json.loads(
-            Path(model_config_path).expanduser().read_text(encoding="utf-8"))
+        config = freeze_shared_budget_policy(json.loads(
+            Path(model_config_path).expanduser().read_text(encoding="utf-8")))
         run_budget = resolve_run_budget(config, "deep_insight_gate", defaults={
             "max_cost_usd": MAX_RUN_COST_USD, "max_units": len(GROUPS)})
         run_cost_micros = int(float(run_budget["max_cost_usd"]) * 1_000_000)
@@ -1493,8 +1493,8 @@ def run_gate(
         factory = model_factory or (lambda: build(config))
         verifier_factory = verifier_model_factory
         if verifier_factory is None and verifier_model_config_path is not None:
-            verifier_config = json.loads(
-                Path(verifier_model_config_path).expanduser().read_text(encoding="utf-8"))
+            verifier_config = freeze_shared_budget_policy(json.loads(
+                Path(verifier_model_config_path).expanduser().read_text(encoding="utf-8")))
             verifier_factory = lambda: build(verifier_config)  # noqa: E731
         if verifier_factory is None:
             summary.update({

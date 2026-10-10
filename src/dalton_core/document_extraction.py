@@ -195,7 +195,7 @@ def validate_model_config(value):
     optional = {"call_budget", "purpose_call_budgets", "run_budget", "purpose_run_budgets",
                 "capacity_retry", "reading_limits", "transport_retry", "provider_retry",
                 "structured_output_repair", "broker_max_frame_bytes",
-                "model_spec_numeric_context", "shared_call_budget_policy_path",
+                "model_spec_numeric_context", "shared_call_budget_policy_path", "shared_call_budget_policy_snapshot",
                 "stale_document_days"}
     if not isinstance(value, Mapping):
         raise ResearchVerificationError("invalid document extraction model configuration")
@@ -213,6 +213,9 @@ def validate_model_config(value):
     if ("shared_call_budget_policy_path" in config
             and not Path(config["shared_call_budget_policy_path"]).is_absolute()):
         raise ResearchVerificationError("shared call budget policy path must be absolute")
+    if config.get("shared_call_budget_policy_snapshot") is not None:
+        from .call_budget import freeze_shared_budget_policy
+        freeze_shared_budget_policy(config)
     try:
         resolve_broker_max_frame_bytes(config)
     except Exception as exc:

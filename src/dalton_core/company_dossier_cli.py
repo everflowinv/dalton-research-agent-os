@@ -39,7 +39,7 @@ from pathlib import Path
 from typing import Any, Callable, Mapping, Sequence
 
 from .cockpit_model import CockpitModel
-from .call_budget import resolve_call_budget, resolve_run_budget
+from .call_budget import resolve_call_budget, resolve_run_budget, freeze_shared_budget_policy, bound_run_argument
 from .company_dossier import (
     CLASSIFICATION_UNIT,
     SECTIONS,
@@ -1994,11 +1994,11 @@ def run_dossier(
         authority = CompanyDossierAuthority(store)
         config: Mapping[str, Any] = {}
         if model_config_path is not None:
-            config = json.loads(Path(model_config_path).expanduser().read_text(encoding="utf-8"))
+            config = freeze_shared_budget_policy(json.loads(Path(model_config_path).expanduser().read_text(encoding="utf-8")))
         run_budget = resolve_run_budget(config, "dossier", defaults={
             "max_cost_usd": MAX_RUN_COST_USD, "max_units": MAX_UNITS_PER_RUN})
-        max_units = int(max_units if max_units is not None
-                        else run_budget.get("max_units", MAX_UNITS_PER_RUN))
+        max_units = int(bound_run_argument(config, "dossier", "max_units",
+            max_units, run_budget.get("max_units", MAX_UNITS_PER_RUN)))
         run_cost_micros = int(float(run_budget["max_cost_usd"]) * 1_000_000)
 
         chosen = None
@@ -2104,8 +2104,8 @@ def run_dossier(
         verifier_factory = verifier_model_factory
         verifier_config: Mapping[str, Any] = {}
         if verifier_model_config_path is not None:
-            verifier_config = json.loads(
-                Path(verifier_model_config_path).expanduser().read_text(encoding="utf-8"))
+            verifier_config = freeze_shared_budget_policy(json.loads(
+                Path(verifier_model_config_path).expanduser().read_text(encoding="utf-8")))
         if verifier_factory is None and verifier_model_config_path is not None:
             verifier_factory = lambda: build(verifier_config)  # noqa: E731
         if verifier_factory is None:

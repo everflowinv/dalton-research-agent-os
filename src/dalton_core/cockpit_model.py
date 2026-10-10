@@ -1950,7 +1950,8 @@ class CockpitModel:
                  max_input_tokens: int = 120_000, max_output_tokens: int = 3_000,
                  max_cost_usd: float | None = None,
                  timeout_seconds: int = 120) -> None:
-        self.config = validate_model_config(model_config)
+        from .call_budget import freeze_shared_budget_policy
+        self.config = freeze_shared_budget_policy(validate_model_config(model_config))
         self.scheduler_db = str(Path(scheduler_db).expanduser().resolve())
         self.adapter_factory = adapter_factory
         self.clock = clock or (lambda: datetime.now(timezone.utc))

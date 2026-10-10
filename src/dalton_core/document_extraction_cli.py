@@ -348,7 +348,8 @@ def run_extraction(
     out = secure_dir(summary_dir)
     spool_root = spool_dir if spool_dir is not None else state / "transcript-spool"
     raw_config = json.loads(Path(model_config_path).read_text(encoding="utf-8"))
-    config = validate_model_config(raw_config)
+    from .call_budget import freeze_shared_budget_policy
+    config = freeze_shared_budget_policy(validate_model_config(raw_config))
     summary: dict[str, Any] = {
         "schema_version": SUMMARY_SCHEMA_VERSION,
         "created_at": datetime.now(timezone.utc).isoformat(timespec="microseconds"),

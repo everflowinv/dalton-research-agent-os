@@ -127,7 +127,8 @@ class BudgetConfigurationTests(fixtures.StateDirectoryCase):
         view = call_budget_view(
             self.root, "ask", cockpit_model_config_path=initial)
         self.assertTrue(view["editable"])
-        self.assertEqual(view["effective"], {"max_cost_usd":1.0})
+        self.assertEqual(view["effective"], {"max_input_tokens": 120000,
+            "max_output_tokens": 3000, "max_cost_usd": 1.0, "timeout_seconds": 120})
 
     def test_reset_returns_to_declared_defaults_and_write_failure_keeps_history_honest(self):
         self.save({"max_cost_usd": 2})
@@ -169,6 +170,9 @@ class BudgetConfigurationTests(fixtures.StateDirectoryCase):
                     self.assertEqual(view["effective"], {
                         "max_input_tokens": 64000, "max_output_tokens": 4096,
                         "max_cost_usd": 1.0, "timeout_seconds": 600})
+                elif purpose in {"ask", "goal", "steer"}:
+                    self.assertEqual(view["effective"], {"max_input_tokens": 120000,
+                        "max_output_tokens": 3000, "max_cost_usd": 2.0, "timeout_seconds": 120})
                 else:
                     self.assertIsNone(view["effective"])
                 result = set_model_call_budget(
@@ -270,10 +274,14 @@ class BudgetGovernanceTests(unittest.TestCase):
             self.assertEqual(result, shared)
             request.assert_called_once_with(Path("/tmp/manager.json"), "owner@example.test",
                                             "draft", .8, "b" * 64)
-            with self.assertRaisesRegex(Exception, "分开保存"):
-                plane.set_call_budget("owner@example.test", {"purpose": "draft",
-                    "budget": {"max_cost_usd": .8, "max_output_tokens": 2},
-                    "expected_shared_policy_hash": "b" * 64})
+            with patch("dalton_core.workspace_manager.request_set_shared_model_budget",
+                       return_value=shared) as request:
+                mixed = {"max_cost_usd": .8, "max_output_tokens": 2000}
+                result = plane.set_call_budget("owner@example.test", {"purpose": "draft",
+                    "budget": mixed, "expected_shared_policy_hash": "b" * 64})
+            self.assertEqual(result, shared)
+            request.assert_called_once_with(Path("/tmp/manager.json"), "owner@example.test",
+                "draft", mixed, "b" * 64, kind="call")
         finally:
             fixture.doCleanups()
 

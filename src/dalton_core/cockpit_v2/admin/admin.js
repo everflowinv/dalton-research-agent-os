@@ -595,6 +595,8 @@
                                    describe: describeModel(models, info), ariaLabel: `${p.label}的 AI 服务顺序` });
       if (proposal && Array.isArray(proposal.chain)) editor.set(proposal.chain);
       const cb = p.call_budget || {}, eff = cb.effective || {};
+      const sharedBudget = cb.shared_limits || cb.shared_call_cost;
+      const budgetScope = sharedBudget ? "全部研究项目" : "仅当前研究项目";
       const out = h("input", { type: "number", min: "256", step: "256", value: eff.max_output_tokens ?? "",
                                "aria-label": `${p.label}的单次输出上限` });
       const thinking = h("select", { "aria-label": `${p.label}的思考强度` },
@@ -618,12 +620,15 @@
           validate: () => (editor.picked.length ? null : "顺序至少需要一个服务"), after: () => reload("ai") }),
         writeForm({ action: "model_select", label: "使用档位默认顺序", primary: false,
           payload: { purpose: p.purpose, mode: "tier" }, after: () => reload("ai") }),
-        cb.editable ? h("div", null, h("h3", null, "高级：单次回答长度上限（仅当前研究项目）"),
-          h("p", { class: "adm-explain" }, `这项长度设置仅修改当前研究项目。当前每次调用最多输出 ${count(eff.max_output_tokens)} 个 token（输入最多 ${count(eff.max_input_tokens)} 个 token，超过 ${txt(eff.timeout_seconds)} 秒未完成即放弃）。推理模型的思考也计入输出上限，上限太小时可能只思考、不给出正文。`),
-          writeForm({ action: "model_budget", label: "保存回答长度上限（仅当前研究项目）", primary: false, extra: h("label", { class: "adm-field" }, h("span", null, "单次回答长度上限（token，正整数）"), out),
+        cb.editable && eff.max_output_tokens != null ? h("div", null, h("h3", null, `高级：单次回答长度上限（${budgetScope}）`),
+          h("p", { class: "adm-explain" }, `${sharedBudget ? "保存会同步全部研究项目与新建项目。下一批任务采用，运行中批次完成后切换。" : "这项长度设置仅修改当前研究项目。"}当前每次调用最多输出 ${count(eff.max_output_tokens)} 个 token（输入最多 ${count(eff.max_input_tokens)} 个 token，超过 ${txt(eff.timeout_seconds)} 秒未完成即放弃）。推理模型的思考也计入输出上限，上限太小时可能只思考、不给出正文。`),
+          writeForm({ action: "model_budget", label: `保存回答长度上限（${budgetScope}）`, primary: false, extra: h("label", { class: "adm-field" }, h("span", null, "单次回答长度上限（token，正整数）"), out),
             validate: () => (Number.isInteger(Number(out.value)) && Number(out.value) > 0 ? null : "请输入正整数"),
-            payload: () => ({ purpose: p.purpose, kind: "call", budget: { ...(cb.overrides || {}), max_output_tokens: Number.parseInt(out.value, 10) },
-                              expected_config_hash: cb.config_hash }), after: () => reload("ai") }))
+            payload: () => ({ purpose: p.purpose, kind: "call",
+                              budget: sharedBudget ? { max_output_tokens: Number.parseInt(out.value, 10) }
+                                : { ...(cb.overrides || {}), max_output_tokens: Number.parseInt(out.value, 10) },
+                              ...(sharedBudget ? { expected_shared_policy_hash: sharedBudget.policy_hash }
+                                : { expected_config_hash: cb.config_hash }) }), after: () => reload("ai") }))
           : (cb.reason ? h("p", { class: "adm-meta" }, cb.reason) : null));
     };
     pick.addEventListener("change", () => render()); render();
@@ -1171,7 +1176,8 @@
     return h("div", null, table(["环节", ["每次调用费用上限（美元）", true], ["每次回答长度上限（token）", true], ["超时放弃（秒）", true], "范围"], rows.map(p => {
       const cb = p.call_budget, e = cb.effective || {};
       return [h("div", null, txt(p.label), tech("环节", p.purpose)), e.max_cost_usd != null ? usd(e.max_cost_usd) : "—", count(e.max_output_tokens), txt(e.timeout_seconds),
-        cb.shared_call_cost ? "全部研究项目共用" : "仅本项目"];
+        cb.shared_limits && ["max_input_tokens", "max_output_tokens", "timeout_seconds"].every(key => (cb.shared_limits.governed_fields || []).includes(key))
+          ? "全部研究项目共用" : cb.shared_call_cost ? "费用共用；其它上限见环节设置" : "仅本项目"];
     })), sharedCostEditor(rows));
   }
   function sharedCostEditor(rows) {
@@ -1182,7 +1188,7 @@
     return h("details", { class: "adm-more" }, h("summary", null, "调整某个环节的每次调用费用上限（全部研究项目）"),
       writeForm({ action: "model_budget", label: "保存每次调用费用上限（全部研究项目）", primary: false, danger: true,
         extra: [h("label", { class: "adm-field" }, h("span", null, "环节"), pick), h("label", { class: "adm-field" }, h("span", null, "每次调用费用上限（美元，大于 0）"), cost)],
-        confirmText: "这会修改本机全部研究项目共用的每次调用费用上限，立即生效；超过上限的调用会被拒绝。",
+        confirmText: "这会修改本机全部研究项目共用的每次调用费用上限，下一批任务采用，运行中批次完成后切换；超过上限的调用会被拒绝。",
         validate: () => (Number(cost.value) > 0 ? null : "请输入大于 0 的金额"),
         payload: () => { const p = shared.find(x => x.purpose === pick.value);
           return { purpose: p.purpose, kind: "call", budget: { max_cost_usd: Number(cost.value) }, expected_shared_policy_hash: p.call_budget.shared_call_cost.policy_hash }; },

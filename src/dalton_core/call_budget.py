@@ -196,6 +196,47 @@ def validate_run_budget_overrides(value: Any) -> dict[str, Any]:
     return out
 
 
+def freeze_shared_budget_policy(config: Mapping[str, Any]) -> dict[str, Any]:
+    """Freeze only the new limits contract for a finite execution batch.
+
+    Old cost-only policies retain their historical hot-read semantics. The
+    snapshot is execution input, never an installed file or a policy write.
+    """
+    from .shared_call_budget_policy import LIMITS_SCHEMA_VERSION, load_shared_call_budget_policy
+    frozen = dict(config)
+    if frozen.get("shared_call_budget_policy_snapshot") is not None:
+        _shared_policy(frozen)
+    elif frozen.get("shared_call_budget_policy_path") is not None:
+        policy = load_shared_call_budget_policy(frozen["shared_call_budget_policy_path"])
+        if policy["schema_version"] == LIMITS_SCHEMA_VERSION:
+            frozen["shared_call_budget_policy_snapshot"] = policy
+    return frozen
+
+
+def _shared_policy(config: Mapping[str, Any]) -> dict[str, Any] | None:
+    from .shared_call_budget_policy import load_shared_call_budget_policy, validate_shared_call_budget_policy
+    snapshot = config.get("shared_call_budget_policy_snapshot")
+    if snapshot is not None:
+        if config.get("shared_call_budget_policy_path") is None:
+            raise CallBudgetError("shared budget snapshot requires its installed policy path")
+        return validate_shared_call_budget_policy(snapshot)
+    path = config.get("shared_call_budget_policy_path")
+    return None if path is None else load_shared_call_budget_policy(path)
+
+
+def bound_run_argument(config: Mapping[str, Any], purpose: str, field: str,
+                       requested: Any, resolved: Any) -> Any:
+    """A task may request fewer units, never bypass an explicit shared bound."""
+    value = resolved if requested is None else requested
+    policy = _shared_policy(config)
+    if policy is not None:
+        from .shared_call_budget_policy import effective_shared_limits
+        upper = effective_shared_limits(policy, purpose, kind="run").get(field)
+        if upper is not None:
+            value = min(value, upper)
+    return value
+
+
 def resolve_run_budget(config: Mapping[str, Any], purpose: str, *,
                        defaults: Mapping[str, Any],
                        call_budgets: Mapping[str, Mapping[str, Any]] | None = None,
@@ -217,8 +258,13 @@ def resolve_run_budget(config: Mapping[str, Any], purpose: str, *,
             raise CallBudgetError("purpose_run_budgets keys must be canonical purpose tokens")
         validate_run_budget_overrides(value)
     resolved.update(validate_run_budget_overrides(per_purpose.get(purpose, {})))
+    shared_policy = _shared_policy(config)
+    if shared_policy is not None:
+        from .shared_call_budget_policy import effective_shared_limits
+        resolved.update(effective_shared_limits(shared_policy, purpose, kind="run"))
     if max_units is not None:
-        resolved.update(validate_run_budget_overrides({"max_units": max_units}))
+        resolved.update(validate_run_budget_overrides({"max_units": bound_run_argument(
+            config, purpose, "max_units", max_units, resolved.get("max_units"))}))
     if purpose in {"investment_memo", "dossier", "debate_map"} and call_budgets is None:
         call_budgets = {name: resolve_call_budget(config, name, defaults=LONG_CONTEXT_CALL_FLOOR)
                         for name in (purpose, purpose + "_verifier")}
@@ -321,12 +367,10 @@ def resolve_call_budget(config: Mapping[str, Any], purpose: str, *,
         _checked(value, f"purpose_call_budgets.{key}")
     resolved.update(_checked(per_purpose.get(purpose, {}),
                              f"purpose_call_budgets.{purpose}"))
-    shared_path = config.get("shared_call_budget_policy_path")
-    if shared_path is not None:
-        from .shared_call_budget_policy import (effective_shared_max_cost,
-                                                load_shared_call_budget_policy)
-        resolved["max_cost_usd"] = effective_shared_max_cost(
-            load_shared_call_budget_policy(shared_path), purpose)
+    shared_policy = _shared_policy(config)
+    if shared_policy is not None:
+        from .shared_call_budget_policy import effective_shared_limits
+        resolved.update(effective_shared_limits(shared_policy, purpose))
     # Last, so neither an installed override nor the shared cost policy can
     # take a long-context purpose below what its prompt needs.
     return _apply_floor({field: resolved[field] for field in FIELDS}, call_budget_floor(purpose))

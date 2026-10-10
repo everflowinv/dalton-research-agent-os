@@ -10,7 +10,7 @@ from datetime import datetime, timezone
 from pathlib import Path
 from typing import Any, Mapping
 
-from .call_budget import (CallBudgetError, default_call_budget, resolve_call_budget,
+from .call_budget import (FIELDS, CallBudgetError, default_call_budget, resolve_call_budget,
                          resolve_run_budget, validate_budget_overrides, validate_run_budget_overrides)
 from .model_selection import ModelSelectionError, _write_configs_atomically, purpose_policy_bindings
 from .service_config_location import service_config_path
@@ -18,6 +18,17 @@ from .service_config_location import service_config_path
 
 class BudgetConfigurationConflict(ModelSelectionError):
     pass
+
+
+def _shared_limits_view(policy: Mapping[str, Any] | None, purpose: str, kind: str) -> dict[str, Any] | None:
+    if policy is None:
+        return None
+    from .shared_call_budget_policy import effective_shared_limits
+    return {"scope": "all_workspaces", "policy_hash": policy["content_hash"],
+            "schema_version": policy["schema_version"], "revision": policy["revision"],
+            "overrides": effective_shared_limits(policy, purpose, kind=kind),
+            "governed_fields": list(effective_shared_limits(policy, purpose, kind=kind)),
+            "effective_at": "next_batch"}
 
 
 def _consumer_call_defaults(purpose: str) -> dict[str, Any] | None:
@@ -28,6 +39,12 @@ def _consumer_call_defaults(purpose: str) -> dict[str, Any] | None:
         from .document_numeric_extraction import LEGACY_CALL_BUDGET
     elif purpose == "metric_discovery_extraction":
         from .metric_discovery_extraction import LEGACY_CALL_BUDGET
+    elif purpose in {"ask", "goal", "steer"}:
+        # Exactly the fallback used by CockpitPlane._model_instance; the
+        # shared cost policy (if bound) remains the cost authority.
+        from .cockpit_plane import COCKPIT_DEFAULT_MAX_COST_USD
+        return {"max_input_tokens": 120_000, "max_output_tokens": 3_000,
+                "max_cost_usd": COCKPIT_DEFAULT_MAX_COST_USD, "timeout_seconds": 120}
     else:
         return None
     return dict(LEGACY_CALL_BUDGET)
@@ -54,7 +71,8 @@ def _service_budget_view(state_dir: str | Path, directory: Path, purpose: str,
                 "config_path": str(path), "direct_budget_path": ["bounded_planner", "config", "planner_call_budget"],
                 "overrides": validate_budget_overrides(nested.get("planner_call_budget", {})),
                 "general": {}, "effective": effective, "config_hash": hashlib.sha256(data).hexdigest(),
-                "requires_restart": True, "shared_call_cost": shared}
+                "requires_restart": shared is None, "shared_call_cost": shared,
+                "shared_limits": _shared_limits_view(policy if shared else None, purpose, kind)}
     if purpose in {"thesis_impact_assessment", "thesis_impact_verifier"}:
         from .thesis_impact_control import ASSESSMENT_BUDGET, VERIFIER_BUDGET
         path = directory / "thesis-impact-budget-config.json"
@@ -81,7 +99,8 @@ def _service_budget_view(state_dir: str | Path, directory: Path, purpose: str,
                 "overrides": validate_budget_overrides((config.get("purpose_call_budgets") or {}).get(purpose, {})),
                 "general": validate_budget_overrides(config.get("call_budget", {})),
                 "effective": effective, "config_hash": hashlib.sha256(data).hexdigest(),
-                "requires_restart": False, "shared_call_cost": shared}
+                "requires_restart": False, "shared_call_cost": shared,
+                "shared_limits": _shared_limits_view(shared_policy if shared else None, purpose, kind)}
     return {"editable": False, "source": binding.get("source"),
             "reason": "该环节的预算在已版本化的 Agenda policy 中配置"}
 
@@ -93,7 +112,13 @@ def _bindings(state_dir: str | Path, cockpit_model_config_path: str | Path | Non
             service = json.loads(service_path.read_text())
             cockpit_model_config_path = (((service.get("control") or {}).get("config") or {})
                                          .get("cockpit") or {}).get("model_config_path")
-    return purpose_policy_bindings(state_dir, cockpit_model_config_path=cockpit_model_config_path)
+    bindings = purpose_policy_bindings(state_dir, cockpit_model_config_path=cockpit_model_config_path)
+    # These are budget consumers of the same extractor config, not new routing
+    # purposes or permission to change that config's model chain.
+    if "document_extraction" in bindings:
+        for purpose in ("document_numeric_extraction", "metric_discovery_extraction"):
+            bindings[purpose] = dict(bindings["document_extraction"])
+    return bindings
 
 
 def _call_budget_view(state_dir: str | Path, purpose: str, *,
@@ -161,7 +186,10 @@ def _call_budget_view(state_dir: str | Path, purpose: str, *,
             "shared_call_cost": (None if shared_policy is None else {
                 "scope": "all_workspaces", "policy_hash": shared_policy["content_hash"],
                 "revision": shared_policy["revision"]}),
-            "note": "修改后用于下一次任务；mission 日预算与各预算池继续约束实际调用"}
+            "shared_limits": _shared_limits_view(shared_policy, purpose, kind),
+            "editable_fields": (list(FIELDS) if effective and kind == "call" and len(effective) == len(FIELDS)
+                                else list(effective or {})),
+            "note": "下一批任务采用；运行中批次完成后切换，mission 日预算与预算池仍约束实际调用"}
 
 
 def call_budget_view(state_dir: str | Path, purpose: str, **kwargs: Any) -> dict[str, Any]:

@@ -3436,6 +3436,8 @@ class CockpitPlane:
             monotonic=monotonic,
         )
         self._model = model
+        self._model_injected = model is not None
+        self._model_config_identity = None
         self._model_factory = model_factory
         self._model_error: str | None = None
         self._jobs: dict[str, dict[str, Any]] = {}
@@ -9293,21 +9295,23 @@ class CockpitPlane:
             budget = (validate_budget_overrides if kind == "call" else validate_run_budget_overrides)(value.get("budget"))
         except ValueError as exc:
             raise CockpitError(str(exc)) from exc
-        if (kind == "call" and "max_cost_usd" in budget
-                and value.get("expected_shared_policy_hash") is not None):
-            if set(budget) != {"max_cost_usd"}:
-                raise CockpitError("共享费用上限与本环境 token/超时预算请分开保存")
+        if value.get("expected_shared_policy_hash") is not None:
             manager = self.config.workspace_manager_config_path
             if manager is None:
-                raise CockpitError("共享模型费用管理尚未配置")
-            from .workspace_manager import request_set_shared_call_budget
-            result = request_set_shared_call_budget(
-                manager, login, purpose, budget["max_cost_usd"],
-                _text(value.get("expected_shared_policy_hash"), "共享策略版本", maximum=64))
-            self.journal.record_event(kind="model_budget", title=f"已调整所有环境「{purpose}」的单次费用上限",
+                raise CockpitError("共享模型预算管理尚未配置")
+            expected = _text(value.get("expected_shared_policy_hash"), "共享策略版本", maximum=64)
+            if kind == "call" and set(budget) == {"max_cost_usd"}:
+                from .workspace_manager import request_set_shared_call_budget
+                result = request_set_shared_call_budget(manager, login, purpose, budget["max_cost_usd"], expected)
+            else:
+                from .workspace_manager import request_set_shared_model_budget
+                result = request_set_shared_model_budget(manager, login, purpose, budget, expected, kind=kind)
+            self.journal.record_event(kind="model_budget", title=f"已调整所有环境「{purpose}」的模型预算",
                 detail=json.dumps(budget, ensure_ascii=False), login=login,
-                refs={"purpose": purpose, "revision": result["policy"]["revision"]})
+                refs={"purpose": purpose, "kind": kind, "revision": result["policy"]["revision"]})
             return result
+        if self.config.workspace_manager_config_path is not None:
+            raise CockpitError("全部项目共用预算已启用，请刷新后使用共享策略版本保存")
         result = self._governance(login, "set_model_call_budget", {
             "purpose": purpose, "budget": budget, "kind": kind,
             "expected_config_hash": _text(value.get("expected_config_hash"), "配置版本", maximum=64),
@@ -9575,13 +9579,19 @@ class CockpitPlane:
     # -- jobs (model work off the request thread) -----------------------------------------
 
     def _model_instance(self) -> CockpitModel:
-        if self._model is not None:
+        if self._model_injected:
             return self._model
         if self.config.model_config_path is None:
             raise CockpitError("问答与目标拆解所需的模型尚未接入")
         config = _load_json(self.config.model_config_path)
         if not isinstance(config, dict):
             raise CockpitError("模型配置无法读取")
+        from .call_budget import freeze_shared_budget_policy
+        from .store import content_hash
+        config = freeze_shared_budget_policy(config)
+        identity = content_hash(config)
+        if self._model is not None and self._model_config_identity == identity:
+            return self._model
         # Interactive brain-tier work can carry the full governed research
         # context, so the plane owns a larger fallback than CockpitModel's
         # general-purpose default. Explicit config budgets still take priority.
@@ -9593,6 +9603,7 @@ class CockpitPlane:
             )
         )
         self._model = factory(config)
+        self._model_config_identity = identity
         return self._model
 
     def _start_job(self, kind: str, login: str, request: Mapping[str, Any], runner: Callable[[], dict[str, Any]]) -> dict[str, Any]:

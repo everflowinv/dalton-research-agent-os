@@ -8,7 +8,7 @@ import sys
 from pathlib import Path
 from typing import Any, Callable, Mapping, Sequence
 
-from .call_budget import resolve_call_budget, resolve_run_budget
+from .call_budget import resolve_call_budget, resolve_run_budget, freeze_shared_budget_policy
 from .cockpit_model import CockpitModel
 from .coverage_mission import CoverageMissionAuthority
 from .investment_memo_contract import (
@@ -612,8 +612,8 @@ def run(*, state_dir: Path, model_config_path: Path | None, verifier_model_confi
     if model_config_path is None or verifier_model_config_path is None:
         return {"schema_version": SUMMARY_SCHEMA_VERSION, "status": "held", "memo_status": "no_model_pair",
                 "reason": "memo producer and independent verifier configurations are both required"}
-    config = json.loads(model_config_path.read_text(encoding="utf-8"))
-    verifier_config = json.loads(verifier_model_config_path.read_text(encoding="utf-8"))
+    config = freeze_shared_budget_policy(json.loads(model_config_path.read_text(encoding="utf-8")))
+    verifier_config = freeze_shared_budget_policy(json.loads(verifier_model_config_path.read_text(encoding="utf-8")))
     producer_budget = resolve_call_budget(config, "investment_memo", defaults={
         "max_input_tokens": MAX_INPUT_TOKENS, "max_output_tokens": MAX_OUTPUT_TOKENS,
         "max_cost_usd": MAX_COST_USD, "timeout_seconds": TIMEOUT_SECONDS})

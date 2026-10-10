@@ -33,7 +33,7 @@ from typing import Any, Callable
 from zoneinfo import ZoneInfo
 
 from .budget_pools import POOL_EXHAUSTED_STATUS
-from .call_budget import resolve_run_budget
+from .call_budget import resolve_run_budget, bound_run_argument
 from .cockpit_model import CockpitModel
 from .coverage_mission import CoverageMissionAuthority
 from .event_judgement import (
@@ -1234,12 +1234,12 @@ def run_judgement(
 
         run_budget = _event_run_budget(judge_model_config, judge_model)
         effective_max_events = (
-            max_events if max_events is not None else int(run_budget["max_events"])
+            bound_run_argument(getattr(judge_model, "config", {}) or {}, PURPOSE,
+                "max_events", max_events, int(run_budget["max_events"]))
         )
         effective_per_company = (
-            per_company
-            if per_company is not None
-            else int(run_budget["max_events_per_company"])
+            bound_run_argument(getattr(judge_model, "config", {}) or {}, PURPOSE,
+                "max_events_per_company", per_company, int(run_budget["max_events_per_company"]))
         )
 
         allowed_versions = tuple(

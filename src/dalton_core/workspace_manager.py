@@ -266,48 +266,79 @@ def _runtime_shared_paths(templates: Mapping[str, Path]) -> list[str]:
 
 def set_shared_call_budget(config_path: Path, login: str, purpose: str,
                            max_cost_usd: float, expected_hash: str) -> dict[str, Any]:
-    """CAS one host-owned purpose ceiling; callable only by the manager child."""
-    from .model_selection import PURPOSE_LABELS
-    from .shared_call_budget_policy import (SCHEMA_VERSION,
-        load_shared_call_budget_policy)
-    from .store import content_hash
+    """Compatibility entry point for the host-owned cost ceiling."""
+    return set_shared_model_budget(config_path, login, purpose,
+        {"max_cost_usd": max_cost_usd}, expected_hash)
+
+
+def set_shared_model_budget(config_path: Path, login: str, purpose: str,
+                           budget: Mapping[str, Any], expected_hash: str,
+                           *, kind: str = "call") -> dict[str, Any]:
+    """CAS an owner edit, with the exact prior policy and merged field receipt."""
+    from .model_selection import PURPOSE_LABELS, RETIRED_PURPOSES
+    from .shared_call_budget_policy import load_shared_call_budget_policy, updated_shared_limits
+    from .call_budget import default_run_budget, validate_budget_overrides, validate_run_budget_overrides
     config = _config(config_path)
-    if login != config["owner_login"]:
-        raise PermissionError("workspace owner mismatch")
-    if purpose not in PURPOSE_LABELS:
-        raise WorkspaceError("模型调用用途无效")
-    from .call_budget import validate_budget_overrides
-    try:
-        max_cost_usd = validate_budget_overrides(
-            {"max_cost_usd": max_cost_usd})["max_cost_usd"]
-    except ValueError as exc:
-        raise WorkspaceError("模型单次费用上限无效") from exc
+    if not _is_admin(config, login):
+        raise PermissionError("workspace administrator mismatch")
+    if purpose not in {*PURPOSE_LABELS, "document_numeric_extraction", "metric_discovery_extraction"} or purpose in RETIRED_PURPOSES:
+        raise WorkspaceError("模型调用用途无效或已退役")
+    if kind not in {"call", "run"}:
+        raise WorkspaceError("预算类型无效")
+    checked = (validate_budget_overrides if kind == "call" else validate_run_budget_overrides)(budget)
+    if kind == "run":
+        supported = default_run_budget(purpose, defaults={})
+        if not supported or set(checked) - set(supported):
+            raise WorkspaceError("该环节不使用这些每轮预算字段")
+    return _save_shared_budget_policy(config, login, expected_hash,
+        lambda current, actor, now: updated_shared_limits(current, purpose=purpose,
+            kind=kind, budget=checked, actor_ref=actor, updated_at=now))
+
+
+def seed_shared_model_limits(config_path: Path, login: str, *, call_limits: Mapping[str, Any],
+                             run_limits: Mapping[str, Any], expected_hash: str) -> dict[str, Any]:
+    """Normal manager CAS for a reviewed 0.1-to-0.2 migration."""
+    from .model_selection import PURPOSE_LABELS, RETIRED_PURPOSES
+    from .shared_call_budget_policy import seed_shared_limits
+    from .call_budget import default_run_budget
+    config = _config(config_path)
+    if not _is_admin(config, login):
+        raise PermissionError("workspace administrator mismatch")
+    allowed = {*PURPOSE_LABELS, "document_numeric_extraction", "metric_discovery_extraction"}
+    for kind, table in (("call", call_limits), ("run", run_limits)):
+        if not isinstance(table, Mapping):
+            raise WorkspaceError("迁移上限必须是一个对象")
+        for purpose, budget in table.items():
+            if purpose not in allowed or purpose in RETIRED_PURPOSES:
+                raise WorkspaceError("模型调用用途无效或已退役")
+            if kind == "run" and (not isinstance(budget, Mapping)
+                    or set(budget) - set(default_run_budget(purpose, defaults={}))):
+                raise WorkspaceError("该环节不使用这些每轮预算字段")
+    return _save_shared_budget_policy(config, login, expected_hash,
+        lambda current, actor, now: seed_shared_limits(current, call_limits=call_limits,
+            run_limits=run_limits, actor_ref=actor, updated_at=now))
+
+
+def _save_shared_budget_policy(config: Mapping[str, Any], login: str, expected_hash: str, build) -> dict[str, Any]:
+    from .shared_call_budget_policy import load_shared_call_budget_policy
     target = Path(config.get("shared_call_budget_policy_path", ""))
     if not target.is_absolute():
-        raise WorkspaceError("共享模型费用策略尚未配置")
+        raise WorkspaceError("共享模型预算策略尚未配置")
     if (target.is_symlink() or not target.is_file() or target.stat().st_uid != os.getuid()
             or target.stat().st_mode & 0o022):
-        raise WorkspaceError("共享模型费用策略必须由当前用户独占管理")
+        raise WorkspaceError("共享模型预算策略必须由当前用户独占管理")
     lock = target.with_name("." + target.name + ".lock")
     fd = os.open(lock, os.O_CREAT | os.O_RDWR, 0o600)
     with os.fdopen(fd, "a+") as stream:
         fcntl.flock(stream.fileno(), fcntl.LOCK_EX)
         current = load_shared_call_budget_policy(target)
         if current["content_hash"] != expected_hash:
-            raise WorkspaceError("共享模型费用策略已更新，请刷新后重试")
-        purposes = dict(current["purpose_max_cost_usd"])
-        if (purposes.get(purpose, current["default_max_cost_usd"])
-                == float(max_cost_usd)):
-            return {"status": "unchanged", "policy": current}
-        purposes[purpose] = float(max_cost_usd)
-        body = {"schema_version": SCHEMA_VERSION,
-                "default_max_cost_usd": current["default_max_cost_usd"],
-                "purpose_max_cost_usd": purposes,
-                "revision": current["revision"] + 1,
-                "prior_hash": current["content_hash"],
-                "updated_at": datetime.now(timezone.utc).isoformat(),
-                "actor_ref": (shared_actor(login) or "human:" + hashlib.sha256(login.encode()).hexdigest()[:32])}
-        policy = {**body, "content_hash": content_hash(body)}
+            raise WorkspaceError("共享模型预算策略已更新，请刷新后重试")
+        policy = build(current, (shared_actor(login) or "human:" + hashlib.sha256(login.encode()).hexdigest()[:32]),
+                       datetime.now(timezone.utc).isoformat())
+        if policy == current:
+            return {"status": "unchanged", "policy": current, "effective_at": "next_batch"}
+
         receipt_dir = Path(config["host_root"]) / "shared-call-budget-revisions"
         receipt_dir.mkdir(parents=True, exist_ok=True, mode=0o700)
         receipt = receipt_dir / (policy["content_hash"] + ".json")
@@ -316,22 +347,34 @@ def set_shared_call_budget(config_path: Path, login: str, purpose: str,
         except Exception:
             receipt.unlink(missing_ok=True)
             raise
-        return {"status": "updated", "policy": policy,
+        # Both names must survive a host crash before reporting the CAS as durable.
+        for directory in {target.parent, receipt_dir}:
+            directory_fd = os.open(directory, os.O_RDONLY)
+            try: os.fsync(directory_fd)
+            finally: os.close(directory_fd)
+        return {"status": "updated", "policy": policy, "effective_at": "next_batch",
                 "receipt_ref": "shared-call-budget-revision:" + policy["content_hash"]}
 
 
 def request_set_shared_call_budget(config_path: Path, login: str,
         purpose: str, max_cost_usd: float, expected_hash: str) -> dict[str, Any]:
+    return request_set_shared_model_budget(config_path, login, purpose,
+        {"max_cost_usd": max_cost_usd}, expected_hash)
+
+
+def request_set_shared_model_budget(config_path: Path, login: str, purpose: str,
+        budget: Mapping[str, Any], expected_hash: str, *, kind: str = "call") -> dict[str, Any]:
     config = _config(config_path)
-    if login != config["owner_login"]:
-        raise PermissionError("workspace owner mismatch")
+    if not _is_admin(config, login):
+        raise PermissionError("workspace administrator mismatch")
     environment = dict(os.environ); environment.pop("DALTON_WORKSPACE_MANIFEST", None)
     result = subprocess.run([sys.executable, "-m", "dalton_core.workspace_manager",
         "--config", str(config_path), "--login", login, "--set-shared-purpose", purpose,
-        "--max-cost-usd", str(max_cost_usd), "--expected-hash", expected_hash],
+        "--shared-budget-json", json.dumps(dict(budget)), "--budget-kind", kind,
+        "--expected-hash", expected_hash],
         env=environment, capture_output=True, text=True, timeout=20, check=False)
     if result.returncode:
-        raise WorkspaceError("共享模型费用没有保存，请刷新后重试")
+        raise WorkspaceError("共享模型预算没有保存，请刷新后重试")
     return json.loads(result.stdout.splitlines()[-1])
 
 
@@ -873,12 +916,27 @@ def main() -> int:
     parser.add_argument("--initial-goal", default="")
     parser.add_argument("--set-shared-purpose")
     parser.add_argument("--max-cost-usd", type=float)
+    parser.add_argument("--shared-budget-json")
+    parser.add_argument("--seed-shared-limits-json")
+    parser.add_argument("--budget-kind", choices=("call", "run"), default="call")
     parser.add_argument("--expected-hash")
     args = parser.parse_args()
     args.login = _cli_login(_config(args.config), args.login)
-    if args.set_shared_purpose is not None:
-        result = set_shared_call_budget(args.config, args.login, args.set_shared_purpose,
-                                        args.max_cost_usd, args.expected_hash)
+    if args.seed_shared_limits_json is not None:
+        if args.set_shared_purpose is not None:
+            parser.error("seed and purpose edits are mutually exclusive")
+        seed = json.loads(args.seed_shared_limits_json)
+        if not isinstance(seed, dict) or set(seed) != {"call_limits", "run_limits"}:
+            parser.error("invalid closed migration shape")
+        result = seed_shared_model_limits(args.config, args.login,
+            call_limits=seed["call_limits"], run_limits=seed["run_limits"], expected_hash=args.expected_hash)
+    elif args.set_shared_purpose is not None:
+        if args.shared_budget_json is not None:
+            result = set_shared_model_budget(args.config, args.login, args.set_shared_purpose,
+                json.loads(args.shared_budget_json), args.expected_hash, kind=args.budget_kind)
+        else:
+            result = set_shared_call_budget(args.config, args.login, args.set_shared_purpose,
+                                            args.max_cost_usd, args.expected_hash)
     else:
         if args.name is None or args.request_id is None:
             parser.error("--name and --request-id are required")

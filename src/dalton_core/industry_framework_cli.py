@@ -39,7 +39,7 @@ from pathlib import Path
 from typing import Any, Callable, Mapping, Sequence
 
 from .cockpit_model import CockpitModel
-from .call_budget import resolve_call_budget, resolve_run_budget
+from .call_budget import resolve_call_budget, resolve_run_budget, freeze_shared_budget_policy, bound_run_argument
 from .coverage_mission import CoverageMissionAuthority
 from .industry_framework import (
     CHARACTERISTIC_FIELDS,
@@ -733,11 +733,11 @@ def run_framework(
         authority = IndustryFrameworkAuthority(store)
         config: Mapping[str, Any] = {}
         if model_config_path is not None:
-            config = json.loads(Path(model_config_path).expanduser().read_text(encoding="utf-8"))
+            config = freeze_shared_budget_policy(json.loads(Path(model_config_path).expanduser().read_text(encoding="utf-8")))
         run_budget = resolve_run_budget(config, "industry_framework", defaults={
             "max_cost_usd": MAX_RUN_COST_USD, "max_units": MAX_UNITS_PER_RUN})
-        max_units = int(max_units if max_units is not None
-                        else run_budget.get("max_units", MAX_UNITS_PER_RUN))
+        max_units = int(bound_run_argument(config, "industry_framework", "max_units",
+            max_units, run_budget.get("max_units", MAX_UNITS_PER_RUN)))
         run_cost_micros = int(float(run_budget["max_cost_usd"]) * 1_000_000)
         prior = authority.latest(str(mission["industry_ref"]))
 
@@ -837,8 +837,8 @@ def run_framework(
         factory = model_factory or (lambda: build(config))
         verifier_factory = verifier_model_factory
         if verifier_factory is None and verifier_model_config_path is not None:
-            verifier_config = json.loads(
-                Path(verifier_model_config_path).expanduser().read_text(encoding="utf-8"))
+            verifier_config = freeze_shared_budget_policy(json.loads(
+                Path(verifier_model_config_path).expanduser().read_text(encoding="utf-8")))
             verifier_factory = lambda: build(verifier_config)  # noqa: E731
         if verifier_factory is None:
             summary.update({
