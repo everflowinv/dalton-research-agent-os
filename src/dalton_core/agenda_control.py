@@ -1373,6 +1373,9 @@ def _handler(application: AgendaControlApplication) -> type[BaseHTTPRequestHandl
                     except V2NotFound:
                         self._send(HTTPStatus.NOT_FOUND, "application/json", b'{"error":"not_found"}')
                         return
+                    except PermissionError:
+                        self._send(HTTPStatus.FORBIDDEN, "application/json", b'{"error":"forbidden"}')
+                        return
                     except CockpitError as exc:
                         self._send(HTTPStatus.BAD_REQUEST, "application/json; charset=utf-8",
                                    _cockpit_error_body("cockpit", exc))

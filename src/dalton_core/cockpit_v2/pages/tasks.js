@@ -4,7 +4,7 @@
    the administrator when only an administrator can (D02-D04). */
 
 import {V, OVERVIEW, NEEDS_HUMAN, APPROVALS, autoReason, companies, companyKey, companyName, confirmAction, load, said} from "./common.js";
-import {GROUPS, KINDS, foldTasks, kindOf, sortTasks, urgencyLabel} from "./task_kinds.js";
+import {GROUPS, KINDS, foldTasks, kindOf, sortTasks, urgencyLabel, analystAction, approvalRequired} from "./task_kinds.js";
 import {decisionBasis} from "./decision_basis.js";
 import {serverEntry} from "./task_entry.js";
 import {LABELS, UI} from "../copy.js";
@@ -129,7 +129,7 @@ function taskCard(ctx, it, overview, hasApprovals, onSettled) {
   const k = kindOf(it);
   const object = objectOf(it, overview);
   const d = it.detail || {};
-  const systemOwned = it.actionable === false && Boolean(it.responsibility);
+  const systemOwned = ["administrator", "background", "optional_feedback"].includes(it.responsibility);
   const impact = systemOwned ? say(it.consequence || "") : (k.impact && k.impact(d)) || say(it.consequence || "");
   const suggestion = systemOwned ? say(it.action || it.why_blocked || "系统继续跟进。") : k.suggest(d);
   const card = h("li", {class: "v2-card", "data-kind": it.kind, "data-ref": it.ref},
@@ -263,11 +263,11 @@ async function render(root, ctx) {
   items = foldTasks(items);
   if (filterCompany) items = items.filter(x => objectOf(x, overview).key === filterCompany);
 
-  const systemItems = items.filter(it => it.actionable === false && it.responsibility);
+  const systemItems = items.filter(it => ["administrator", "background", "optional_feedback"].includes(it.responsibility));
   items = items.filter(it => !systemItems.includes(it));
-  const decisions = approvals.filter(it => it.decision_required !== false);
-  const systemWork = approvals.filter(it => it.decision_required === false);
-  let actionable = items.filter(x => x.actionable !== false && kindOf(x).group !== "processing").length + decisions.length;
+  const decisions = approvals.filter(approvalRequired);
+  const systemWork = approvals.filter(it => !approvalRequired(it));
+  let actionable = items.filter(analystAction).length + decisions.length;
   // T12: a part that could not be read is never counted as zero.
   const partial = Boolean(nh.error || ap.error);
   const sub = h("span", {class: "v2-sub", role: "status", "aria-live": "polite"});
@@ -291,12 +291,12 @@ async function render(root, ctx) {
     root.append(ui.section("approvals", "需要你确认的研究决定", h("ul", {class: "v2-list"}, decisions.map(it => approvalCard(ctx, it, onSettled)))));
   }
   if (grouping === "urgency") {
-    root.append(ui.section("all", "全部事项", items.length ? h("ul", {class: "v2-list"}, items.map(it => taskCard(ctx, it, overview, approvals.length > 0, onSettled))) : ui.empty("没有事项。")));
+    root.append(ui.section("all", "全部事项", items.length ? h("ul", {class: "v2-list"}, items.map(it => taskCard(ctx, it, overview, approvals.length > 0, analystAction(it) ? onSettled : null))) : ui.empty("没有事项。")));
   } else {
     for (const g of GROUPS) {
       const own = items.filter(x => kindOf(x).group === g.id);
       if (!own.length) continue;
-      root.append(ui.section(`group-${g.id}`, `${g.title}（${own.length}）`, h("ul", {class: "v2-list"}, own.map(it => taskCard(ctx, it, overview, approvals.length > 0, onSettled)))));
+      root.append(ui.section(`group-${g.id}`, `${g.title}（${own.length}）`, h("ul", {class: "v2-list"}, own.map(it => taskCard(ctx, it, overview, approvals.length > 0, analystAction(it) ? onSettled : null)))));
     }
   }
   for (const [role, title] of [["background", "后台推进"], ["administrator", "管理员诊断"], ["optional_feedback", "可选反馈"]]) {

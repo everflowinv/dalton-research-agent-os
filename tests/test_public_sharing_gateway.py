@@ -78,6 +78,85 @@ class SharingNetworkTests(unittest.TestCase):
         status,_,_=self.request('/v2/data/manifest',server=self.servers[0],headers={'Tailscale-User-Login':'owner@example.com'});self.assertEqual(status,200)
         cookie=self.bootstrap();csrf,backend_cookie=self.manifest('legacy',cookie)
         status,_,_=self.request('/w/legacy/v1/cockpit/goal_publish',method='POST',data={},cookies=cookie+'; '+backend_cookie,headers={'Origin':'https://wrong.example','X-Dalton-CSRF':csrf});self.assertEqual(status,403);self.assertFalse(self.calls)
+    def test_shared_v2_admin_summary_and_action_keep_the_real_shared_subject(self):
+        from types import SimpleNamespace
+        app=self.apps[0]
+        app.cockpit_plane=SimpleNamespace(workspace_context={'name':'共享测试项目','slug':'legacy'})
+        cookie=self.bootstrap();csrf,backend_cookie=self.manifest('legacy',cookie)
+        jar=cookie+'; '+backend_cookie
+        status,_,raw=self.request('/w/legacy/v2/data/admin/summary',cookies=jar)
+        self.assertEqual(status,200,raw)
+        summary=json.loads(raw);self.assertTrue(summary['enabled'])
+        self.assertEqual('共享测试项目',summary['environment']['name'])
+        self.assertEqual(csrf,summary['csrf_token'])
+        status,_,raw=self.request('/w/legacy/v2/data/admin/action',method='POST',cookies=jar,
+            data={'action':'lever','reason':'核对隔离项目的控制入口',
+                  'payload':{'lever':'pause_lane','lane':'document_extraction'}},headers={'X-Dalton-CSRF':csrf})
+        self.assertEqual(status,200,raw)
+        receipt=json.loads(raw)
+        self.assertEqual(shared_actor(SharedLogin('public')),receipt['receipt']['actor_ref'])
+        self.assertEqual(shared_actor(SharedLogin('public')),self.calls[-1]['actor'])
+        self.assertNotEqual(_subject_for_login('owner@example.com'),self.calls[-1]['actor'])
+        self.assertEqual(1,len(self.calls))
+        status,_,_=self.request('/w/legacy/v2/data/admin/action',method='POST',cookies=jar,
+            data={'action':'lever','reason':'同一操作必须核对会话', 'payload':{}},headers={'X-Dalton-CSRF':'foreign'})
+        self.assertEqual(status,403);self.assertEqual(1,len(self.calls))
+        status,_,raw=self.request('/v2/data/admin/summary',server=self.servers[0],headers={'Tailscale-User-Login':'owner@example.com'})
+        self.assertEqual(status,200,raw)
+        status,_,_=self.request('/v2/data/admin/summary',server=self.servers[0],headers={'Tailscale-User-Login':'shared-access:public'})
+        self.assertEqual(status,403)
+
+    def test_shared_admin_selection_reaches_real_writer_policy_and_same_value_is_idempotent(self):
+        from types import SimpleNamespace
+        from dalton_core.cockpit_plane import CockpitPlane
+        from dalton_core.writer_server import Principal,HUMAN_GOVERNANCE_OPERATIONS
+        from dalton_core.writer_protocol import Request
+        from tests.test_host_research_settings import HostSettingsTests
+        app=self.apps[0];proof=[]
+        # The fixture authorities are born and closed on the HTTP worker thread,
+        # as the real writer keeps SQLite on its own serialized store thread.
+        def select(login,value):
+            fixture=HostSettingsTests();fixture.setUp()
+            try:
+                server=fixture.writer();server._token_config_path=None
+                actor=_subject_for_login(login)
+                server._by_token={'shared-token':Principal('governance','shared-token',HUMAN_GOVERNANCE_OPERATIONS,actor_ref=actor)}
+                plane=object.__new__(CockpitPlane)
+                plane.config=SimpleNamespace(workspace_manager_config_path=None,model_config_path=fixture.state/'research-planner-model-config.json')
+                plane.journal=SimpleNamespace(record_event=lambda **kwargs:None)
+                plane._sync_model_selection=lambda login,params:{'status':'applied','note':'隔离项目已保存','synced':[],'failed':[],'skipped':[]}
+                def governance(login,operation,params,**kwargs):
+                    return server._handle(Request('0.1','shared-model-save',operation,{**params,'actor_ref':_subject_for_login(login)},'shared-token'))
+                plane._governance=governance
+                result=plane.select_model(login,value)
+                rows=fixture.router.connection.execute('SELECT policy_json FROM model_routing_policy_versions ORDER BY rowid').fetchall()
+                plane.select_model(login,value)
+                self.assertEqual(rows,fixture.router.connection.execute('SELECT policy_json FROM model_routing_policy_versions ORDER BY rowid').fetchall())
+                config=json.loads((fixture.state/'research-planner-model-config.json').read_text())
+                policy=fixture.router.get_policy(config['routing_policy_ref'])
+                proof.append({'actor':actor,'policy_actor':policy['purpose_overrides']['plan']['actor_ref'],
+                              'chain':policy['purpose_overrides']['plan']['chain']})
+                return result
+            finally:fixture.doCleanups()
+        app.cockpit_plane=SimpleNamespace(select_model=select)
+        app.post_cockpit=MethodType(AgendaControlApplication.post_cockpit,app)
+        cookie=self.bootstrap();csrf,backend_cookie=self.manifest('legacy',cookie)
+        status,_,raw=self.request('/w/legacy/v2/data/admin/action',method='POST',cookies=cookie+'; '+backend_cookie,
+            data={'action':'model_select','reason':'保存隔离项目的模型顺序',
+                  'payload':{'purpose':'plan','mode':'explicit','chain':['profile:gpt-6-astra']}},
+            headers={'X-Dalton-CSRF':csrf})
+        self.assertEqual(status,200,raw)
+        self.assertEqual(shared_actor(SharedLogin('public')),json.loads(raw)['receipt']['actor_ref'])
+        self.assertEqual([{'actor':shared_actor(SharedLogin('public')),
+                          'policy_actor':shared_actor(SharedLogin('public')),'chain':['profile:gpt-6-astra']}],proof)
+
+    def test_admin_extension_refuses_foreign_typed_and_plain_shared_identity(self):
+        from dalton_core.cockpit_v2.admin.routes import _admitted,AdminRefusal
+        app=self.apps[0]
+        self.assertEqual(SharedLogin('public'),_admitted(app,SharedLogin('public')))
+        for login in (SharedLogin('foreign'),'shared-access:public'):
+            with self.assertRaises(AdminRefusal):_admitted(app,login)
+
     def test_funnel_stripped_prefix_static_admin_and_research_bytes(self):
         cookie=self.bootstrap();status,_,body=self.request('/w/legacy/',cookies=cookie);self.assertEqual(status,200);self.assertIn(b'/dalton/w/legacy/v2/static/shell.js',body);self.assertIn(b'dalton-base',body)
         status,_,body=self.request('/w/legacy/admin',cookies=cookie);self.assertEqual(status,200);self.assertIn(b'/dalton/w/legacy/v2/static/admin/admin.js',body)

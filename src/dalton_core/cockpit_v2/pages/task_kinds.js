@@ -36,6 +36,8 @@ export const KINDS = {
   data_foundation_stalled: {group: "material", entry: "material",
                             suggest: d => `补齐资料：${missingList(d) || "见说明"}。补传资料或调整检索方式目前由管理员处理。`},
   fetch_failure_capped: {group: "material", entry: "material", suggest: () => "确认这份资料是否仍需要；需要的话，请管理员更换来源或人工取回原文。"},
+  material_budget_exceeded: {group: "decision", entry: "material",
+                            suggest: d => `决定是否追加材料获取额度${d.approve_usd ? ` ${d.approve_usd} 美元` : ""}${d.approve_calls ? `（约 ${d.approve_calls} 次检索）` : ""}；也可以保留现有额度。`},
   source_not_connected: {group: "material", entry: "admin", suggest: () => "本项目需要的资料来源尚未连接，请管理员连接。"},
   earnings_release_unread: {group: "processing", entry: "company", suggest: () => "无需操作：申报数据入库后会自动补上。"},
   model_coverage_gap: {group: "processing", entry: "company", suggest: () => "查看模型缺少哪些条件；无需审批，模型发布后提醒自动消失。"},
@@ -71,7 +73,19 @@ export function foldTasks(items) {
   return items.filter(x => !(x.kind === "controlled_recovery" && !x.detail?.admission_ref && lanes.has(x.detail?.lane)));
 }
 
-/** What the 待我处理 badge counts: every item asking for an action. */
+/** Technical upkeep remains visible, but is never an analyst decision. */
+const BACKGROUND_ROLES = new Set(["administrator", "background", "optional_feedback"]);
+export function approvalRequired(it) {
+  return it.decision_required !== false && !BACKGROUND_ROLES.has(it.responsibility);
+}
+export function analystAction(it) {
+  if (it.actionable === false || !approvalRequired(it)) return false;
+  if (it.decision_required === true) return true;
+  const k = kindOf(it);
+  return k.group === "decision" || (k.group === "material" && k.entry !== "admin");
+}
+
+/** What the 待我处理 badge counts: actual analyst actions and approvals. */
 export function actionCount(items, approvals = []) {
-  return foldTasks(items || []).filter(x => x.actionable !== false && kindOf(x).group !== "processing").length + (approvals || []).filter(x => x.decision_required !== false).length;
+  return foldTasks(items || []).filter(analystAction).length + (approvals || []).filter(approvalRequired).length;
 }

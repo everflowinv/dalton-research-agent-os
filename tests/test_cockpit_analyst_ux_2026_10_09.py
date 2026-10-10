@@ -100,7 +100,7 @@ class TasksPageTests(unittest.TestCase):
         after = out["results"]["t:after"]
         self.assertIn("done", after["states"])                                # T06: the card says it is done
         self.assertIn("已处理：通过", after["text"])
-        self.assertIn("3 项需要处理", after["text"])                           # 4 -> 3: the count follows
+        self.assertIn("2 项需要处理", after["text"])                           # 3 -> 2 analyst actions; publication upkeep stays visible
 
     def test_light_actions_are_one_click_with_an_auto_reason(self):
         out = self.run_tasks([{"op": "click", "text": "已阅知悉"}],
@@ -126,7 +126,7 @@ class TasksPageTests(unittest.TestCase):
         after = out["results"]["t:after"]
         self.assertIn("rejected", after["states"])
         self.assertIn("没有完成", after["text"])
-        self.assertIn("4 项需要处理", after["text"])                           # the count did not move
+        self.assertIn("3 项需要处理", after["text"])                           # no analyst action completed; publication upkeep is not counted
 
     def test_abandon_confirms_and_the_doors_keep_a_required_reason(self):
         out = self.run_tasks([{"op": "click", "text": "忽略该缺失资料（采用现有数据推导）"}])

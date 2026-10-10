@@ -165,9 +165,15 @@ def require_human(actor_ref: Any) -> str:
 def _admitted(application: Any, login: Any) -> str:
     if not isinstance(login, str) or not login:
         raise AdminRefusal(HTTPStatus.FORBIDDEN, "forbidden", "没有登录身份，没有执行。")
+    from ...shared_access_identity import SharedLogin, is_shared_login
+    config = getattr(application, "config", None)
     allowed = getattr(application, "allowed_login", None)
-    if callable(allowed) and getattr(application, "config", None) is not None \
-            and allowed(login) is None:
+    if is_shared_login(login):
+        binding = getattr(config, "shared_gateway", None)
+        if (not isinstance(binding, Mapping) or not isinstance(binding.get("principal"), str)
+                or login != SharedLogin(binding["principal"])):
+            raise AdminRefusal(HTTPStatus.FORBIDDEN, "forbidden", "这个共享身份未获授权，没有执行。")
+    elif callable(allowed) and config is not None and allowed(login) is None:
         raise AdminRefusal(HTTPStatus.FORBIDDEN, "forbidden", "这个登录身份不在允许名单里，没有执行。")
     # 2026-10-09 (G02): the page is role-gated server-side, not only hidden.
     # ``admin_logins`` in the service config; absent = every allowed login.

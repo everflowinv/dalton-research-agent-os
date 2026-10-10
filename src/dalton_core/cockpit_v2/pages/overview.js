@@ -14,7 +14,7 @@
      marked 非当前, and the headline never reads a superseded version;
    - the administrator's failure ledger is not on this page (G02). */
 
-import {foldTasks, sortTasks, kindOf, GROUPS} from "./task_kinds.js";
+import {foldTasks, sortTasks, kindOf, GROUPS, analystAction} from "./task_kinds.js";
 import {V, OVERVIEW, NEEDS_HUMAN, companies, companyKey, companyName, compareRow,
         hasMission, isInternalRef, lead, load, periodSteps, refLabel, showText, tasksByCompany, thesisVersions} from "./common.js";
 import {cnDate} from "./company_common.js";
@@ -104,7 +104,7 @@ export function headline(ctx, overview, needs) {
     : latest ? `最近一次研判：${companyName(latest.company)}，${fmt.date(latest.at)}${reason && !ECHO.test(reason) ? `。依据：${reason}` : "。该次复核未调整判断。"}`
     : "尚无已完成的事件研判，暂不能判断近期经营变化对投资观点的影响。";
   const affected = [...new Set(importantChanges(overview, ctx).filter(x => x.group === "view").map(x => companyName(x.company)))];
-  const items = needs ? sortTasks(foldTasks(needs.items || []).filter(x => x.actionable !== false && kindOf(x).group !== "processing")) : [];
+  const items = needs ? sortTasks(foldTasks(needs.items || []).filter(analystAction)) : [];
   const catalysts = companies(overview).filter(c => c.catalyst?.expected_date).sort((a, b) => String(a.catalyst.expected_date).localeCompare(String(b.catalyst.expected_date)));
   const next = items.length ? `待审阅研究事项：共 ${items.length} 项重点决策待确认（首要：${say(items[0].title)}）`
     : catalysts.length ? `下一关键催化事件：${companyName(catalysts[0])} ${say(catalysts[0].catalyst.event_label || "下一事件")}，${fmt.date(catalysts[0].catalyst.expected_date)}${catalysts[0].catalyst.date_unconfirmed ? "（日期未确认）" : ""}`
@@ -244,7 +244,7 @@ async function render(root, ctx) {
   await ctx.slot("overview.header", headerSlot, {overview, needsHuman: nh.value}, el => {
     const list = companies(overview);
     const reports = list.reduce((n, c) => n + (c.feedback?.total ? 1 : 0), 0);
-    const actionable = nh.value ? sortTasks(foldTasks(nh.value.items || [])).filter(x => x.actionable !== false && kindOf(x).group !== "processing").length : null;
+    const actionable = nh.value ? sortTasks(foldTasks(nh.value.items || [])).filter(analystAction).length : null;
     el.append(h("div", {class: "v2-stats"}, [
       ["覆盖公司", `${list.length} 家`],
       [NAV.tasks, actionable == null ? "暂时读不到" : `${actionable} 项`],
@@ -285,7 +285,7 @@ function renderDecisions(root, ctx, nh) {
   if (nh.error) section.append(ui.state({tone: "danger", status: "待办暂时无法更新。", impact: "这里可能缺少新的待办。",
     owner: "系统会自动恢复。", next: `打开「${NAV.tasks}」查看上次结果。`, actions: [{label: `打开${NAV.tasks}`, href: href({page: "tasks"}), variant: "secondary"}]}));
   else {
-    const items = sortTasks(foldTasks(nh.value.items || []).filter(x => x.actionable !== false && kindOf(x).group !== "processing"));
+    const items = sortTasks(foldTasks(nh.value.items || []).filter(analystAction));
     const groupTitle = id => (GROUPS.find(g => g.id === id) || {}).title || "";
     if (!items.length) section.append(ui.empty(`${LABELS.shell.blocked_none}。`));
     else {
