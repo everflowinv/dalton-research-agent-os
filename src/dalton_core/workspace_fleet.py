@@ -78,6 +78,9 @@ def main(argv: Sequence[str] | None = None) -> int:
     parser.add_argument("--irreversible", action="store_true")
     parser.add_argument("--review-ack", action="store_true")
     args = parser.parse_args(argv)
+    if args.config is not None and args.login:
+        from .workspace_manager import _config, _cli_login
+        args.login = _cli_login(_config(args.config), args.login)
     if args.operation_json is not None:
         if args.config is None or not args.login:
             parser.error("--operation-json requires --config and --login")

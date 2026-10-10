@@ -599,7 +599,7 @@ class StaticChecks(unittest.TestCase):
         self.assertIn('role="banner"', html)
         self.assertIn('aria-label="主导航"', html)
         js = (V2 / "shell.js").read_text(encoding="utf-8")
-        self.assertIn('return "/admin" + (q ? "?" + q : "");', js)
+        self.assertIn('return (globalThis.DaltonPublicURL || (x => x))("/admin" + (q ? "?" + q : ""));', js)
         self.assertIn('pages.includes("/v2/admin")', js)              # an install that only has /v2/admin still links
 
     @unittest.skipIf(shutil.which("node") is None, "node is not installed")

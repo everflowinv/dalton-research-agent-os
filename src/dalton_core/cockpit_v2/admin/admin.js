@@ -30,7 +30,7 @@
       else if (k === "text") el.textContent = String(v);
       else if (k.startsWith("on") && typeof v === "function") el.addEventListener(k.slice(2), v);
       else if (k === "dataset") Object.assign(el.dataset, v);
-      else el.setAttribute(k, v === true ? "" : String(v));
+      else el.setAttribute(k, v === true ? "" : (["href", "src", "action"].includes(k) ? (globalThis.DaltonPublicURL || (x => x))(String(v)) : String(v)));
     }
     for (const c of children.flat(Infinity)) {
       if (c == null || c === false) continue;
@@ -457,7 +457,7 @@
     if (!back || window.DaltonV2) return;
     try {
       const r = await fetch("/v2/data/manifest", { headers: { Accept: "application/json" }, credentials: "same-origin" });
-      if (r.ok) { back.setAttribute("href", "/#/settings"); back.textContent = "← 返回研究设置"; }
+      if (r.ok) { back.setAttribute("href", (globalThis.DaltonPublicURL || (x => x))("/#/settings")); back.textContent = "← 返回研究设置"; }
     } catch (_e) { /* the old workbench stays the way back */ }
   }
   async function loadHeader() {

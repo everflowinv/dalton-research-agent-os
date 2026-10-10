@@ -24,6 +24,7 @@ from typing import Any, Mapping
 from urllib.parse import urlparse
 
 from .workspace import WorkspaceError, load_workspace_manifest
+from .shared_access_identity import is_shared_login, shared_actor, SharedLogin
 
 CONFIG_ENV = "DALTON_WORKSPACE_MANAGER_CONFIG"
 
@@ -55,7 +56,7 @@ def _config(path: Path) -> dict[str, Any]:
     optional = {"shared_readonly_paths", "shared_model_capacity_bindings", "shared_connector_capacity",
                 "legacy_workspace", "connections_path", "runtime_templates",
                 "shared_call_budget_policy_path", "shared_daily_budget_policy_path",
-                "allowed_tailscale_logins", "admin_logins", "daily_create_quota"}
+                "allowed_tailscale_logins", "admin_logins", "daily_create_quota", "shared_gateway"}
     if not isinstance(raw, dict) or not required <= raw.keys() or raw.keys() - required - optional:
         raise WorkspaceError("研究环境管理配置格式无效")
     for key in ("host_root", "release_path", "tailscale_executable", "launch_agents_dir"):
@@ -102,6 +103,8 @@ def _config(path: Path) -> dict[str, Any]:
                     or not isinstance(binding["sha256"], str)
                     or not re.fullmatch(r"[0-9a-f]{64}", binding["sha256"])):
                 raise WorkspaceError("研究运行模板绑定无效")
+    from .shared_gateway_auth import validate_config
+    validate_config(raw.get("shared_gateway"))
     return raw
 
 
@@ -109,7 +112,30 @@ def _admins(config: Mapping[str, Any]) -> set[str]:
     return {config["owner_login"], *config.get("admin_logins", [])}
 
 
+def _shared_authorized(config: Mapping[str, Any], login: str) -> bool:
+    binding = config.get("shared_gateway")
+    return (is_shared_login(login) and isinstance(binding, Mapping)
+            and str(login) == "shared-access:" + binding["principal"])
+
+
+def _cli_login(config: Mapping[str, Any], login: str) -> str:
+    # CLI already requires an operator-owned manager configuration. Preserve
+    # its explicit shared grant through the fixed manager child process.
+    binding = config.get("shared_gateway")
+    if login.startswith("shared-access:"):
+        if not isinstance(binding, Mapping) or login != "shared-access:" + binding["principal"]:
+            raise PermissionError("shared workspace principal is not authorized")
+        return SharedLogin(binding["principal"])
+    return login
+
+
+def _is_admin(config: Mapping[str, Any], login: str) -> bool:
+    return (_shared_authorized(config, login) or login in _admins(config))
+
+
 def _authorize(config: Mapping[str, Any], login: str) -> None:
+    if _shared_authorized(config, login):
+        return
     if login not in set(config.get("allowed_tailscale_logins", [config["owner_login"]])) | _admins(config):
         raise PermissionError("workspace login is not allowed")
 
@@ -179,9 +205,9 @@ def provision_runtime(config: Mapping[str, Any], manifest: Path, *, login: str,
     # Establish the base control shape before installing reusable authorities.
     # Its bootstrap may create the empty router and base principals; installing
     # model/runtime state afterwards makes those writes final and observable.
-    configure_workspace_control(manifest, owner_login=login,
+    configure_workspace_control(manifest, owner_login=(config["owner_login"] if is_shared_login(login) else login),
         tailscale_host=config["tailscale_host"], tailscale_executable=config["tailscale_executable"])
-    actor_ref = "human:tailscale-" + hashlib.sha256(login.encode()).hexdigest()[:32]
+    actor_ref = shared_actor(login) or "human:tailscale-" + hashlib.sha256(login.encode()).hexdigest()[:32]
     model = install_runtime_template(manifest, templates["model"])
     legacy_service_path = (config.get("legacy_workspace") or {}).get("config_path")
     runtime = install(manifest, actor_ref=actor_ref,
@@ -280,7 +306,7 @@ def set_shared_call_budget(config_path: Path, login: str, purpose: str,
                 "revision": current["revision"] + 1,
                 "prior_hash": current["content_hash"],
                 "updated_at": datetime.now(timezone.utc).isoformat(),
-                "actor_ref": "human:" + hashlib.sha256(login.encode()).hexdigest()[:32]}
+                "actor_ref": (shared_actor(login) or "human:" + hashlib.sha256(login.encode()).hexdigest()[:32])}
         policy = {**body, "content_hash": content_hash(body)}
         receipt_dir = Path(config["host_root"]) / "shared-call-budget-revisions"
         receipt_dir.mkdir(parents=True, exist_ok=True, mode=0o700)
@@ -370,18 +396,19 @@ def list_workspaces(config_path: Path | None, login: str, current_id: str | None
         items.append(row)
     for path in sorted((Path(config["host_root"]) / "creation-requests").glob("*.json")):
         record = json.loads(path.read_text())
-        if record.get("owner_login") == login or ("admin_logins" in config and login in _admins(config)):
-            if record.get("lifecycle") in {"archived", "deleted"} and login not in _admins(config):
+        if (record.get("owner_login") == login or is_shared_login(login)
+                or ("admin_logins" in config and _is_admin(config, login))):
+            if record.get("lifecycle") in {"archived", "deleted"} and not _is_admin(config, login):
                 continue
             row = _public(record, current_id)
             from .workspace_lifecycle import latest_operation
             row["lifecycle_operation"] = latest_operation(Path(config["host_root"]), record.get("slug", ""))
             if record.get("lifecycle") == "paused":
                 row["readonly_url"] = "/v1/cockpit/workspace_research?slug=" + record["slug"]
-            if login in _admins(config) and record.get("lifecycle") == "paused":
+            if _is_admin(config, login) and record.get("lifecycle") == "paused":
                 from .workspace_lifecycle import review_items
                 row["pending_review"] = review_items(Path(config["host_root"]) / "workspaces" / record["slug"])
-            elif login in _admins(config) and record.get("lifecycle") == "archived":
+            elif _is_admin(config, login) and record.get("lifecycle") == "archived":
                 from .workspace_lifecycle import archive_integrity
                 row["archive_integrity"] = archive_integrity(Path(config["host_root"]), record["slug"])
             items.append(row)
@@ -402,7 +429,7 @@ def list_workspaces(config_path: Path | None, login: str, current_id: str | None
     records = [json.loads(p.read_text()) for p in (Path(config["host_root"]) / "creation-requests").glob("*.json")]
     used, quota = _quota(config, login, records)
     return {"enabled": True, "can_create": used < quota, "quota": {"used": used, "limit": quota, "window": "UTC day"},
-            "is_admin": login in _admins(config),
+            "is_admin": _is_admin(config, login),
             "create_disabled_reason": "今天已达到项目创建配额" if used >= quota else None,
             "current_workspace_id": current_id or "legacy",
             "items": items, "isolation": "blank",
@@ -441,7 +468,7 @@ def rename_workspace(config_path: Path, login: str, value: Mapping[str, Any]) ->
         _write(display, {**body, "content_hash": _metadata_hash(body)})
 
     if slug == "legacy":
-        if login not in _admins(config):
+        if not _is_admin(config, login):
             raise PermissionError("primary workspace requires administrator")
         _rename_display(root / "legacy-display")
         return {"status": "renamed", "slug": slug, "name": name}
@@ -449,7 +476,7 @@ def rename_workspace(config_path: Path, login: str, value: Mapping[str, Any]) ->
     if not record_path.is_file():
         raise WorkspaceError("没有这个研究环境")
     record = json.loads(record_path.read_text(encoding="utf-8"))
-    if record.get("owner_login") != login and login not in _admins(config):
+    if record.get("owner_login") != login and not _is_admin(config, login):
         raise PermissionError("workspace owner mismatch")
     record["name"] = name
     _write(record_path, record)
@@ -640,7 +667,7 @@ def _initial_goal(workspace, goal: str, login: str) -> str:
     if draft["setup_state"] != "ready_for_confirmation":
         _save_creation_goal(workspace, goal, login, draft)
         return "review_required"
-    actor = "human:tailscale-" + hashlib.sha256(login.encode()).hexdigest()[:32]
+    actor = shared_actor(login) or "human:tailscale-" + hashlib.sha256(login.encode()).hexdigest()[:32]
     store = DaltonStore(str(workspace.state_dir / "core.sqlite"))
     try:
         publish_first_mission_to_store(store, workspace, proposal=draft,
@@ -771,11 +798,13 @@ def create_managed_workspace(config_path: Path, login: str, name: str, request_i
             if provision_runtime(config, manifest, login=login,
                                  manager_config_path=config_path.resolve()) is None:
                 configure_workspace_control(
-                    manifest, owner_login=login, tailscale_host=config["tailscale_host"],
+                    manifest, owner_login=(config["owner_login"] if is_shared_login(login) else login), tailscale_host=config["tailscale_host"],
                     tailscale_executable=config["tailscale_executable"])
             service = json.loads(workspace.config_path.read_text())
             control = service["control"]["config"]
-            control["allowed_tailscale_logins"] = sorted({login, *_admins(config)})
+            control["allowed_tailscale_logins"] = sorted({config["owner_login"] if is_shared_login(login) else login, *_admins(config)})
+            if config.get("shared_gateway") is not None:
+                control["shared_gateway"] = dict(config["shared_gateway"])
             if "admin_logins" in config:
                 control["admin_logins"] = sorted(_admins(config))
             service["control"]["config"]["cockpit"]["workspace_manager_config_path"] = str(
@@ -846,6 +875,7 @@ def main() -> int:
     parser.add_argument("--max-cost-usd", type=float)
     parser.add_argument("--expected-hash")
     args = parser.parse_args()
+    args.login = _cli_login(_config(args.config), args.login)
     if args.set_shared_purpose is not None:
         result = set_shared_call_budget(args.config, args.login, args.set_shared_purpose,
                                         args.max_cost_usd, args.expected_hash)

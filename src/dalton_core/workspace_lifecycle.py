@@ -246,7 +246,7 @@ def latest_operation(root: Path, slug: str) -> dict[str, Any] | None:
 
 
 def transition(config_path: Path, login: str, value: Mapping[str, Any], *, run=None, plan_only: bool = False) -> dict[str, Any]:
-    from .workspace_manager import _config, _write, _public, _authorize, _admins, _serve
+    from .workspace_manager import _config, _write, _public, _authorize, _admins, _is_admin, _serve
     from .workspace_process import _run_launchctl, install_workspace, label_namespace
     config = _config(config_path); _authorize(config, login)
     allowed = {'slug', 'action', 'request_id', 'reason', 'confirm_name', 'irreversible', 'review_ack'}
@@ -258,7 +258,7 @@ def transition(config_path: Path, login: str, value: Mapping[str, Any], *, run=N
     if not isinstance(reason, str) or not reason.strip() or len(reason) > 1000:
         raise WorkspaceError('请说明操作原因')
     root = Path(config['host_root']); record_path, record = _record(config, slug)
-    admin = login in _admins(config)
+    admin = _is_admin(config, login)
     if not admin and record.get('owner_login') != login:
         raise PermissionError('workspace creator or administrator required')
     if action == 'delete' and not admin:
@@ -443,10 +443,10 @@ def request_transition(config_path: Path, login: str, value: Mapping[str, Any]) 
 
 
 def readonly_research(config_path: Path, login: str, slug: str) -> dict[str, Any]:
-    from .workspace_manager import _config, _authorize, _admins
+    from .workspace_manager import _config, _authorize, _admins, _is_admin
     config = _config(config_path); _authorize(config, login)
     _, record = _record(config, slug)
-    if login not in _admins(config) and record.get('owner_login') != login:
+    if not _is_admin(config, login) and record.get('owner_login') != login:
         raise PermissionError('workspace access denied')
     workspace = load_workspace_manifest(Path(config['host_root']) / 'workspaces' / slug / 'workspace.json')
     if workspace.lifecycle != 'paused':

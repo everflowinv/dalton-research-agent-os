@@ -2929,6 +2929,9 @@ class NaturalLanguageComposerPlane:
 
     @staticmethod
     def _actor(login: str) -> str:
+        from .shared_access_identity import shared_actor
+        if shared_actor(login) is not None:
+            return shared_actor(login)
         digest = hashlib.sha256(login.encode("utf-8")).hexdigest()[:32]
         return f"human:tailscale-{digest}"
 

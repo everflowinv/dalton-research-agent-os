@@ -10706,6 +10706,9 @@ def _with_sync_note(reload_note: Any, sync: Mapping[str, Any]) -> str:
 
 
 def _subject_for_login(login: str) -> str:
+    from .shared_access_identity import shared_actor
+    if shared_actor(login) is not None:
+        return shared_actor(login)
     import hashlib
     return "human:tailscale-" + hashlib.sha256(login.encode("utf-8")).hexdigest()[:32]
 

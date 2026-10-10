@@ -172,6 +172,7 @@ class AgendaControlConfig:
     # /admin, /v2/admin, /v2/data/admin/* and the administrator-only cockpit
     # writes, and the analyst shell's manifest does not list the page.
     admin_logins: tuple[str, ...] | None = None
+    shared_gateway: Mapping[str, Any] | None = None
 
     @property
     def public_url(self) -> str:
@@ -184,7 +185,7 @@ class AgendaControlConfig:
             "writer_socket", "token_config", "endpoint_ref",
             "feedback_timeout_seconds", "sweep_interval_seconds",
         }
-        optional = {"research_review", "intent_composer", "cockpit", "admin_logins"}
+        optional = {"research_review", "intent_composer", "cockpit", "admin_logins", "shared_gateway"}
         if set(raw) - expected - optional or not expected.issubset(raw):
             raise AgendaControlError("Agenda control config has an invalid closed shape")
         host = _string(raw["host"], "host")
@@ -238,6 +239,11 @@ class AgendaControlConfig:
                 cockpit_config = CockpitConfig.from_mapping(cockpit_raw)
             except CockpitError as exc:
                 raise AgendaControlError("embedded cockpit config is invalid") from exc
+        from .shared_gateway_auth import validate_config
+        try:
+            shared_gateway = validate_config(raw.get("shared_gateway"))
+        except (ValueError, TypeError) as exc:
+            raise AgendaControlError("shared gateway config invalid") from exc
         return cls(
             host=host,
             port=_positive_int(raw["port"], "port", 65535),
@@ -257,6 +263,7 @@ class AgendaControlConfig:
             intent_composer=intent_config,
             cockpit=cockpit_config,
             admin_logins=None if admin_logins is None else tuple(admin_logins),
+            shared_gateway=shared_gateway,
         )
 
     @classmethod
@@ -281,6 +288,9 @@ class AgendaControlConfig:
 
 
 def _subject_for_login(login: str) -> str:
+    from .shared_access_identity import shared_actor
+    if shared_actor(login) is not None:
+        return shared_actor(login)
     digest = hashlib.sha256(login.encode("utf-8")).hexdigest()[:32]
     return f"human:tailscale-{digest}"
 
@@ -750,13 +760,16 @@ class AgendaControlApplication:
             self.session_cookie_name = f"dalton_session_{namespace}"
 
     def allowed_login(self, value: str | None) -> str | None:
-        if not isinstance(value, str) or value not in self.config.allowed_tailscale_logins:
+        if not isinstance(value, str) or value.startswith("shared-access:") or value not in self.config.allowed_tailscale_logins:
             return None
         return value
 
     def is_admin_login(self, login: str | None) -> bool:
         """May ``login`` open 管理员设置?  Default: every allowed login."""
 
+        from .shared_access_identity import is_shared_login
+        if is_shared_login(login):
+            return True
         config = self.config
         if config is None:  # narrow unit composition: no HTTP surface, no roles
             return True
@@ -770,17 +783,20 @@ class AgendaControlApplication:
             raise AdminRoleRequired("管理员设置只对管理员开放；请联系管理员处理。")
 
     def session(self, login: str, cookie_header: str | None) -> tuple[str, _Session, bool]:
+        from .shared_access_identity import is_shared_login
+        shared = is_shared_login(login)
+        cookie_name = self.session_cookie_name + ("_shared" if shared else "")
         session_id = None
         if cookie_header:
             cookie = SimpleCookie()
             try:
                 cookie.load(cookie_header)
-                held = cookie.get(self.session_cookie_name)
+                held = cookie.get(cookie_name)
                 # A legacy cookie can only resume a session already held by
                 # this process. New sessions always receive the namespaced
                 # cookie, so two workspaces on one hostname cannot overwrite
                 # each other merely because their ports differ.
-                if held is None:
+                if held is None and not shared:
                     held = cookie.get("dalton_session")
                 session_id = held.value if held else None
             except Exception:
@@ -1241,6 +1257,12 @@ def _handler(application: AgendaControlApplication) -> type[BaseHTTPRequestHandl
         server_version = "DaltonCockpit/0.4"
 
         def _identity(self) -> str | None:
+            from .shared_gateway_auth import authenticate
+            shared = authenticate(getattr(application.config, "shared_gateway", None), self.headers, self.client_address[0])
+            if shared is not None:
+                self.shared_prefix = self.headers["X-Dalton-Public-Prefix"]
+                return shared
+            self.shared_prefix = ""
             return application.allowed_login(self.headers.get("Tailscale-User-Login"))
 
         def _host_ok(self) -> bool:
@@ -1256,6 +1278,10 @@ def _handler(application: AgendaControlApplication) -> type[BaseHTTPRequestHandl
         def _send(
             self, status: int, content_type: str, body: bytes, *, session_cookie: str | None = None
         ) -> None:
+            if (getattr(self, "shared_prefix", "") and content_type.startswith("text/html")
+                    and urlparse(self.path).path in {"/", "/v2", "/v2/", "/admin", "/admin/", "/legacy", "/legacy/review", *v2_router.pages}):
+                from .shared_public_urls import html_urls
+                body = html_urls(body, self.shared_prefix)
             self.send_response(status)
             self.send_header("Content-Type", content_type)
             self.send_header("Content-Length", str(len(body)))
@@ -1272,8 +1298,8 @@ def _handler(application: AgendaControlApplication) -> type[BaseHTTPRequestHandl
             if session_cookie is not None:
                 self.send_header(
                     "Set-Cookie",
-                    f"{application.session_cookie_name}={session_cookie}; "
-                    "Path=/; Secure; HttpOnly; SameSite=Strict",
+                    f"{application.session_cookie_name}{'_shared' if getattr(self, 'shared_prefix', '') else ''}={session_cookie}; "
+                    f"Path={getattr(self, 'shared_prefix', '') or '/'}; Secure; HttpOnly; SameSite=Strict",
                 )
             try:
                 self.end_headers()
@@ -1453,6 +1479,9 @@ def _handler(application: AgendaControlApplication) -> type[BaseHTTPRequestHandl
             if context is None:
                 return
             login, session_id, session, created = context
+            if getattr(self, "shared_prefix", "") and self.headers.get("Origin") != application.config.shared_gateway["public_origin"]:
+                self._send(HTTPStatus.FORBIDDEN, "application/json", b'{"error":"origin"}')
+                return
             path = urlparse(self.path).path
             if is_admin_path(path) and not application.is_admin_login(login):
                 self._send_admin_only()

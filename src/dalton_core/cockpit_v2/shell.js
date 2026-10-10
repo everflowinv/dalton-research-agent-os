@@ -488,7 +488,7 @@ export function makeDom(doc) {
       else if (k === "hidden") el.hidden = true;
       else if (k === "value") el.value = v;
       else if (k === "disabled") el.disabled = true;
-      else el.setAttribute(k, v === true ? "" : String(v));
+      else el.setAttribute(k, v === true ? "" : (["href", "src", "action"].includes(k) ? (globalThis.DaltonPublicURL || (x => x))(String(v)) : String(v)));
     }
     append(el, children);
     return el;
@@ -968,7 +968,7 @@ function boot() {
     const pages = manifest.pages || [];
     if (!pages.includes("/admin") && !pages.includes("/v2/admin")) return null;
     const q = new URLSearchParams(Object.entries(params).filter(([, v]) => v != null && v !== "")).toString();
-    return "/admin" + (q ? "?" + q : "");
+    return (globalThis.DaltonPublicURL || (x => x))("/admin" + (q ? "?" + q : ""));
   }
 
   function setBadge(pageId, count) {
@@ -1172,7 +1172,7 @@ function boot() {
     for (const href of manifest.styles || []) doc.head.append(h("link", {rel: "stylesheet", href}));
     const urls = [...(manifest.shell_modules || []), ...(manifest.modules || [])];
     for (const url of urls) {
-      try { await import(url); } catch (e) { console.warn(`v2 module ${url} failed to load`, e); }
+      try { await import((globalThis.DaltonPublicURL || (x => x))(url)); } catch (e) { console.warn(`v2 module ${url} failed to load`, e); }
     }
     booted = true;
     if (!location.hash || location.hash === "#" || location.hash === "#/") history.replaceState(null, "", "#/overview");
