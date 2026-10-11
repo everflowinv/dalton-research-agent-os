@@ -266,6 +266,34 @@ def driver_execution(body: Mapping[str, Any], spec: Mapping[str, Any]) -> tuple[
             "publication_blockers": [r["reason"] for r in rows if r["status"] != "executed"]}, overrides
 
 
+def _income_depreciation_policy(body: Mapping[str, Any]) -> Mapping[str, Any] | None:
+    policy = (body.get("financial_statement_structure") or {}).get("income_depreciation_forecast_policy")
+    if policy is None:
+        return None
+    from .forecast_coverage import INCOME_DEPRECIATION_POLICY_REF, INCOME_DEPRECIATION_METHODS, COVERAGE_CONCEPTS, MIN_HISTORY_QUARTERS
+    from .model_forecast_driver import ForecastModelValidationError
+    base = {k:v for k,v in policy.items() if k!="content_hash"}
+    if (policy.get("contract_ref") != INCOME_DEPRECIATION_POLICY_REF
+            or policy.get("content_hash") != content_hash(base)):
+        raise ForecastModelValidationError("income depreciation policy hash/contract differs")
+    seen = set()
+    for held in policy.get("lines", []):
+        driver = next((d for d in body["drivers"] if d.get("structure_line_ref") == held["line_ref"]), None)
+        if (held["line_ref"] in seen or driver is None or driver.get("statement") != "income"
+                or driver.get("concept") != held["concept"]
+                or held["concept"] not in COVERAGE_CONCEPTS["depreciation_amortization"]
+                or held["method"] not in INCOME_DEPRECIATION_METHODS
+                or driver.get("forecast_method") != held["method"]
+                or driver.get("forecast_base_ref") != held["forecast_base_ref"]
+                or len(_history(driver)) < MIN_HISTORY_QUARTERS
+                or content_hash({end:str(value) for end,value in _history(driver).items()}) != held["source_history_hash"]):
+            raise ForecastModelValidationError("income depreciation policy differs from filed driver history")
+        seen.add(held["line_ref"])
+    if not seen:
+        raise ForecastModelValidationError("income depreciation policy contains no exact income line")
+    return policy
+
+
 def financial_mechanisms(body: Mapping[str, Any]) -> tuple[dict[str, Any], list[dict[str, Any]]]:
     from .forecast_coverage import COVERAGE_CONCEPTS
     from .model_forecast_driver import _assumption, _cell_ref, _structure_result_refs
@@ -280,6 +308,7 @@ def financial_mechanisms(body: Mapping[str, Any]) -> tuple[dict[str, Any], list[
     da = [d for d in drivers if d.get("concept") in COVERAGE_CONCEPTS["depreciation_amortization"]]
     primary_da = next((d for d in da if d.get("role") == "depreciation_amortization"), da[0] if da else None)
     closing_assets = {}
+    income_da_policy = _income_depreciation_policy(body)
     def amount(driver, period, value, because, refs):
         out.append(_assumption(driver_ref=driver["ref"], period=period, measure="mechanism_amount",
             value=value, unit=driver.get("unit") or "usd", because=because, refs=refs,
@@ -287,6 +316,19 @@ def financial_mechanisms(body: Mapping[str, Any]) -> tuple[dict[str, Any], list[
     with localcontext() as ctx:
         ctx.prec = 60
         for driver in da:
+            policy = income_da_policy
+            if policy is not None:
+                from .forecast_coverage import INCOME_DEPRECIATION_POLICY_REF
+                held = next((x for x in policy["lines"] if x["line_ref"] == driver.get("structure_line_ref")), None)
+                if (policy.get("contract_ref") == INCOME_DEPRECIATION_POLICY_REF and held is not None
+                        and driver.get("statement") == "income" and driver.get("forecast_method") == held["method"]):
+                    projected = _live(body["results"], result_refs.get(driver.get("structure_line_ref"), ""))
+                    ready = set(p["end"] for p in periods) <= set(projected)
+                    reports.append({"line_ref":driver.get("structure_line_ref"), "method":held["method"],
+                        "status":"computed" if ready else "unavailable",
+                        "reason":None if ready else "利润表折旧的明确预测假设缺少可执行历史或收入基底",
+                        "periods":[], "policy_hash":policy["content_hash"]})
+                    continue
             common = set(_history(driver))
             for asset in assets: common &= set(_history(asset))
             common = sorted(common)[-4:]
@@ -453,7 +495,11 @@ def validate_execution_contract(record: Mapping[str, Any], *, publishing: bool =
             raise ForecastModelValidationError("financial forecast results do not replay")
         for driver in record["drivers"]:
             from .forecast_coverage import COVERAGE_CONCEPTS
-            if driver.get("concept") in COVERAGE_CONCEPTS["depreciation_amortization"] and driver.get("forecast_method") != "roll_forward" and not (driver.get("forecast_method") == "unavailable" and any(r["line_ref"] == driver.get("structure_line_ref") and r["status"] == "unavailable" for r in mechanisms["lines"])):
+            policy = _income_depreciation_policy(record)
+            income_policy = policy is not None and driver.get("statement") == "income" and any(
+                x["line_ref"] == driver.get("structure_line_ref") and x["concept"] == driver.get("concept")
+                and x["method"] == driver.get("forecast_method") for x in policy.get("lines", []))
+            if driver.get("concept") in COVERAGE_CONCEPTS["depreciation_amortization"] and driver.get("forecast_method") != "roll_forward" and not income_policy and not (driver.get("forecast_method") == "unavailable" and any(r["line_ref"] == driver.get("structure_line_ref") and r["status"] == "unavailable" for r in mechanisms["lines"])):
                 raise ForecastModelValidationError("depreciation requires asset roll_forward")
             if driver.get("role") == "interest_expense" and driver.get("forecast_method") != "rate_times_balance" and not (driver.get("forecast_method") == "unavailable" and any(r["line_ref"] == driver.get("structure_line_ref") and r["status"] == "unavailable" for r in mechanisms["lines"])):
                 raise ForecastModelValidationError("interest requires debt balance × rate")

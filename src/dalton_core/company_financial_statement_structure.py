@@ -1961,6 +1961,11 @@ def validate_financial_statement_structure(
         if not is_coverage_structure(proposal.get("schema_version")):
             raise FinancialStatementStructureError("historical composition requires coverage structure")
         fields |= {"historical_income_composition"}
+    income_da_policy = proposal.get("income_depreciation_forecast_policy") if isinstance(proposal, Mapping) else None
+    if income_da_policy is not None:
+        if not is_coverage_structure(proposal.get("schema_version")):
+            raise FinancialStatementStructureError("income depreciation policy requires coverage structure")
+        fields |= {"income_depreciation_forecast_policy"}
     body = _closed(proposal, fields, "financial statement structure")
     authority = financial_input_authority(financial_inputs)
     spec_authority = _spec_authority(company_spec)
@@ -2082,6 +2087,16 @@ def validate_financial_statement_structure(
         if content_hash(original_formula) != composition["formula_hash"]:
             raise FinancialStatementStructureError("composition formula differs from drafted ordinary formula")
         normalized["historical_income_composition"] = checked_composition
+    if income_da_policy is not None:
+        from .forecast_coverage import income_depreciation_policy
+        expected = income_depreciation_policy(company_spec, financial_inputs)
+        if income_da_policy != expected:
+            raise FinancialStatementStructureError("income depreciation policy differs from exact declaration/history")
+        for item in income_da_policy["lines"]:
+            line = by_ref.get(item["line_ref"])
+            if line is None or (line["forecast_method"], line["forecast_base_ref"]) != (item["method"], item["forecast_base_ref"]):
+                raise FinancialStatementStructureError("income depreciation method differs from frozen policy")
+        normalized["income_depreciation_forecast_policy"] = income_da_policy
     normalized["content_hash"] = content_hash(normalized)
     replay = replay_historical_structure(normalized, financial_inputs)
     return normalized, replay
@@ -2180,6 +2195,8 @@ def _materialize_definition(
     if completed is not None:
         proposal["auto_repairs"] = completed["auto_repairs"]
         proposal["coverage"] = completed["coverage"]
+        if "income_depreciation_forecast_policy" in completed:
+            proposal["income_depreciation_forecast_policy"] = completed["income_depreciation_forecast_policy"]
     composition = financial_inputs.get("historical_income_composition")
     if composition is not None:
         proposal["historical_income_composition"] = composition

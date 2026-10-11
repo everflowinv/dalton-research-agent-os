@@ -44,6 +44,8 @@ PROPOSAL_METHOD_COMPLETION_REF = "rule:forecast-proposal-method-completion:0.2"
 COVERAGE_SCHEMA_VERSION = "0.6"
 UPGRADEABLE_STRUCTURE_VERSIONS = frozenset({"0.3", "0.4", "0.5", "0.6"})
 MIN_HISTORY_QUARTERS = 8
+INCOME_DEPRECIATION_POLICY_REF = "filed-income-depreciation-method:0.1"
+INCOME_DEPRECIATION_METHODS = frozenset({"share_of_line", "carry_forward_mean"})
 # Share counts and per-share figures are not additive, so a fiscal fourth
 # quarter is never filed as a quarter: two years of history is six quarters.
 MIN_NON_ADDITIVE_QUARTERS = 6
@@ -425,10 +427,61 @@ def _sign_options(terms: Sequence[tuple[str, int, bool]]) -> list[list[tuple[str
     return options[:64]
 
 
+
+def income_depreciation_policy(spec: Mapping[str, Any], inputs: Mapping[str, Any]) -> dict[str, Any] | None:
+    """Bind a drafter's explicit income D&A assumption, never a cash fallback."""
+    from .store import content_hash
+    definition = spec.get("financial_statement_structure") or {}
+    if definition.get("schema_version") != COVERAGE_SCHEMA_VERSION:
+        return None
+    filed = _filed_index(inputs)
+    capex_method = next((x.get("forecast_method") for x in (spec.get("cash_flow_companion") or {}).get("lines", [])
+                         if x.get("role") == "capital_expenditure"), None)
+    asset_sources = [filed[c] for role in ("depreciable_assets", "amortizable_assets")
+                     for c in COVERAGE_CONCEPTS[role] if c in filed]
+    capex_history = next((x.get("series", {}).get("quarters", []) for x in inputs.get("cash_flow_inputs", [])
+                          if x.get("role") == "capital_expenditure" and x.get("status") == "filed"), [])
+    # A mature asset roll with an explicit capex assumption stays unchanged.
+    # Only an unexecutable roll may retain the already-declared income method.
+    bindings = []
+    for line in definition.get("lines") or []:
+        if (line.get("statement") != "income" or line.get("kind") != "filed"
+                or line.get("concept") not in COVERAGE_CONCEPTS["depreciation_amortization"]
+                or line.get("forecast_method") not in INCOME_DEPRECIATION_METHODS):
+            continue
+        if _history_count(line, filed) < MIN_HISTORY_QUARTERS:
+            continue
+        source = filed.get(line["concept"])
+        common = set(filed_values(source)) if source is not None else set()
+        for asset in asset_sources:
+            common &= set(filed_values(asset))
+        if capex_method == "share_of_line" and len(capex_history) >= 4 and asset_sources and len(common) >= 4 and all(
+                sum((filed_values(asset)[end] for asset in asset_sources), Decimal(0)) > 0 for end in common):
+            continue
+        if source is None or source.get("statement") != "income":
+            continue
+        if line["forecast_method"] == "share_of_line":
+            base = next((x for x in definition.get("lines") or [] if x["ref"] == line.get("forecast_base_ref")), None)
+            if base is None or base.get("role") != "revenue" or base.get("kind") != "filed":
+                continue
+            revenue = filed.get(base.get("concept"))
+            amounts = filed_values(source);bases = filed_values(revenue) if revenue else {}
+            if len(set(amounts) & set(bases)) < MIN_HISTORY_QUARTERS or any(v <= 0 for v in bases.values()):
+                continue
+        bindings.append({"line_ref":line["ref"],"concept":line["concept"],
+            "method":line["forecast_method"],"forecast_base_ref":line.get("forecast_base_ref"),
+            "source_history_hash":content_hash({end:str(value) for end,value in filed_values(source).items()}),
+            "assumption":"保留模型明确选择的利润表折旧预测方法；这是预测假设，不是现金流资产滚动事实。"})
+    if not bindings:
+        return None
+    body={"contract_ref":INCOME_DEPRECIATION_POLICY_REF,"lines":bindings}
+    return {**body,"content_hash":content_hash(body)}
+
 class _Completion:
     def __init__(self, definition: Mapping[str, Any], spec: Mapping[str, Any],
                  inputs: Mapping[str, Any]):
         self.definition = copy.deepcopy(dict(definition))
+        self.income_depreciation_policy = income_depreciation_policy(spec, inputs)
         self.spec = spec
         self.filed = _filed_index(inputs)
         self.lines: dict[str, dict[str, Any]] = {
@@ -867,6 +920,12 @@ class _Completion:
                 self.reasons[ref] = ("利息按当期债务余额×历史季度利率预测" if debt else "缺少已申报债务余额，利息不可预测；禁止环比或均值替代")
                 continue
             if concept in COVERAGE_CONCEPTS["depreciation_amortization"]:
+                policy = self.income_depreciation_policy or {}
+                if any(item["line_ref"] == ref for item in policy.get("lines", [])) and self._valid(ref, drafted):
+                    self.reasons[ref] = "保留模型明确选择的利润表折旧预测方法，按完整申报历史核验；不将现金流资产滚动要求覆盖此假设。"
+                    self.repairs.append({"kind":"income_depreciation_method", "line_ref":ref,
+                        "detail":self.reasons[ref], "tie_out_concept":None})
+                    continue
                 assets = (self.by_role("depreciable_assets") or [None])[0]
                 self._set(ref, "roll_forward" if assets else "unavailable", assets)
                 self.reasons[ref] = ("折旧与摊销由资产期初余额＋资本开支−折旧的滚动表计算" if assets else "缺少可折旧资产基底，折旧不可预测；禁止收入占比或环比替代")
@@ -1104,6 +1163,8 @@ class _Completion:
                if "note_evidence" in self.definition else {}),
             "auto_repairs": self.repairs,
             "coverage": self.coverage(),
+            **({"income_depreciation_forecast_policy": self.income_depreciation_policy}
+               if self.income_depreciation_policy is not None else {}),
         }
 
 

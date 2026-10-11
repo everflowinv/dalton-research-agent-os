@@ -870,7 +870,7 @@ def model_spec_validation_contract() -> dict[str, str]:
         CASH_LEAF_DURATION_UNIT_VALIDATION_REF,
         NET_INCOME_SOURCE_CARRY_VALIDATION_REF, STRUCTURE_AUTHORITY_REF,
     )
-    from .forecast_coverage import PROPOSAL_METHOD_COMPLETION_REF
+    from .forecast_coverage import PROPOSAL_METHOD_COMPLETION_REF, INCOME_DEPRECIATION_POLICY_REF
     from .filed_period_composition import CONTRACT_REF as FILED_PERIOD_COMPOSITION_REF
     from .sec_filing_units import DOCUMENT_SET_RULE_REF
     from .company_model_series import DUPLICATE_FACT_POLICY_REF
@@ -884,6 +884,7 @@ def model_spec_validation_contract() -> dict[str, str]:
         "cash_flow_companion": CASH_FLOW_COMPANION_VALIDATION_CONTRACT_HASH,
         "financial_statement_structure": STRUCTURE_AUTHORITY_REF,
         "filed_period_income_composition": FILED_PERIOD_COMPOSITION_REF,
+        "income_depreciation_forecast_policy": INCOME_DEPRECIATION_POLICY_REF,
         "net_income_source_carry": NET_INCOME_SOURCE_CARRY_VALIDATION_REF,
         "cash_leaf_duration_unit": CASH_LEAF_DURATION_UNIT_VALIDATION_REF,
         "exact_filing_unit_document_set": DOCUMENT_SET_RULE_REF,
