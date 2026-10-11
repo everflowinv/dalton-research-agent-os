@@ -1797,7 +1797,7 @@ class DocumentExtractionService:
                 "document_age_days": None, "document_stale": False}
 
     def context(self, review_id, expected_review_hash, offset, actor_ref,
-                require_open=True, allow_superseded=False):
+                require_open=True, allow_superseded=False, replay_builder=None):
         base = self._source_context(review_id, expected_review_hash, offset, actor_ref,
                                     require_open=require_open,
                                     allow_superseded=allow_superseded)
@@ -1813,11 +1813,22 @@ class DocumentExtractionService:
             with ModelRouter(config["model_router_db"], read_only=True) as router, ThesisImpactBudgetStore(config["budget_db"], read_only=True) as budget:
                 policy = self.model_policy(router, config["routing_policy_ref"])
                 cap = budget.policy(config["budget_policy_ref"])
-            base["model_binding"] = {"config_hash": content_hash(config),
+            from .extraction_execution_identity import execution_config_binding
+            base["model_binding"] = {**execution_config_binding(config),
                 "routing_policy_ref": config["routing_policy_ref"], "routing_policy_hash": content_hash(policy),
                 "budget_policy_ref": config["budget_policy_ref"], "budget_policy_hash": cap["content_hash"],
                 "outer_budget": self.outer_budget(base["mission_version_ref"])}
-        return _record({"id": "document-extraction-context:" + content_hash(base)[:32], **base})
+        current = _record({"id": "document-extraction-context:" + content_hash(base)[:32], **base})
+        if config is not None:
+            from .extraction_execution_identity import reusable_legacy_context
+            try:
+                historical = reusable_legacy_context(
+                    current, config, self.writer._scheduler, replay_builder or build_work)
+            except ValueError as exc:
+                raise ResearchVerificationConflict(str(exc)) from exc
+            if historical is not None:
+                return historical
+        return current
 
     def source_context(self, review_id, expected_review_hash, offset, actor_ref,
                        require_open=True, allow_superseded=False):
@@ -1900,7 +1911,7 @@ class DocumentExtractionService:
                 "max_daily_paid_calls": min(c["max_daily_paid_calls"] for c in caps),
                 "max_daily_cost_micros": int(min(Decimal(str(c["max_daily_cost_usd"])) for c in caps) * 1000000)}
 
-    def reread(self, context, actor_ref):
+    def reread(self, context, actor_ref, *, replay_builder=None):
         """Re-derive a context to prove it has not drifted.
 
         The queue rule is not applied again here.  It belongs to the operation
@@ -1916,7 +1927,24 @@ class DocumentExtractionService:
         # built under its own version still is (the grant resolves to it), and
         # any other change shows up as drift, as before.
         return self.context(context["review_id"], context["review_hash"], context["offset"],
-                            actor_ref, require_open=False, allow_superseded=True)
+                            actor_ref, require_open=False, allow_superseded=True,
+                            replay_builder=replay_builder)
+
+    def _task_context(self, context, config, builder):
+        """Find only this task's exact legacy Work, never another pass's Work."""
+        if config is None:
+            return context
+        from .extraction_execution_identity import (
+            CONTRACT_REF, current_context, execution_config_binding, reusable_legacy_context)
+        if execution_config_binding(config).get("config_hash_contract_ref") != CONTRACT_REF:
+            return context  # Unshared and old-schema hosts retain their old path.
+        current = current_context(context, config)
+        try:
+            historical = reusable_legacy_context(
+                current, config, self.writer._scheduler, builder)
+        except ValueError as exc:
+            raise ResearchVerificationConflict(str(exc)) from exc
+        return historical or current
 
     def _suggestions(self, context):
         work = build_work(context, model_config=getattr(self.writer, "_document_extraction_model_config", None))
@@ -2392,6 +2420,9 @@ class DocumentExtractionService:
         factory = self.writer._document_extraction_worker_factory
         if factory is None and config is None:
             return {"status": "gated", "reason": GATE_REASON, "formal_authority_writes": 0}
+        context = self._task_context(context, config,
+            lambda current, model_config: build_numeric_work(
+                current, slots, model_config=model_config))
         quotes = {item["quote_id"]: item["raw_text"] for item in context["quotes"]}
         work = build_numeric_work(
             context, slots,
@@ -2459,6 +2490,7 @@ class DocumentExtractionService:
         factory = self.writer._document_extraction_worker_factory
         if factory is None and config is None:
             return {"status": "gated", "reason": GATE_REASON, "formal_authority_writes": 0}
+        context = self._task_context(context, config, build_discovery_work)
         work = build_discovery_work(
             context, model_config=getattr(self.writer, "_document_extraction_model_config", None),
         )
@@ -2581,6 +2613,22 @@ class DocumentExtractionService:
         from .openclaw_model_adapter import OpenClawModelAdapter
         from .thesis_impact_budget import ThesisImpactBudgetStore
         config = self.writer._document_extraction_model_config
+        # The CLI freezes this config for the batch. A Work's own purpose budget
+        # must still match that frozen authority before any new broker send.
+        rebuilt = DocumentExtractionModelWorker._rebuild(work, context)
+        from .document_numeric_extraction import TASK_REF as NUMERIC_TASK_REF, build_work as numeric_work
+        from .metric_discovery_extraction import TASK_REF as DISCOVERY_TASK_REF, build_work as discovery_work
+        task = work.metadata.get("task_ref")
+        if task == NUMERIC_TASK_REF:
+            authorized = numeric_work(context, work.metadata.get("requests") or (), model_config=config)
+        elif task == DISCOVERY_TASK_REF:
+            authorized = discovery_work(context, model_config=config)
+        elif task == TASK_REF:
+            authorized = build_work(context, model_config=config)
+        else:
+            raise ResearchVerificationConflict("unsupported extraction task contract")
+        if rebuilt.to_dict() != work.to_dict() or authorized.to_dict() != work.to_dict():
+            raise ResearchVerificationConflict("extraction Work differs from frozen task configuration")
         requested_lease = extraction_scheduler_policy(config)["max_lease_seconds"]
         # Test/embedded hosts may inject model config after constructing their
         # Scheduler. They retain its short default lease; installed services
@@ -2604,7 +2652,8 @@ class DocumentExtractionService:
                 max_frame_bytes=resolve_broker_max_frame_bytes(config))
             worker = DocumentExtractionModelWorker(scheduler=self.writer._scheduler, router=router, adapter=adapter,
                 store=self.writer.store, observability=self.writer.observability,
-                context_resolver=lambda c: self.reread(c, actor_ref),
+                context_resolver=lambda c: self.reread(c, actor_ref,
+                    replay_builder=lambda current, model_config: DocumentExtractionModelWorker._rebuild(work, current)),
                 mission_resolver=lambda c: self.writer.coverage_mission.mission(c["mission_version_ref"]),
                 budget_store=budget, budget_policy_ref=config["budget_policy_ref"],
                 routing_policy_ref=config["routing_policy_ref"], credential_slot_refs=config["credential_slot_refs"],
