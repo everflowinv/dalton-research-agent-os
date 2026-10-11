@@ -185,7 +185,7 @@ class CashFlowBaseRepairTests(unittest.TestCase):
 
     def test_contract_binds_exact_scoped_repair_and_net_income_source_carry(self):
         from dalton_core.company_financial_statement_structure import NET_INCOME_SOURCE_CARRY_VALIDATION_REF
-        self.assertEqual(cli.REPAIR_CONTRACT_REF,'contract:company-model-spec-structured-output-repair:0.9')
+        self.assertEqual(cli.REPAIR_CONTRACT_REF,'contract:company-model-spec-structured-output-repair:0.10')
         self.assertEqual(cli.model_spec_validation_contract()['net_income_source_carry'],NET_INCOME_SOURCE_CARRY_VALIDATION_REF)
         self.assertEqual(cli.REPAIR_CONTRACT['cash_flow_operating_base_shape']['allowed_fields'],
             ['forecast_method','forecast_base_ref','because'])

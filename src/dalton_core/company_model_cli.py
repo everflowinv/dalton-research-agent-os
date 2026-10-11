@@ -91,7 +91,12 @@ from .model_spec_signed_expense_repair import (
     assert_only_coefficient_changed, validate_coefficient_parent, validate_financials_for_repair,
 )
 
-REPAIR_CONTRACT_REF = "contract:company-model-spec-structured-output-repair:0.9"
+from .model_spec_typed_field_repair import (
+    CONTRACT_REF as TYPED_FIELD_REPAIR_REF, ERROR_CODES as TYPED_FIELD_ERROR_CODES,
+    assert_only_typed_fields_changed, validate_parent as validate_typed_parent,
+)
+
+REPAIR_CONTRACT_REF = "contract:company-model-spec-structured-output-repair:0.10"
 # One repair call, which is the number every other lane in this repository
 # uses for the same bargain (``draft_contract_repair.MAX_REPAIR_ATTEMPTS``).
 DEFAULT_REPAIR_ATTEMPTS = 1
@@ -118,7 +123,7 @@ REPAIR_CONTRACT = {
     # refusal, because a repair there is an invitation to make the numbers
     # agree.  12 live refusals between 2026-09-11 and 09-13 were wiring.
     "eligible_error_codes": ["format", "structure", "text_length",
-                             CASH_FLOW_OPERATING_BASE_SHAPE_CODE, SIGNED_EXPENSE_REPAIR_CODE],
+                             CASH_FLOW_OPERATING_BASE_SHAPE_CODE, SIGNED_EXPENSE_REPAIR_CODE, *TYPED_FIELD_ERROR_CODES],
     "eligible_structure_rules_ref": REPAIRABLE_STRUCTURE_RULES_REF,
     "eligible_structure_rules": list(REPAIRABLE_STRUCTURE_RULES),
     "validation": "full_spec_from_response_and_supplied_financial_validator_after_every_attempt",
@@ -145,6 +150,9 @@ REPAIR_CONTRACT = {
     "signed_filed_income_sum": {"ref": SIGNED_EXPENSE_REPAIR_REF,
         "scope": "one_exact_coefficient_only_with_all_held_periods_strictly_proven",
         "validation": "full_financial_validation_after_every_new_or_replayed_answer"},
+    "typed_field_change": {"ref": TYPED_FIELD_REPAIR_REF,
+        "scope": "exact_parent_paths_only_with_source_group_reconstruction_for_identity",
+        "validation": "full_spec_and_financial_validation_after_every_new_or_replayed_answer"},
     "semantic_failure": "whole_refusal",
     # 0.5: a new contract is a new question only where nobody has answered it.
     # A repair already made under an earlier contract for this disclosure,
@@ -393,7 +401,17 @@ def _repair_prompt(original_text: str, error: CompanyModelSpecError, *,
                    output_schema: Mapping[str, Any] | None = None) -> str:
     contract = REPAIR_CONTRACT if contract is None else contract
     output_schema = OUTPUT_SCHEMA if output_schema is None else output_schema
-    if error.code == SIGNED_EXPENSE_REPAIR_CODE:
+    if error.code in TYPED_FIELD_ERROR_CODES:
+        head = (
+            "Correct only the exact paths in TYPED_FIELD_PROOF. For periodicity choose quarterly or annual. "
+            "For acquisitions select a permitted forecast method and its base, or unavailable with null base; never treat acquisitions as zero. "
+            "For revenue identity choose exact member catalog_refs from the given source-group choices. "
+            "Labels are not identity; do not invent residuals or reuse a consolidated total for independent segments. "
+            "Do not change any other field, filed concept, amount, period, unit, source, evidence, line, formula, or assessment. "
+            "A missing reconciliation remains a gap, not a forecast. Return the complete original JSON with only the named fields corrected.\n\n"
+            f"TYPED_FIELD_PROOF:\n{canonical_json(error.proof)}\n\n"
+        )
+    elif error.code == SIGNED_EXPENSE_REPAIR_CODE:
         head = (
             "Correct only the exact coefficient_path identified by the source-proven "
             "signed expense proof in VALIDATION_ERROR, to its required_coefficient. Do not change "
@@ -617,6 +635,7 @@ def _validated_spec_with_repair(
     depth = 0
     replayed_refs: set[str] = set()
     cash_base_repair_applied = False
+    typed_repair_applied = False
     while True:
         try:
             spec = spec_from_response(
@@ -629,12 +648,14 @@ def _validated_spec_with_repair(
         except CompanyModelSpecError as error:
             # This narrow gap declaration gets one reconsideration only, even
             # if the original response reveals another invalid field afterwards.
-            if cash_base_repair_applied:
+            if cash_base_repair_applied or typed_repair_applied:
                 raise
             if error.code not in REPAIR_CONTRACT["eligible_error_codes"]:
                 raise
             if error.code == SIGNED_EXPENSE_REPAIR_CODE:
                 validate_coefficient_parent(parse_response(current_call["text"]),error.proof)
+            if error.code in TYPED_FIELD_ERROR_CODES:
+                validate_typed_parent(parse_response(current_call["text"]), error.proof, state=state)
             prior = _prior_contract_repair(
                 getattr(model, "scheduler_db", None),
                 state_hash=str(state["state_hash"]),
@@ -672,6 +693,10 @@ def _validated_spec_with_repair(
                 if error.code == SIGNED_EXPENSE_REPAIR_CODE:
                     assert_only_coefficient_changed(parse_response(current_call["text"]),
                         parse_response(prior["text"]), error.proof)
+                if error.code in TYPED_FIELD_ERROR_CODES:
+                    assert_only_typed_fields_changed(parse_response(current_call["text"]),
+                        parse_response(prior["text"]), error.proof, state=state)
+                    typed_repair_applied = True
                 current_call = {
                     key: value for key, value in prior.items()
                     if key not in {"binding_hash", "repair_contract_hash",
@@ -680,7 +705,7 @@ def _validated_spec_with_repair(
                 continue
             if (contract_calls >= repair_config["max_attempts"]
                     or signed_repair_attempted
-                    or (error.code == SIGNED_EXPENSE_REPAIR_CODE and contract_calls >= 1)):
+                    or (error.code in (SIGNED_EXPENSE_REPAIR_CODE, *TYPED_FIELD_ERROR_CODES) and contract_calls >= 1)):
                 raise
             prompt = _repair_prompt(current_call["text"], error)
             binding = {
@@ -757,6 +782,10 @@ def _validated_spec_with_repair(
             if error.code == SIGNED_EXPENSE_REPAIR_CODE:
                 assert_only_coefficient_changed(parse_response(current_call["text"]),
                     parse_response(repaired_call["text"]), error.proof)
+            if error.code in TYPED_FIELD_ERROR_CODES:
+                assert_only_typed_fields_changed(parse_response(current_call["text"]),
+                    parse_response(repaired_call["text"]), error.proof, state=state)
+                typed_repair_applied = True
             current_call = dict(repaired_call)
 
 
@@ -891,6 +920,7 @@ def model_spec_validation_contract() -> dict[str, str]:
         "repairable_structure_rules": REPAIRABLE_STRUCTURE_RULES_REF,
         "series_duplicate_facts": DUPLICATE_FACT_POLICY_REF,
         "repair_replay": REPAIR_REPLAY_POLICY_REF,
+        "typed_field_repair": TYPED_FIELD_REPAIR_REF,
         "assessment_compatible_replay": ASSESSMENT_COMPATIBILITY_REF,
         "assessment_compatible_signed_repair": SIGNED_COMPATIBLE_REPLAY_REF,
     }

@@ -389,9 +389,11 @@ CASH_FLOW_OPERATING_BASE_SHAPE_CODE = "cash_flow_operating_base_shape"
 class CompanyModelSpecError(ValueError):
     """The specification is malformed, or rests on something not in the filings."""
 
-    def __init__(self, message: str, *, code: str = "semantic") -> None:
+    def __init__(self, message: str, *, code: str = "semantic", proof: Any = None) -> None:
         super().__init__(message)
         self.code = code
+        if proof is not None:
+            self.proof = proof
 
 
 # The structure rules a model may be asked to reconsider once, as a closed
@@ -513,6 +515,17 @@ def _numeric_period_cell_line(cell: Mapping[str, Any], *, catalog: bool = False)
 
 
 def _numeric_period_table_header(context: Mapping[str, Any]) -> str:
+    from .model_revenue_group_candidates import CONTRACT_REF as GROUP_CHOICES_REF
+    group_choices = context.get("revenue_group_candidates")
+    typed_guidance = (
+        "FIELD REQUIREMENTS: operating_metrics.periodicity is exactly quarterly or annual, never quarterly_or_annual. "
+        "An acquisitions cash line cannot use zero_one_off; select a supported cash forecast method and its exact base, "
+        "or unavailable with null base. A segment driver with a filed basis must select a distinct complete "
+        "basis_identity from one coherent disclosed revenue group. Do not bind independent segments to the same "
+        "group total, mix groups, or invent a residual. If no exact dimensional source is provided, keep that base "
+        "explicitly unavailable instead of using consolidated revenue.\n\n"
+        if isinstance(group_choices, Mapping) and group_choices.get("contract_ref") == GROUP_CHOICES_REF else ""
+    )
     metadata = {
         key: context.get(key) for key in (
             "schema_version", "policy", "available_cells",
@@ -527,6 +540,7 @@ def _numeric_period_table_header(context: Mapping[str, Any]) -> str:
         if key in context:
             metadata[key] = context[key]
     return "\n".join([
+        *([typed_guidance.rstrip()] if typed_guidance else []),
         "CONTEXT=" + json.dumps(metadata, ensure_ascii=False, sort_keys=True),
         "FILINGS=" + json.dumps(
             context.get("filing_authorities") or [],
@@ -1163,6 +1177,15 @@ def spec_from_response(
     if len(raw_drivers) > MAX_REVENUE_DRIVERS:
         raise CompanyModelSpecError(
             f"a model may name at most {MAX_REVENUE_DRIVERS} revenue drivers")
+    from .model_spec_typed_field_repair import revenue_identity_scope, IDENTITY_CODE
+    try:
+        identity_scope = revenue_identity_scope(state, body)
+    except ValueError as exc:
+        raise CompanyModelSpecError(str(exc)) from exc
+    if identity_scope is not None:
+        raise CompanyModelSpecError(
+            "dimensional revenue drivers must select distinct exact source-bound member identities",
+            code=IDENTITY_CODE, proof=identity_scope)
     for index, item in enumerate(raw_drivers):
         if not isinstance(item, Mapping):
             raise CompanyModelSpecError(f"revenue_drivers[{index}] must be an object")
@@ -1282,6 +1305,13 @@ def spec_from_response(
         if not isinstance(disclosed, bool):
             raise CompanyModelSpecError(
                 f"operating_metrics[{index}].disclosed must be true or false")
+        if item.get("periodicity") not in PERIODICITY:
+            from .model_spec_typed_field_repair import proof, PERIODICITY_CODE
+            raise CompanyModelSpecError(
+                f"operating_metrics[{index}].periodicity must be quarterly or annual",
+                code=PERIODICITY_CODE, proof=proof(body, PERIODICITY_CODE,
+                    [["operating_metrics", index, "periodicity"]],
+                    detail="Correct this temporal enum only; do not change metric, source, period, or any other field."))
         metrics.append({
             "ref": _ref(item.get("ref"), f"operating_metrics[{index}].ref", metric_refs),
             "label": _text(item.get("label"), f"operating_metrics[{index}].label", limit=120),
@@ -1350,6 +1380,16 @@ def spec_from_response(
             note_evidence_resolver=note_evidence_resolver,
         )
     except (FinancialStatementStructureError, FinancialNoteContextError) as exc:
+        import re
+        match = re.fullmatch(r"lines\[(\d+)\] acquisitions cannot use zero_one_off", str(exc))
+        if isinstance(exc, FinancialStatementStructureError) and match:
+            from .model_spec_typed_field_repair import proof, ACQUISITIONS_CODE
+            index = int(match.group(1))
+            raise CompanyModelSpecError(str(exc), code=ACQUISITIONS_CODE,
+                proof=proof(body, ACQUISITIONS_CODE,
+                    [["financial_statement_structure", "lines", index, field]
+                     for field in ("forecast_method", "forecast_base_ref")],
+                    detail="Choose a supported cash-line method and base, or unavailable with null base; preserve every filed authority and amount.")) from exc
         raise CompanyModelSpecError(
             f"financial_statement_structure is invalid: {exc}",
             code=structure_error_code(str(exc)),

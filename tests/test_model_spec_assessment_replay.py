@@ -16,6 +16,12 @@ from tests import test_model_spec_cash_flow_base_repair as cash
 from tests import test_company_model_cli as cli_fixture
 
 
+# A historical paid Work must retain its frozen published contract, not the
+# current repair contract. The product reader still checks its exact known hash.
+OLD_REPAIR_CONTRACT = json.loads((Path(__file__).parent / 'fixtures' / 'model_spec_repair_contract_v09.json').read_text())
+OLD_REPAIR_CONTRACT_HASH = content_hash(OLD_REPAIR_CONTRACT)
+assert OLD_REPAIR_CONTRACT_HASH == 'afb22cd7a12c408bfb166f5abb63b7072488e689d782958df9cacb4584310448'
+
 class AssessmentReplayTests(unittest.TestCase):
     def setUp(self):
         self.temp = tempfile.TemporaryDirectory()
@@ -67,12 +73,12 @@ class AssessmentReplayTests(unittest.TestCase):
             'result_envelope_ref':formal['id'],'result_envelope_hash':content_hash(formal),
             'invocation_ref':formal['invocation_ref'],'route_decision_ref':formal['metadata']['route_decision_ref']}
         text=formal['outputs']['text'];error=specs.CompanyModelSpecError(cash.MESSAGE,code=cash.CODE)
-        prompt=cli._repair_prompt(text,error,output_schema=specs.prior_assessment_output_schema())
+        prompt=cli._repair_prompt(text,error,contract=OLD_REPAIR_CONTRACT,output_schema=specs.prior_assessment_output_schema())
         binding={'schema_version':'company-model-spec-repair-binding-0.1','root_original':call,'repair_parent':call,
             'original_text_sha256':hashlib.sha256(text.encode()).hexdigest(),
             'parent_text_sha256':hashlib.sha256(text.encode()).hexdigest(),'state_hash':self.state['state_hash'],
             'task_hash':specs.PRIOR_ASSESSMENT_TASK_HASH,'validation_error':{'code':cash.CODE,'message':cash.MESSAGE},
-            'repair_contract_ref':cli.REPAIR_CONTRACT_REF,'repair_contract_hash':cli.REPAIR_CONTRACT_HASH,
+            'repair_contract_ref':OLD_REPAIR_CONTRACT['ref'],'repair_contract_hash':OLD_REPAIR_CONTRACT_HASH,
             'repair_prompt_sha256':hashlib.sha256(prompt.encode()).hexdigest(),
             'repair_config':{'max_attempts':1},'repair_number':1}
         if mutate_binding:mutate_binding(binding)

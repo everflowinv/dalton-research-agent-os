@@ -11,6 +11,12 @@ from dalton_core.store import content_hash,canonical_json
 from dalton_core.thesis_impact_budget import ThesisImpactBudgetStore
 from tests import test_model_spec_assessment_replay as old,test_model_spec_signed_expense_repair as signed
 
+# A historical paid Work must retain its frozen published contract, not the
+# current repair contract. The product reader still checks its exact known hash.
+OLD_REPAIR_CONTRACT = json.loads((Path(__file__).parent / 'fixtures' / 'model_spec_repair_contract_v09.json').read_text())
+OLD_REPAIR_CONTRACT_HASH = content_hash(OLD_REPAIR_CONTRACT)
+assert OLD_REPAIR_CONTRACT_HASH == 'afb22cd7a12c408bfb166f5abb63b7072488e689d782958df9cacb4584310448'
+
 class CompatibleSignedReplayTests(unittest.TestCase):
     def setUp(self):
         self.f=old.AssessmentReplayTests('runTest');self.f.setUp();self.addCleanup(self.f.doCleanups)
@@ -28,11 +34,11 @@ class CompatibleSignedReplayTests(unittest.TestCase):
         try:signed.callback(prior_inputs,[])(original)
         except SignedExpenseRepairError as error:failure=error
         call={k:v for k,v in find_parent(self.db,state=self.state,mission=self.mission)['call'].items()if k in ['work_order_ref','work_order_hash','result_envelope_ref','result_envelope_hash','invocation_ref','route_decision_ref']}
-        prompt=cli._repair_prompt(text,failure,output_schema=specs.prior_assessment_output_schema())
+        prompt=cli._repair_prompt(text,failure,contract=OLD_REPAIR_CONTRACT,output_schema=specs.prior_assessment_output_schema())
         binding={'schema_version':'company-model-spec-repair-binding-0.1','root_original':call,'repair_parent':call,
           'original_text_sha256':hashlib.sha256(text.encode()).hexdigest(),'parent_text_sha256':hashlib.sha256(text.encode()).hexdigest(),
           'state_hash':self.state['state_hash'],'task_hash':specs.PRIOR_ASSESSMENT_TASK_HASH,
-          'validation_error':{'code':failure.code,'message':str(failure)},'repair_contract_ref':cli.REPAIR_CONTRACT_REF,'repair_contract_hash':cli.REPAIR_CONTRACT_HASH,
+          'validation_error':{'code':failure.code,'message':str(failure)},'repair_contract_ref':OLD_REPAIR_CONTRACT['ref'],'repair_contract_hash':OLD_REPAIR_CONTRACT_HASH,
           'repair_prompt_sha256':hashlib.sha256(prompt.encode()).hexdigest(),'repair_config':{'max_attempts':1},'repair_number':1}
         if mutate_binding:mutate_binding(binding)
         repair=build_work(purpose='model_spec',request_id='model-spec-repair:'+content_hash(binding)[:32]+suffix,prompt=prompt,
@@ -132,7 +138,7 @@ class CompatibleSignedReplayTests(unittest.TestCase):
         self.assertNotEqual(f.launcher.started[0]['financial_validation_contract_hash'],f.launcher.started[1]['financial_validation_contract_hash'])
         self.assertEqual(len(f.launcher.started),2)
         self.assertEqual(specs.TASK_HASH,'608338bcd6cf70cbe6e012acd5f579b99d34f9d990d5bc846c4059a198eda9af')
-        self.assertEqual(cli.REPAIR_CONTRACT_REF,'contract:company-model-spec-structured-output-repair:0.9')
+        self.assertEqual(cli.REPAIR_CONTRACT_REF,'contract:company-model-spec-structured-output-repair:0.10')
         self.assertEqual(f.launcher.repair_config,{'max_attempts':0})
 
     def test_current_same_task_specs_do_not_launch_when_free_validation_marker_changes(self):
