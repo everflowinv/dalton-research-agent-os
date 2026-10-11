@@ -23,14 +23,22 @@ from .sec_filing_units import FilingUnitError, INLINE, MAX_BYTES, _expanded, par
 # The additive source rule is independently versioned. It deliberately does
 # not change the base normalizer hash: no-addition contexts and their paid
 # request identities must not drift merely to attest another source check.
-RULE_REF = "statement-original-revenue-context:exact-inline-facts:1"
+LEGACY_RULE_REF = "statement-original-revenue-context:exact-inline-facts:1"
+RULE_REF = "statement-original-revenue-context:exact-inline-facts:2"
+# Independent statement components; never top-line aliases or REVENUE roles.
+RECONCILIATION_CONCEPTS = frozenset({"us-gaap:RevenueNotFromContractWithCustomer"})
 
 
-def _concepts(parsed):
+def _concepts(parsed, rule_ref):
     from .model_forecast_driver import CONCEPT_ROLES, REVENUE
     ns = parsed['namespace_bindings']
-    return {_expanded(concept, ns): concept for concept, role in CONCEPT_ROLES.items()
-            if role == REVENUE and concept.split(':')[0] in ns
+    allowed = {concept for concept, role in CONCEPT_ROLES.items() if role == REVENUE}
+    if rule_ref == RULE_REF:
+        allowed.update(RECONCILIATION_CONCEPTS)
+    elif rule_ref != LEGACY_RULE_REF:
+        raise FilingUnitError('original revenue source rule is unsupported')
+    return {_expanded(concept, ns): concept for concept in sorted(allowed)
+            if concept.split(':')[0] in ns
             and re.fullmatch(r'https?://fasb.org/us-gaap/\d{4}', ns[concept.split(':')[0]])}
 
 
@@ -85,8 +93,8 @@ def _identity(row, ns):
                                      for a, v in row.get('dimensions', {}).items()))))
 
 
-def derive_lines(filing, lines, parsed, raw):
-    concepts = _concepts(parsed)
+def derive_lines(filing, lines, parsed, raw, *, rule_ref=RULE_REF):
+    concepts = _concepts(parsed, rule_ref)
     usable = _audited_facts(raw, parsed, concepts)
     ns = parsed['namespace_bindings']
     known = {}
@@ -149,7 +157,7 @@ def derive_lines(filing, lines, parsed, raw):
     return result, evidence
 
 
-def supplemental_revenue_lines(connection, state_dir, filing, lines, *, source=None):
+def supplemental_revenue_lines(connection, state_dir, filing, lines, *, source=None, rule_ref=RULE_REF):
     from .sec_filing_units import _source
     if source is None:
         try:
@@ -163,10 +171,10 @@ def supplemental_revenue_lines(connection, state_dir, filing, lines, *, source=N
     if not raw.startswith(b'\x1f\x8b') and b'nonFraction' not in raw:
         return [dict(row) for row in lines], None
     parsed = parse_filing_units(raw)
-    result, evidence = derive_lines(filing, lines, parsed, raw)
+    result, evidence = derive_lines(filing, lines, parsed, raw, rule_ref=rule_ref)
     if not evidence:
         return result, None
-    proof = {'rule_ref': RULE_REF, 'source': binding, 'raw_sha256': parsed['raw_sha256'],
+    proof = {'rule_ref': rule_ref, 'source': binding, 'raw_sha256': parsed['raw_sha256'],
              'parsed_hash': content_hash(parsed), 'base_line_count': len(lines),
              'base_lines_hash': content_hash(lines), 'evidence': evidence,
              'evidence_hash': content_hash(evidence)}
@@ -177,7 +185,7 @@ def validate_revenue_supplement(connection, record, filing):
     proof = record.get('supplementary_original_revenue')
     if proof is None:
         return
-    if record.get('kind') != 'complete_snapshot' or proof.get('rule_ref') != RULE_REF:
+    if record.get('kind') != 'complete_snapshot' or proof.get('rule_ref') not in {RULE_REF, LEGACY_RULE_REF}:
         raise FilingUnitError('original revenue supplement contract/kind differs')
     n = proof.get('base_line_count')
     original = [dict(row) for row in record['lines']]
@@ -191,7 +199,7 @@ def validate_revenue_supplement(connection, record, filing):
     if len(paths) != 1:
         raise FilingUnitError('original revenue replay requires existing Core file')
     replay, expected = supplemental_revenue_lines(connection, Path(paths[0]).parent, filing,
-                                                  original[:n], source=proof['source'])
+                                                  original[:n], source=proof['source'], rule_ref=proof['rule_ref'])
     if replay != original or expected != proof:
         raise FilingUnitError('original revenue complete source/fact replay differs')
 
@@ -208,12 +216,14 @@ def prepare_model_revenue_inputs(missions, state_dir, company_ref):
     authority = None
     refreshed = []
     for filing in filings:
+        previous = None
         ref = _latest(missions.connection, filing['ingest_id'])
         if ref is not None:
             # Only an inspection skip; all material consumers still use the
             # ordinary context_record strong reader for every source binding.
             row = missions.connection.execute('SELECT record_json,content_hash FROM statement_context_versions WHERE version_id=?', (ref,)).fetchone()
             record = json.loads(row['record_json'])
+            previous = record
             asserted = record.pop('content_hash', None)
             if (asserted != row['content_hash'] or asserted != content_hash(record)
                     or record.get('status') != 'available' or record.get('version_id') != ref
@@ -223,6 +233,10 @@ def prepare_model_revenue_inputs(missions, state_dir, company_ref):
                 continue
         record = prepare_context(missions.connection, state_dir, filing['ingest_id'])
         if record.get('status') != 'available' or not record.get('supplementary_original_revenue'):
+            continue
+        if previous is not None and previous.get('mapping_hash') == record.get('mapping_hash'):
+            # A newer additive rule with no new material must not invalidate
+            # an older exact context or buy the old successful request again.
             continue
         if authority is None:
             authority = StatementContextAuthority(missions.store)
