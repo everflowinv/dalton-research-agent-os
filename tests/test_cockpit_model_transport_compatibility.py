@@ -14,6 +14,7 @@ from dalton_core.company_model_cli import (
     model_spec_request_id,
     model_spec_request_identity,
 )
+from dalton_core.company_model_spec import MAX_ASSESSMENT_CHARS
 from dalton_core.contracts import WorkOrder
 from dalton_core.scheduler import Scheduler
 from tests import test_cockpit_model_fallback as fallback_tests
@@ -48,9 +49,9 @@ class ModelSpecTransportCompatibilityTests(TestCase):
         )
 
     def test_legacy_initial_and_repair_chain_replay_without_another_provider_call(self):
-        initial = _spec(assessment="x" * 1201)
+        initial = _spec(assessment="x" * (MAX_ASSESSMENT_CHARS + 1))
         repaired = copy.deepcopy(initial)
-        repaired["assessment"] = "x" * 1199
+        repaired["assessment"] = "x" * (MAX_ASSESSMENT_CHARS - 1)
 
         class SequenceAdapter(ChainAdapter):
             def __init__(inner):
