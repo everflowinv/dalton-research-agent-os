@@ -6,7 +6,7 @@ import sqlite3
 import tempfile
 import shutil
 import threading
-from unittest.mock import patch
+from unittest.mock import Mock, patch
 import unittest
 from datetime import datetime, timezone
 from pathlib import Path
@@ -121,6 +121,61 @@ class ControlledFailureRedriveTests(unittest.TestCase):
                              formal=formal, mission=self.mission),
             ":operator-recovery:" + saved["content_hash"][:16],
         )
+
+    def test_unstable_header_open_denies_approval_without_new_work_or_accounting(self):
+        before_work = self.scheduler.work_order_authority(self.work.id)
+        before_formal = self.scheduler.formal_result(self.work.id)
+        before_settlement = self.budget.connection.execute(
+            "SELECT record_json FROM thesis_impact_day_settlements WHERE admission_id=?",
+            (self.admission["admission_id"],),
+        ).fetchone()[0]
+        with patch("dalton_core.readonly_sqlite.read_sqlite_header", side_effect=
+                   sqlite3.OperationalError("SQLite file changed during header read")):
+            self.assertIsNone(approved_request(
+                self.scheduler_db, self.budget_db, old_work_order_ref=self.work.id,
+                formal=before_formal, mission=self.mission,
+            ))
+        self.assertEqual(self.scheduler.work_order_authority(self.work.id), before_work)
+        self.assertEqual(self.scheduler.formal_result(self.work.id), before_formal)
+        self.assertEqual(self.scheduler.connection.execute(
+            "SELECT count(*) FROM scheduler_work_orders").fetchone()[0], 1)
+        self.assertEqual(self.budget.connection.execute(
+            "SELECT record_json FROM thesis_impact_day_settlements WHERE admission_id=?",
+            (self.admission["admission_id"],),
+        ).fetchone()[0], before_settlement)
+
+    def test_valid_approval_is_readable_after_a_failed_header_open(self):
+        candidate = prepare(
+            scheduler_db=self.scheduler_db, budget_db=self.budget_db,
+            old_work_order_ref=self.work.id, openclaw_root=self.openclaw_root,
+        )
+        saved = apply(
+            scheduler_db=self.scheduler_db, budget_db=self.budget_db,
+            candidate=candidate, expected_candidate_hash=candidate["candidate_hash"],
+        )
+        formal = self.scheduler.formal_result(self.work.id)
+        with patch("dalton_core.readonly_sqlite.read_sqlite_header", side_effect=
+                   sqlite3.OperationalError("SQLite file changed during header read")):
+            self.assertIsNone(approved_request(
+                self.scheduler_db, self.budget_db, old_work_order_ref=self.work.id,
+                formal=formal, mission=self.mission,
+            ))
+        self.assertEqual(approved_request(
+            self.scheduler_db, self.budget_db, old_work_order_ref=self.work.id,
+            formal=formal, mission=self.mission,
+        ), ":operator-recovery:" + saved["content_hash"][:16])
+
+    def test_select_failure_denies_approval_and_closes_opened_reader(self):
+        reader = Mock()
+        reader.execute.side_effect = sqlite3.OperationalError("database is locked")
+        with patch("dalton_core.controlled_failure_redrive.connect_read_only",
+                   return_value=reader):
+            self.assertIsNone(approved_request(
+                self.scheduler_db, self.budget_db, old_work_order_ref=self.work.id,
+                formal=self.scheduler.formal_result(self.work.id), mission=self.mission,
+            ))
+        reader.execute.assert_called_once()
+        reader.close.assert_called_once_with()
 
     def test_apply_provisions_and_holds_missing_wal_sidecars(self):
         candidate = prepare(

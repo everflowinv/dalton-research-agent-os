@@ -272,8 +272,9 @@ def apply(*, scheduler_db: str | Path, budget_db: str | Path,
 
 def approved_request(scheduler_db: str | Path, budget_db: str | Path, *, old_work_order_ref: str,
                      formal: Mapping[str, Any], mission: Mapping[str, Any]) -> str | None:
-    connection = connect_read_only(scheduler_db)
+    connection = None
     try:
+        connection = connect_read_only(scheduler_db)
         row = connection.execute(
             "SELECT r.record_json,r.content_hash,w.work_order_hash "
             "FROM controlled_failure_redrives r JOIN scheduler_work_orders w "
@@ -283,7 +284,8 @@ def approved_request(scheduler_db: str | Path, budget_db: str | Path, *, old_wor
     except sqlite3.OperationalError:
         return None
     finally:
-        connection.close()
+        if connection is not None:
+            connection.close()
     if row is None:
         return None
     record = json.loads(row[0])
