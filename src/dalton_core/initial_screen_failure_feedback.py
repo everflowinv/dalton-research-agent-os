@@ -56,8 +56,10 @@ def _body(record):
     if digest != content_hash(body):raise ValueError('initial-screen feedback hash differs')
     return body
 
-def _settled_call(model, call, mission):
+def _settled_call(model, call, mission, *, purpose=STRL_PURPOSE):
     """Read exact formal/route and every admission for this Work, without DDL."""
+    if purpose not in {STRL_PURPOSE, 'initial_screen_verifier', 'draft'}:
+        raise ValueError('initial-screen checkpoint purpose is outside its closed scope')
     from .planner_paid_output_recovery import _authority_connection, recovery_readers
     with _authority_connection(model.scheduler_db) as scheduler, recovery_readers(
             model.config["model_router_db"], model.config["budget_db"],
@@ -80,7 +82,7 @@ def _settled_call(model, call, mission):
         if (canonical_json(work) != wr["work_order_json"]
                 or content_hash(work) != wr["work_order_hash"]
                 or work["id"] != call["work_order_ref"]
-                or metadata.get("purpose") != STRL_PURPOSE
+                or metadata.get("purpose") != purpose
                 or metadata.get("mission_version_ref") != mission["id"]
                 or metadata.get("mission_version_hash", mission["content_hash"]) != mission["content_hash"]
                 or canonical_json(result) != fr["result_envelope_json"]

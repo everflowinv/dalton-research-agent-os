@@ -543,6 +543,22 @@ def _run_legacy_sections(
         "age_months": prior_block["age_months"],
         "imported": prior_block["imported"],
     }
+    if model is not None:
+        from .initial_screen_quiesce import wrap, resume_context, ScreenQuiesceUnproved
+        resumed = resume_context(args)
+        if resumed is not None:
+            if resumed.get('mode') != 'legacy' or resumed['company']['company_ref'] != company_ref:
+                raise ScreenQuiesceUnproved('paused legacy screen target changed')
+            context, prior_block = resumed['claim_context'], resumed['prior_reference']
+            playbook, entry = resumed['playbook'], resumed['entry']
+            titles = section_titles(playbook)
+            valuation = resumed['valuation']
+        model=wrap(model,args,context={'mode':'legacy',
+            'company':{'company_ref':company_ref,'ticker':entry['ticker']},
+            'claim_context':context,'claim_refs':sorted({r['ref'] for r in
+                [*context['claims'],*context['numbers']] if not r.get('cell')}),
+            'prior_reference':prior_block,'playbook':playbook,'entry':entry,'valuation':valuation},
+            mission=mission,authority=deliverable_authority)
     sections: list[dict[str, Any]] = []
     invocations: list[str] = []
     for index, title in enumerate(titles):
@@ -760,35 +776,44 @@ def _run_strl(
     deliverable_ref = f"mission-deliverable:{KIND}:{company_ref.rsplit(':', 1)[-1]}"
     run_ref = f"{KIND}-run:{company_ref}:{summary.get('created_at') or _now()}"
     as_of = getattr(args, "as_of", None)
+    from .initial_screen_quiesce import wrap, resume_context, ScreenQuiesceUnproved
+    resumed = resume_context(args)
     # Batch C: collect first, then draft. The sufficiency check opens (or
     # joins) a MaterialRequest per missing item -- never on a dry run -- and
     # a product that may not draft yet holds with the reason and the wait.
-    try:
-        check = check_sufficiency(
-            state, company_ref, KIND, as_of,
-            requester={"lane": KIND, "product_ref": deliverable_ref, "run_ref": run_ref},
-            record=not args.dry_run)
-    except MaterialPackUnavailable as exc:
-        summary["status"] = "held"
-        summary["reason_code"] = "material_pack_unavailable"
-        summary["failure_reason"] = str(exc)
-        return summary
-    summary["sufficiency"] = {key: check.get(key) for key in (
-        "status", "drafting_allowed", "reason", "wait_until", "gap_request_refs")}
-    if not check.get("drafting_allowed"):
-        summary["status"] = "held"
-        summary["reason_code"] = "material_insufficient"
-        summary["failure_reason"] = ("材料包未通过充分性检查，先取材料再起草："
-                                     + str(check.get("reason") or "缺必需材料"))[:800]
-        summary["material_requests"] = list(check.get("gap_request_refs") or [])
-        return summary
-    try:
-        pack = build_pack(state, company_ref, KIND, as_of)
-    except MaterialPackUnavailable as exc:
-        summary["status"] = "held"
-        summary["reason_code"] = "material_pack_unavailable"
-        summary["failure_reason"] = str(exc)
-        return summary
+    if resumed is not None:
+        if resumed.get('mode') != 'strl' or resumed['company']['company_ref'] != company_ref:
+            raise ScreenQuiesceUnproved('paused screen target or contract mode changed')
+        pack = resumed['pack']
+        check = dict(pack.get('sufficiency') or {})
+        summary['sufficiency'] = check
+    else:
+        try:
+            check = check_sufficiency(
+                state, company_ref, KIND, as_of,
+                requester={"lane": KIND, "product_ref": deliverable_ref, "run_ref": run_ref},
+                record=not args.dry_run)
+        except MaterialPackUnavailable as exc:
+            summary["status"] = "held"
+            summary["reason_code"] = "material_pack_unavailable"
+            summary["failure_reason"] = str(exc)
+            return summary
+        summary["sufficiency"] = {key: check.get(key) for key in (
+            "status", "drafting_allowed", "reason", "wait_until", "gap_request_refs")}
+        if not check.get("drafting_allowed"):
+            summary["status"] = "held"
+            summary["reason_code"] = "material_insufficient"
+            summary["failure_reason"] = ("材料包未通过充分性检查，先取材料再起草："
+                                         + str(check.get("reason") or "缺必需材料"))[:800]
+            summary["material_requests"] = list(check.get("gap_request_refs") or [])
+            return summary
+        try:
+            pack = build_pack(state, company_ref, KIND, as_of)
+        except MaterialPackUnavailable as exc:
+            summary["status"] = "held"
+            summary["reason_code"] = "material_pack_unavailable"
+            summary["failure_reason"] = str(exc)
+            return summary
     # The check this run made is the one the drafter cites (its requests).
     pack["sufficiency"] = {**dict(pack.get("sufficiency") or {}),
                            **{key: check[key] for key in ("status", "gap_request_refs", "missing")
@@ -797,13 +822,14 @@ def _run_strl(
         "content_hash": pack["content_hash"], "recipe_version": pack["recipe_version"],
         "chars": len(pack["text"]), "tags": len(pack["tags"]),
     }
-    if not args.dry_run:
+    if not args.dry_run and resumed is None:
         try:
             record_pack_build(state, pack, run_ref=run_ref)
         except Exception as exc:  # noqa: BLE001 - the ledger row is provenance, not the draft
             summary["pack"]["build_ledger"] = f"not_recorded: {type(exc).__name__}: {exc}"[:300]
     prior_block = prior_reference(
         deliverable_authority.latest(f"mission-deliverable:{KIND}:{company_ref.rsplit(':', 1)[-1]}"))
+    if resumed is not None: prior_block = resumed["prior_reference"]
     company = {"ticker": entry["ticker"], "company_ref": company_ref}
     worksheet_prompt = build_worksheet_prompt(company=company, pack=pack, prior_reference=prior_block)
     summary["prompts"] = {"worksheet_chars": len(worksheet_prompt)}
@@ -819,7 +845,11 @@ def _run_strl(
         )
     validation_context={'company':company,'pack':pack,'prior_reference':prior_block}
     from .initial_screen_failure_feedback import prepare_prompt,snapshot_passage_bindings
-    validation_context['source_bindings']=snapshot_passage_bindings(deliverable_authority,pack)
+    validation_context['source_bindings']=(resumed['source_bindings'] if resumed is not None
+        else snapshot_passage_bindings(deliverable_authority,pack))
+    model=wrap(model,args,context={**validation_context,'mode':'strl',
+        'contract':STRL_CONTRACT_VERSION,'entry':entry,'playbook':playbook},
+        mission=mission,authority=deliverable_authority)
     worksheet_bound,document_bound=False,False
     worksheet_repair: list[dict[str, Any]] = []
     invocations: list[str] = []
@@ -1030,6 +1060,7 @@ def run(args: argparse.Namespace) -> dict[str, Any]:
         "drafted": None, "sections": [], "skipped": [], "gate": None,
         "formal_authority_writes": 0, "failure_reason": None,
     }
+    from .initial_screen_quiesce import ScreenQuiesced, ScreenQuiesceUnproved, paused_summary
     store = DaltonStore(str(state / "core.sqlite"))
     try:
         missions = CoverageMissionAuthority(store)
@@ -1084,6 +1115,13 @@ def run(args: argparse.Namespace) -> dict[str, Any]:
             else _redraft_decisions(state, stage_rows, published),
         )
         summary["skipped"] = skipped
+        from .initial_screen_quiesce import resume_context, ScreenQuiesceUnproved
+        resumed = resume_context(args)
+        if resumed is not None:
+            entry = resumed['entry']
+            if entry['company_ref'] not in {m['company_ref'] for m in mission['universe']}:
+                raise ScreenQuiesceUnproved('paused company is no longer in mission')
+            playbook = resumed['playbook']
         if entry is None:
             # 2026-10-02 (ws-7d): "nothing to draft" is the right word for a
             # finished queue and the wrong one for four companies that have
@@ -1126,6 +1164,8 @@ def run(args: argparse.Namespace) -> dict[str, Any]:
             args, state=state, store=store, mission=mission, playbook=playbook, entry=entry,
             summary=summary, deliverable_authority=deliverable_authority, missions=missions,
             claims=claims)
+    except (ScreenQuiesced, ScreenQuiesceUnproved) as exc:
+        return paused_summary(summary, exc)
     finally:
         store.close()
 
@@ -1161,7 +1201,7 @@ def main(argv: list[str] | None = None) -> int:
         print(json.dumps(summary, ensure_ascii=False, sort_keys=True, indent=1))
     # "held" is a governed refusal, not a failure: the ticket should read as a
     # clean run that changed nothing.
-    return 0 if summary["status"] in {"succeeded", "idle", "held"} else 1
+    return 0 if summary["status"] in {"succeeded", "idle", "held", "quiesced"} else 1
 
 
 if __name__ == "__main__":

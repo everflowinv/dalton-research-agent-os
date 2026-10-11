@@ -23,7 +23,7 @@ from .child_tickets import adopt_finished_child
 from .data_foundation import REASON_CODE as FOUNDATION_REASON_CODE
 from .lane_registry import LaneSpec, register_lane
 from .launch_drain import _pid_alive
-from .store import canonical_json
+from .store import canonical_json, content_hash
 
 TICKET_SCHEMA_VERSION = "0.1"
 TICKET_PREFIX = "initial-screen"
@@ -82,9 +82,38 @@ class InitialScreenLauncher:
     def _ticket_path(self, ticket_id: str) -> Path:
         return self.tickets_dir / ticket_id.split(":", 1)[1] / "ticket.json"
 
-    def start(self) -> dict[str, Any]:
+    def start(self, *, resumed_from: str | None = None) -> dict[str, Any]:
         if not self.model_config_path.is_file():
             raise InitialScreenLaunchRejected("the drafting model configuration is missing")
+        from .initial_screen_quiesce import (
+            _read, _body, _config_hash, quiesced_summary_matches, MAX_RESUMES,
+        )
+        fingerprint = _config_hash(self.model_config_path)
+        parent = None
+        if resumed_from is not None:
+            if not _TICKET_RE.fullmatch(resumed_from):
+                raise InitialScreenLaunchRejected('invalid initial-screen predecessor')
+            try:
+                parent = self.status(resumed_from)
+                if not quiesced_summary_matches(parent.get('summary'), parent):
+                    raise ValueError('initial-screen pause is unproved')
+                directory = self._ticket_path(resumed_from).parent
+                checkpoint = _read(directory / 'step-checkpoint.json'); _body(checkpoint)
+                if (checkpoint['content_hash'] != parent['summary']['checkpoint_hash']
+                        or parent['model_config_path'] != str(self.model_config_path)
+                        or checkpoint['model_config_fingerprint'] != fingerprint):
+                    raise ValueError('paused configuration or checkpoint changed')
+                seen = set(); ancestor = resumed_from
+                for _ in range(MAX_RESUMES):
+                    if ancestor in seen: raise ValueError('initial-screen pause chain cycles')
+                    seen.add(ancestor)
+                    row = _read(self._ticket_path(ancestor))
+                    ancestor = row.get('resumed_from')
+                    if ancestor is None: break
+                    if not _TICKET_RE.fullmatch(str(ancestor)): raise ValueError('invalid pause ancestor')
+                else: raise ValueError('initial-screen pause chain exceeds bounded resume count')
+            except (OSError, ValueError, KeyError, TypeError) as exc:
+                raise InitialScreenLaunchRejected(str(exc)) from exc
         with self._lock:
             if self._current is not None and self._current[1].poll() is None:
                 raise InitialScreenLaunchConflict(f"initial screen {self._current[0]} is still running")
@@ -92,7 +121,12 @@ class InitialScreenLauncher:
             digest = hashlib.sha256(canonical_json({
                 "started_at": started_at, "model_config": str(self.model_config_path),
             }).encode("utf-8")).hexdigest()[:24]
+            if parent is not None:
+                digest = hashlib.sha256((resumed_from + '|' + checkpoint['content_hash']).encode()).hexdigest()[:24]
             ticket_id = f"{TICKET_PREFIX}:{digest}"
+            if parent is not None and self._ticket_path(ticket_id).exists():
+                # One successor per exact checkpoint, including terminal failure.
+                return _read(self._ticket_path(ticket_id))
             ticket_dir = _secure_dir(self.tickets_dir / digest)
             command = [
                 self.python_executable, "-m", "dalton_core.initial_screen_cli",
@@ -103,20 +137,29 @@ class InitialScreenLauncher:
             ]
             if self.scheduler_db is not None:
                 command += ["--scheduler-db", str(self.scheduler_db)]
+            record = {
+                'schema_version': TICKET_SCHEMA_VERSION, 'id': ticket_id,
+                'model_config_path': str(self.model_config_path), 'started_at': started_at,
+                'model_config_fingerprint': fingerprint, 'command': command,
+                'pid': None, 'status': 'running', 'exit_code': None, 'completed_at': None,
+            }
+            if parent is not None: record['resumed_from'] = resumed_from
+            _write_owner_only(self._ticket_path(ticket_id), record)
             log_fd = os.open(str(ticket_dir / "run.log"), os.O_WRONLY | os.O_CREAT | os.O_TRUNC, 0o600)
             try:
                 process = subprocess.Popen(
                     command, cwd=str(self.state_dir), stdin=subprocess.DEVNULL,
                     stdout=log_fd, stderr=subprocess.STDOUT,
-                    env={**os.environ, "PYTHONUNBUFFERED": "1"},
+                    env={**os.environ, "PYTHONUNBUFFERED": "1",
+                         'DALTON_INITIAL_SCREEN_TICKET': ticket_id},
                 )
+            except Exception:
+                record.update(status='failed', completed_at=_wire_time(self.clock()))
+                _write_owner_only(self._ticket_path(ticket_id), record)
+                raise
             finally:
                 os.close(log_fd)
-            record = {
-                "schema_version": TICKET_SCHEMA_VERSION, "id": ticket_id,
-                "model_config_path": str(self.model_config_path), "started_at": started_at,
-                "pid": process.pid, "status": "running", "exit_code": None, "completed_at": None,
-            }
+            record['pid'] = process.pid
             _write_owner_only(self._ticket_path(ticket_id), record)
             self._current = (ticket_id, process)
             return dict(record)
@@ -151,6 +194,13 @@ class InitialScreenLauncher:
         summary_path = path.with_name("summary.json")
         if summary_path.is_file():
             record["summary"] = json.loads(summary_path.read_text(encoding="utf-8"))
+            from .initial_screen_quiesce import quiesced_summary_matches
+            if record['status'] != 'running' and quiesced_summary_matches(record['summary'], record):
+                record.update(status='quiesced', exit_code=0)
+                _write_owner_only(path, {k:v for k,v in record.items() if k != 'summary'})
+            elif record.get('summary', {}).get('status') == 'quiesced' and record['status'] == 'succeeded':
+                record['status'] = 'failed'
+                _write_owner_only(path, {k:v for k,v in record.items() if k != 'summary'})
         return record
 
     def running(self) -> bool:
@@ -161,7 +211,11 @@ class InitialScreenLauncher:
         with self._lock:
             current = self._current
         if current is not None and current[1].poll() is None:
-            current[1].terminate()
+            record = self.status(current[0])
+            if 'model_config_fingerprint' in record:
+                from .initial_screen_quiesce import request_quiesce
+                request_quiesce(self._ticket_path(current[0]).parent,
+                    expected_ticket_hash=content_hash({k:v for k,v in record.items() if k != 'summary'}))
 
 
 class InitialScreenCoordinator:
@@ -217,6 +271,7 @@ class InitialScreenCoordinator:
             return {"status": "unconfigured", "reason": "no initial screen launcher on this writer"}
         latest = self._latest()
         result: dict[str, Any] = {}
+        resumed_from = None
         if latest is not None and latest.get("ticket_ref"):
             try:
                 ticket = self.launcher.status(latest["ticket_ref"])
@@ -225,6 +280,11 @@ class InitialScreenCoordinator:
             if ticket is not None:
                 if ticket["status"] == "running":
                     return {"status": "busy", "ticket_ref": ticket["id"]}
+                if ticket['status'] == 'quiesced':
+                    from .initial_screen_quiesce import quiesced_summary_matches
+                    if not quiesced_summary_matches(ticket.get('summary'), ticket):
+                        return {'status':'held', 'reason':'initial-screen pause is unproved'}
+                    resumed_from = ticket['id']
                 result["last"] = {
                     "ticket_ref": ticket["id"], "status": ticket["status"],
                     "summary_status": (ticket.get("summary") or {}).get("status"),
@@ -234,7 +294,7 @@ class InitialScreenCoordinator:
                     "reason_code": (ticket.get("summary") or {}).get("reason_code"),
                 }
         signature = self._signature()
-        if latest is not None and latest.get("idle_signature") == signature:
+        if resumed_from is None and latest is not None and latest.get("idle_signature") == signature:
             held_since = latest.get("idle_at")
             if held_since:
                 try:
@@ -264,7 +324,8 @@ class InitialScreenCoordinator:
                                        if failed else
                                        "上一轮没有可写的内容，账本也没有变化")}
         try:
-            ticket = self.launcher.start()
+            ticket = (self.launcher.start(resumed_from=resumed_from) if resumed_from is not None
+                      else self.launcher.start())
         except InitialScreenLaunchConflict as exc:
             return {**result, "status": "busy", "reason": str(exc)}
         except InitialScreenLaunchRejected as exc:
