@@ -65,7 +65,7 @@ class CallBudgetTests(unittest.TestCase):
 
     def test_catalogued_event_budget_replaces_caller_legacy_defaults(self):
         self.assertEqual(default_call_budget("event_judgement", defaults=DEFAULTS), {
-            "max_input_tokens": 60_000, "max_output_tokens": 1_500,
+            "max_input_tokens": 60_000, "max_output_tokens": 32_768,
             "max_cost_usd": 1.0, "timeout_seconds": 180,
         })
 

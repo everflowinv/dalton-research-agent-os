@@ -111,7 +111,7 @@
     "event_judgement": {
       "max_cost_usd": 1.0,
       "max_input_tokens": 60000,
-      "max_output_tokens": 1500,
+      "max_output_tokens": 32768,
       "timeout_seconds": 180
     },
     "event_judgement_verifier": {
