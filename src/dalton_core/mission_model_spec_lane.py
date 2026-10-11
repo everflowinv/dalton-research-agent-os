@@ -167,6 +167,7 @@ class MissionModelSpecLaneCoordinator:
             "financial_validation_contract_hash": ticket.get(
                 "financial_validation_contract_hash"),
             "spec_status": summary.get("spec_status"),
+            "permission_control_key": ticket.get("permission_control_key"),
             "spec_ref": summary.get("spec_ref"),
             "cost_micros": summary.get("cost_micros"),
             "failure_codes": failure_codes,
@@ -223,7 +224,8 @@ class MissionModelSpecLaneCoordinator:
                 reason += " [PROVIDER_BUDGET_EXCEEDED]"
             settled["failure"] = record_controlled_failure(
                 self.budget, key, self.mission() or {}, self.launcher,
-                reason=reason, connection=authority_connection(
+                reason=reason, control_key=settled.get("permission_control_key"),
+                connection=authority_connection(
                     getattr(self, "store", None), getattr(self, "missions", None),
                     getattr(self, "models", None)), status=str(spec_status or settled.get("status")),
             ).as_wire()
@@ -383,6 +385,8 @@ class MissionModelSpecLaneCoordinator:
                 "company_ref": company_ref, "state_hash": state_hash,
                 "task_hash": TASK_HASH, "repair_policy_hash": repair_policy_hash,
             }
+            if getattr(self.launcher, "freezes_permission_control", False):
+                launch_kwargs["permission_control_key"] = permission
             if controlled_reentry is not None:
                 launch_kwargs["controlled_reentry"] = controlled_reentry
             ticket = self.launcher.start(**launch_kwargs)

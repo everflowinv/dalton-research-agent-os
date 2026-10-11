@@ -111,6 +111,36 @@ class ModelSpecEffectiveBudgetIdentityTests(unittest.TestCase):
             self.assertEqual(lane.dispatch_once()["status"],"held")
         self.assertEqual(len(fake.started),2)
 
+    def test_old_inflight_failure_uses_original_permission_after_shared_save(self):
+        fake = lane_fixture.FakeLauncher()
+        fake.model_config_path = self.config_path
+        fake.permission_control_projection = self.launcher.permission_control_projection
+        fake.freezes_permission_control = True
+        original_start = fake.start
+        def start(*, permission_control_key, **kwargs):
+            result = original_start(**kwargs)
+            fake.tickets[result["id"]]["permission_control_key"] = permission_control_key
+            return result
+        fake.start = start
+        lane = lane_fixture.MissionModelSpecLaneCoordinator(
+            missions=lane_fixture.FakeMissions([lane_fixture.ACN]), launcher=fake,
+            mission=lambda: {"id":"coverage-mission-version:synthetic:1",
+                             "universe":[{"company_ref":lane_fixture.ACN,"ticker":"ACN"}]})
+        first=lane.dispatch_once()
+        old_control=fake.tickets[first["ticket_ref"]]["permission_control_key"]
+        self.save(32768)  # The old immutable Work is still running at this save.
+        failure={"spec_status":"model_unavailable", "failure_codes":["PROVIDER_BUDGET_EXCEEDED"],
+                 "failure_reason":"provider max_output_tokens telemetry exceeds WorkOrder budget"}
+        fake.finish(first["ticket_ref"],summary=failure)
+        second=lane.dispatch_once()
+        self.assertEqual(second["status"],"launched")
+        new_control=fake.tickets[second["ticket_ref"]]["permission_control_key"]
+        self.assertNotEqual(old_control,new_control)
+        self.assertEqual(second["settled"]["permission_control_key"],old_control)
+        fake.finish(second["ticket_ref"],summary=failure)
+        self.assertEqual(lane.dispatch_once()["status"],"held")
+        self.assertEqual(len(fake.started),2)
+
     def test_unrelated_purpose_and_same_effective_limits_do_not_change_identity(self):
         before = (self.launcher.permission_control_projection(), self.ticket())
         self.save(32768, 'document_extraction')
@@ -140,6 +170,16 @@ class ModelSpecEffectiveBudgetIdentityTests(unittest.TestCase):
             expected_financial_validation_contract_hash='d'*64,
             expected_call_budget_hash=frozen_hash)
         self.assertEqual(command[command.index('--expected-call-budget-hash')+1], frozen_hash)
+        repair_hash=self.launcher.repair_policy_hash()
+        bound_key=business_key(**{**self.key_args, "repair_policy_hash":repair_hash,
+            "validation_hash":self.launcher.financial_validation_contract_hash()})
+        control=current_permission(LaneFailureBudget('mission_model_spec'),bound_key,
+                                   self.mission,self.launcher)
+        with patch.object(self.launcher,'spawn',create=True,return_value={'id':'synthetic-ticket'}) as spawn:
+            self.launcher.start(company_ref=self.key_args['company_ref'],state_hash='a'*64,
+                                task_hash='b'*64,permission_control_key=control)
+        self.assertEqual(spawn.call_args.kwargs['record']['permission_control_key'],control)
+        self.assertEqual(spawn.call_args.kwargs['expected_call_budget_hash'],frozen_hash)
         fixture=cli_fixture.ChooseCompanyTests()
         fixture.setUp(); self.addCleanup(fixture.doCleanups)
         config=fixture.state_dir/'frozen-budget.json'

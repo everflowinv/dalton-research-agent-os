@@ -29,6 +29,7 @@ class CompanyModelSpecLauncher(LaneChildLauncher):
     TICKET_PREFIX = TICKET_PREFIX
     TICKETS_DIRNAME = "company-model-spec-runs"
     CHILD_MODULE = "dalton_core.company_model_cli"
+    freezes_permission_control = True
 
     def __init__(
         self,
@@ -135,7 +136,8 @@ class CompanyModelSpecLauncher(LaneChildLauncher):
     def start(self, *, company_ref: str, state_hash: str,
               task_hash: str | None = None,
               repair_policy_hash: str | None = None,
-              controlled_reentry: str | None = None) -> dict[str, Any]:
+              controlled_reentry: str | None = None,
+              permission_control_key: str | None = None) -> dict[str, Any]:
         if not isinstance(company_ref, str) or not company_ref.strip():
             raise LaneChildRejected("a model specification run needs a company")
         if not isinstance(state_hash, str) or len(state_hash) != 64:
@@ -155,6 +157,16 @@ class CompanyModelSpecLauncher(LaneChildLauncher):
             or repair_policy_hash != actual_repair_policy_hash
         ):
             raise LaneChildRejected("repair policy hash changed before launch")
+        if permission_control_key is not None:
+            from .mission_model_spec_lane import business_key
+            import re
+            prefix = business_key(company_ref=company_ref, state_hash=state_hash,
+                task_hash=task_hash, repair_policy_hash=repair_policy_hash,
+                validation_hash=self.financial_validation_contract_hash()) + "|permission:"
+            if (not isinstance(permission_control_key, str)
+                    or not permission_control_key.startswith(prefix)
+                    or not re.fullmatch("[a-f0-9]{16}", permission_control_key[len(prefix):])):
+                raise LaneChildRejected("model specification permission binding differs")
         validation_hash = self.financial_validation_contract_hash()
         call_budget_hash = self.call_budget_hash()
         digest = self._ticket_digest(
@@ -169,6 +181,8 @@ class CompanyModelSpecLauncher(LaneChildLauncher):
                 "repair_policy_hash": repair_policy_hash,
                 "financial_validation_contract_hash": validation_hash,
                 "model_configured": self.configured,
+                **({} if permission_control_key is None else {
+                    "permission_control_key": permission_control_key}),
                 **({} if call_budget_hash is None else {"call_budget_hash": call_budget_hash}),
             },
             _controlled_reentry=(None if controlled_reentry is None else
