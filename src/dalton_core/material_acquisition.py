@@ -382,6 +382,10 @@ def _item_key(data_item: str | None) -> str:
 def data_item_terms(data_item: str | None) -> list[str]:
     """The words a passage uses for the data item (its own words first)."""
 
+    from .forecast_driver_retrieval import terms as driver_terms
+    explicit = driver_terms(data_item)
+    if explicit is not None:
+        return explicit
     raw = str(data_item or "").replace("_", " ").strip()
     if raw.lower().startswith("check:"):
         raw = raw[len("check:"):]
@@ -432,7 +436,8 @@ def build_queries(request: Mapping[str, Any], identity: Mapping[str, Any] | None
         else:
             out = [f"{name} {primary.replace('_', ' ')}", f"{ticker} {primary.replace('_', ' ')}"]
     elif kind in ("data", "model"):
-        terms = data_item_terms(need.get("data_item"))
+        from .forecast_driver_retrieval import request_terms
+        terms = request_terms(request) or data_item_terms(need.get("data_item"))
         first = terms[0] if terms else str(need.get("data_item") or "")
         out = [f"{name} {first} {period_words or label}".strip()]
         for term in terms[1:3]:
@@ -621,7 +626,8 @@ def evaluate_acceptance(state_dir: str | Path, request: Mapping[str, Any], *,
                 "reason": (f"只有 {len(unique)} 份，少于要求的 {needed} 份" if unique else "索引中没有符合要求的文档")}
     queries = build_queries(request, identity, now=now)
     if kind == "data":
-        terms = [t.lower() for t in data_item_terms(need.get("data_item"))]
+        from .forecast_driver_retrieval import request_terms
+        terms = [t.lower() for t in (request_terms(request) or data_item_terms(need.get("data_item")))]
         tokens = [t.lower() for t in period_window(request.get("period"), now=now)["tokens"]]
         good, near = [], []
         for query in queries:
@@ -1622,17 +1628,19 @@ def serve(state_dir: str | Path, request_id: str, *, rungs: Mapping[str, Any] | 
     view = mr.request(state, request_id)
     if view is None:
         return {"request_id": request_id, "status": None, "outcome": "missing", "rungs": []}
+    from .forecast_driver_retrieval import routing_view
+    view = routing_view(view)
     rechecked = _free_retrieval_recheck(state, view, stamp=stamp)
     if rechecked is not None:
         return rechecked
-    view = mr.request(state, request_id) or view
+    view = routing_view(mr.request(state, request_id) or view)
     if view["closed"] or view["status"] in mr.TERMINAL:
         due, why = retry_due(state, view, now=stamp)
         if not due:
             return {"request_id": request_id, "status": view["status"], "outcome": "cached", "reason": why,
                     "rungs": []}
         mr.reopen(state, request_id, reason=why, actor_ref=ACTOR_REF, now=stamp)
-        view = mr.request(state, request_id)
+        view = routing_view(mr.request(state, request_id))
     if (view.get("acceptance") or {}).get("numeric_contract_ref") == "directed-document-numeric:0.1":
         return {"request_id": request_id, "status": view["status"], "outcome": "waiting",
                 "reason": "系统将继续核对所缺数字及出处，取得新的原文段落后再分析", "rungs": []}

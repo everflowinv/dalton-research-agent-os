@@ -6,6 +6,8 @@ identity, filed arithmetic and assumption-source gates still decide admission.
 from __future__ import annotations
 from typing import Any, Mapping
 
+from .forecast_driver_retrieval import data_item as driver_data_item
+
 RULE_REF="rule:forecast-material-gaps:1"
 ROLE_NEEDS={
     "income_tax_expense":("normalised_tax_basis","effective income tax rate discrete tax items guidance"),
@@ -29,9 +31,15 @@ def gap_plans(spec: Mapping[str,Any], table: Mapping[str,Any], *, record=None, f
     drivers=(record or {}).get("execution_contract",{}).get("drivers",{})
     if (drivers.get("status")=="unexecuted" or
         any(d.get("kind")=="segment" and not d.get("basis_identity") for d in spec.get("revenue_drivers") or [])):
-        add("economic_driver_history","segment revenue classification comparable quarterly history quantity price bookings",
+        add("economic_driver_history",driver_data_item([str(d.get("kind")) for d in spec.get("revenue_drivers") or []]),
             "Find independently disclosed revenue drivers: full segment identity and at least four comparable fiscal quarters, or quantity×price / book-volume×yield. Obtain an explicit company source for taxonomy changes and the complete consolidation bridge; no residual or label-based allocation.",
             "Revenue mechanism lacks independently admitted driver history or a source-backed classification bridge.")
+        plans["economic_driver_history"]["need"]["doc_kinds"].insert(0, "sec_10q")
+        identities = [{key: driver.get(key) for key in
+                       ("ref", "kind", "label", "basis_concept", "basis_identity")}
+                      for driver in spec.get("revenue_drivers") or []]
+        if identities:
+            plans["economic_driver_history"]["acceptance"]["economic_driver_identities"] = identities
     filed={l.get("concept"):l for l in table.get("filed_lines") or []}
     for line in ((spec.get("financial_statement_structure") or {}).get("lines") or []) if "filed_lines" in table else []:
         source=filed.get(line.get("concept"))
