@@ -2245,6 +2245,8 @@ def _new_forecast_model(body: dict[str, Any], *, spec: Mapping[str, Any] | None 
             from .forecast_financial_execution import additional_drivers
             held_refs = {d["ref"] for d in body["drivers"]}
             body["drivers"].extend(d for d in additional_drivers(effective, table, body["drivers"]) if d["ref"] not in held_refs)
+        if (assumption_sources or {}).get("source_accuracy") is not None:
+            effective["source_accuracy"] = assumption_sources["source_accuracy"]
         execute_financial_model(body, effective)
     validate_new_forecast_rules(body)
     return body
@@ -3544,6 +3546,7 @@ def _actualize_structured_model(
     binding: Mapping[str, Any] | None,
     evidence_refs: Sequence[Mapping[str, Any]] | None,
     actor_ref: str | None,
+    source_accuracy: Mapping[str, Any] | None = None,
 ) -> dict[str, Any] | None:
     """Actualise a v0.3 model by replaying its exact company statement DAG."""
 
@@ -3797,6 +3800,10 @@ def _actualize_structured_model(
         "decision": None,
         "mission_version_ref": prior.get("mission_version_ref"),
     }
+    if source_accuracy is not None:
+        import copy
+        body["execution_contract"] = copy.deepcopy(prior.get("execution_contract") or {})
+        body["execution_contract"]["source_accuracy"] = copy.deepcopy(source_accuracy)
     return _roll_actualized_forecast(body)
 
 
@@ -3809,6 +3816,7 @@ def actualize_model(
     binding: Mapping[str, Any] | None = None,
     evidence_refs: Sequence[Mapping[str, Any]] | None = None,
     actor_ref: str | None = None,
+    source_accuracy: Mapping[str, Any] | None = None,
 ) -> dict[str, Any] | None:
     """Write the filed answer beside the estimate, and change nothing else.
 
@@ -3825,7 +3833,7 @@ def actualize_model(
     if is_structured_schema(prior.get("schema_version")):
         return _actualize_structured_model(
             prior, table, structure=structure, replay=replay, binding=binding,
-            evidence_refs=evidence_refs, actor_ref=actor_ref)
+            evidence_refs=evidence_refs, actor_ref=actor_ref, source_accuracy=source_accuracy)
 
     ends = realised_ends(prior, table)
     if not ends:
@@ -4975,6 +4983,8 @@ class ForecastModelAuthority:
         record.setdefault("decision", None)
         record["content_hash"] = content_hash(record)
         wire = validate_forecast_model(record)
+        from .forecast_source_accuracy import validate_originals
+        validate_originals(self.connection, wire)
         if not duplicate_existing:
             validate_new_forecast_rules(wire)
             from .forecast_financial_execution import validate_execution_contract, validate_assumption_sources, validate_stored_execution_spec
@@ -5309,6 +5319,8 @@ class ForecastModelAuthority:
                 or content_hash({"statement_rows": statement_wire})
                 != wire["statement_rows_hash"]):
             raise ForecastModelConflict("forecast model filing proof source rows drifted")
+        from .forecast_source_accuracy import validate_originals
+        validate_originals(self.connection, model)
         from .economic_invariants import evaluate_forecast_model
         if wire.get("model_statement_scope") is not None:
             from .forecast_statement_scope import statement_scope

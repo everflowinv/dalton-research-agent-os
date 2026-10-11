@@ -191,6 +191,8 @@ def model_digest(
         digest_body["filed_consumed_source_groups_rule"] = CONSUMED_SOURCE_GROUPS_RULE
         from .forecast_execution_statement_scope import RULE_REF as EXECUTION_STATEMENT_SCOPE_RULE
         digest_body["filed_execution_statement_scope_rule"] = EXECUTION_STATEMENT_SCOPE_RULE
+        from .forecast_source_accuracy import RULE_REF as SOURCE_ACCURACY_RULE
+        digest_body["filed_source_accuracy_rule"] = SOURCE_ACCURACY_RULE
         from .company_financial_statement_structure import (
             CASH_LEAF_DURATION_UNIT_VALIDATION_REF, _TYPED_NOTE_STRUCTURE_VERSIONS,
         )
@@ -529,6 +531,12 @@ def run_company_forecast(
         return {"company_ref": company_ref, "status": "nothing_to_do",
                 "action": None, "lines": [], "lines_refused": None,
                 "record": prior, "annual_projection": annual_projection}
+    if action is not None and not backfill_proof and structure is not None:
+        from pathlib import Path
+        from .forecast_source_accuracy import prepare_accuracy
+        filename = next((str(row[2]) for row in models.connection.execute("PRAGMA database_list") if row[1] == "main"), "")
+        if filename:
+            sources["source_accuracy"] = prepare_accuracy(models.connection, Path(filename).parent, spec, table)
     if backfill_proof:
         body = prior
         action = "filing_proof_backfill"
@@ -553,7 +561,7 @@ def run_company_forecast(
     else:
         body = actualize_model(
             prior, table, actor_ref=actor_ref, structure=structure,
-            replay=replay, binding=binding)
+            replay=replay, binding=binding, source_accuracy=sources.get("source_accuracy"))
         body["forecast_policy"]["fiscal_year_end"] = boundary.get("fiscal_year_end")
     source_groups = None
     if structure is not None:

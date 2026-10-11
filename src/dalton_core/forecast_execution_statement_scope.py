@@ -198,17 +198,21 @@ def evaluate_execution(record, *, statement_rows=(), solver_results=(), scope):
     for row in statement_rows:
         grouped.setdefault((row.get("ingest_id"), row.get("statement_context_ref"), row.get("statement")), []).append(row)
     selected = []
+    selected_with_sources = []
     seen = set()
     for key, source_rows in sorted(grouped.items(), key=lambda item: str(item[0])):
         for group in segment_groups(source_rows):
             family = (*key, group["line"], group["period"], group["axis"])
             if family in required:
                 selected.append(group)
+                selected_with_sources.append((key, group))
                 seen.add(family)
     if seen != required:
         _refuse("a consumed complete family lacks its own consolidated partition")
     subject = forecast_subject(record, statement_rows=statement_rows, solver_results=solver_results)
     subject["segments"] = selected
-    return evaluate(output_kind=FORECAST_MODEL,
+    report = evaluate(output_kind=FORECAST_MODEL,
         output_ref=str(record.get("id") or record.get("model_ref") or "forecast-model"),
         company_ref=str(record.get("company_ref")), subject=subject)
+    from .forecast_source_accuracy import evaluate_segment_accuracy
+    return evaluate_segment_accuracy(record, subject, grouped, selected_with_sources, report)

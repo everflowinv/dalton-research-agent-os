@@ -185,8 +185,13 @@ def _recurring_expense_proof(body, expense, source, assumptions):
     return {**proof,"content_hash":content_hash(proof)}
 
 
-def driver_execution(body: Mapping[str, Any], spec: Mapping[str, Any], *, assumption_policy=None) -> tuple[dict[str, Any], list[dict[str, Any]]]:
+def driver_execution(body: Mapping[str, Any], spec: Mapping[str, Any], *, assumption_policy=None, source_accuracy=None) -> tuple[dict[str, Any], list[dict[str, Any]]]:
     from .model_forecast_driver import _assumption, _cell_ref, _structure_historical_values
+    if source_accuracy is None:
+        source_accuracy = (body.get("execution_contract") or {}).get("source_accuracy")
+    if source_accuracy is not None:
+        from .forecast_source_accuracy import validate_shape
+        validate_shape(source_accuracy, body["company_ref"])
     structure = body.get("financial_statement_structure") or {}
     lines = {l["ref"]: l for l in structure.get("lines") or []}
     drivers = list(body["drivers"])
@@ -253,9 +258,24 @@ def driver_execution(body: Mapping[str, Any], spec: Mapping[str, Any], *, assump
                 if plan["operator"] == "sum": return sum(values)
                 if plan["operator"] == "product": return values[0] * values[1]
                 return None if conversion is None else values[0] * conversion
+            accuracy_checks = []
+            def period_ties(end):
+                delta = calculate([h[end] for h in histories]) - target_history[end]
+                if abs(delta) <= max(Decimal("0.01"), abs(target_history[end]) * Decimal("0.000001")):
+                    return True
+                if plan["operator"] != "sum" or source_accuracy is None:
+                    return False
+                from .forecast_source_accuracy import history_assessment
+                assessment = history_assessment(source_accuracy, inputs, target, end)
+                if assessment is not None:
+                    # The proof must compare the exact output used by this DAG,
+                    # not a different reported output from the same period.
+                    if Decimal(assessment["reported_delta"]) != delta:
+                        return False
+                    accuracy_checks.append(assessment)
+                return assessment is not None and assessment["status"] == "within_disclosed_accuracy"
             tied = (len(common) >= 4 and (plan["operator"] == "contract_conversion" and conversion is not None
-                    or all(abs(calculate([h[end] for h in histories]) - target_history[end]) <=
-                           max(Decimal("0.01"), abs(target_history[end]) * Decimal("0.000001")) for end in common)))
+                    or all(period_ties(end) for end in common)))
             projected = [_project(d, body["forecast_periods"], body["assumptions"]) for d in inputs]
             ends = [p["end"] for p in body["forecast_periods"]]
             if not tied or any(not set(ends) <= set(v) for v in projected):
@@ -290,7 +310,8 @@ def driver_execution(body: Mapping[str, Any], spec: Mapping[str, Any], *, assump
                     refs=evidence, decided_by=body["actor_ref"], rule_ref=RULE_REF))
             for ref in refs: statuses[ref].update(status="executed", reason=None)
             executed.append({**plan, "status": "executed", "reason": None,
-                             "historical_periods": common, "conversion_rate": None if conversion is None else str(conversion)})
+                             "historical_periods": common, "conversion_rate": None if conversion is None else str(conversion),
+                             **({"reported_accuracy_checks": accuracy_checks} if accuracy_checks else {})})
     if assumption_policy is None:
         assumption_policy = (body.get("execution_contract") or {}).get("assumption_execution_ref")
     if assumption_policy not in (None, ASSUMPTION_EXECUTION_REF):
@@ -489,7 +510,10 @@ def execute_financial_model(body: dict[str, Any], spec: Mapping[str, Any]) -> di
     prior_contract = body.get("execution_contract")
     assumption_policy = (prior_contract.get("assumption_execution_ref")
                          if isinstance(prior_contract, Mapping) else ASSUMPTION_EXECUTION_REF)
-    report, overrides = driver_execution(body, declaration, assumption_policy=assumption_policy)
+    source_accuracy = (prior_contract or {}).get("source_accuracy") if isinstance(prior_contract, Mapping) else None
+    if source_accuracy is None:
+        source_accuracy = spec.get("source_accuracy")
+    report, overrides = driver_execution(body, declaration, assumption_policy=assumption_policy, source_accuracy=source_accuracy)
     if overrides: _apply_overrides(body, overrides)
     append_company_fcf(body, spec.get("fcf_definition"))
     mechanisms, financial_overrides = financial_mechanisms(body)
@@ -511,6 +535,8 @@ def execute_financial_model(body: dict[str, Any], spec: Mapping[str, Any]) -> di
                 "drivers": report, "financial_mechanisms": mechanisms, "fcf_bridge": fcf}
     if assumption_policy is not None:
         contract["assumption_execution_ref"] = assumption_policy
+    if source_accuracy is not None:
+        contract["source_accuracy"] = copy.deepcopy(source_accuracy)
     contract["content_hash"] = content_hash(contract)
     body["execution_contract"] = contract
     return body
@@ -528,6 +554,9 @@ def validate_execution_contract(record: Mapping[str, Any], *, publishing: bool =
     asserted = original.pop("content_hash", None)
     if content_hash(original) != asserted:
         raise ForecastModelValidationError("financial execution contract hash differs")
+    if contract.get("source_accuracy") is not None:
+        from .forecast_source_accuracy import validate_shape
+        validate_shape(contract["source_accuracy"], record["company_ref"])
     if contract.get("assumption_execution_ref") not in (None, ASSUMPTION_EXECUTION_REF):
         raise ForecastModelValidationError("forecast assumption execution rule is unsupported")
     if publishing:
