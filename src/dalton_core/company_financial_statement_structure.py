@@ -34,6 +34,7 @@ COVERAGE_SCHEMA_VERSION = "0.6"
 SCHEMA_VERSION = COVERAGE_SCHEMA_VERSION
 STRUCTURE_AUTHORITY_REF = "company-financial-statement-structure:0.6"
 NET_INCOME_SOURCE_CARRY_VALIDATION_REF = "filed-net-income-source-carry:0.1"
+CASH_LEAF_DURATION_UNIT_VALIDATION_REF = "filed-cash-leaf-duration-unit-proof:0.1"
 _STRUCTURE_AUTHORITY_REFS = {
     LEGACY_SCHEMA_VERSION: "company-financial-statement-structure:0.1",
     ANNUAL_SCHEMA_VERSION: "company-financial-statement-structure:0.2",
@@ -641,7 +642,7 @@ def _normalize_line(
         if line[field] not in allowed:
             raise FinancialStatementStructureError(f"lines[{index}].{field} is invalid")
     if line["role"] in STATEMENT_LEAF_ROLES:
-        _normalize_statement_leaf(line, index, filed)
+        _normalize_statement_leaf(line, index, filed, schema_version=schema_version)
         return line
     if line["statement"] != "income" or line["period_kind"] != "duration":
         raise FinancialStatementStructureError(
@@ -780,7 +781,8 @@ def _normalize_line(
 
 
 def _normalize_statement_leaf(
-    line: dict[str, Any], index: int, filed: Mapping[str, Mapping[str, Any]],
+    line: dict[str, Any], index: int, filed: Mapping[str, Mapping[str, Any]], *,
+    schema_version: str = SCHEMA_VERSION,
 ) -> None:
     """A 0.6 cash-flow or balance-sheet leaf: filed, method-forecast, no formula."""
 
@@ -829,7 +831,9 @@ def _normalize_statement_leaf(
         raise FinancialStatementStructureError("filed line statement differs from authority")
     if source.get("period_basis") != line["period_kind"]:
         raise FinancialStatementStructureError("filed line period kind differs from authority")
-    units = _units(source)
+    # Duration authority proves a unit even when no standalone quarter exists.
+    # This does not create quarter cells or authorize cumulative-as-quarter values.
+    units = _units(source, include_duration=schema_version in _TYPED_NOTE_STRUCTURE_VERSIONS)
     if units != {line["unit"]} or not _is_currency_unit(line["unit"]):
         raise FinancialStatementStructureError("filed line unit differs or is ambiguous")
     line["concept"] = concept

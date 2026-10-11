@@ -866,6 +866,7 @@ def model_spec_validation_contract() -> dict[str, str]:
 
     from .company_model_spec import ASSESSMENT_COMPATIBILITY_REF
     from .company_financial_statement_structure import (
+        CASH_LEAF_DURATION_UNIT_VALIDATION_REF,
         NET_INCOME_SOURCE_CARRY_VALIDATION_REF, STRUCTURE_AUTHORITY_REF,
     )
     from .forecast_coverage import PROPOSAL_METHOD_COMPLETION_REF
@@ -880,6 +881,7 @@ def model_spec_validation_contract() -> dict[str, str]:
         "cash_flow_companion": CASH_FLOW_COMPANION_VALIDATION_CONTRACT_HASH,
         "financial_statement_structure": STRUCTURE_AUTHORITY_REF,
         "net_income_source_carry": NET_INCOME_SOURCE_CARRY_VALIDATION_REF,
+        "cash_leaf_duration_unit": CASH_LEAF_DURATION_UNIT_VALIDATION_REF,
         "repairable_structure_rules": REPAIRABLE_STRUCTURE_RULES_REF,
         "series_duplicate_facts": DUPLICATE_FACT_POLICY_REF,
         "repair_replay": REPAIR_REPLAY_POLICY_REF,
