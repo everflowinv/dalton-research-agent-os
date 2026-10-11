@@ -962,8 +962,12 @@ def choose_company(
         for item in (mission.get("universe") or [])
         if isinstance(item, dict)
     }
-    refs = ([company_ref] if company_ref is not None
-            else [filing["company_ref"] for filing in missions.statement_filings()])
+    # Selection is per company. Keep its oldest filing's queue position, but
+    # build the complete company state only once even when many disclosures
+    # are already filed. The state builder still reads all applicable filings.
+    refs = ([company_ref] if company_ref is not None else list(dict.fromkeys(
+        filing["company_ref"] for filing in missions.statement_filings()
+    )))
     for held in refs:
         if company_ref is None and held in exclude_company_refs:
             continue
