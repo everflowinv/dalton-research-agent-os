@@ -1396,7 +1396,22 @@ def parse_document_output(
                     findings.append({"code": "quote_not_in_passage", "section": title,
                                      "detail": f"{tag}: {quote[:60]}"})
                     continue
-                numbers.append({"text": quote or passage[:1000], "passage_ref": entry["ref"], **meta})
+                from .mission_deliverable import value_tokens, validate_passage_number, MissionDeliverableError
+                cited_text = figure or quote or passage[:1000]
+                if not value_tokens(cited_text, include_small=True):
+                    # A verbatim qualitative quotation belongs to source_refs,
+                    # already bound above. Keep the prose and original source;
+                    # it cannot supply any number used elsewhere in the body.
+                    continue
+                cited = {"text": cited_text, "passage_ref": entry["ref"], **meta}
+                if figure:
+                    try:
+                        validate_passage_number(cited, lambda _ref: quote or passage)
+                    except MissionDeliverableError as exc:
+                        findings.append({"code": "passage_figure_invalid", "section": title,
+                                         "detail": str(exc)[:200]})
+                        continue
+                numbers.append(cited)
             elif entry["kind"] == "number":
                 text = figure if displayed else str(entry.get("text") or "")
                 if entry.get("cell"):
