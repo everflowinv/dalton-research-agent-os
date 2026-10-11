@@ -702,8 +702,13 @@ def render_sensitivity(
     out.append("  当前假设列代表模型自身。")
     out.append("")
     out.append("")
-    out.append("  每个情景列在所示全部季度中保持同一假设水平。")
-    out.append("  情景列不是路径；低点列表示整个预测期均处于低点。")
+    if record.get("selection_rule_ref") == "rule:swing-rank:2":
+        out.append("  季度增速情景只调整首个预测季度，此后恢复模型原有增速；")
+        out.append("  首季变化带来的金额差异会随模型延续。比例和金额假设在各季保持所选水平。")
+        out.append("  当前假设列保留模型原有的逐季预测路径。")
+    else:
+        out.append("  每个情景列在所示全部季度中保持同一假设水平。")
+        out.append("  情景列不是路径；低点列表示整个预测期均处于低点。")
     out.append("")
     out.append("  若极值与次高或次低值相距较远，极值可能只对应单一季度或事件；")
     out.append("  表中同时列出次高或次低值，便于判断这种差距。")
