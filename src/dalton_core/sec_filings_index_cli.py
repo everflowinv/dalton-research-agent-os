@@ -72,6 +72,7 @@ def run_discovery(
     spool_dir: Path | None = None,
     adapter: Any | None = None,
     targeted_binding: dict[str, Any] | None = None,
+    cursor: str | None = None,
 ) -> dict[str, Any]:
     """Authorize, read the index, and append the discovery record."""
 
@@ -148,8 +149,10 @@ def run_discovery(
             from .material_targeted_sec import targeted_sec_parameters
             parameters, bound = targeted_sec_parameters(state,plan=plan,company_ref=company_ref,
                 spec_ref=spec_ref,as_of=as_of,mission_version_ref=mission_version_ref,
-                mission_version_hash=mission_version_hash,binding=targeted_binding)
+                mission_version_hash=mission_version_hash,binding=targeted_binding,cursor=cursor)
             summary["targeted_binding"] = bound
+        elif cursor is not None:
+            raise ValueError("SEC continuation requires an exact targeted material binding")
         summary["parameters"] = parameters
         summary["query_hash"] = discovery_query_hash(plan, parameters)
 
@@ -168,6 +171,8 @@ def run_discovery(
             )
         }
         summary["provider_calls"] = receipt["provider_calls"]
+        if targeted_binding is not None and "page_rule_ref" in targeted_binding:
+            summary["next_cursor"] = receipt["next_cursor"]
         if receipt["outcome"] != "succeeded" or receipt["source_envelope_ref"] is None:
             summary["failure_reason"] = f"index outcome {receipt['outcome']}"
             return summary
@@ -240,6 +245,7 @@ def build_parser() -> argparse.ArgumentParser:
     parser.add_argument("--catalog-db", type=Path, default=None)
     parser.add_argument("--spool-dir", type=Path, default=None)
     parser.add_argument("--allow-network", action="store_true")
+    parser.add_argument("--cursor", default=None)
     parser.add_argument("--targeted-binding", type=json.loads, default=None)
     parser.add_argument("--quiet", action="store_true")
     return parser
@@ -275,6 +281,7 @@ def main(argv: list[str] | None = None) -> int:
         catalog_db=args.catalog_db,
         spool_dir=args.spool_dir,
         targeted_binding=args.targeted_binding,
+        cursor=args.cursor,
     )
     if not args.quiet:
         print(json.dumps(summary, ensure_ascii=False, sort_keys=True, indent=1))

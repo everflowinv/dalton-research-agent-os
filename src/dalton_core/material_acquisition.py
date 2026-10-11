@@ -994,6 +994,10 @@ class TargetedSourceRung:
         verdict = evaluate_acceptance(ctx.state_dir, ctx.request, identity=ctx.identity, now=ctx.now)
         if verdict["met"]:
             return RungResult("accepted", query=ctx.queries, items=verdict["items"], detail=verdict["reason"])
+        if self.name=="sec_edgar" and query_id and age < RUNG_WAIT_HOURS:
+            from .material_targeted_sec import archive_pending_for_material
+            if archive_pending_for_material(ctx.state_dir,query_id):
+                return RungResult("waiting",detail="SEC 原始索引已保存，等待其强绑定归档页正常执行")
         settled = _dispatch_settled(ctx.state_dir, status, now=ctx.now)
         if not settled and age < RUNG_WAIT_HOURS:
             return RungResult("waiting")

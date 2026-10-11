@@ -823,8 +823,11 @@ def validate_mission_source_discovery(value: Mapping[str, Any]) -> dict[str, Any
         # P10s: the filings index is asked for an issuer and a form, so it has
         # no query to record. Pinned here as well as in the plan so a malformed
         # parameter set cannot reach the ledger through a hand-made call.
-        if set(wire["parameters"]) != {"issuer", "form", "date_from", "date_to", "limit"}:
+        if set(wire["parameters"]) not in ({"issuer", "form", "date_from", "date_to", "limit"}, {"issuer", "form", "date_from", "date_to", "limit", "cursor"}):
             raise CoverageMissionValidationError("list_filings discovery parameters have an invalid shape")
+        if wire["parameters"].get("cursor") is not None:
+            from .sec_submissions_pages import ROOT_CURSOR,archive_cursor
+            if wire["parameters"]["cursor"] != ROOT_CURSOR: archive_cursor(wire["parameters"]["cursor"])
     elif set(wire["parameters"]) != {"query", "date_after", "date_before"}:
         raise CoverageMissionValidationError("search_web discovery parameters have an invalid shape")
     wire["document_refs"] = refs

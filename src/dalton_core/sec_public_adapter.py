@@ -105,6 +105,9 @@ def normalize_sec_submissions(
         raise SecPublicAdapterError("SEC submissions body must be an object")
     if not isinstance(parameters, Mapping):
         raise SecPublicAdapterError("adapter parameters must be an object")
+    from .sec_submissions_pages import ROOT_CURSOR,submissions_payload,continuation
+    original_payload=payload
+    payload=submissions_payload(payload,parameters)
     issuer = _issuer(parameters.get("issuer"))
     form = _text(parameters.get("form"), "form")
     date_from = _date(parameters.get("date_from"), "date_from")
@@ -200,6 +203,7 @@ def normalize_sec_submissions(
     recent_dates = [
         _date(item, "filingDate") for item in columns["filingDate"]
     ]
+    next_cursor=None
     if not recent_dates or date_from < min(recent_dates):
         # ``filings.files`` points at additional provider documents, but this
         # minimal public WorkOrder has no second fetch authority.  Asking for a
@@ -212,7 +216,10 @@ def normalize_sec_submissions(
         # query unaskable: ACN's ``recent`` ends at its last 8-K, so "10-K
         # filings up to today" was rejected for a company whose 10-K is sitting
         # in the block. Only the near end can hide a filing.
-        raise SecPublicAdapterError("requested date window is outside SEC recent coverage")
+        if parameters.get("cursor") == ROOT_CURSOR:
+            next_cursor=continuation(original_payload,parameters)
+        else:
+            raise SecPublicAdapterError("requested date window is outside SEC recent coverage")
     if len(records) > limit:
         # A bounded page cannot claim enumerated completeness when it silently
         # truncates the provider result.  Pagination for this endpoint is not
@@ -221,9 +228,9 @@ def normalize_sec_submissions(
     return {
         "records": records,
         "source_record_refs": refs,
-        "request_cursor": None,
-        "next_cursor": None,
-        "page_ordinal": 1,
+        "request_cursor": parameters.get("cursor"),
+        "next_cursor": next_cursor,
+        "page_ordinal": 2 if parameters.get("cursor") not in (None,ROOT_CURSOR) else 1,
         "provider_status": provider_status,
     }
 
@@ -733,7 +740,10 @@ class SecPublicHttpAdapter:
             raise SecPublicAdapterError("SEC submissions adapter operation is not list_filings")
         parameters = request["parameters"]
         issuer = _issuer(parameters["issuer"])
-        url = f"https://data.sec.gov/submissions/CIK{issuer}.json"
+        from .sec_submissions_pages import ROOT_CURSOR,archive_cursor
+        cursor=parameters.get("cursor")
+        page= "CIK"+issuer+".json" if cursor in (None,ROOT_CURSOR) else archive_cursor(cursor)["name"]
+        url = f"https://data.sec.gov/submissions/{page}"
         try:
             deadline = datetime.fromisoformat(str(request["deadline_at"]).replace("Z", "+00:00"))
             if deadline.tzinfo is None:
@@ -789,7 +799,7 @@ class SecPublicHttpAdapter:
             structured = normalize_sec_submissions(
                 payload, parameters, provider_status=response.status
             )
-        except (UnicodeDecodeError, json.JSONDecodeError, SecPublicAdapterError) as exc:
+        except (UnicodeDecodeError, json.JSONDecodeError, ValueError) as exc:
             return _observation(
                 request, outcome="failed", provider_request_id=provider_request_id,
                 provider_status=response.status, structured_output=None,
@@ -800,7 +810,7 @@ class SecPublicHttpAdapter:
         return _observation(
             request, outcome="succeeded", provider_request_id=provider_request_id,
             provider_status=response.status, structured_output=structured,
-            source_record_refs=list(structured["source_record_refs"]), cursor=None,
+            source_record_refs=list(structured["source_record_refs"]), cursor=structured["next_cursor"],
             error=None, bytes_written=response.bytes_written,
         )
 

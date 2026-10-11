@@ -179,9 +179,9 @@ def _with_hash(value: Mapping[str, Any]) -> dict[str, Any]:
 def validate_filings_index_spec(spec: Mapping[str, Any]) -> dict[str, Any]:
     """The closed parameter set the frozen ``list_filings`` contract accepts."""
 
-    if not isinstance(spec, Mapping) or set(spec) != {
+    if not isinstance(spec, Mapping) or set(spec) not in ({
         "issuer", "form", "date_from", "date_to", "limit",
-    }:
+    }, {"issuer", "form", "date_from", "date_to", "limit", "cursor"}):
         raise SecFilingsIndexCoreError(
             "filings index spec must be exactly issuer/form/date_from/date_to/limit"
         )
@@ -204,9 +204,13 @@ def validate_filings_index_spec(spec: Mapping[str, Any]) -> dict[str, Any]:
     limit = spec["limit"]
     if isinstance(limit, bool) or not isinstance(limit, int) or not 1 <= limit <= MAX_RECORDS:
         raise SecFilingsIndexCoreError(f"limit must be an integer 1..{MAX_RECORDS}")
+    if spec.get("cursor") is not None:
+        from .sec_submissions_pages import ROOT_CURSOR,archive_cursor
+        if spec["cursor"] != ROOT_CURSOR: archive_cursor(spec["cursor"])
     return {
         "issuer": issuer, "form": form.strip(),
         "date_from": spec["date_from"], "date_to": spec["date_to"], "limit": limit,
+        **({"cursor":spec["cursor"]} if "cursor" in spec else {}),
     }
 
 
@@ -483,6 +487,9 @@ class SecFilingsIndexCore:
         """Bind one validated spec to a creation time; the pair is the identity."""
 
         parameters = validate_filings_index_spec(spec)
+        from .sec_submissions_pages import ROOT_CURSOR,verify_archive_parent
+        if parameters.get("cursor") not in (None,ROOT_CURSOR):
+            verify_archive_parent(self.store.connection,self.spool,parameters)
         created = created_at or _wire_time(self.clock())
         _parse_time(created, "created_at")
         identity = {
@@ -725,6 +732,7 @@ class SecFilingsIndexCore:
             "source_record_refs": [],
             "filings": [],
             "document_refs": [],
+            "next_cursor": None,
         }
         if response["outcome"] != "succeeded" or response["source_envelope_ref"] is None:
             return base
@@ -740,6 +748,7 @@ class SecFilingsIndexCore:
         filings = self.filing_authorities(source["id"], request["parameters"])
         base.update({
             "source_envelope_ref": source["id"],
+            "next_cursor": source["cursor"],
             "source_envelope_hash": source["content_hash"],
             "raw_artifact_version_ref": source.get("raw_artifact_version_ref"),
             "raw_response_hash": source.get("raw_response_hash"),

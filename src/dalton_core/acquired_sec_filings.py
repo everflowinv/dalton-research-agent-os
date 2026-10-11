@@ -90,6 +90,11 @@ def _submissions_row(state_dir: Path, connection: sqlite3.Connection,
         return None
     try:
         payload = json.loads(raw)
+        if "filings" not in payload:
+            from .sec_submissions_pages import submissions_payload,envelope_parameters,_record
+            discovery=_record(connection,"coverage_mission_source_discoveries","record_id",discovery_ref)
+            envelope=_record(connection,"connector_source_envelopes","source_envelope_id",discovery["source_envelope_ref"])
+            payload=submissions_payload(payload,envelope_parameters(connection,envelope))
         recent = payload["filings"]["recent"]
         accessions = recent["accessionNumber"]
         index = accessions.index(accession)

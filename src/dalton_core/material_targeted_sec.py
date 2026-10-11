@@ -3,6 +3,7 @@ from __future__ import annotations
 import json
 import sqlite3
 from collections.abc import Mapping
+from pathlib import Path
 from . import material_requests as mr
 from . import material_acquisition as ma
 
@@ -11,16 +12,19 @@ class TargetedSecError(ValueError):
 
 def _targeted_sec_parameters(state_dir, *, plan, company_ref, spec_ref, as_of,
                             mission_version_ref, mission_version_hash,
-                            query_ref=None, binding=None, allow_closed=False):
+                            query_ref=None, binding=None, allow_closed=False, cursor=None):
     from .mission_source_discovery import build_discovery_parameters
     from .sec_filings_index_core import validate_filings_index_spec
     from datetime import date
     if plan["source_ref"] != "source:sec-edgar":
         raise TargetedSecError("targeted filing dates are only supported for SEC")
+    from .sec_submissions_pages import RULE_REF
+    binding_fields={"query_ref", "query_hash", "request_ref", "request_hash", "mission_version_ref",
+            "mission_version_hash", "plan_ref", "plan_hash", "company_ref", "spec_ref"}
+    paged=binding is None or (isinstance(binding,Mapping) and binding.get("page_rule_ref")==RULE_REF)
     if binding is not None:
-        if not isinstance(binding, Mapping) or set(binding) != {
-            "query_ref", "query_hash", "request_ref", "request_hash", "mission_version_ref",
-            "mission_version_hash", "plan_ref", "plan_hash", "company_ref", "spec_ref"}:
+        if (not isinstance(binding,Mapping) or set(binding) not in (binding_fields,binding_fields|{"page_rule_ref"})
+                or ("page_rule_ref" in binding and binding["page_rule_ref"]!=RULE_REF)):
             raise TargetedSecError("targeted binding has an invalid closed shape")
         query_ref = binding["query_ref"]
     if not isinstance(query_ref, str) or not query_ref.startswith("material-targeted-query:"):
@@ -81,6 +85,7 @@ def _targeted_sec_parameters(state_dir, *, plan, company_ref, spec_ref, as_of,
         "request_hash":request["content_hash"],"mission_version_ref":mission_version_ref,
         "mission_version_hash":mission_version_hash,"plan_ref":plan["id"],"plan_hash":plan["content_hash"],
         "company_ref":company_ref,"spec_ref":spec_ref}
+    if paged:actual["page_rule_ref"]=RULE_REF
     if binding is not None and dict(binding)!=actual:
         raise TargetedSecError("exact targeted request/plan/mission binding drifted")
     parameters=build_discovery_parameters(plan,spec_ref=spec_ref,company_ref=company_ref,as_of=as_of)
@@ -99,7 +104,19 @@ def _targeted_sec_parameters(state_dir, *, plan, company_ref, spec_ref, as_of,
                 or acceptance.get("cik") != parameters["issuer"]
                 or acceptance.get("document_ref") != "sec:filing:"+accession or start != end or start is None):
             raise TargetedSecError("targeted exact filing identity differs")
-    return validate_filings_index_spec(parameters),actual
+    if accession is not None and paged:
+        from .sec_submissions_pages import ROOT_CURSOR
+        parameters["cursor"] = ROOT_CURSOR if cursor is None else cursor
+    elif cursor is not None:
+        raise TargetedSecError("archive continuation requires an exact filing request")
+    parameters=validate_filings_index_spec(parameters)
+    if cursor is not None:
+        from .sec_submissions_pages import verify_archive_parent
+        from .raw_spool import RawSpoolReader
+        c=connect_read_only(Path(state_dir)/"core.sqlite");c.row_factory=sqlite3.Row
+        try:verify_archive_parent(c,RawSpoolReader(Path(state_dir)/"connector-spool"),parameters)
+        finally:c.close()
+    return parameters,actual
 
 
 
@@ -111,3 +128,69 @@ def targeted_sec_parameters(state_dir, **kwargs):
         raise
     except (ValueError, TypeError, KeyError, sqlite3.Error, OSError) as exc:
         raise TargetedSecError(f"targeted material authority is unreadable: {type(exc).__name__}") from exc
+
+
+def pending_archive_query(state_dir,connection,plan,launcher,*,query_ref=None):
+    """One continuation of an exact targeted query, after its root is durable.
+
+    The latest targeted event must still name the successful root ticket.
+    Once an archive is launched (even if it fails), ordinary material retry
+    owns recovery; an older root cannot reopen the same page on every tick.
+    """
+    from .readonly_sqlite import connect_read_only
+    path=mr.ledger_path(state_dir)
+    if not path.is_file():return None
+    c=connect_read_only(path);c.row_factory=sqlite3.Row
+    try:
+        rows=c.execute("SELECT q.query_id,q.record_json,json_extract(e.record_json,'$.ticket_ref') AS ticket_ref,json_extract(e.record_json,'$.dispatch_ref') AS dispatch_ref FROM material_targeted_queries q "
+            "JOIN material_targeted_query_events e ON e.event_id=(SELECT MAX(x.event_id) FROM material_targeted_query_events x WHERE x.query_id=q.query_id AND x.status IN ('launched','failed','refused')) "
+            "WHERE q.source_ref='source:sec-edgar' AND e.status='launched' AND json_extract(e.record_json,'$.kind')='archive_ready' "
+            +('AND q.query_id=? ' if query_ref is not None else '')
+            +'ORDER BY e.event_id DESC LIMIT 32', (() if query_ref is None else (query_ref,))).fetchall()
+    finally:c.close()
+    from datetime import date
+    from .sec_submissions_pages import ROOT_CURSOR,_record
+    for row in rows:
+        try:
+            ticket=launcher.status(row['ticket_ref']);summary=ticket.get('summary') or {}
+            if ticket['status']!='succeeded' or ticket.get('cursor') is not None or not summary.get('next_cursor') or ticket.get('targeted_binding') is None:continue
+            dispatch=connection.execute('SELECT status,ticket_ref FROM coverage_mission_discovery_dispatches WHERE dispatch_id=?',(row['dispatch_ref'],)).fetchone()
+            if dispatch is None or dispatch['status']!='succeeded' or dispatch['ticket_ref']!=row['ticket_ref']:continue
+            query=json.loads(row['record_json']);b=ticket['targeted_binding']
+            p,bound=targeted_sec_parameters(state_dir,plan=plan,company_ref=query['company_ref'],spec_ref=query['spec_ref'],
+                as_of=date.fromisoformat(ticket['as_of']),mission_version_ref=ticket['mission_version_ref'],
+                mission_version_hash=ticket['mission_version_hash'],binding=b)
+            if summary.get('parameters')!=p or summary.get('targeted_binding')!=bound or p.get('cursor')!=ROOT_CURSOR:continue
+            discovery=_record(connection,'coverage_mission_source_discoveries','record_id',summary['discovery_ref'])
+            if (discovery['content_hash']!=summary['discovery_hash'] or discovery['parameters']!=p
+                    or discovery['query_hash']!=summary['query_hash'] or discovery['company_ref']!=query['company_ref']):continue
+            envelope=_record(connection,'connector_source_envelopes','source_envelope_id',discovery['source_envelope_ref'])
+            if envelope['content_hash']!=discovery['source_envelope_hash'] or envelope['cursor']!=summary['next_cursor']:continue
+            return {'query_id':row['query_id'],**query,'archive_cursor':envelope['cursor']}
+        except (ValueError,KeyError,TypeError,OSError):
+            continue  # No unreadable or closed parent can authorize a page.
+    return None
+
+
+def archive_pending_for_material(state_dir,query_ref):
+    from .readonly_sqlite import connect_read_only
+    from .sec_submissions_pages import _record,ROOT_CURSOR
+    from .store import content_hash,canonical_json
+    c=connect_read_only(mr.ledger_path(state_dir));c.row_factory=sqlite3.Row
+    try:
+        row=c.execute("SELECT json_extract(record_json,'$.ticket_ref') AS ticket_ref FROM material_targeted_query_events WHERE query_id=? AND status IN ('launched','failed','refused') ORDER BY event_id DESC LIMIT 1",(query_ref,)).fetchone()
+    finally:c.close()
+    if row is None or not str(row['ticket_ref']).startswith('sec-filings-index:'):return False
+    directory=Path(state_dir)/'sec-filings-index-runs'/row['ticket_ref'].split(':',1)[1]
+    try:ticket=json.loads((directory/'ticket.json').read_text());summary=json.loads((directory/'summary.json').read_text())
+    except (OSError,ValueError):return False
+    if ticket.get('cursor') is not None or summary.get('status')!='succeeded' or not summary.get('next_cursor'):return False
+    c=connect_read_only(Path(state_dir)/'core.sqlite');c.row_factory=sqlite3.Row
+    try:
+        d=_record(c,'coverage_mission_source_discoveries','record_id',summary['discovery_ref'])
+        e=_record(c,'connector_source_envelopes','source_envelope_id',d['source_envelope_ref'])
+        return (d['content_hash']==summary['discovery_hash'] and d['parameters']==summary['parameters']
+                and d['parameters'].get('cursor')==ROOT_CURSOR and e['cursor']==summary['next_cursor']
+                and e['content_hash']==d['source_envelope_hash']
+                and ticket.get('targeted_binding',{}).get('query_ref')==query_ref)
+    finally:c.close()

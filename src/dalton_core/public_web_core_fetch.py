@@ -329,8 +329,13 @@ def url_authority_from_discovery(
         # the ref being resolved is an accession. The URL is derived from the
         # same bytes the envelope is bound to, exactly as it is for a search.
         from .sec_filings_index import build_sec_filing_url_authorities
+        from .sec_submissions_pages import envelope_parameters,verify_archive_parent,ROOT_CURSOR
 
-        authority = build_sec_filing_url_authorities(raw, envelope).get(url_ref)
+        parameters=None
+        if "filings" not in json.loads(raw):
+            parameters=envelope_parameters(connection,envelope)
+            verify_archive_parent(connection,spool,parameters)
+        authority = build_sec_filing_url_authorities(raw, envelope,parameters=parameters).get(url_ref)
         if authority is None:
             raise PublicWebCoreFetchError("filing is not named by the discovery envelope")
         return authority
@@ -359,10 +364,15 @@ def cited_hosts_from_discovery(
     raw = spool.read_object(envelope["raw_response_hash"])
     if envelope.get("operation") == SEC_FILINGS_INDEX_OPERATION:
         from .sec_filings_index import build_sec_filing_url_authorities
+        from .sec_submissions_pages import envelope_parameters,verify_archive_parent,ROOT_CURSOR
 
+        parameters=None
+        if "filings" not in json.loads(raw):
+            parameters=envelope_parameters(connection,envelope)
+            verify_archive_parent(connection,spool,parameters)
         return {
             record_ref: authority["host"]
-            for record_ref, authority in build_sec_filing_url_authorities(raw, envelope).items()
+            for record_ref, authority in build_sec_filing_url_authorities(raw, envelope,parameters=parameters).items()
         }
     return cited_url_hosts(raw, envelope)
 

@@ -1025,7 +1025,8 @@ class _SearchLauncherBase:
                 _, targeted_binding = _targeted_parameters(self.state_dir, plan=plan,
                     company_ref=authorization["company_ref"], spec_ref=spec_ref, as_of=as_of_date,
                     mission_version_ref=authorization["mission_version_ref"],
-                    mission_version_hash=authorization["mission_version_hash"], binding=targeted_binding)
+                    mission_version_hash=authorization["mission_version_hash"], binding=targeted_binding,
+                    **({"cursor":cursor} if plan["source_ref"]==SEC_SOURCE_REF else {}))
             except ValueError as exc:
                 raise DiscoveryLaunchRejected(str(exc)) from exc
         with self._lock:
@@ -1036,6 +1037,7 @@ class _SearchLauncherBase:
                 canonical_json({
                     "authorization": dict(authorization), "spec_ref": spec_ref,
                     "as_of": as_of_date.isoformat(), "started_at": started_at,
+                    **({"cursor":cursor} if plan["source_ref"]==SEC_SOURCE_REF else {}),
                     "variant_index": variant_index, "missing_periods": list(missing_periods),
                     "governance_hash": governance.content_hash,
                     "plan_hash": plan["content_hash"],
@@ -1082,6 +1084,7 @@ class _SearchLauncherBase:
                 os.close(log_fd)
             record = {
                 "schema_version": TICKET_SCHEMA_VERSION,
+                **({"cursor":cursor} if plan["source_ref"]==SEC_SOURCE_REF else {}),
                 "id": ticket_id,
                 "company_ref": authorization["company_ref"],
                 "spec_ref": spec_ref,
@@ -1837,7 +1840,8 @@ class MissionSourceDiscoveryCoordinator:
                         as_of=date.fromisoformat(ticket["as_of"]),
                         mission_version_ref=dispatch["mission_version_ref"],
                         mission_version_hash=dispatch["mission_version_hash"],
-                        binding=ticket["targeted_binding"], allow_closed=True)
+                        binding=ticket["targeted_binding"], allow_closed=True,
+                        **({"cursor":ticket.get("cursor")} if self.source_ref==SEC_SOURCE_REF else {}))
                     if (summary.get("targeted_binding")!=bound or summary.get("parameters")!=parameters
                             or summary.get("query_hash")!=discovery_query_hash(self.plan,parameters)
                             or dispatch["query_hash"]!=discovery_query_hash(self.plan,parameters)):
@@ -1849,6 +1853,12 @@ class MissionSourceDiscoveryCoordinator:
                         "reason":result.get("failure_reason")})
                     continue
             if ticket["status"] == "succeeded" and summary.get("discovery_ref"):
+                if (self.source_ref==SEC_SOURCE_REF and ticket.get("targeted_binding") is not None
+                        and ticket.get("cursor") is None and summary.get("next_cursor")):
+                    from .material_acquisition import record_targeted_event
+                    record_targeted_event(self.search_launcher.state_dir,ticket["targeted_binding"]["query_ref"],
+                        status="launched",kind="archive_ready",dispatch_ref=dispatch["dispatch_id"],ticket_ref=ticket["id"],
+                        extra={"targeted_binding":ticket["targeted_binding"],"next_cursor":summary["next_cursor"]})
                 result = self.missions.settle_discovery_dispatch(
                     dispatch["dispatch_id"], status="succeeded"
                 )
@@ -3070,6 +3080,10 @@ class MissionSourceDiscoveryCoordinator:
         try:
             from .material_acquisition import pending_targeted_queries, record_targeted_event
             pending = pending_targeted_queries(state_dir, self.source_ref, limit=1)
+            if self.source_ref==SEC_SOURCE_REF and getattr(self,"store",None) is not None:
+                from .material_targeted_sec import pending_archive_query
+                archive=pending_archive_query(state_dir,self.store.connection,self.plan,self.search_launcher)
+                if archive is not None:pending=[archive]
         except Exception:  # noqa: BLE001 - a missing or locked ledger is nothing queued
             return None
         if not pending:
@@ -3142,8 +3156,11 @@ class MissionSourceDiscoveryCoordinator:
                 parameters, bound = _targeted_parameters(state_dir, plan=self.plan,
                     company_ref=company_ref, spec_ref=spec["spec_ref"], as_of=request_date,
                     mission_version_ref=mission["id"], mission_version_hash=mission["content_hash"],
-                    query_ref=query["query_id"])
+                    query_ref=query["query_id"],
+                    **({"cursor":query.get("archive_cursor")} if self.source_ref==SEC_SOURCE_REF else {}))
                 page_options["targeted_binding"] = bound
+                if self.source_ref==SEC_SOURCE_REF and query.get("archive_cursor") is not None:
+                    page_options["cursor"]=query["archive_cursor"]
             except ValueError as exc:
                 answer("refused", "request_binding", str(exc))
                 return {**base, "status":"targeted_refused", "reason":"request_binding"}
