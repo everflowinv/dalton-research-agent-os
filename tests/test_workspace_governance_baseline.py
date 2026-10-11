@@ -29,6 +29,7 @@ from dalton_core.workspace_governance_baseline import (
     research_specific_policy_keys,
 )
 
+FILED_QUARTER_PAIR = "research-auto-commit:sec-statement-line-growth-quarter-pair:v1"
 FY_MINUS_9M = "research-auto-commit:sec-statement-line-growth-fy-minus-9m:v1"
 
 #: Legacy's active policy on 2026-09-27, exported read-only.
@@ -61,18 +62,18 @@ BUDGET = {"max_daily_paid_calls": 100, "max_daily_cost_usd": 100.0,
 class BaselineBodyTests(unittest.TestCase):
     def test_legacy_policy_18_is_the_baseline_but_for_the_fy_minus_9m_rule(self):
         # policy-18 predates the FY - 9M rule (2026-09-28): the baseline adds
-        # exactly that rule, after the ones legacy already lists, and nothing else.
+        # the FY−9M and filed-quarter-pair rules after the legacy rules; no budget/content changes.
         body, added = baseline_policy_body(LEGACY_POLICY_18, mission_budget=BUDGET)
-        self.assertEqual(added, [f"research_candidate_auto_commit:{FY_MINUS_9M}"])
+        self.assertEqual(added, [f"research_candidate_auto_commit:{FY_MINUS_9M}", f"research_candidate_auto_commit:{FILED_QUARTER_PAIR}"])
         self.assertEqual(body["research_candidate_auto_commit"]["rules"],
                          [*LEGACY_POLICY_18["research_candidate_auto_commit"]["rules"],
-                          FY_MINUS_9M])
+                          FY_MINUS_9M, FILED_QUARTER_PAIR])
         self.assertEqual({key: value for key, value in body.items()
                           if key != "research_candidate_auto_commit"},
                          {key: value for key, value in LEGACY_POLICY_18.items()
                           if key != "research_candidate_auto_commit"})
         self.assertEqual(
-            LEGACY_POLICY_18["research_candidate_auto_commit"]["rules"] + [FY_MINUS_9M],
+            LEGACY_POLICY_18["research_candidate_auto_commit"]["rules"] + [FY_MINUS_9M, FILED_QUARTER_PAIR],
             list(BASELINE_AUTO_COMMIT_RULES))
         again, added_again = baseline_policy_body(body, mission_budget=BUDGET)
         self.assertEqual((again, added_again), (body, []))
@@ -92,7 +93,7 @@ class BaselineBodyTests(unittest.TestCase):
         self.assertEqual(body["independence_predicates"], [PREDICATE])
         self.assertNotIn("weekly_brief_auto_publish", body)
         self.assertIn("research_budget", added)
-        self.assertEqual(len(added), 6 + 2 + 1)
+        self.assertEqual(len(added), 7 + 2 + 1)
         self.assertIn(FY_MINUS_9M, body["research_candidate_auto_commit"]["rules"])
 
     def test_what_the_owner_decided_is_kept(self):
@@ -132,7 +133,7 @@ class BaselineBodyTests(unittest.TestCase):
         legacy_gaps = [row for row in legacy_rows if row["status"] != "ok"
                        and row["check"] != "policy.independence_predicates"]
         self.assertEqual([row["check"] for row in legacy_gaps],
-                         [f"policy.research_candidate_auto_commit:{FY_MINUS_9M}"])
+                         [f"policy.research_candidate_auto_commit:{FY_MINUS_9M}", f"policy.research_candidate_auto_commit:{FILED_QUARTER_PAIR}"])
         self.assertIn("FY - 9M", legacy_gaps[0]["detail"])
         self.assertEqual(research_specific_policy_keys(LEGACY_POLICY_18),
                          ["weekly_brief_auto_publish"])

@@ -950,6 +950,13 @@ class MissionSecQuartersCoordinator:
                                     "form": ANNUAL_FORM, "period_end": filing["end"],
                                     "reason": derived["reason"]})
                     continue
+                if filing.get("form") == QUARTERLY_FORM:
+                    primary = self._derive_filed_quarter(company_ref, filing)
+                    if primary is not None:
+                        derivations.append(primary)
+                        if primary["status"] == "committed":
+                            held_ends.add(filing["end"])
+                            continue
                 if tried >= MAX_ATTEMPTS_PER_FILING:
                     skipped.append({"ticker": entry.get("ticker"), "accession": filing["accession"],
                                     "reason": f"这份 filing 已经试过 {tried} 次"})
@@ -1039,6 +1046,50 @@ class MissionSecQuartersCoordinator:
         return {"status": "idle", "skipped": skipped}
 
     # -- FY - 9M -------------------------------------------------------------
+
+    def _derive_filed_quarter(self, company_ref, filing):
+        """Use held original statement authority before retrying lagging companyfacts."""
+        from .research_auto_commit import SEC_FILED_QUARTER_GROWTH_RULE_REF, ResearchAutoCommitRejected
+        from .quantitative_claim_promotion_cli import WRITE_SCOPES, _signed_rules
+        from .quantitative_claim_promotion import QuantitativeClaimPromotionError
+        from .research_verification import ResearchVerificationError
+        from .sec_filed_quarter_growth import stage_filed_quarter_growth_candidate
+        from .store import GateRejected
+        row = self.connection.execute(
+            "SELECT ingest_id FROM coverage_mission_statement_filings "
+            "WHERE company_ref=? AND accession=? AND form='10-Q'",
+            (company_ref, filing["accession"]),
+        ).fetchone()
+        if row is None:
+            return None
+        base = {"accession": filing["accession"], "form": QUARTERLY_FORM,
+                "period_end": filing["end"], "rule_ref": SEC_FILED_QUARTER_GROWTH_RULE_REF}
+        try:
+            signed = _signed_rules(self.store.active_policy())
+        except Exception:
+            signed = frozenset()
+        if SEC_FILED_QUARTER_GROWTH_RULE_REF not in signed:
+            return None  # Preserve the existing lane until this distinct rule is signed.
+        if self.staging is None:
+            return {**base, "status": "unavailable", "reason": "本车道未配置候选暂存库"}
+        mission = self.missions.mission(self._active_mission_version())
+        if WRITE_SCOPES - set(mission["autonomy"]["may_write"]):
+            return {**base, "status": "unavailable", "reason": "任务未授予正式候选写入范围"}
+        try:
+            bundle = stage_filed_quarter_growth_candidate(
+                self.connection, self.staging, ingest_id=row["ingest_id"],
+                actor_ref=mission["autonomy"]["automation_principal"])
+            promoted = self.store.commit_policy_candidate(
+                **{k: bundle[k] for k in ("evidence", "claim", "material", "numeric_spec",
+                                         "source_verification", "numeric_verification")},
+                idempotency_key="policy-ledger:" + bundle["claim"]["id"])
+        except (QuantitativeClaimPromotionError, ResearchVerificationError,
+                ResearchAutoCommitRejected, GateRejected) as exc:
+            return {**base, "status": "refused", "reason": type(exc).__name__ + ": " + str(exc)}
+        return {**base, "status": "committed", "period": bundle["claim"]["period"],
+                "value": bundle["claim"]["value"], "candidate_claim_ref": bundle["claim"]["id"],
+                "claim_version_ref": promoted.get("claim_version_ref"),
+                "ledger_write": promoted.get("status") == "fresh"}
 
     def _derive_fourth_quarter(self, company_ref: str,
                                filing: Mapping[str, Any]) -> dict[str, Any]:

@@ -1544,7 +1544,7 @@ class DaltonStore:
         document_source_verification: Mapping[str, Any] | None = None,
     ) -> dict[str, Any]:
         """Shared atomic Ledger writer for human and policy authorization."""
-        from .research_auto_commit import SEC_FY_MINUS_9M_RULE_REF, SEC_STATEMENT_LINE_RULE_REF
+        from .research_auto_commit import SEC_FY_MINUS_9M_RULE_REF, SEC_STATEMENT_LINE_RULE_REF, SEC_FILED_QUARTER_GROWTH_RULE_REF
         from .research_review import (
             validate_claim_version_v0_2,
             validate_evidence_version_v0_2,
@@ -1677,7 +1677,7 @@ class DaltonStore:
                 active_policy_binding is not None
                 and decision_wire.get("authorization") == "versioned_governance_policy"
                 and decision_wire.get("rule_ref") in (
-                    SEC_STATEMENT_LINE_RULE_REF, SEC_FY_MINUS_9M_RULE_REF)
+                    SEC_STATEMENT_LINE_RULE_REF, SEC_FY_MINUS_9M_RULE_REF, SEC_FILED_QUARTER_GROWTH_RULE_REF)
             ):
                 # WP-F.  A filed XBRL statement line has no connector
                 # SourceEnvelope and never had one: the SEC financial-statements

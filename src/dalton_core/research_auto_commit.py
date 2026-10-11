@@ -74,10 +74,11 @@ SEC_STATEMENT_LINE_RULE_REF = "research-auto-commit:sec-statement-line:v1"
 SEC_FY_MINUS_9M_RULE_REF = (
     "research-auto-commit:sec-statement-line-growth-fy-minus-9m:v1"
 )
+SEC_FILED_QUARTER_GROWTH_RULE_REF = "research-auto-commit:sec-statement-line-growth-quarter-pair:v1"
 KNOWN_RULE_REFS: frozenset[str] = frozenset({
     RULE_REF, *COMPANY_FACTS_RULE_REFS.values(), DOCUMENT_QUALITATIVE_RULE_REF,
     MISSION_VERIFIED_FIGURE_RULE_REF, SEC_STATEMENT_LINE_RULE_REF,
-    SEC_FY_MINUS_9M_RULE_REF,
+    SEC_FY_MINUS_9M_RULE_REF, SEC_FILED_QUARTER_GROWTH_RULE_REF,
 })
 _RULE_FINDINGS: dict[str, str] = {
     RULE_REF: "matched exact deterministic SEC filing-count rule",
@@ -96,6 +97,10 @@ _RULE_FINDINGS: dict[str, str] = {
     SEC_STATEMENT_LINE_RULE_REF: (
         "matched the SEC statement-line rule: filed XBRL row rebuilt from Core "
         "field by field, anchored to its accession, statement, ordinal and concept"
+    ),
+    SEC_FILED_QUARTER_GROWTH_RULE_REF: (
+        "matched exact same-concept consolidated filed quarter pair, comparable periods, "
+        "YTD consistency and precision-bounded growth, rebuilt from Core"
     ),
     SEC_FY_MINUS_9M_RULE_REF: (
         "matched the SEC FY-9M rule: fourth quarter derived as fiscal year less nine "
@@ -666,6 +671,41 @@ def _authorize_sec_fy_minus_9m(
     )
 
 
+def _authorize_sec_filed_quarter_growth(
+    *, connection, policy_version, rule, evidence_wire, claim_wire, material,
+    source_verification, numeric_verification, numeric_spec,
+):
+    from .sec_filed_quarter_growth import build_filed_quarter_growth_candidate
+    from .quantitative_claim_promotion import QuantitativeClaimPromotionError
+    if SEC_FILED_QUARTER_GROWTH_RULE_REF not in rule["rules"]:
+        raise ResearchAutoCommitRejected(
+            "active policy does not list " + SEC_FILED_QUARTER_GROWTH_RULE_REF)
+    wire = _authority_material(material)
+    payload = wire.get("normalized_payload") or {}
+    if payload.get("kind") != "filed_quarter_pair_growth":
+        raise ResearchAutoCommitRejected("filed quarter pair payload is unavailable")
+    try:
+        rebuilt = build_filed_quarter_growth_candidate(
+            connection, ingest_id=str(payload.get("ingest_id")),
+            actor_ref=_automation_actor(claim_wire), context_bindings=payload.get("context_bindings"))
+    except (QuantitativeClaimPromotionError, sqlite3.Error) as exc:
+        raise ResearchAutoCommitRejected("filed quarter pair cannot replay: " + str(exc)) from exc
+    for label, expected, observed in (
+        ("material", rebuilt["material"], material),
+        ("source verification", rebuilt["source_verification"], source_verification),
+        ("numeric spec", rebuilt["numeric_spec"], numeric_spec),
+        ("numeric verification", rebuilt["numeric_verification"], numeric_verification),
+        ("evidence", rebuilt["evidence"], evidence_wire),
+        ("claim", rebuilt["claim"], claim_wire),
+    ):
+        _replay_is_exact("filed quarter pair " + label, expected, observed)
+    return _decision(
+        policy_version, claim_wire=claim_wire, evidence_wire=evidence_wire,
+        rule_ref=SEC_FILED_QUARTER_GROWTH_RULE_REF,
+        rationale="Comparable filed quarter revenues, same concept and basis, exact Core replay.",
+    )
+
+
 def _scheduler_work(
     connection: sqlite3.Connection, work_ref: str
 ) -> dict[str, Any]:
@@ -1204,6 +1244,8 @@ def authorize_policy_candidate(
         branch = (
             _authorize_mission_verified_figure
             if provenance_mode == MISSION_FIGURE_AUTHORITY_MODE
+            else _authorize_sec_filed_quarter_growth
+            if payload_kind == "filed_quarter_pair_growth"
             else _authorize_sec_fy_minus_9m
             if payload_kind == _FY_MINUS_9M_PAYLOAD_KIND
             else _authorize_sec_statement_line
