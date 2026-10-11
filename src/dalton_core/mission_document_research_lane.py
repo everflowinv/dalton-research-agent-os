@@ -2135,13 +2135,21 @@ class MissionDocumentResearchCoordinator:
         recovery: Mapping[str, Any], settled: Mapping[str, Any] | None,
     ) -> dict[str, Any]:
         authorization = self._reentry_authorization(admission, ticket_ref, recovery)
-        resumed = self.launcher.resume(
-            admission_ref=admission["id"],
-            admission_hash=admission["content_hash"],
-            prior_ticket_ref=ticket_ref,
-            authorization=authorization,
-            expected_summary_sha256=recovery.get("expected_summary_sha256"),
-        )
+        from .document_completed_model_replay import candidate
+        local_replay = (candidate(self, admission, ticket_ref)
+                        if hasattr(self.launcher, "replay_completed_models") else None)
+        if local_replay is not None:
+            resumed = self.launcher.replay_completed_models(
+                admission_ref=admission["id"], admission_hash=admission["content_hash"],
+                proof=local_replay)
+        else:
+            resumed = self.launcher.resume(
+                admission_ref=admission["id"],
+                admission_hash=admission["content_hash"],
+                prior_ticket_ref=ticket_ref,
+                authorization=authorization,
+                expected_summary_sha256=recovery.get("expected_summary_sha256"),
+            )
         pointer = {
             "ticket_ref": resumed["id"],
             "admission_ref": admission["id"],

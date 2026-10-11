@@ -94,7 +94,7 @@ class MissionDocumentResearchLauncher(LaneChildLauncher):
 
     def _command(self, *, ticket_dir: Path, **kwargs: Any) -> list[str]:
         configuration = kwargs["configuration"]
-        return [
+        command = [
             self.python_executable, "-m", self.CHILD_MODULE,
             "--state-dir", str(self.state_dir),
             "--staging", configuration["staging"]["path"],
@@ -110,6 +110,34 @@ class MissionDocumentResearchLauncher(LaneChildLauncher):
             "--summary-dir", str(ticket_dir),
             "--quiet",
         ]
+        if kwargs.get("completed_models_only"):
+            command.append("--completed-models-only")
+        return command
+
+    def replay_completed_models(self, *, admission_ref, admission_hash, proof):
+        """One versioned child per admission, independent of config/day changes."""
+        from .document_completed_model_replay import CONTRACT
+        self._validate_admission(admission_ref, admission_hash)
+        if (proof.get("contract_ref") != CONTRACT or proof.get("model_calls_allowed") != 0
+                or proof.get("admission_ref") != admission_ref
+                or proof.get("admission_hash") != admission_hash
+                or proof.get("content_hash") != content_hash({k:v for k,v in proof.items() if k != "content_hash"})):
+            raise LaneChildRejected("completed model replay proof differs")
+        scope = {"contract_ref": CONTRACT, "admission_ref": admission_ref,
+                 "admission_hash": admission_hash}
+        digest = content_hash(scope)[:24]
+        ref = f"{self.TICKET_PREFIX}:{digest}"
+        if self._ticket_path(ref).exists():
+            prior = self.status(ref)
+            if prior.get("status") == "running":
+                return prior
+            raise LaneChildRejected("completed model postprocessing already attempted")
+        configuration = self.configuration()
+        return self.spawn(digest=digest,
+            record={**scope, "configuration": configuration,
+                    "configuration_hash": content_hash(configuration), "completed_model_replay": proof},
+            admission_ref=admission_ref, admission_hash=admission_hash,
+            configuration=configuration, completed_models_only=True)
 
     @staticmethod
     def _validate_admission(admission_ref: str, admission_hash: str) -> None:

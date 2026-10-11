@@ -6126,7 +6126,7 @@ class MissionDocumentResearchExecutor:
                 return self._candidate_rejection(admission, records, outcome, reason)
         return promote_document_candidate(self, admission, works, records, outcome)
 
-    def run_once(self, admission_ref: str):
+    def run_once(self, admission_ref: str, *, completed_models_only: bool = False):
         try:
             admission = self.authority.resolve_for_execution(admission_ref)
         except MissionDocumentResearchError as exc:
@@ -6138,7 +6138,8 @@ class MissionDocumentResearchExecutor:
             if index == 0:
                 work = originals[0]
             elif index in (1, 2):
-                self._ensure_model_authority_epoch_rebind(admission, index)
+                if not completed_models_only:
+                    self._ensure_model_authority_epoch_rebind(admission, index)
                 stage_worker = self.draft_worker if index == 1 else self.verifier_worker
                 work, _links = _effective_stage(
                     self.authority, self.scheduler, admission, index, worker=stage_worker)
@@ -6147,6 +6148,11 @@ class MissionDocumentResearchExecutor:
                     admission, self.scheduler, self.registry, effective)
             effective.append(work)
             stored = self.scheduler.work_order_authority(work["id"])
+            if completed_models_only and index < 3:
+                completed = self.scheduler.formal_result(work["id"])
+                if stored is None or completed is None or completed["terminal_state"] != "succeeded":
+                    raise MissionDocumentResearchExecutorError(
+                        "local postprocessing requires every existing retrieval and model stage to be complete")
             if stored is None:
                 return self._enqueue(work)
             if stored["work_order_hash"] != content_hash(work):

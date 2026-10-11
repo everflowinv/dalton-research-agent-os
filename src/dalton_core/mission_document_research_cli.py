@@ -31,6 +31,7 @@ def build_parser() -> argparse.ArgumentParser:
     parser.add_argument("--summary-dir", type=Path, required=True)
     parser.add_argument("--stack-dump-seconds", type=int, default=60)
     parser.add_argument("--quiet", action="store_true")
+    parser.add_argument("--completed-models-only", action="store_true")
     return parser
 
 
@@ -62,6 +63,7 @@ def run_admission(
     expected_admission_hash: str,
     draft_model_config: Path | None = None,
     verifier_model_config: Path | None = None,
+    completed_models_only: bool = False,
 ) -> dict[str, Any]:
     outcomes: list[dict[str, Any]] = []
     with MissionDocumentResearchRuntime(
@@ -77,7 +79,8 @@ def run_admission(
     ) as runtime:
         admission = runtime.admission
         for _transition in range(runtime.transition_budget(admission)):
-            outcome = runtime.executor.run_once(admission_ref)
+            outcome = runtime.executor.run_once(admission_ref, **(
+                {"completed_models_only": True} if completed_models_only else {}))
             outcomes.append(outcome)
             status = outcome.get("status")
             if status in {"complete", "blocked"}:
@@ -130,6 +133,7 @@ def main(argv: list[str] | None = None) -> int:
             expected_admission_hash=args.expected_admission_hash,
             draft_model_config=args.mission_document_draft_model_config,
             verifier_model_config=args.mission_document_verifier_model_config,
+            completed_models_only=args.completed_models_only,
         )
     except Exception as exc:
         summary = _summary(
