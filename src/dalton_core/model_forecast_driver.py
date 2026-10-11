@@ -5023,7 +5023,13 @@ class ForecastModelAuthority:
             source_groups = expected_groups
             evaluate_bound = evaluate_grouped
         from .forecast_statement_scope import statement_scope
-        scoped_rows, model_statement_scope = statement_scope(wire, statement_rows, self.connection)
+        scoped_rows, model_statement_scope = statement_scope(
+            wire, statement_rows, self.connection, source_groups=source_groups)
+        if model_statement_scope is not None:
+            from .forecast_execution_statement_scope import RULE_REF as EXECUTION_SCOPE_RULE, evaluate_execution
+            if model_statement_scope.get("rule_ref") == EXECUTION_SCOPE_RULE:
+                evaluate_bound = lambda record, **kwargs: evaluate_execution(
+                    record, scope=model_statement_scope, **kwargs)
         candidate_report = evaluate_bound(
             wire, statement_rows=scoped_rows, solver_results=solver_results)
         gate(self.store, candidate_report,
@@ -5172,7 +5178,8 @@ class ForecastModelAuthority:
                                and found[str(row["ingest_id"])]["form"] in {"10-K", "10-K/A"}]
                     if not matches:
                         raise ForecastModelValidationError("annual share forecast source does not match immutable direct annual filing rows")
-        scoped_wire, model_statement_scope = statement_scope(wire, statement_wire, self.connection)
+        scoped_wire, model_statement_scope = statement_scope(
+            wire, statement_wire, self.connection, source_groups=source_groups)
         invariant_report = evaluate_bound(
             wire, statement_rows=scoped_wire, solver_results=solver_results)
         gate(self.store, invariant_report,
@@ -5306,7 +5313,8 @@ class ForecastModelAuthority:
         if wire.get("model_statement_scope") is not None:
             from .forecast_statement_scope import statement_scope
             scoped_wire, scope_replay = statement_scope(
-                model, statement_wire, self.connection, frozen_scope=wire["model_statement_scope"])
+                model, statement_wire, self.connection, frozen_scope=wire["model_statement_scope"],
+                source_groups=wire.get("consumed_source_groups"))
             if scope_replay != wire["model_statement_scope"]:
                 raise ForecastModelConflict("forecast filing partition scope does not replay")
         else:
@@ -5319,6 +5327,11 @@ class ForecastModelAuthority:
             except ForecastModelValidationError as exc:
                 raise ForecastModelConflict(str(exc)) from exc
             evaluate_bound = evaluate_grouped
+        from .forecast_execution_statement_scope import RULE_REF as EXECUTION_SCOPE_RULE
+        if (wire.get("model_statement_scope") or {}).get("rule_ref") == EXECUTION_SCOPE_RULE:
+            from .forecast_execution_statement_scope import evaluate_execution
+            evaluate_bound = lambda record, **kwargs: evaluate_execution(
+                record, scope=scope_replay, **kwargs)
         replay = evaluate_bound(
             model, statement_rows=scoped_wire,
             solver_results=wire.get("solver_results") or [])

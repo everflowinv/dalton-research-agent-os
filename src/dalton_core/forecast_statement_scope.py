@@ -13,7 +13,7 @@ from .store import content_hash
 RULE_REF = "rule:forecast-statement-scope:1"
 
 
-def statement_scope(record: Mapping[str, Any], rows: Sequence[Mapping[str, Any]],
+def _legacy_statement_scope(record: Mapping[str, Any], rows: Sequence[Mapping[str, Any]],
                     connection: Any = None, *, frozen_scope: Mapping[str, Any] | None = None) -> tuple[list[Mapping[str, Any]], dict[str, Any] | None]:
     from .model_forecast_driver import ForecastModelValidationError
     declarations = {d["ref"]: d for d in (record.get("execution_contract") or {}).get("specification", {}).get("revenue_drivers") or []}
@@ -137,3 +137,37 @@ def statement_scope(record: Mapping[str, Any], rows: Sequence[Mapping[str, Any]]
                 "unmodeled_partitions_reason": "Other filed dimensions remain source data; only the specification's complete identity partitions enter this model's segment-sum assertion."}
     manifest["content_hash"] = content_hash(manifest)
     return scoped_rows, manifest
+
+
+def statement_scope(record: Mapping[str, Any], rows: Sequence[Mapping[str, Any]],
+                    connection: Any = None, *, frozen_scope: Mapping[str, Any] | None = None,
+                    source_groups: Mapping[str, Any] | None = None):
+    """New source-bound executions use every declared branch's exact family.
+
+    Existing v1 and unmarked proofs retain their algorithm and immutable bytes.
+    The original explicit-partition validator still checks all declared members
+    and source presentation proofs before a new execution scope is constructed.
+    """
+    from .forecast_execution_statement_scope import RULE_REF as EXECUTION_SCOPE_RULE, execution_scope
+    from .model_forecast_driver import ForecastModelValidationError
+    if frozen_scope is not None and frozen_scope.get("rule_ref") == RULE_REF:
+        return _legacy_statement_scope(record, rows, connection, frozen_scope=frozen_scope)
+    if frozen_scope is not None and frozen_scope.get("rule_ref") != EXECUTION_SCOPE_RULE:
+        raise ForecastModelValidationError("unknown frozen forecast statement scope")
+    if frozen_scope is not None and frozen_scope.get("content_hash") != content_hash({
+            k: v for k, v in frozen_scope.items() if k != "content_hash"}):
+        raise ForecastModelValidationError("frozen execution statement scope hash differs")
+    if source_groups is None:
+        if frozen_scope is not None:
+            raise ForecastModelValidationError("execution scope lacks its exact source-group proof")
+        return _legacy_statement_scope(record, rows, connection)
+    # Presentation receipts, when present, must be rechecked from the original
+    # exact source during durable replay, never replaced by today's receipt.
+    legacy_frozen = None
+    if frozen_scope is not None and frozen_scope.get("partitions"):
+        legacy_frozen = {"partitions": frozen_scope["partitions"]}
+        legacy_frozen["content_hash"] = content_hash(legacy_frozen)
+    _, prior_partition_scope = _legacy_statement_scope(
+        record, rows, connection, frozen_scope=legacy_frozen)
+    return execution_scope(record, rows, source_groups,
+                           prior_partition_scope=prior_partition_scope)

@@ -189,6 +189,8 @@ def model_digest(
         digest_body["filed_presentation_partition_rule"] = PRESENTATION_PARTITION_RULE
         from .forecast_consumed_source_groups import RULE_REF as CONSUMED_SOURCE_GROUPS_RULE
         digest_body["filed_consumed_source_groups_rule"] = CONSUMED_SOURCE_GROUPS_RULE
+        from .forecast_execution_statement_scope import RULE_REF as EXECUTION_STATEMENT_SCOPE_RULE
+        digest_body["filed_execution_statement_scope_rule"] = EXECUTION_STATEMENT_SCOPE_RULE
         from .company_financial_statement_structure import (
             CASH_LEAF_DURATION_UNIT_VALIDATION_REF, _TYPED_NOTE_STRUCTURE_VERSIONS,
         )
