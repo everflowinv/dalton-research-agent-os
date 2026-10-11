@@ -341,10 +341,19 @@ def build_state(store: DaltonStore, missions: CoverageMissionAuthority,
         except Exception as exc:  # preserve ordinary planning, disclose unavailable original reads
             document_inventory = {"status": "unavailable", "reason": type(exc).__name__}
 
+    from .initial_screen_failure_feedback import read_feedback
+    try:
+        failure_config = json.loads((state_dir/'initial-screen-model-config.json').read_text())
+        screen_feedback = {entry['company_ref']: read_feedback(store.connection,
+            state_dir=state_dir, mission=mission, company_ref=entry['company_ref'],config=failure_config)
+            for entry in checklist}
+    except (OSError, ValueError, KeyError, TypeError):
+        screen_feedback = {}
     state = build_research_state(
         mission=mission, checklist=checklist, industry=industry,
         figures_by_company=figures, financial_models_by_company=financial_models,
         metrics_by_company=metrics,
+        initial_screen_feedback_by_company=screen_feedback,
         contested_by_company=disputed, acquisition_by_company=acquisition,
         dossier_feedback_by_company=read_dossier_repair_feedback(
             Path(store.path).parent),

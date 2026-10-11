@@ -49,6 +49,7 @@ def company_state(
     contested: Sequence[Mapping[str, Any]] = (),
     acquisition: Mapping[str, Any] | None = None,
     dossier_feedback: Mapping[str, Any] | None = None,
+    initial_screen_feedback: Mapping[str, Any] | None = None,
     readable_documents: Sequence[Mapping[str, Any]] = (),
     unavailable_documents: Sequence[Mapping[str, Any]] = (),
     document_research_feedback: Sequence[Mapping[str, Any]] = (),
@@ -107,6 +108,8 @@ def company_state(
     numeric = numeric_requirements(document_research_feedback)
     if numeric["requirements"]:
         extra["numeric_reading_requirements"] = numeric
+    if initial_screen_feedback and initial_screen_feedback.get("status") != "not_recorded":
+        extra["initial_screen_validation_feedback"] = dict(initial_screen_feedback)
     completed = numeric_completed_context(document_research_feedback, company_ref=entry.get('company_ref'))
     if completed['sources']:
         extra['numeric_completed_context'] = completed
@@ -262,6 +265,7 @@ def build_research_state(
     contested_by_company: Mapping[str, Sequence[Mapping[str, Any]]] | None = None,
     acquisition_by_company: Mapping[str, Mapping[str, Any]] | None = None,
     dossier_feedback_by_company: Mapping[str, Mapping[str, Any]] | None = None,
+    initial_screen_feedback_by_company: Mapping[str, Mapping[str, Any]] | None = None,
     readable_documents_by_company: Mapping[str, Sequence[Mapping[str, Any]]] | None = None,
     unavailable_documents_by_company: Mapping[str, Sequence[Mapping[str, Any]]] | None = None,
     document_research_policy: Mapping[str, Any] | None = None,
@@ -301,6 +305,7 @@ def build_research_state(
             contested=contested_by_company.get(entry.get("company_ref"), ()),
             acquisition=acquisition_by_company.get(entry.get("company_ref")),
             dossier_feedback=dossier_feedback_by_company.get(entry.get("company_ref")),
+            initial_screen_feedback=(initial_screen_feedback_by_company or {}).get(entry.get("company_ref")),
             readable_documents=readable_documents_by_company.get(entry.get("company_ref"), ()),
             unavailable_documents=unavailable_documents_by_company.get(entry.get("company_ref"), ()),
             document_research_feedback=document_research_feedback.get("by_company", {}).get(entry.get("company_ref"), ()),
@@ -457,6 +462,9 @@ def _material_subject(subject: Mapping[str, Any] | None) -> dict[str, Any] | Non
            if 'document_execution_failures' in subject else {}),
         **({key: content_hash(subject[key]) for key in (
             "model_execution_failures", "model_execution_failure_summary") if key in subject}),
+        **({"initial_screen_validation_feedback": sorted(item["semantic_hash"] for item in
+            (subject["initial_screen_validation_feedback"].get("items") or []))}
+           if (subject.get("initial_screen_validation_feedback") or {}).get("items") else {}),
         **({"numeric_source_refusal_ids": subject["numeric_source_refusal_ids"]}
            if "numeric_source_refusal_ids" in subject else {}),
         **({"numeric_completed_context": content_hash(subject["numeric_completed_context"])}

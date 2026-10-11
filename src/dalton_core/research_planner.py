@@ -171,7 +171,7 @@ PROMPT_PROJECTION_RULE = {
         "filed_statement_figures", "reading_pipeline",
         "readable_documents", "readable_documents_summary",
         "document_execution_availability", "document_execution_failures", "numeric_reading_requirements", "canonical_document_questions",
-        "model_execution_failures", "model_execution_failure_summary",
+        "model_execution_failures", "model_execution_failure_summary", "initial_screen_validation_feedback",
         "numeric_source_refusal_ids", "numeric_source_refusals", "numeric_waiting_targets", "numeric_completed_context",
         "document_research_feedback_summary", "dossier_feedback.repair_target_ids",
         "dossier_feedback.material", "document_research_reopened",
@@ -212,7 +212,7 @@ _COMPANY_CORE_FIELDS: tuple[str, ...] = (
     "filed_statement_figures", "reading_pipeline",
     "readable_documents", "readable_documents_summary",
     "document_execution_availability", "document_execution_failures", "numeric_reading_requirements", "canonical_document_questions",
-    "model_execution_failures", "model_execution_failure_summary",
+    "model_execution_failures", "model_execution_failure_summary", "initial_screen_validation_feedback",
     "document_research_feedback_summary",
     "document_research_reopened", "document_research_reopened_omitted",
 )
@@ -1366,6 +1366,7 @@ def build_prompt(state: Mapping[str, Any]) -> str:
         "numeric_admission_period_refused means a numeric target lacks an executable period: preserve the "
         "question and exact original, identify its explicit year or quarter/half-year before resubmitting; "
         "never guess a date or repeat latest/current reporting period. "
+        "initial_screen_validation_feedback: checked draft defects, not evidence or retry authority; fix citations/format within normal gates, not by inventing facts or buying unrelated material. "
         "model_execution_failures: hashed failures, not readiness/evidence/retry authority. "
         "Respect unlinked Work/formal status. Check held originals for driver/period gaps. "
         "Cleared/superseded failures are omitted. "

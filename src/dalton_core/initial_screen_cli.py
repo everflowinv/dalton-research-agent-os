@@ -24,6 +24,7 @@ Every step is idempotent: a re-run with nothing new to say publishes nothing.
 from __future__ import annotations
 
 import argparse
+import sqlite3
 import calendar
 import json
 import os
@@ -816,11 +817,33 @@ def _run_strl(
             max_input_tokens=STRL_MAX_INPUT_TOKENS, max_output_tokens=STRL_MAX_OUTPUT_TOKENS,
             timeout_seconds=args.timeout_seconds,
         )
+    validation_context={'company':company,'pack':pack,'prior_reference':prior_block}
+    from .initial_screen_failure_feedback import prepare_prompt,snapshot_passage_bindings
+    validation_context['source_bindings']=snapshot_passage_bindings(deliverable_authority,pack)
+    worksheet_bound,document_bound=False,False
+    worksheet_repair: list[dict[str, Any]] = []
     invocations: list[str] = []
     routes: list[str] = []
     base_id = f"{mission['id']}:{company_ref}:{KIND}:strl:{pack['content_hash'][:16]}"
+    def record_failure(stage, calls, *, document_repair=()):
+        from .initial_screen_failure_feedback import save_failure,PROOF_ERRORS
+        try:
+            summary['validation_feedback'] = save_failure(
+                state_dir=state, summary_dir=args.summary_dir, model=model, mission=mission,
+                context={'stage':stage, 'company':company, 'pack':pack,
+                         'prior_reference':prior_block,'source_bindings':validation_context['source_bindings'],
+                         'worksheet_repair':worksheet_repair,
+                         'document_repair':list(document_repair),'worksheet_bound':worksheet_bound,
+                         'document_bound':document_bound}, calls=calls,
+                authority=deliverable_authority)
+        except (*PROOF_ERRORS,AttributeError):
+            # Missing proof never changes the original refusal or authorizes a retry.
+            summary['validation_feedback'] = {'status':'unverified',
+                'reason':'initial_screen_failure_proof_unavailable'}
     try:
         # Step one, with one repair on deterministic findings.
+        worksheet_prompt,worksheet_bound=prepare_prompt(model,prompt=worksheet_prompt,
+            context=validation_context,request_id=f'{base_id}:worksheet',mission=mission)
         raw, call = _call_json(model, request_id=f"{base_id}:worksheet", prompt=worksheet_prompt,
                                mission=mission, invocations=invocations)
         routes.append(str(call.get("route_decision_ref") or ""))
@@ -829,6 +852,7 @@ def _run_strl(
         except InitialScreenContractError as exc:
             worksheet, sheet_findings = None, [{"code": "worksheet_shape", "detail": str(exc)}]
         if sheet_findings:
+            worksheet_repair = list(sheet_findings)
             raw, call = _call_json(
                 model, request_id=f"{base_id}:worksheet:repair",
                 prompt=worksheet_prompt + "\n\nYour previous worksheet was rejected: "
@@ -840,12 +864,14 @@ def _run_strl(
                 worksheet, sheet_findings = validate_worksheet(raw, pack)
             except InitialScreenContractError as exc:
                 worksheet, sheet_findings = None, [{"code": "worksheet_shape", "detail": str(exc)}]
+        worksheet_call = dict(call)
         summary["worksheet"] = {"findings": sheet_findings,
                                 "stance": (worksheet or {}).get("stance")}
         if worksheet is None or sheet_findings:
             summary["status"] = "failed"
             summary["failure_reason"] = "底稿未通过核验：" + "、".join(
                 sorted({item["code"] for item in sheet_findings}))
+            record_failure("worksheet", {"worksheet":worksheet_call})
             return summary
         # Step two: the whole document, one call, then verify; one repair.
         live = deliverable_authority.live_claim_version_refs()
@@ -855,12 +881,18 @@ def _run_strl(
         sections: list[dict[str, Any]] = []
         repair: list[dict[str, Any]] = []
         attempts = []
+        deterministic_findings = []
+        document_call, document_repair = {}, []
         for attempt in range(2):
+            document_repair = list(repair)
             prompt = build_document_prompt(company=company, pack=pack, worksheet=worksheet,
                                            prior_reference=prior_block, repair=repair)
+            prompt,document_bound=prepare_prompt(model,prompt=prompt,context=validation_context,
+                request_id=f'{base_id}:document:{attempt}',mission=mission)
             raw, call = _call_json(model, request_id=f"{base_id}:document:{attempt}", prompt=prompt,
                                    mission=mission, invocations=invocations)
             routes.append(str(call.get("route_decision_ref") or ""))
+            document_call = dict(call)
             try:
                 sections, parse_findings = parse_document_output(raw, pack=pack)
             except InitialScreenContractError as exc:
@@ -869,6 +901,7 @@ def _run_strl(
                                        resolve_cell=resolve_cell, resolve_passage=resolve_passage)
                        if sections else {"verdict": "reject", "findings": []})
             findings = parse_findings + verdict["findings"]
+            deterministic_findings = list(findings)
             if not findings and sections:
                 # The model verifier reads what a regex cannot; it checks and
                 # never rewrites.
@@ -903,6 +936,9 @@ def _run_strl(
         summary["failure_reason"] = "核验未通过，未发布（不删句子凑过）：" + "、".join(
             sorted({str(item.get("code")) for item in verdict["findings"]}))[:800]
         summary["findings"] = verdict["findings"][:40]
+        if deterministic_findings:
+            record_failure("document", {"worksheet":worksheet_call, "document":document_call},
+                           document_repair=document_repair)
         return summary
     numbers_by_ref, passages_by_ref = pack_resolvers(pack)
     # Rubric H runs on every draft, before publish, and its result travels in
