@@ -85,7 +85,11 @@ class CallBudgetTests(unittest.TestCase):
              for name in wire["purposes"]},
         )
         for name in LONG_CONTEXT_PURPOSES:
-            self.assertEqual(wire["purposes"][name], LONG_CONTEXT_CALL_FLOOR)
+            # Initial-screen drafting has a larger evidence-backed output
+            # default; the shared minimum and independent verifier are unchanged.
+            expected = {**LONG_CONTEXT_CALL_FLOOR,
+                        **({"max_output_tokens": 64000} if name == "initial_screen" else {})}
+            self.assertEqual(wire["purposes"][name], expected)
 
     def test_long_form_brain_drafts_leave_room_for_reasoning(self):
         # 2026-09-29: glm-5.3 (a brain-tier link) spent all 4096 output tokens
