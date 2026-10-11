@@ -64,13 +64,22 @@ class CompanyModelSpecLauncher(LaneChildLauncher):
 
         return model_spec_validation_contract_hash()
 
-    def permission_control_projection(self) -> dict[str, str]:
+    def call_budget_hash(self) -> str | None:
+        """Shared policy contents are controls, even when their path is unchanged."""
+        from .call_budget import budget_fingerprint
+        from .company_model_cli import model_spec_call_budget
+
+        config = self._validated_model_config()
+        return None if config is None else budget_fingerprint(model_spec_call_budget(config))
+
+    def permission_control_projection(self) -> dict[str, str | None]:
         """Runtime code whose change can authorize a held model Work anew."""
 
         from . import cockpit_model
 
         path = Path(cockpit_model.__file__).resolve()
-        return {"cockpit_model_sha256": hashlib.sha256(path.read_bytes()).hexdigest()}
+        return {"cockpit_model_sha256": hashlib.sha256(path.read_bytes()).hexdigest(),
+                "model_spec_call_budget_hash": self.call_budget_hash()}
 
     def numeric_context_policy(self) -> dict[str, int]:
         from .company_model_state import model_spec_numeric_context_config
@@ -102,7 +111,8 @@ class CompanyModelSpecLauncher(LaneChildLauncher):
     def _command(self, *, ticket_dir: Path, company_ref: str,
                  expected_state_hash: str, expected_task_hash: str,
                  expected_repair_policy_hash: str,
-                 expected_financial_validation_contract_hash: str) -> list[str]:
+                 expected_financial_validation_contract_hash: str,
+                 expected_call_budget_hash: str | None = None) -> list[str]:
         command = [
             self.python_executable, "-m", self.CHILD_MODULE,
             "--state-dir", str(self.state_dir),
@@ -114,6 +124,8 @@ class CompanyModelSpecLauncher(LaneChildLauncher):
             expected_financial_validation_contract_hash,
             "--summary-dir", str(ticket_dir), "--quiet",
         ]
+        if expected_call_budget_hash is not None:
+            command += ["--expected-call-budget-hash", expected_call_budget_hash]
         if self.model_config_path is not None:
             command += ["--model-config", str(self.model_config_path)]
         if self.scheduler_db is not None:
@@ -144,9 +156,11 @@ class CompanyModelSpecLauncher(LaneChildLauncher):
         ):
             raise LaneChildRejected("repair policy hash changed before launch")
         validation_hash = self.financial_validation_contract_hash()
+        call_budget_hash = self.call_budget_hash()
         digest = self._ticket_digest(
             company_ref=company_ref, state_hash=state_hash, task_hash=task_hash,
-            repair_policy_hash=repair_policy_hash, validation_hash=validation_hash)
+            repair_policy_hash=repair_policy_hash, validation_hash=validation_hash,
+            call_budget_hash=call_budget_hash)
         return self.spawn(
             digest=digest,
             record={
@@ -155,6 +169,7 @@ class CompanyModelSpecLauncher(LaneChildLauncher):
                 "repair_policy_hash": repair_policy_hash,
                 "financial_validation_contract_hash": validation_hash,
                 "model_configured": self.configured,
+                **({} if call_budget_hash is None else {"call_budget_hash": call_budget_hash}),
             },
             _controlled_reentry=(None if controlled_reentry is None else
                                  (f"{self.TICKET_PREFIX}:{digest}", controlled_reentry)),
@@ -162,13 +177,16 @@ class CompanyModelSpecLauncher(LaneChildLauncher):
             expected_task_hash=task_hash,
             expected_repair_policy_hash=repair_policy_hash,
             expected_financial_validation_contract_hash=validation_hash,
+            expected_call_budget_hash=call_budget_hash,
         )
 
     def _ticket_digest(self, *, company_ref: str, state_hash: str,
                        task_hash: str, repair_policy_hash: str,
-                       validation_hash: str) -> str:
+                       validation_hash: str, call_budget_hash: str | None = None) -> str:
         identity = f"{self.TICKET_PREFIX}|{company_ref}|{state_hash}|{task_hash}"
         identity += f"|repair:{repair_policy_hash}|financial-validation:{validation_hash}"
+        if call_budget_hash is not None:
+            identity += f"|call-budget:{call_budget_hash}"
         return hashlib.sha256(identity.encode("utf-8")).hexdigest()[:24]
 
     def controlled_budget_reentry(self, *, business_key: str,
@@ -192,7 +210,8 @@ class CompanyModelSpecLauncher(LaneChildLauncher):
             digest = self._ticket_digest(
                 company_ref=company_ref, state_hash=state_hash, task_hash=task_hash,
                 repair_policy_hash=repair_policy_hash,
-                validation_hash=self.financial_validation_contract_hash())
+                validation_hash=self.financial_validation_contract_hash(),
+                call_budget_hash=self.call_budget_hash())
             ticket_ref = f"{self.TICKET_PREFIX}:{digest}"
             return None if self.controlled_reentry_claimed(ticket_ref, suffix) else suffix
         except (OSError, TypeError, ValueError):

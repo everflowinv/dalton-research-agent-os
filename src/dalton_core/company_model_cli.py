@@ -204,6 +204,18 @@ def _scheduler_failure_codes(
         connection.close()
 
 
+def model_spec_call_budget(config: Mapping[str, Any]) -> dict[str, Any]:
+    """Resolve exactly the frozen call limits used by the model-spec child."""
+    from .call_budget import resolve_call_budget
+
+    return resolve_call_budget(config, "model_spec", defaults={
+        "max_input_tokens": MAX_INPUT_TOKENS,
+        "max_output_tokens": MAX_OUTPUT_TOKENS,
+        "max_cost_usd": MAX_COST_USD,
+        "timeout_seconds": TIMEOUT_SECONDS,
+    })
+
+
 def model_spec_request_identity(
     state_hash: str,
     task_hash: str = TASK_HASH,
@@ -859,6 +871,7 @@ def run_model_spec(
     expected_task_hash: str | None = None,
     expected_repair_policy_hash: str | None = None,
     expected_financial_validation_contract_hash: str | None = None,
+    expected_call_budget_hash: str | None = None,
     dry_run: bool = False,
 ) -> dict[str, Any]:
     state_dir = state_dir.expanduser().resolve()
@@ -992,6 +1005,14 @@ def run_model_spec(
         repair_config = structured_output_repair_config(raw_model_config)
         repair_policy_hash = content_hash(repair_config)
         summary["repair_policy_hash"] = repair_policy_hash
+        # One shared-policy read freezes both the launch check and the Work's
+        # actual limits. A later administrator save is for the next batch.
+        from .call_budget import budget_fingerprint, freeze_shared_budget_policy
+        if raw_model_config is not None:
+            raw_model_config = freeze_shared_budget_policy(raw_model_config)
+        call_budget_hash = (None if raw_model_config is None else
+                            budget_fingerprint(model_spec_call_budget(raw_model_config)))
+        summary["call_budget_hash"] = call_budget_hash
         validation_contract_hash = model_spec_validation_contract_hash()
         summary["financial_validation_contract_hash"] = validation_contract_hash
         if ((expected_state_hash is not None
@@ -1002,7 +1023,9 @@ def run_model_spec(
                     and expected_repair_policy_hash != repair_policy_hash)
                 or (expected_financial_validation_contract_hash is not None
                     and expected_financial_validation_contract_hash
-                    != validation_contract_hash)):
+                    != validation_contract_hash)
+                or (expected_call_budget_hash is not None
+                    and expected_call_budget_hash != call_budget_hash)):
             summary.update({
                 "status": "succeeded", "spec_status": "stale_input",
                 "failure_reason": (
@@ -1176,6 +1199,7 @@ def build_parser() -> argparse.ArgumentParser:
     parser.add_argument("--expected-task-hash")
     parser.add_argument("--expected-repair-policy-hash")
     parser.add_argument("--expected-financial-validation-contract-hash")
+    parser.add_argument("--expected-call-budget-hash")
     parser.add_argument("--dry-run", action="store_true",
                         help="assemble the state and stop; no model call, no writes")
     parser.add_argument("--quiet", action="store_true")
@@ -1193,6 +1217,7 @@ def main(argv: list[str] | None = None) -> int:
         expected_repair_policy_hash=args.expected_repair_policy_hash,
         expected_financial_validation_contract_hash=(
             args.expected_financial_validation_contract_hash),
+        expected_call_budget_hash=args.expected_call_budget_hash,
         dry_run=args.dry_run,
     )
     if not args.quiet:
