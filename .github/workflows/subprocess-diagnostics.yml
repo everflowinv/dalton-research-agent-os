@@ -40,7 +40,7 @@ jobs:
           DIAGNOSTIC_MODULE_SET: ${{ inputs.modules }}
         run: |
           mkdir -p "$DALTON_TEST_DIAGNOSTICS_DIR"
-          modules=(tests.test_mission_document_research_production tests.test_workspace_runtime_acceptance tests.test_mission_document_research_lane)
+          modules=(tests.test_sqlite_header_lock_safety tests.test_mission_document_research_production tests.test_workspace_runtime_acceptance tests.test_mission_document_research_lane)
           if [[ "$DIAGNOSTIC_MODULE_SET" == "all-six" ]]; then
             modules+=(tests.test_deployment_model_pairs tests.test_installer_startup_wait tests.test_projection_work_order_cover)
           fi

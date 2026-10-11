@@ -816,7 +816,7 @@ class ChildDiagnosticsTests(unittest.TestCase):
 class SQLiteHeaderLockIsolationDiagnosticTests(unittest.TestCase):
     def test_isolated_header_preserves_actual_reserved_lock(self):
         import subprocess
-        from dalton_core.readonly_sqlite import _read_header_without_releasing_process_locks
+        from dalton_core.sqlite_header import read_sqlite_header as _read_header_without_releasing_process_locks
         probe = """import fcntl,os,sys
 fd=os.open(sys.argv[1],os.O_RDWR)
 try:

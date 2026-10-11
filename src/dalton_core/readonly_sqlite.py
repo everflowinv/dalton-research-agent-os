@@ -2,23 +2,8 @@
 from contextlib import contextmanager
 from pathlib import Path
 import sqlite3
-import subprocess
-import sys
 from typing import Iterator
-
-
-def _read_header_without_releasing_process_locks(target: Path) -> bytes:
-    # Diagnostic experiment: a raw close in this process releases SQLite's
-    # POSIX locks even when another sqlite3 connection still owns the file.
-    result = subprocess.run(
-        [sys.executable, "-I", "-c",
-         "import sys; f=open(sys.argv[1],'rb'); sys.stdout.buffer.write(f.read(100)); f.close()",
-         str(target)], stdin=subprocess.DEVNULL, stdout=subprocess.PIPE,
-        stderr=subprocess.PIPE, timeout=5, check=False,
-    )
-    if result.returncode:
-        raise sqlite3.OperationalError("isolated database header read failed")
-    return result.stdout
+from .sqlite_header import read_sqlite_header
 
 
 def connect_read_only(path: str | Path) -> sqlite3.Connection:
@@ -33,7 +18,7 @@ def connect_read_only(path: str | Path) -> sqlite3.Connection:
     if str(path) == ":memory:":
         raise ValueError("read_only requires an existing database file")
     target = Path(path).absolute()
-    header = _read_header_without_releasing_process_locks(target)
+    header = read_sqlite_header(target)
     if header[:16] == b"SQLite format 3\x00" and header[18:20] == b"\x02\x02":
         if not all(Path(str(target) + suffix).is_file() for suffix in ("-wal", "-shm")):
             raise sqlite3.OperationalError("read_only WAL requires existing WAL/SHM; no sidecars were created")
@@ -63,7 +48,7 @@ def connect_cold_wal_snapshot(path: str | Path) -> Iterator[sqlite3.Connection]:
         raise ValueError("cold WAL snapshot requires an existing database file")
     target = Path(path).absolute()
     sidecars = tuple(Path(str(target) + suffix) for suffix in ("-wal", "-shm"))
-    header = _read_header_without_releasing_process_locks(target)
+    header = read_sqlite_header(target)
     if header[:16] != b"SQLite format 3\x00" or header[18:20] != b"\x02\x02":
         raise sqlite3.OperationalError("cold WAL snapshot requires a WAL database")
     if any(item.exists() for item in sidecars):
