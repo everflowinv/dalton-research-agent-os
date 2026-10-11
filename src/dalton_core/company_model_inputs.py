@@ -457,6 +457,7 @@ def build_model_inputs(
 ) -> dict[str, Any]:
     """One company's model rows, its filed history, and what still has to be estimated."""
 
+    source_authority = missions
     missions = _input_statement_reader(missions)
     company_ref = spec.get("company_ref")
     if not isinstance(company_ref, str) or not company_ref:
@@ -682,6 +683,10 @@ def build_model_inputs(
         result["cost_driver_template"] = dict(cost_template)
     identities=identity_input_lines(missions,spec)
     if identities: result["filed_identity_lines"]=identities
+    from .filed_period_composition import collect
+    composition = collect(source_authority, spec, result)
+    if composition is not None:
+        result["historical_income_composition"] = composition
     return result
 
 

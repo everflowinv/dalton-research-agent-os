@@ -412,6 +412,9 @@ def financial_input_authority(value: Mapping[str, Any]) -> dict[str, Any]:
         "filed_lines": lines,
         "cash_flow_inputs": list(value.get("cash_flow_inputs") or []),
     }
+    if "historical_income_composition" in value:
+        projection["schema_version"] = "financial-input-authority-0.3"
+        projection["historical_income_composition"] = value["historical_income_composition"]
     return {**projection, "content_hash": content_hash(projection)}
 
 
@@ -1640,6 +1643,15 @@ def replay_historical_structure(
                     if divisor == 0:
                         continue
                     calculated[period] = values[formula["numerator_ref"]][period] / divisor
+            composition = structure.get("historical_income_composition")
+            if composition is not None and composition["output_ref"] == output:
+                if content_hash(formula) != composition["formula_hash"]:
+                    raise FinancialStatementStructureError("historical composition formula drifted")
+                exact_values = {(p["period_start"], p["period_end"]): _decimal(p["value"], "composition amount")
+                                for p in composition["periods"]}
+                if set(exact_values) != set(calculated):
+                    raise FinancialStatementStructureError("historical composition cannot drop or add formula periods")
+                calculated = exact_values
             candidate_periods = set(calculated)
             note_report = note_reports_by_output.get(output)
             note_quarters = {
@@ -1910,6 +1922,13 @@ def replay_historical_structure(
     }
     if structure.get("schema_version") in _TYPED_NOTE_STRUCTURE_VERSIONS:
         result["note_formula_periods"] = note_formula_reports
+    if structure.get("historical_income_composition") is not None:
+        result["historical_income_composition"] = {
+            "contract_ref": structure["historical_income_composition"]["contract_ref"],
+            "content_hash": structure["historical_income_composition"]["content_hash"],
+            "tested_period_count": len(structure["historical_income_composition"]["periods"]),
+            "future_assumption": structure["historical_income_composition"]["future_assumption"],
+        }
     if is_coverage_structure(structure.get("schema_version")):
         from .forecast_coverage import forecast_computability
 
@@ -1937,6 +1956,11 @@ def validate_financial_statement_structure(
         if not any(name in proposal for name in _COVERAGE_STRUCTURE_FIELDS):
             proposal = {**dict(proposal), "auto_repairs": [], "coverage": None}
         fields = fields | _COVERAGE_STRUCTURE_FIELDS
+    composition = proposal.get("historical_income_composition") if isinstance(proposal, Mapping) else None
+    if composition is not None:
+        if not is_coverage_structure(proposal.get("schema_version")):
+            raise FinancialStatementStructureError("historical composition requires coverage structure")
+        fields |= {"historical_income_composition"}
     body = _closed(proposal, fields, "financial statement structure")
     authority = financial_input_authority(financial_inputs)
     spec_authority = _spec_authority(company_spec)
@@ -2046,6 +2070,18 @@ def validate_financial_statement_structure(
                 line["ref"] for line in lines]:
             raise FinancialStatementStructureError(
                 "structure coverage must describe every line in order")
+    if composition is not None:
+        from .filed_period_composition import verify, FiledCompositionError
+        try:
+            checked_composition = verify(composition, company_spec, financial_inputs)
+        except FiledCompositionError as exc:
+            raise FinancialStatementStructureError(str(exc)) from exc
+        if composition != financial_inputs.get("historical_income_composition"):
+            raise FinancialStatementStructureError("structure composition differs from input authority")
+        original_formula = next((f for f in formulas if f["output_ref"] == composition["output_ref"]), None)
+        if content_hash(original_formula) != composition["formula_hash"]:
+            raise FinancialStatementStructureError("composition formula differs from drafted ordinary formula")
+        normalized["historical_income_composition"] = checked_composition
     normalized["content_hash"] = content_hash(normalized)
     replay = replay_historical_structure(normalized, financial_inputs)
     return normalized, replay
@@ -2144,6 +2180,16 @@ def _materialize_definition(
     if completed is not None:
         proposal["auto_repairs"] = completed["auto_repairs"]
         proposal["coverage"] = completed["coverage"]
+    composition = financial_inputs.get("historical_income_composition")
+    if composition is not None:
+        proposal["historical_income_composition"] = composition
+        proposal.setdefault("auto_repairs", [])
+        proposal.setdefault("coverage", None)
+        proposal["auto_repairs"] = list(proposal["auto_repairs"]) + [{
+            "kind": "filed_period_income_composition", "line_ref": composition["output_ref"],
+            "tie_out_concept": composition["tie_out_concept"],
+            "detail": "历史使用各期完整原申报组成，未披露项目不补零。未假设未来继续发生已披露的一次性损失或收益；这是系统建模假设而非公司指引，新证据需要重评。",
+        }]
     return validate_financial_statement_structure(
         proposal, company_spec, financial_inputs,
         note_evidence=effective_note_evidence,
