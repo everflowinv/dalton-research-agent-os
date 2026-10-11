@@ -106,9 +106,10 @@ def normalize_strategy(value: Any, *, max_query_terms: int,
             or set(value) - STRATEGY_FIELDS):
         raise DocumentResearchStrategyError("directed document strategy has an invalid closed shape")
     from .directed_numeric_research import CONTRACT_REF, normalize_targets
-    if value["strategy_version"] not in {STRATEGY_VERSION, CONTRACT_REF}:
+    from .directed_numeric_source_capabilities import NUMERIC_STRATEGIES, SPOKEN_CONTRACT_REF
+    if value["strategy_version"] not in {STRATEGY_VERSION, *NUMERIC_STRATEGIES}:
         raise DocumentResearchStrategyError("unsupported directed document strategy")
-    numeric = value["strategy_version"] == CONTRACT_REF
+    numeric = value["strategy_version"] in NUMERIC_STRATEGIES
     if numeric != ("numeric_targets" in value) or (numeric and "evidence_target" in value):
         raise DocumentResearchStrategyError("numeric strategy requires exact typed targets and no note target")
     for limit in (max_query_terms, max_query_term_chars):
@@ -138,6 +139,8 @@ def normalize_strategy(value: Any, *, max_query_terms: int,
     if numeric:
         try:
             strategy["numeric_targets"] = normalize_targets(strategy["numeric_targets"])
+            if strategy["strategy_version"] == SPOKEN_CONTRACT_REF and any(t["basis"] != "management-reported" for t in strategy["numeric_targets"]):
+                raise DocumentResearchStrategyError("spoken numeric targets must retain management-reported basis")
         except ValueError as exc:
             raise DocumentResearchStrategyError(str(exc)) from exc
     upgrade = strategy.get("replaces_numeric_rejection")
@@ -179,6 +182,13 @@ def resolve_strategy(value: Any, *, company_ref: str | None,
             or document.get("authority_hash") != strategy["document_version_hash"]
             or not isinstance(document.get("authority_ref"), str)):
         raise DocumentResearchStrategyError("selected document has no verified directed-reading capability")
+    if "numeric_targets" in strategy:
+        from .directed_numeric_source_capabilities import SPOKEN_CONTRACT_REF
+        from .document_figure_grade import FILED, SPOKEN
+        grade = document.get("source_grade")
+        expected = SPOKEN if strategy["strategy_version"] == SPOKEN_CONTRACT_REF else FILED
+        if (strategy["strategy_version"] == SPOKEN_CONTRACT_REF or "source_grade" in document) and grade != expected:
+            raise DocumentResearchStrategyError("selected original source grade does not support this numeric strategy")
     target = strategy.get("evidence_target")
     if target is not None:
         targets = document.get("evidence_targets")
