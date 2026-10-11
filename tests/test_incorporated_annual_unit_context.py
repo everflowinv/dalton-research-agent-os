@@ -138,6 +138,7 @@ class IncorporatedAnnualUnits(unittest.TestCase):
             acceptance_db.execute('CREATE TABLE coverage_mission_statement_filings(ingest_id,company_ref,cik,accession)')
             acceptance_db.execute('INSERT INTO coverage_mission_statement_filings VALUES(?,?,?,?)',
                 ('fixture:filing',filing['company_ref'],filing['cik'],filing['accession']))
+        acceptance_db.close()
         def strong_reader(_connection,ref):
             self.assertEqual(ref,'context:fixture')
             units.validate_unit_supplement(c,record,filing)
