@@ -11,6 +11,8 @@ from .forecast_driver_retrieval import data_item as driver_data_item
 RULE_REF="rule:forecast-material-gaps:1"
 ROLE_NEEDS={
     "income_tax_expense":("normalised_tax_basis","effective income tax rate discrete tax items guidance"),
+    "noncontrolling_interest":("noncontrolling_interest_basis","noncontrolling interest attributable net income loss subsidiaries ownership guidance"),
+    "capital_expenditure":("capital_expenditure_basis","capital expenditure purchases property plant equipment cash flow investing"),
     "diluted_weighted_average_shares":("diluted_share_basis","quarter diluted weighted average shares buyback share count guidance"),
     "interest_expense":("debt_rate_basis","interest expense current noncurrent debt quarterly balance"),
     "depreciation_amortization":("asset_roll_basis","depreciation amortization property plant equipment capital expenditures"),
@@ -51,6 +53,25 @@ def gap_plans(spec: Mapping[str,Any], table: Mapping[str,Any], *, record=None, f
     for result in (record or {}).get("results") or []:
         if result.get("status")!="unavailable":continue
         role=result.get("role")
+        if role == "diluted_weighted_average_shares":
+            held=[d for d in (record or {}).get("drivers") or [] if d.get("role")==role]
+            if (len(held)==1 and spec.get("spec_id") and spec.get("content_hash")
+                    and (record or {}).get("spec_ref")==spec["spec_id"]
+                    and (record or {}).get("spec_hash")==spec["content_hash"]):
+                driver=held[0]
+                expected=set((record or {}).get("history_periods") or table.get("periods") or [])
+                have={c["period_end"] for c in driver.get("history") or [] if c.get("period_start")}
+                for end in sorted(expected-have):
+                    key="diluted_share_history:"+end
+                    add(key,"quarter diluted weighted average shares "+end,
+                        "Obtain this exact quarter's filed diluted weighted-average shares, not year-to-date or annual shares: "+end+". Preserve original dates, unit and accession; do not infer Q4 by subtracting annual average shares.",
+                        "A declared historical quarter lacks a filed diluted-share base.")
+                    plans[key]["period"]="quarter_ending:"+end
+                    plans[key]["need"]["doc_kinds"]=["sec_10k","sec_10q"]
+                    plans[key]["acceptance"]["forecast_gap_identity"]={
+                        "spec_ref":spec.get("spec_id"),"spec_hash":spec.get("content_hash"),
+                        "role":role,"driver_ref":driver["ref"],"concept":driver.get("concept"),
+                        "period_end":end}
         if role in ROLE_NEEDS:
             key,item=ROLE_NEEDS[role]
             add(key,item,"Find source-backed assumptions and exact filed bases that resolve this financial gap: "+str(result.get("reason") or "missing inputs")+". Keep original concept, unit, dates, accession and provenance; do not substitute a proxy.",str(result.get("reason") or "missing inputs"))

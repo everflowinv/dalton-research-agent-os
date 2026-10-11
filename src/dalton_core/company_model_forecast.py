@@ -183,6 +183,8 @@ def model_digest(
         # same spec/filings. This changes only the new structured run identity,
         # not any stored Work, model, source fact or validation arithmetic.
         digest_body["derived_history_unit_rule"] = DERIVED_HISTORY_UNIT_RULE_REF
+        from .forecast_financial_execution import ASSUMPTION_EXECUTION_REF
+        digest_body["assumption_execution_rule"] = ASSUMPTION_EXECUTION_REF
         from .forecast_presentation_partition import RULE_REF as PRESENTATION_PARTITION_RULE
         digest_body["filed_presentation_partition_rule"] = PRESENTATION_PARTITION_RULE
         from .forecast_consumed_source_groups import RULE_REF as CONSUMED_SOURCE_GROUPS_RULE
@@ -224,6 +226,14 @@ def pending_action(
     try:
         validate_new_forecast_rules(prior)
     except (ValueError, ForecastModelUnavailable):
+        return "rules_upgrade"
+    from .forecast_financial_execution import ASSUMPTION_EXECUTION_REF
+    if (prior.get("execution_contract",{}).get("assumption_execution_ref") != ASSUMPTION_EXECUTION_REF
+            and (any(r.get("role") == "income_tax_expense" and r.get("status") == "unavailable"
+                     for r in prior.get("results") or [])
+                 or any(r.get("status") == "unexecuted" and r.get("ref") in {
+                     e["ref"] for e in spec.get("expense_lines") or [] if e.get("behaviour") == "one_off"}
+                     for r in prior.get("execution_contract",{}).get("drivers",{}).get("drivers",[])))):
         return "rules_upgrade"
     if realised_ends(prior, table):
         return "actualize"

@@ -16,6 +16,7 @@ from .forecast_seasonality import seasonal_profile, year_ago
 
 RULE_REF = "rule:financial-driver-execution:1"
 SCHEMA_VERSION = "financial-execution:1"
+ASSUMPTION_EXECUTION_REF = "rule:filed-tax-recurring-execution:0.1"
 DERIVED_HISTORY_UNIT_RULE_REF = "rule:filed-derived-history-unit-case:0.1"
 
 
@@ -145,7 +146,46 @@ def _project(driver: Mapping[str, Any], periods: Sequence[Mapping[str, Any]], as
     return out
 
 
-def driver_execution(body: Mapping[str, Any], spec: Mapping[str, Any]) -> tuple[dict[str, Any], list[dict[str, Any]]]:
+def _recurring_expense_proof(body, expense, source, assumptions):
+    """Recheck the completion's filed recurring classification, never its prose."""
+    from .forecast_coverage import ONE_OFF_CONCEPTS, MIN_HISTORY_QUARTERS
+    from .model_forecast_driver import quarterly_history
+    structure = body.get("financial_statement_structure") or {}
+    line = next((l for l in structure.get("lines") or []
+                 if source and l["ref"] == source.get("structure_line_ref")), None)
+    if (source is None or line is None or source.get("status") != "filed"
+            or line.get("kind") != "filed" or line.get("statement") != "income"
+            or source.get("statement") != "income"
+            or line.get("concept") != expense.get("basis_concept")
+            or source.get("concept") != line.get("concept")
+            or line["concept"] in ONE_OFF_CONCEPTS
+            or line.get("forecast_method") not in {"share_of_line", "carry_forward_mean"}
+            or (source.get("forecast_method"),source.get("forecast_base_ref")) !=
+               (line["forecast_method"],line.get("forecast_base_ref"))):
+        return None
+    history = quarterly_history(source)
+    if (len(history) < MIN_HISTORY_QUARTERS
+            or len({c["period_end"] for c in history}) != len(history)
+            or sum(Decimal(c["value"]) != 0 for c in history) * 4 < len(history) * 3):
+        return None
+    active = [a for a in assumptions if not a.get("superseded_by")]
+    ends = {p["end"] for p in body["forecast_periods"]}
+    if (len(active) != len(ends) or {a["period"]["end"] for a in active} != ends
+            or any(a.get("measure") != line["forecast_method"] or not a.get("refs") for a in active)):
+        return None
+    from .model_forecast_driver import _structure_result_refs
+    result_ref = _structure_result_refs(structure)[line["ref"]]
+    if set(_live(body["results"],result_ref)) != ends:
+        return None
+    proof = {"contract_ref":ASSUMPTION_EXECUTION_REF,"expense_ref":expense["ref"],
+             "concept":line["concept"],"driver_ref":source["ref"],"line_ref":line["ref"],
+             "method":line["forecast_method"],"forecast_base_ref":line.get("forecast_base_ref"),
+             "source_history_hash":content_hash(history),
+             "assumption_refs":sorted(a["ref"] for a in active)}
+    return {**proof,"content_hash":content_hash(proof)}
+
+
+def driver_execution(body: Mapping[str, Any], spec: Mapping[str, Any], *, assumption_policy=None) -> tuple[dict[str, Any], list[dict[str, Any]]]:
     from .model_forecast_driver import _assumption, _cell_ref, _structure_historical_values
     structure = body.get("financial_statement_structure") or {}
     lines = {l["ref"]: l for l in structure.get("lines") or []}
@@ -251,6 +291,10 @@ def driver_execution(body: Mapping[str, Any], spec: Mapping[str, Any]) -> tuple[
             for ref in refs: statuses[ref].update(status="executed", reason=None)
             executed.append({**plan, "status": "executed", "reason": None,
                              "historical_periods": common, "conversion_rate": None if conversion is None else str(conversion)})
+    if assumption_policy is None:
+        assumption_policy = (body.get("execution_contract") or {}).get("assumption_execution_ref")
+    if assumption_policy not in (None, ASSUMPTION_EXECUTION_REF):
+        raise ValueError("forecast assumption execution contract is unsupported")
     one_offs = []
     for expense in spec.get("expense_lines") or []:
         if expense.get("behaviour") != "one_off": continue
@@ -258,7 +302,11 @@ def driver_execution(body: Mapping[str, Any], spec: Mapping[str, Any]) -> tuple[
         assumptions = [a for a in body["assumptions"] if source and a["driver_ref"] == source["ref"] and a.get("kind") != "actual"]
         executed_one_off = bool(source and assumptions and all(
             a.get("measure") == "zero_one_off" or "normalis" in a.get("because", "").lower() for a in assumptions))
-        one_offs.append({"ref": expense["ref"], "status": "executed" if executed_one_off else "unexecuted",
+        recurring = (_recurring_expense_proof(body,expense,source,assumptions)
+                     if assumption_policy == ASSUMPTION_EXECUTION_REF else None)
+        executed_one_off |= recurring is not None
+        one_offs.append({**({"recurring_source_proof":recurring} if recurring is not None else {}),
+                        "ref": expense["ref"], "status": "executed" if executed_one_off else "unexecuted",
                         "reason": None if executed_one_off else "驱动计划未执行：一次性项未归零或剔除基期"})
     rows = list(statuses.values()) + one_offs
     return {"rule_ref": RULE_REF, "drivers": rows, "formulas": executed,
@@ -438,7 +486,10 @@ def execute_financial_model(body: dict[str, Any], spec: Mapping[str, Any]) -> di
     from .model_forecast_driver import _structure_result_refs
     # The stored contract freezes the exact declarations for pure replay.
     declaration = execution_spec(spec)
-    report, overrides = driver_execution(body, declaration)
+    prior_contract = body.get("execution_contract")
+    assumption_policy = (prior_contract.get("assumption_execution_ref")
+                         if isinstance(prior_contract, Mapping) else ASSUMPTION_EXECUTION_REF)
+    report, overrides = driver_execution(body, declaration, assumption_policy=assumption_policy)
     if overrides: _apply_overrides(body, overrides)
     append_company_fcf(body, spec.get("fcf_definition"))
     mechanisms, financial_overrides = financial_mechanisms(body)
@@ -458,6 +509,8 @@ def execute_financial_model(body: dict[str, Any], spec: Mapping[str, Any]) -> di
     contract = {"schema_version": SCHEMA_VERSION, "specification": declaration,
                 "fcf_definition": copy.deepcopy(spec.get("fcf_definition")),
                 "drivers": report, "financial_mechanisms": mechanisms, "fcf_bridge": fcf}
+    if assumption_policy is not None:
+        contract["assumption_execution_ref"] = assumption_policy
     contract["content_hash"] = content_hash(contract)
     body["execution_contract"] = contract
     return body
@@ -475,6 +528,8 @@ def validate_execution_contract(record: Mapping[str, Any], *, publishing: bool =
     asserted = original.pop("content_hash", None)
     if content_hash(original) != asserted:
         raise ForecastModelValidationError("financial execution contract hash differs")
+    if contract.get("assumption_execution_ref") not in (None, ASSUMPTION_EXECUTION_REF):
+        raise ForecastModelValidationError("forecast assumption execution rule is unsupported")
     if publishing:
         # A caller cannot forge an executed report and re-hash it. Re-run the
         # frozen specification and compare every formula amount with its cell.
