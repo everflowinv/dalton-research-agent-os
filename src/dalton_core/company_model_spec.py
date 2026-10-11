@@ -498,13 +498,17 @@ _NUMERIC_PERIOD_FIELDS = (
 )
 
 
-def _numeric_period_cell_line(cell: Mapping[str, Any]) -> str:
+def _numeric_period_cell_line(cell: Mapping[str, Any], *, catalog: bool = False) -> str:
     row="\t".join(
         json.dumps(cell.get(field), ensure_ascii=False, separators=(",", ":"))
         for field in _NUMERIC_PERIOD_FIELDS
     )
     if "dimensions" in cell:
-        row+="\tSOURCE_IDENTITY="+json.dumps({k:cell[k] for k in ("dimensions","statement_context_ref","source_unit_ref","unit_definition_hash") if k in cell},ensure_ascii=False,sort_keys=True,separators=(",",":"))
+        source = {k:cell[k] for k in ("dimensions","statement_context_ref","source_unit_ref","unit_definition_hash") if k in cell}
+        if catalog and cell.get("status") == "filed":
+            from .company_model_identity_catalog import cell_identity_ref
+            source["catalog_ref"] = cell_identity_ref(cell)
+        row+="\tSOURCE_IDENTITY="+json.dumps(source,ensure_ascii=False,sort_keys=True,separators=(",",":"))
     return row
 
 
@@ -519,6 +523,9 @@ def _numeric_period_table_header(context: Mapping[str, Any]) -> str:
             "content_hash",
         )
     }
+    for key in ("identity_catalog_contract", "selection_contract"):
+        if key in context:
+            metadata[key] = context[key]
     return "\n".join([
         "CONTEXT=" + json.dumps(metadata, ensure_ascii=False, sort_keys=True),
         "FILINGS=" + json.dumps(
@@ -530,6 +537,7 @@ def _numeric_period_table_header(context: Mapping[str, Any]) -> str:
         "balance\taccession\tfiling_form\tline_content_hash\tstatus\t"
         "ambiguity_ref",
         *(["SOURCE_IDENTITY suffix, when present, binds complete dimensions and exact context version; never infer missing axes from labels or amounts."] if any("dimensions" in c for c in context.get("cells") or []) else []),
+        *(["For a dimensional revenue driver, select the row's catalog_ref as basis_identity={statement:<that row's statement>,dimensions:{catalog_ref:<exact ref>}}. The system binds all original axes; do not hand-copy a subset. A ref must belong to the selected basis_concept in this input."] if context.get("identity_catalog_contract") else []),
     ])
 
 
@@ -539,7 +547,7 @@ def _numeric_period_table(state: Mapping[str, Any]) -> str:
         return "NUMERIC CONTEXT UNAVAILABLE"
     lines = [_numeric_period_table_header(context)]
     for cell in context.get("cells") or []:
-        lines.append(_numeric_period_cell_line(cell))
+        lines.append(_numeric_period_cell_line(cell, catalog=bool(context.get("identity_catalog_contract"))))
     return "\n".join(lines)
 
 
@@ -1158,14 +1166,12 @@ def spec_from_response(
         if not isinstance(item, Mapping):
             raise CompanyModelSpecError(f"revenue_drivers[{index}] must be an object")
         if item.get("basis_identity") is not None:
-            from .company_model_inputs import validate_statement_identity
+            from .company_model_identity_catalog import resolve_identity
             try:
-                identity=validate_statement_identity(item["basis_identity"])
-                if not any(c.get("concept")==item.get("basis_concept") and c.get("statement")==identity["statement"] and c.get("dimensions")==identity["dimensions"] for c in (state.get("numeric_context") or {}).get("cells") or []):
-                    raise ValueError("economic driver identity is not in the admitted exact numeric context")
+                identity=resolve_identity(state, item.get("basis_concept"), item["basis_identity"])
             except ValueError as exc: raise CompanyModelSpecError(str(exc)) from exc
         drivers.append({
-            **({"basis_identity":dict(item["basis_identity"])} if item.get("basis_identity") is not None else {}),
+            **({"basis_identity":identity} if item.get("basis_identity") is not None else {}),
             "ref": _ref(item.get("ref"), f"revenue_drivers[{index}].ref", driver_refs),
             "label": _text(item.get("label"), f"revenue_drivers[{index}].label", limit=120),
             "kind": _one_of(item.get("kind"), DRIVER_KINDS, f"revenue_drivers[{index}].kind"),

@@ -313,8 +313,7 @@ def _numeric_context(
         series.append(groups[: int(policy["max_periods_per_series"])])
 
     statement_rank = {"income": 0, "cash": 1, "balance": 2}
-    selected_groups: list[list[dict[str, Any]]] = []
-    selected_count = 0
+    ordered_groups: list[list[dict[str, Any]]] = []
     for depth in range(int(policy["max_periods_per_series"])):
         at_depth = [groups[depth] for groups in series if len(groups) > depth]
         at_depth.sort(key=lambda group: (
@@ -323,12 +322,18 @@ def _numeric_context(
             group[0]["concept"], str(group[0]["dimension_member"] or ""),
             group[0]["line_id"],
         ))
-        for group in at_depth:
-            # Never show one side of a same-source conflict. If the complete
-            # ambiguity group does not fit, omit that period as a whole.
-            if selected_count + len(group) <= int(policy["max_total_cells"]):
-                selected_groups.append(group)
-                selected_count += len(group)
+        ordered_groups.extend(at_depth)
+    from .company_model_identity_catalog import (
+        IDENTITY_CATALOG_REF, coherent_revenue_groups,
+    )
+    selected_groups: list[list[dict[str, Any]]] = []
+    selected_count = 0
+    for group in coherent_revenue_groups(ordered_groups):
+        # Neither a same-source conflict nor a revenue disclosure may be
+        # partially admitted just because one member sorts later.
+        if selected_count + len(group) <= int(policy["max_total_cells"]):
+            selected_groups.append(group)
+            selected_count += len(group)
         if selected_count >= int(policy["max_total_cells"]):
             break
     after_series_limit = sum(
@@ -336,6 +341,8 @@ def _numeric_context(
     )
     body = {
         "schema_version": NUMERIC_CONTEXT_SCHEMA_VERSION,
+        "identity_catalog_contract": IDENTITY_CATALOG_REF,
+        "selection_contract": "company-model-coherent-revenue-context:0.1",
         "policy": dict(policy),
         "filing_authorities": filing_authorities,
         "available_cells": available_cells,
@@ -440,7 +447,9 @@ def _fit_prompt_budget(
     final_context = base_context
     for group in groups:
         group_bytes = sum(
-            1 + len(_numeric_period_cell_line(cell).encode("utf-8"))
+            1 + len(_numeric_period_cell_line(
+                cell, catalog=bool(context.get("identity_catalog_contract"))
+            ).encode("utf-8"))
             for cell in group
         )
         candidate, size = _context_with_prompt_proof(
