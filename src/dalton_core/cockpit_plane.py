@@ -10702,6 +10702,16 @@ def _job_error_message(error: Any) -> str | None:
     if not error:
         return None
     text = str(error)
+    # Only these closed pre-call guards are safe to surface. Other internal
+    # exception messages retain the existing translation/fallback boundary.
+    settings_guards = {
+        "当前模型策略仍未完整同步，新调用暂缓",
+        "这次调用仍持有旧模型设置，请重新载入共用设置后继续",
+        "共用模型或预算设置尚待应用，新调用暂缓",
+        "当前研究预算授权尚未同步，新调用暂缓",
+    }
+    if text.removeprefix("HostSettingsError: ") in settings_guards:
+        return "模型或预算设置尚未完整同步，本次处理尚未开始。请稍后再试。"
     if _CJK.search(text) and not _MACHINE_MARKERS.search(text):
         return text[:300]
     translated = _reason_text(text)

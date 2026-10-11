@@ -297,9 +297,17 @@ def resolved_model_config(state_dir, current, purpose):
         raise settings.HostSettingsError('原模型策略内容校验失败')
     environment = environment_for_state_dir([row[0] for row in environments(manager)], state_dir)
     heads = {p['policy_version_ref']:p for p in consumer_policies(environment) if p['id']==pinned['id']}
-    if len(heads) != 1:
+    # Different purposes can legitimately consume different versions of one
+    # family. An exact active pin is unambiguous; do not collapse them into a
+    # supposed single family head. A stale pin still needs one unique head.
+    policy = heads.get(pinned['policy_version_ref'])
+    if policy is not None:
+        if policy['content_hash'] != pinned['content_hash']:
+            raise settings.HostSettingsError('原模型策略内容校验失败')
+    elif len(heads) == 1:
+        policy = next(iter(heads.values()))
+    else:
         raise settings.HostSettingsError('当前模型策略仍未完整同步，新调用暂缓')
-    policy = next(iter(heads.values()))
     resolved = dict(current)
     resolved['routing_policy_ref'] = policy['policy_version_ref']
     desired = settings.load(manager)
