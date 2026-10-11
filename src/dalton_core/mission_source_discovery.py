@@ -722,6 +722,14 @@ def build_discovery_parameters(
     })
 
 
+def _targeted_parameters(state_dir, *, plan, **kwargs):
+    if plan["source_ref"] == SEC_SOURCE_REF:
+        from .material_targeted_sec import targeted_sec_parameters
+        return targeted_sec_parameters(state_dir, plan=plan, **kwargs)
+    from .material_targeted_web import targeted_web_parameters
+    return targeted_web_parameters(state_dir, plan=plan, **kwargs)
+
+
 def discovery_query_hash(plan: Mapping[str, Any], parameters: Mapping[str, Any]) -> str:
     """Query hash of compiled parameters under the plan's source operation."""
 
@@ -1013,13 +1021,12 @@ class _SearchLauncherBase:
         if not isinstance(as_of_date, date) or isinstance(as_of_date, datetime):
             raise DiscoveryLaunchRejected("as_of must be a calendar date")
         if targeted_binding is not None:
-            from .material_targeted_web import targeted_web_parameters, TargetedWebError
             try:
-                _, targeted_binding = targeted_web_parameters(self.state_dir, plan=plan,
+                _, targeted_binding = _targeted_parameters(self.state_dir, plan=plan,
                     company_ref=authorization["company_ref"], spec_ref=spec_ref, as_of=as_of_date,
                     mission_version_ref=authorization["mission_version_ref"],
                     mission_version_hash=authorization["mission_version_hash"], binding=targeted_binding)
-            except TargetedWebError as exc:
+            except ValueError as exc:
                 raise DiscoveryLaunchRejected(str(exc)) from exc
         with self._lock:
             if self._current is not None and self._current[1].poll() is None:
@@ -1825,8 +1832,7 @@ class MissionSourceDiscoveryCoordinator:
             summary = ticket.get("summary") or {}
             if ticket.get("targeted_binding") is not None and ticket["status"] == "succeeded":
                 try:
-                    from .material_targeted_web import targeted_web_parameters
-                    parameters, bound = targeted_web_parameters(self.search_launcher.state_dir,
+                    parameters, bound = _targeted_parameters(self.search_launcher.state_dir,
                         plan=self.plan, company_ref=dispatch["company_ref"], spec_ref=dispatch["spec_ref"],
                         as_of=date.fromisoformat(ticket["as_of"]),
                         mission_version_ref=dispatch["mission_version_ref"],
@@ -3131,15 +3137,14 @@ class MissionSourceDiscoveryCoordinator:
         page_options: dict[str, Any] = {}
         if self.plan["schema_version"] == DISCOVERY_PLAN_SCHEMA_VERSION_V6:
             page_options.update(variant_index=0, missing_periods=missing_periods)
-        if self.source_ref == WEB_SEARCH_SOURCE_REF:
-            from .material_targeted_web import targeted_web_parameters, TargetedWebError
+        if self.source_ref in (WEB_SEARCH_SOURCE_REF, SEC_SOURCE_REF):
             try:
-                parameters, bound = targeted_web_parameters(state_dir, plan=self.plan,
+                parameters, bound = _targeted_parameters(state_dir, plan=self.plan,
                     company_ref=company_ref, spec_ref=spec["spec_ref"], as_of=request_date,
                     mission_version_ref=mission["id"], mission_version_hash=mission["content_hash"],
                     query_ref=query["query_id"])
                 page_options["targeted_binding"] = bound
-            except TargetedWebError as exc:
+            except ValueError as exc:
                 answer("refused", "request_binding", str(exc))
                 return {**base, "status":"targeted_refused", "reason":"request_binding"}
         try:

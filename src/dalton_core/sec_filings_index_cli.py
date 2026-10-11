@@ -71,6 +71,7 @@ def run_discovery(
     catalog_db: Path | None = None,
     spool_dir: Path | None = None,
     adapter: Any | None = None,
+    targeted_binding: dict[str, Any] | None = None,
 ) -> dict[str, Any]:
     """Authorize, read the index, and append the discovery record."""
 
@@ -143,6 +144,12 @@ def run_discovery(
         parameters = build_discovery_parameters(
             plan, spec_ref=spec_ref, company_ref=company_ref, as_of=as_of
         )
+        if targeted_binding is not None:
+            from .material_targeted_sec import targeted_sec_parameters
+            parameters, bound = targeted_sec_parameters(state,plan=plan,company_ref=company_ref,
+                spec_ref=spec_ref,as_of=as_of,mission_version_ref=mission_version_ref,
+                mission_version_hash=mission_version_hash,binding=targeted_binding)
+            summary["targeted_binding"] = bound
         summary["parameters"] = parameters
         summary["query_hash"] = discovery_query_hash(plan, parameters)
 
@@ -233,6 +240,7 @@ def build_parser() -> argparse.ArgumentParser:
     parser.add_argument("--catalog-db", type=Path, default=None)
     parser.add_argument("--spool-dir", type=Path, default=None)
     parser.add_argument("--allow-network", action="store_true")
+    parser.add_argument("--targeted-binding", type=json.loads, default=None)
     parser.add_argument("--quiet", action="store_true")
     return parser
 
@@ -266,6 +274,7 @@ def main(argv: list[str] | None = None) -> int:
         user_agent=args.user_agent,
         catalog_db=args.catalog_db,
         spool_dir=args.spool_dir,
+        targeted_binding=args.targeted_binding,
     )
     if not args.quiet:
         print(json.dumps(summary, ensure_ascii=False, sort_keys=True, indent=1))
