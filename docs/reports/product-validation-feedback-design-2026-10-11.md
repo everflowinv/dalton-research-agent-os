@@ -1,6 +1,6 @@
 # 初筛与备忘录核验失败如何进入研究规划
 
-时间：2026-10-11 UTC。本报告记录失败反馈机制及其验收方法。初筛的第一部分已完成开发与专项测试，正在进行下一批部署前检查；备忘录反馈仍待开发。当前线上 v0.11.13 的进展另见[研究推进记录](research-execution-recovery-2026-10-11.md)。
+时间：2026-10-11 UTC。本报告记录失败反馈机制及其验收方法。初筛的第一部分已在 v0.11.14 部署，等待新任务的实际反馈验收；备忘录反馈仍待开发。当前线上进展另见[研究推进记录](research-execution-recovery-2026-10-11.md)。
 
 ## 本批实现范围
 
@@ -34,7 +34,7 @@ AMZN 初筛 `initial-screen:1d2a896b7a77d158bdcb458b` 的已结束失败摘要�
 | `document_execution_failures` | 文档 admission 与文档模型执行失败 | 产品初筛及备忘录核验失败 |
 | `dossier_repair_feedback` | 已成功结束 Dossier 子票据的有界 repair targets；有稳定语义/节流机制 | 失败初筛或备忘录；不能改变其“成功 Dossier”认证契约 |
 
-初筛 `_call_json` 返回可用的模型调用引用，但目前只收集局部 invocations/routes，没有把它们保存到失败 summary。确定性核验的详细 findings 已保存，正式调用绑定丢失。
+v0.11.13 及更早的初筛 `_call_json` 返回可用的模型调用引用，但旧失败 summary 没有完整保存它们。v0.11.14 为新调用保存冻结上下文和独立诊断记录；旧记录仍按其实际证据判断。
 
 备忘录有两种不同覆盖情况：最终独立 verifier 拒绝返回 `verification.model` 的 Work、route、envelope、invocation 引用，适合强重读；`draft_group` 解析/引用拒绝、`authority_validation_failed`、`deterministic_gate_failed` 分支则通常仅保留 reason/checks/cost，未保留 producer calls。备忘录这些失败均未接入 planner company state。META 的具体现场记录仍须用 exact run 核定；此报告不把源码可能路径当作已验证 META 的实际分支。
 
@@ -75,4 +75,4 @@ AMZN 初筛 `initial-screen:1d2a896b7a77d158bdcb458b` 的已结束失败摘要�
 - `/tmp/ar-product-validation-feedback-next-batch-proposal-r01-20261011.json`
   - SHA256 `16e05b8b7b3a10d46fa4eac88cb218a0f40f0b4093852949d2527ed0dd2f9ce6`
 
-上述初筛实现正在做整批验收。备忘录的各类失败反馈、缺少冻结上下文的旧记录如何补足证明，以及规划是否据此完成后续修复，分别保留为待办。
+上述初筛实现已通过 866 项整批测试和隔离回放，现在线上观察新任务的实际采用。备忘录的各类失败反馈、缺少冻结上下文的旧记录如何补足证明，以及规划是否据此完成后续修复，分别保留为待办。
