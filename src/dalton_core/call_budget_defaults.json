@@ -141,7 +141,7 @@
     "initial_screen": {
       "max_cost_usd": 14.0,
       "max_input_tokens": 600000,
-      "max_output_tokens": 64000,
+      "max_output_tokens": 128000,
       "timeout_seconds": 900
     },
     "initial_screen_verifier": {
