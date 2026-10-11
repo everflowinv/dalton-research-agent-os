@@ -2050,9 +2050,87 @@ def retry_sweep(state_dir: str | Path, *, now: str | None = None, limit: int = 3
     return out
 
 
+_SERVICE_CURSOR_ID = "priority-round-robin"
+_SERVICE_CURSOR_SCHEMA = "material-acquisition-service-cursor:0.1"
+
+
+def _decode_service_cursor(row: sqlite3.Row | None) -> tuple[tuple[Any, ...] | None, str | None]:
+    if row is None:
+        return None, None
+    try:
+        record = json.loads(row["record_json"])
+    except (TypeError, ValueError) as exc:
+        raise MaterialAcquisitionError("material scheduling cursor JSON is invalid") from exc
+    if not isinstance(record, dict):
+        raise MaterialAcquisitionError("material scheduling cursor must be an object")
+    if _sha(record) != row["content_hash"]:
+        raise MaterialAcquisitionError("material scheduling cursor content hash differs")
+    key = record.get("priority_key")
+    if (set(record) != {"schema_version", "request_ref", "priority_key", "updated_at", "revision"}
+            or record["schema_version"] != _SERVICE_CURSOR_SCHEMA
+            or type(record["revision"]) is not int or not 0 < record["revision"] < 2**63
+            or not isinstance(key, list) or len(key) != 5
+            or any(type(value) is not int or value not in (0, 1) for value in key[:3])
+            or not all(isinstance(value, str) for value in key[3:])
+            or key[4] != record["request_ref"]
+            or not _REQUEST_ID_RE.fullmatch(key[4])
+            or not isinstance(record["updated_at"], str) or _parse_ts(record["updated_at"]) is None):
+        raise MaterialAcquisitionError("material scheduling cursor identity or priority is invalid")
+    return tuple(key), str(row["content_hash"])
+
+
+def _service_order(state_dir: str | Path, pending: Sequence[Mapping[str, Any]],
+                   universe: Mapping[str, Mapping[str, Any]]) -> tuple[list[Mapping[str, Any]], str | None]:
+    """Resume the priority-ordered sweep even when its last request has closed."""
+    with _reader(state_dir) as connection:
+        if connection is None:
+            raise MaterialAcquisitionError("material scheduling cursor ledger cannot be read")
+        try:
+            rows = connection.execute(
+                "SELECT record_json,content_hash FROM material_acquisition_service_cursor WHERE cursor_id=?",
+                (_SERVICE_CURSOR_ID,)).fetchall()
+        except sqlite3.OperationalError as exc:
+            # This table is additive: only its genuine pre-migration absence
+            # starts a new sweep. Other schema/read errors must not reset it.
+            if str(exc) != "no such table: material_acquisition_service_cursor":
+                raise MaterialAcquisitionError(f"material scheduling cursor cannot be read: {exc}") from exc
+            rows = []
+    key, digest = _decode_service_cursor(rows[0] if rows else None)
+    ordered = sorted(pending, key=lambda item: priority_key(item, universe))
+    if key is None:
+        return ordered, digest
+    start = next((index for index, item in enumerate(ordered)
+                  if priority_key(item, universe) > key), len(ordered))
+    return ordered[start:] + ordered[:start], digest
+
+
+def _advance_service_cursor(state_dir: str | Path, request: Mapping[str, Any],
+                            universe: Mapping[str, Mapping[str, Any]], *,
+                            expected_hash: str | None, now: str,
+                            deadline: float | None = None) -> str | None:
+    """Claim one service turn; concurrent stale ticks must not execute it."""
+    record = {"schema_version": _SERVICE_CURSOR_SCHEMA, "request_ref": request["id"],
+              "priority_key": list(priority_key(request, universe)), "updated_at": now}
+    with _writer(state_dir) as connection:
+        row = connection.execute("SELECT record_json,content_hash FROM material_acquisition_service_cursor "
+                                 "WHERE cursor_id=?", (_SERVICE_CURSOR_ID,)).fetchone()
+        _, current_hash = _decode_service_cursor(row)
+        if current_hash != expected_hash:
+            return None
+        if deadline is not None and time.monotonic() >= deadline:
+            return None
+        record["revision"] = 1 if row is None else json.loads(row["record_json"])["revision"] + 1
+        digest = _sha(record)
+        connection.execute(
+            "INSERT INTO material_acquisition_service_cursor(cursor_id,record_json,content_hash) VALUES (?,?,?) "
+            "ON CONFLICT(cursor_id) DO UPDATE SET record_json=excluded.record_json,content_hash=excluded.content_hash",
+            (_SERVICE_CURSOR_ID, _canonical(record), digest))
+    return digest
+
+
 def tick(state_dir: str | Path, *, max_requests: int = 4, max_seconds: float = 10.0, now: str | None = None,
          rungs: Mapping[str, Any] | None = None, convert: bool = True) -> dict[str, Any]:
-    """One bounded pass: convert dead ends, reopen what left the cache, serve the top requests."""
+    """One bounded pass over a durable priority-ordered round-robin sweep."""
 
     started = time.monotonic()
     stamp = now or _now()
@@ -2075,7 +2153,7 @@ def tick(state_dir: str | Path, *, max_requests: int = 4, max_seconds: float = 1
     if not pending:
         return summary
     universe = mission_universe(state)
-    pending.sort(key=lambda item: priority_key(item, universe))
+    pending, cursor_hash = _service_order(state, pending, universe)
     pool = pool_status(state, now=stamp)
     # The first request that reaches a costed rung on a spent pool records
     # ``budget_blocked`` (that is what raises the one pool card); the rest of
@@ -2086,6 +2164,14 @@ def tick(state_dir: str | Path, *, max_requests: int = 4, max_seconds: float = 1
         if time.monotonic() - started >= max_seconds:
             summary["out_of_time"] = True
             break
+        next_cursor_hash = _advance_service_cursor(
+            state, view, universe, expected_hash=cursor_hash, now=stamp,
+            deadline=started + max_seconds)
+        if next_cursor_hash is None:
+            summary["out_of_time" if time.monotonic() - started >= max_seconds
+                    else "scheduling_busy"] = True
+            break
+        cursor_hash = next_cursor_hash
         try:
             result = serve(state, view["id"], rungs=rungs, now=stamp, allow_costed=allow_costed)
         except Exception as exc:  # noqa: BLE001 - one request's failure is not the tick's
