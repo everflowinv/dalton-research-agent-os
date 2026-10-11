@@ -366,6 +366,24 @@ class RankingTests(unittest.TestCase):
         self.assertNotIn(TAX_DRIVER,
                          [item["driver_ref"] for item in projection["drivers"]])
 
+    def test_typed_tax_share_does_not_reuse_a_historical_benefit_as_a_rate(self):
+        band = {"status": "available", "measure": "share_of_line", "count": 12,
+                "trough": {"value": "-0.23"}, "mean": {"value": "0.16"},
+                "peak": {"value": "0.87"}, "latest": {"value": "0.15"}}
+        original = json.loads(json.dumps(band))
+        for measure in ("share_of_line", "revenue_share", "operating_income_share"):
+            actual = fs._scenario_band({"role": "income_tax_expense"}, measure, band)
+            self.assertEqual(actual["status"], "unavailable")
+            self.assertIsNone(actual["trough"])
+        self.assertEqual(band, original)
+        self.assertEqual(fs._scenario_band({"role": "operating_expense"},
+                                          "share_of_line", band), original)
+        self.assertEqual(fs._scenario_band({"role": "income_tax_expense"},
+                                          "quarterly_growth", band), original)
+        safe = {**band, "trough": {"value": "0"}, "peak": {"value": "1"}}
+        self.assertEqual(fs._scenario_band({"role": "income_tax_expense"},
+                                          "share_of_line", safe), safe)
+
     def test_no_more_than_five_drivers_are_named(self):
         self.assertLessEqual(len(select_drivers(model())["ranked"]), MAX_DRIVERS)
 
@@ -373,7 +391,7 @@ class RankingTests(unittest.TestCase):
         # The ref says what the rule ranks by. It is not "elasticity-rank":
         # a projection computed under a rule that ranked by elasticity must
         # never be mistakable for one computed under this rule.
-        self.assertEqual(SELECTION_RULE_REF, "rule:swing-rank:2")
+        self.assertEqual(SELECTION_RULE_REF, "rule:swing-rank:3")
         self.assertEqual(SELECTION_RULE["ref"], SELECTION_RULE_REF)
         self.assertEqual(SELECTION_RULE_HASH, content_hash(SELECTION_RULE))
         self.assertEqual(SELECTION_RULE["unit_move"], "0.01")

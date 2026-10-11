@@ -605,7 +605,7 @@ def render_sensitivity(
             out.append("      当前假设：预测期内并非固定值")
         if impact.get("status") == "computed":
             move_label = ("首个预测季度的增速变动" if
-                          record.get("selection_rule_ref") == "rule:swing-rank:2"
+                          record.get("selection_rule_ref") in {"rule:swing-rank:2", "rule:swing-rank:3"}
                           and driver.get("measure") == "quarterly_growth" else "该假设变动")
             out.append(f"      {move_label} 1 个百分点时，"
                        f"{show(str(metric.get('label')))}变动 "
@@ -707,7 +707,7 @@ def render_sensitivity(
     out.append("  当前假设列代表模型自身。")
     out.append("")
     out.append("")
-    if record.get("selection_rule_ref") == "rule:swing-rank:2":
+    if record.get("selection_rule_ref") in {"rule:swing-rank:2", "rule:swing-rank:3"}:
         out.append("  季度增速情景只调整首个预测季度，此后恢复模型原有增速；")
         out.append("  首季变化带来的金额差异会随模型延续。比例和金额假设在各季保持所选水平。")
         out.append("  当前假设列保留模型原有的逐季预测路径。")

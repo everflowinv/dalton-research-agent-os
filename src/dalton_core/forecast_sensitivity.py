@@ -142,7 +142,7 @@ WHAT_IF_LINES: tuple[str, ...] = (
     "result:free_cash_flow",
 )
 
-SELECTION_RULE_REF = "rule:swing-rank:2"
+SELECTION_RULE_REF = "rule:swing-rank:3"
 BAND_RULE_REF = "rule:historical-band:2"
 
 #: The rule itself, hashed into every projection. Changing any word of this
@@ -168,7 +168,7 @@ SELECTION_RULE: dict[str, Any] = {
                      "by its unit-move elasticity. A driver with neither a swing "
                      "nor an elasticity is the only one dropped",
     "rate_domain": "a historical tax-rate band containing a value outside [0, 1] "
-                   "is retained as history but is unavailable as a forecast "
+                   "including a typed share_of_line tax assumption, is retained as history but is unavailable as a forecast "
                    "scenario; it is never clamped or carried forward",
     "order": "largest swing first; ties broken by driver ref",
     "why_not_elasticity": "a one-point move ranks every share driver identically, "
@@ -875,7 +875,7 @@ def _scenario_band(
     wire = dict(band)
     if (wire.get("status") != "available"
             or driver.get("role") != "income_tax_expense"
-            or measure != "operating_income_share"):
+            or measure not in {"operating_income_share", "share_of_line", "revenue_share"}):
         return wire
     values = []
     for name in ("trough", "mean", "peak"):
