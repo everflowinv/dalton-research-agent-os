@@ -380,6 +380,8 @@ def _context_with_prompt_proof(
         "truncated": len(selected) < int(base["available_cells"]),
         "cells": list(selected),
     })
+    from .model_revenue_group_candidates import candidates
+    context_body["revenue_group_candidates"] = candidates(selected)
     # The decimal prompt size is itself rendered in the prompt. It converges
     # after at most a digit-width change; the hash is fixed-width.
     for _ in range(8):

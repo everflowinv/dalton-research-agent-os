@@ -523,7 +523,7 @@ def _numeric_period_table_header(context: Mapping[str, Any]) -> str:
             "content_hash",
         )
     }
-    for key in ("identity_catalog_contract", "selection_contract"):
+    for key in ("identity_catalog_contract", "selection_contract", "revenue_group_candidates"):
         if key in context:
             metadata[key] = context[key]
     return "\n".join([
@@ -538,6 +538,7 @@ def _numeric_period_table_header(context: Mapping[str, Any]) -> str:
         "ambiguity_ref",
         *(["SOURCE_IDENTITY suffix, when present, binds complete dimensions and exact context version; never infer missing axes from labels or amounts."] if any("dimensions" in c for c in context.get("cells") or []) else []),
         *(["For a dimensional revenue driver, select the row's catalog_ref as basis_identity={statement:<that row's statement>,dimensions:{catalog_ref:<exact ref>}}. The system binds all original axes; do not hand-copy a subset. A ref must belong to the selected basis_concept in this input."] if context.get("identity_catalog_contract") else []),
+        *(["Revenue group candidates are exact-source disclosure choices, not an automatic modeling choice. Select and explain one coherent group using its member identity refs; a not_closed result requires original reconciliation evidence. Do not invent a residual member or mix totals from different groups or filings."] if context.get("revenue_group_candidates") else []),
     ])
 
 
