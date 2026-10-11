@@ -14,12 +14,46 @@ import subprocess
 import tempfile
 from datetime import datetime, timezone
 from pathlib import Path
-from typing import Any, Iterable, Mapping
+from typing import Any, Callable, Iterable, Mapping
 from urllib.parse import quote
 
 
 class BackupError(RuntimeError):
     pass
+
+
+class BackupCancelled(BackupError):
+    """Cooperative stop: no complete snapshot or integrity success is claimed."""
+
+
+def _check_cancelled(cancel_requested: Callable[[], bool] | None) -> None:
+    if cancel_requested is not None and cancel_requested():
+        raise BackupCancelled("cooperative backup stop requested")
+
+
+@contextlib.contextmanager
+def _sqlite_cancellation(connection: sqlite3.Connection, cancel_requested):
+    _check_cancelled(cancel_requested)
+    interrupted = False
+    def progress():
+        nonlocal interrupted
+        if cancel_requested():
+            interrupted = True
+            return 1
+        return 0
+    if cancel_requested is not None:
+        connection.set_progress_handler(progress, 10000)
+    try:
+        yield
+    except sqlite3.OperationalError as exc:
+        if interrupted:
+            raise BackupCancelled("cooperative backup SQLite operation stopped") from exc
+        _check_cancelled(cancel_requested)
+        raise
+    finally:
+        if cancel_requested is not None:
+            connection.set_progress_handler(None, 0)
+    _check_cancelled(cancel_requested)
 
 
 class BackupInsufficientSpace(BackupError):
@@ -38,22 +72,27 @@ def _now() -> str:
     return datetime.now(timezone.utc).isoformat(timespec="microseconds")
 
 
-def _sha256(path: Path) -> str:
+def _sha256(path: Path, *, cancel_requested=None) -> str:
+    _check_cancelled(cancel_requested)
     digest = hashlib.sha256()
     with path.open("rb") as handle:
         for chunk in iter(lambda: handle.read(1024 * 1024), b""):
+            _check_cancelled(cancel_requested)
             digest.update(chunk)
+    _check_cancelled(cancel_requested)
     return digest.hexdigest()
 
 
-def _integrity(path: Path) -> None:
+def _integrity(path: Path, *, cancel_requested=None) -> None:
+    _check_cancelled(cancel_requested)
     wal = Path(f"{path}-wal")
     if wal.exists() and (wal.is_symlink() or not wal.is_file() or wal.stat().st_size != 0):
         raise BackupError(f"non-empty or invalid WAL prevents immutable check for {path.name}")
     connection = sqlite3.connect(
         f"file:{quote(str(path), safe='/')}?mode=ro&immutable=1", uri=True)
     try:
-        result = connection.execute("PRAGMA integrity_check").fetchone()
+        with _sqlite_cancellation(connection, cancel_requested):
+            result = connection.execute("PRAGMA integrity_check").fetchone()
     finally:
         connection.close()
     if result is None or result[0] != "ok":
@@ -118,10 +157,11 @@ def _external_open_pids(snapshot: Path) -> list[int] | None:
 
 
 def _read_completed_snapshot(
-    snapshot: Path,
+    snapshot: Path, *, cancel_requested=None,
 ) -> tuple[dict[str, Any], int, dict[str, tuple[int, int, int, int, int]]]:
     """Hash-check one immutable completed snapshot without making a copy."""
 
+    _check_cancelled(cancel_requested)
     if snapshot.is_symlink() or not snapshot.is_dir() or snapshot.name.startswith("."):
         raise BackupError("backup snapshot is not a completed directory")
     manifest_path = snapshot / "manifest.json"
@@ -165,7 +205,7 @@ def _read_completed_snapshot(
         if not _owner_file(path) or path.stat().st_size != item["size_bytes"]:
             raise BackupError("backup file is unavailable or has the wrong size")
         before = _signature(path)
-        if _sha256(path) != item["sha256"]:
+        if _sha256(path, cancel_requested=cancel_requested) != item["sha256"]:
             raise BackupError("backup file hash mismatch")
         after = _signature(path)
         if before != after:
@@ -185,7 +225,7 @@ def _read_completed_snapshot(
                 raise BackupError("backup SHM has an invalid SQLite sidecar shape")
             for sidecar in (wal, shm):
                 before_sidecar = _signature(sidecar)
-                _sha256(sidecar)
+                _sha256(sidecar, cancel_requested=cancel_requested)
                 after_sidecar = _signature(sidecar)
                 if before_sidecar != after_sidecar:
                     raise BackupError("backup SQLite sidecar changed during verification")
@@ -194,10 +234,11 @@ def _read_completed_snapshot(
                 total += sidecar.stat().st_size
     if {path.name for path in snapshot.iterdir()} != expected:
         raise BackupError("backup snapshot contains unmanifested files")
+    _check_cancelled(cancel_requested)
     return manifest, total, signatures
 
 
-def _copy_database(source_path: Path, destination: Path) -> None:
+def _copy_database(source_path: Path, destination: Path, *, cancel_requested=None) -> None:
     """Write one consistent, compacted copy of a live SQLite authority.
 
     ``VACUUM INTO`` reads through a read-only connection at one point in time,
@@ -208,18 +249,30 @@ def _copy_database(source_path: Path, destination: Path) -> None:
     fallback for a SQLite too old for ``VACUUM INTO`` (3.27).
     """
 
+    _check_cancelled(cancel_requested)
     source = sqlite3.connect(f"file:{quote(str(source_path), safe='/')}?mode=ro",
                              uri=True)
     try:
         try:
-            source.execute("VACUUM INTO ?", (str(destination),))
+            with _sqlite_cancellation(source, cancel_requested):
+                source.execute("VACUUM INTO ?", (str(destination),))
             return
+        except BackupCancelled:
+            raise  # An interrupted VACUUM must never buy another copy path.
         except sqlite3.OperationalError:
+            _check_cancelled(cancel_requested)
             if destination.exists():
                 destination.unlink()
         target = sqlite3.connect(destination)
         try:
-            source.backup(target)
+            if cancel_requested is None:
+                source.backup(target)
+            else:
+                def progress(_status, _remaining, _total):
+                    _check_cancelled(cancel_requested)
+                _check_cancelled(cancel_requested)
+                source.backup(target, pages=256, progress=progress, sleep=0.01)
+                _check_cancelled(cancel_requested)
         finally:
             target.close()
     finally:
@@ -241,7 +294,11 @@ def _snapshot_matches_signatures(
 class DatabaseBackupManager:
     def __init__(self, backup_root: str | Path, databases: Mapping[str, str | Path],
                  *, keep_latest: int | None = None,
-                 free_space_multiple: float = DEFAULT_FREE_SPACE_MULTIPLE):
+                 free_space_multiple: float = DEFAULT_FREE_SPACE_MULTIPLE,
+                 cancel_requested: Callable[[], bool] | None = None):
+        if cancel_requested is not None and not callable(cancel_requested):
+            raise BackupError("backup cancellation callback must be callable")
+        self.cancel_requested = cancel_requested
         self.backup_root = Path(backup_root).expanduser().resolve()
         self.databases = {name: Path(path).expanduser().resolve() for name, path in databases.items()}
         if not self.databases or any(not name or "/" in name for name in self.databases):
@@ -268,6 +325,7 @@ class DatabaseBackupManager:
         the previous snapshot is the only measured evidence available.
         """
 
+        _check_cancelled(self.cancel_requested)
         live = 0
         for path in self.databases.values():
             try:
@@ -285,6 +343,7 @@ class DatabaseBackupManager:
     def disk_preflight(self) -> dict[str, Any]:
         """Refuse the snapshot when the volume cannot safely hold it."""
 
+        _check_cancelled(self.cancel_requested)
         estimate = self.estimate_snapshot_bytes()
         required = int(estimate * self.free_space_multiple)
         try:
@@ -301,6 +360,7 @@ class DatabaseBackupManager:
         return report
 
     def snapshot(self, snapshot_id: str | None = None) -> dict[str, Any]:
+        _check_cancelled(self.cancel_requested)
         snapshot_id = snapshot_id or datetime.now(timezone.utc).strftime("%Y%m%dT%H%M%S.%fZ")
         snapshot_id = _snapshot_id(snapshot_id)
         self.backup_root.mkdir(mode=0o700, parents=True, exist_ok=True)
@@ -315,6 +375,8 @@ class DatabaseBackupManager:
             try:
                 retention = self.prune_verified(
                     keep_latest=max(1, self.keep_latest - 1))
+            except BackupCancelled:
+                raise
             except BackupError as exc:
                 # Retention failing must not stop the snapshot; the preflight
                 # below is what decides whether there is room for it.
@@ -323,9 +385,9 @@ class DatabaseBackupManager:
         final = self.backup_root / snapshot_id
         if final.exists():
             with _manifest_lock(final, exclusive=False):
-                manifest, _, _ = _read_completed_snapshot(final)
+                manifest, _, _ = _read_completed_snapshot(final, cancel_requested=self.cancel_requested)
                 for item in manifest["files"]:
-                    _integrity(final / item["file"])
+                    _integrity(final / item["file"], cancel_requested=self.cancel_requested)
             manifest = dict(manifest)
             manifest["status"] = "duplicate"
             return manifest
@@ -337,13 +399,14 @@ class DatabaseBackupManager:
                 if not source_path.is_file():
                     raise BackupError(f"authority database is unavailable: {name}")
                 destination = temporary / f"{name}.sqlite"
-                _copy_database(source_path, destination)
+                _check_cancelled(self.cancel_requested)
+                _copy_database(source_path, destination, cancel_requested=self.cancel_requested)
                 os.chmod(destination, 0o600)
-                _integrity(destination)
+                _integrity(destination, cancel_requested=self.cancel_requested)
                 files.append({
                     "name": name,
                     "file": destination.name,
-                    "sha256": _sha256(destination),
+                    "sha256": _sha256(destination, cancel_requested=self.cancel_requested),
                     "size_bytes": destination.stat().st_size,
                 })
             manifest = {
@@ -353,9 +416,11 @@ class DatabaseBackupManager:
                 "files": files,
                 "status": "fresh",
             }
+            _check_cancelled(self.cancel_requested)
             manifest_path = temporary / "manifest.json"
             manifest_path.write_text(json.dumps(manifest, sort_keys=True, separators=(",", ":")) + "\n", encoding="utf-8")
             os.chmod(manifest_path, 0o600)
+            _check_cancelled(self.cancel_requested)
             os.replace(temporary, final)
             if retention is not None:
                 # Reported, never manifested: the manifest's field set is exact
@@ -369,6 +434,7 @@ class DatabaseBackupManager:
     def prune_verified(self, *, keep_latest: int) -> dict[str, Any]:
         """Delete older completed snapshots only after proving the retained set."""
 
+        _check_cancelled(self.cancel_requested)
         if isinstance(keep_latest, bool) or not isinstance(keep_latest, int) or keep_latest < 1:
             raise BackupError("keep_latest must be a positive integer")
         if not self.backup_root.is_dir():
@@ -379,16 +445,19 @@ class DatabaseBackupManager:
         ] = []
         skipped: list[dict[str, str]] = []
         for path in sorted(self.backup_root.iterdir()):
+            _check_cancelled(self.cancel_requested)
             if path.name.startswith("."):
                 skipped.append({"snapshot_id": path.name, "reason": "temporary_or_control_path"})
                 continue
             try:
                 with _manifest_lock(path, exclusive=False, nonblocking=True):
-                    manifest, size, signatures = _read_completed_snapshot(path)
+                    manifest, size, signatures = _read_completed_snapshot(path, cancel_requested=self.cancel_requested)
                 created = datetime.fromisoformat(manifest["created_at"].replace("Z", "+00:00"))
             except BlockingIOError:
                 skipped.append({"snapshot_id": path.name, "reason": "snapshot is in use"})
                 continue
+            except BackupCancelled:
+                raise
             except (BackupError, OSError) as exc:
                 skipped.append({"snapshot_id": path.name, "reason": str(exc)})
                 continue
@@ -414,7 +483,8 @@ class DatabaseBackupManager:
                         self.backup_root / snapshot_id, exclusive=False, nonblocking=True))
                 for _, snapshot_id, manifest, size, _ in retained:
                     for item in manifest["files"]:
-                        _integrity(self.backup_root / snapshot_id / item["file"])
+                        _integrity(self.backup_root / snapshot_id / item["file"],
+                                   cancel_requested=self.cancel_requested)
                     retained_checks.append({
                         "snapshot_id": snapshot_id, "file_count": len(manifest["files"]),
                         "size_bytes": size, "hashes_verified": True,
@@ -429,6 +499,7 @@ class DatabaseBackupManager:
                         self.backup_root / item[1], item[4]) for item in retained):
                     raise BackupError("retained snapshot changed before deletion")
                 for _, snapshot_id, _, size, signatures in reversed(verified[keep_latest:]):
+                    _check_cancelled(self.cancel_requested)
                     path = self.backup_root / snapshot_id
                     try:
                         with _manifest_lock(path, exclusive=True, nonblocking=True):
@@ -452,7 +523,11 @@ class DatabaseBackupManager:
                             if any(not _snapshot_matches_signatures(
                                     self.backup_root / item[1], item[4]) for item in retained):
                                 raise BackupError("retained snapshot changed before deletion")
+                            _check_cancelled(self.cancel_requested)
                             shutil.rmtree(path)
+                            # Finish this deletion before acknowledging stop;
+                            # never abandon a half-deleted completed snapshot.
+                            _check_cancelled(self.cancel_requested)
                             deleted.append(snapshot_id)
                             deleted_bytes += size
                     except BlockingIOError:
@@ -477,6 +552,7 @@ class DatabaseBackupManager:
         cadence without trusting directory names or an unverified timestamp.
         """
 
+        _check_cancelled(self.cancel_requested)
         if not self.backup_root.is_dir():
             return None
         # Newest claim first, and stop at the first snapshot that verifies.
@@ -488,6 +564,7 @@ class DatabaseBackupManager:
         # order, so older snapshots are hashed only if a newer one fails.
         claimed: list[tuple[datetime, str]] = []
         for path in sorted(self.backup_root.iterdir()):
+            _check_cancelled(self.cancel_requested)
             if path.name.startswith(".") or path.is_symlink() or not path.is_dir():
                 continue
             try:
@@ -504,7 +581,9 @@ class DatabaseBackupManager:
             path = self.backup_root / name
             try:
                 with _manifest_lock(path, exclusive=False, nonblocking=True):
-                    manifest, _, _ = _read_completed_snapshot(path)
+                    manifest, _, _ = _read_completed_snapshot(path, cancel_requested=self.cancel_requested)
+            except BackupCancelled:
+                raise
             except (BlockingIOError, BackupError, OSError, ValueError):
                 continue
             return dict(manifest)
