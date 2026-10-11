@@ -150,6 +150,66 @@ class StructuredMaterialRetrievalTests(Fixture):
         with self.assertRaises(MaterialRetrievalError):
             ma.evaluate_acceptance(self.state,req,now=NOW)
 
+    def test_same_issuer_wrong_fiscal_year_or_quarter_never_fulfils_textual_period(self):
+        self.add()
+        for period in ['FY2025', 'Q2 2025', '第二季度']:
+            req=self.answer(form=period+' 10-Q')
+            verdict=ma.evaluate_acceptance(self.state,req,now=NOW)
+            self.assertFalse(verdict['met']);self.assertTrue(verdict['partial'])
+            self.assertIn('财政期间',verdict['reason'])
+
+    def test_selected_document_identity_retained_and_other_same_form_cannot_substitute(self):
+        from dalton_core.research_planner import inquiry_material_request
+        other=self.add()
+        inquiry={'company_ref':SYNW,'question':'10-Q 成本是多少？','wants':'原文',
+                 'directed_document':{'document_ref':'doc:exact-old','document_version_hash':'a'*64,
+                                      'query_terms':['cost of revenues']}}
+        spec=inquiry_material_request(inquiry);spec['acceptance']['min_passages']=1
+        selected=spec['acceptance']['retrieval']['selected_document']
+        self.assertEqual(selected,{'document_ref':'doc:exact-old','document_version_hash':'a'*64})
+        req=self.request(need=spec['need'],acceptance=spec['acceptance'])
+        result=ma.evaluate_acceptance(self.state,req,now=NOW)
+        self.assertFalse(result['met']);self.assertEqual(result['items'],[])
+        # Even a same-ref indexed candidate cannot impersonate a registration
+        # version; the normal directed reader must verify that authority.
+        req['acceptance']['retrieval']['selected_document']['document_ref']=other
+        result=ma.evaluate_acceptance(self.state,req,now=NOW)
+        self.assertFalse(result['met']);self.assertTrue(result['partial'])
+        self.assertIn('确切版本',result['reason'])
+
+    def test_arrival_links_exact_text_version_and_rejects_wrong_version(self):
+        from dalton_core import evidence_index as ei
+        req=self.answer();ref=self.add();ma.ensure_schema(self.state)
+        verdict=ma.evaluate_acceptance(self.state,req,now=NOW)
+        actual=verdict['items'][0]
+        wrong={**actual,'document_sha256':'0'*64}
+        with self.assertRaisesRegex(ma.MaterialAcquisitionError,'exact indexed document version'):
+            ma.link_arrivals(self.state,req,[wrong],source='indexed_corpus',now=NOW)
+        self.assertEqual(ma.material_arrived(self.state,request_id=req['id']),[])
+        links=ma.link_arrivals(self.state,req,[actual],source='indexed_corpus',now=NOW)
+        self.assertEqual(len(links),1)
+        self.assertEqual(links[0]['document_sha256'],actual['document_sha256'])
+        c=ei.open_index_readonly(self.state)
+        try:
+            row=c.execute('SELECT digest FROM material_arrivals WHERE arrival_id=?',(links[0]['arrival_id'],)).fetchone()
+        finally:c.close()
+        self.assertEqual(row[0],actual['document_sha256'])
+
+    def test_form_only_legacy_question_routes_filing_even_without_translation(self):
+        req=self.request(need={'kind':'answer','question':'What does the 10-K say about liquidity?'})
+        self.assertEqual(ma.TargetedSourceRung('sec_edgar').spec_for(req),'annual-report-10k')
+        self.assertIsNone(ma.TargetedSourceRung('alphaengine').spec_for(req))
+        self.assertIsNone(ma.TargetedSourceRung('guidepoint').spec_for(req))
+        self.add('sec_8k',terms='What does the 10-K say about liquidity? Liquidity remains adequate.')
+        self.assertFalse(ma.evaluate_acceptance(self.state,req,now=NOW)['met'])
+
+    def test_generic_people_or_workforce_description_is_not_an_employee_count_label(self):
+        req=self.answer(terms='people, workforce')
+        self.add(terms='Our people and workforce are talented and dedicated.')
+        result=ma.evaluate_acceptance(self.state,req,now=NOW)
+        self.assertFalse(result['met'])
+        self.assertEqual([g['target'] for g in contract(req)['groups']],['people','workforce'])
+
     def test_numeric_request_never_closed_by_retrieval(self):
         req=self.answer();self.add()
         numeric={**req,'acceptance':{**req['acceptance'],'numeric_contract_ref':'directed-document-numeric:0.1'}}

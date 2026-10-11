@@ -651,7 +651,9 @@ def evaluate_acceptance(state_dir: str | Path, request: Mapping[str, Any], *,
                 for item in found.get("results") or ():
                     if (float((item.get("score_parts") or {}).get("coverage") or 0) < minimum
                             or not phrase_matches(item.get("text") or "", term)
-                            or not issuer_matches(item, company, identity)):
+                            or not issuer_matches(item, company, identity)
+                            or (retrieval.get("selected_document") is not None and
+                                item.get("document_ref") != retrieval["selected_document"]["document_ref"])):
                         continue
                     ref = item["passage_ref"]
                     collected.add(ref); hits.setdefault(ref, item)
@@ -667,8 +669,17 @@ def evaluate_acceptance(state_dir: str | Path, request: Mapping[str, Any], *,
                 "reason": ("各项所需原文段落已取得；研究答案仍由后续阅读核验" if met else
                            "仍缺原文项目：" + "、".join(missing) if missing else
                            f"已覆盖各项，但只有 {len(hits)} 段原文，少于要求的 {needed} 段" if len(hits) < needed else
+                           "已找到相关原文；选定原文的确切版本仍需由正式阅读核验" if retrieval.get("selected_document") else
+                           "已找到相关原文；问题指定的财政期间仍需核对" if retrieval["period_unproved"] else
                            "已找到问题中的财务项目原文；复合问题的其他要求仍需逐项核对")}
 
+
+    from .material_retrieval import filing_kinds
+    required_filings = filing_kinds(request)
+    if required_filings:
+        kinds = [k for k in required_filings if not kinds or k in kinds]
+        if not kinds:
+            return {"met": False, "partial": False, "items": [], "reason": "这个来源不提供要求的申报类型"}
     # answer
     min_coverage = float(acceptance.get("min_coverage") or 0.5)
     hits: dict[str, dict[str, Any]] = {}
@@ -679,14 +690,19 @@ def evaluate_acceptance(state_dir: str | Path, request: Mapping[str, Any], *,
         except Exception:  # noqa: BLE001
             continue
         for item in found.get("results") or ():
-            if float((item.get("score_parts") or {}).get("coverage") or 0) >= min_coverage:
+            if (float((item.get("score_parts") or {}).get("coverage") or 0) >= min_coverage
+                    and (not required_filings or issuer_matches(item, company, identity))):
                 hits.setdefault(item["passage_ref"], item)
     needed = max(1, int(acceptance.get("min_passages") or 2))
     items = [_passage_item(p) for p in list(hits.values())[:6]]
-    if len(hits) >= needed:
+    period_unproved = bool(re.search(r"\bFY\s*\d{2,4}\b|\bQ[1-4]\b|20\d{2}|第[一二三四1234]季度|[一二三四]季度",
+                                     str(need.get("question") or ""), re.I))
+    if len(hits) >= needed and not period_unproved and len(required_filings) <= 1:
         return {"met": True, "partial": False, "items": items, "reason": f"索引中有 {len(hits)} 段相关材料"}
     return {"met": False, "partial": bool(hits), "items": items,
-            "reason": "相关材料不足" if hits else "索引中没有相关材料"}
+            "reason": ("已找到相关段落，但问题指定的财政期间或多种申报类型仍需核对"
+                           if hits and (period_unproved or len(required_filings) > 1) else
+                           "相关材料不足" if hits else "索引中没有相关材料")}
 
 
 # ---------------------------------------------------------------------------
@@ -862,11 +878,11 @@ class TargetedSourceRung:
         need = request.get("need") or {}
         kinds = list(need.get("doc_kinds") or ())
         kind = need.get("kind")
-        from .material_retrieval import contract
-        retrieval = contract(request)
-        if retrieval is not None and retrieval["doc_kinds"]:
+        from .material_retrieval import filing_kinds
+        required_filings = filing_kinds(request) if kind == "answer" else []
+        if required_filings:
             if self.name == "sec_edgar":
-                return next((SEC_SPECS[k] for k in retrieval["doc_kinds"] if k in SEC_SPECS), None)
+                return next((SEC_SPECS[k] for k in required_filings if k in SEC_SPECS), None)
             if self.name in {"alphaengine", "guidepoint"}:
                 return None
         if self.name == "alphaengine":
@@ -1390,15 +1406,30 @@ def link_arrivals(state_dir: str | Path, request: Mapping[str, Any], items: Sequ
                 arrival = None
                 if index is not None and item.get("kind") != "xbrl_fact":
                     try:
-                        found = index.execute("SELECT MIN(arrival_id) FROM material_arrivals WHERE company_ref=? "
-                                              "AND document_ref=?", (company, ref)).fetchone()
+                        digest = item.get("document_sha256")
+                        if digest is not None:
+                            if re.fullmatch(r"[a-f0-9]{64}", str(digest)) is None:
+                                raise MaterialAcquisitionError("indexed document version hash is invalid")
+                            found = index.execute("SELECT MIN(arrival_id) FROM material_arrivals WHERE company_ref=? "
+                                                  "AND document_ref=? AND digest=?", (company, ref, digest)).fetchone()
+                        else:
+                            # Preserve the old link contract for historical
+                            # items that did not carry a source text version.
+                            found = index.execute("SELECT MIN(arrival_id) FROM material_arrivals WHERE company_ref=? "
+                                                  "AND document_ref=?", (company, ref)).fetchone()
                         arrival = found[0] if found else None
                     except sqlite3.Error:
+                        if item.get("document_sha256") is not None:
+                            raise
                         arrival = None
+                if item.get("document_sha256") is not None and arrival is None:
+                    raise MaterialAcquisitionError("the exact indexed document version has no matching arrival")
                 body = {"event": "material_arrived", "request_id": request["id"], "document_ref": ref,
                         "kind": item.get("kind"), "passage_ref": item.get("passage_ref"), "source": source,
                         "need": request.get("need"), "period": request.get("period"),
                         "requesters": [r.get("lane") for r in request.get("requesters") or ()]}
+                if item.get("document_sha256") is not None:
+                    body["document_sha256"] = item["document_sha256"]
                 cursor = connection.execute(
                     "INSERT OR IGNORE INTO material_request_arrivals(request_id,company_ref,document_ref,arrival_id,"
                     "kind,source,record_json,created_at) VALUES (?,?,?,?,?,?,?,?)",
@@ -1509,11 +1540,14 @@ def _free_retrieval_recheck(state: Path, view: Mapping[str, Any], *, stamp: str)
     The append-only request/attempt/spend history is retained. A closed miss
     stays closed after this free check; it never opens a fresh paid ladder.
     """
-    from .material_retrieval import contract, RULE_REF
+    from .material_retrieval import contract, filing_kinds, RULE_REF
     retrieval = contract(view)
-    if retrieval is None or (view.get("acceptance") or {}).get("numeric_contract_ref"):
+    required_filings = filing_kinds(view)
+    if (retrieval is None and not required_filings) or (view.get("acceptance") or {}).get("numeric_contract_ref"):
         return None
-    marker = {"rule_ref": RULE_REF, "retrieval_contract_hash": retrieval["content_hash"]}
+    retrieval_hash = (retrieval["content_hash"] if retrieval is not None else
+                      _sha({"rule_ref": RULE_REF, "need": view.get("need"), "doc_kinds": required_filings}))
+    marker = {"rule_ref": RULE_REF, "retrieval_contract_hash": retrieval_hash}
     if any(e.get("event_kind") == "attempt" and e.get("query") == marker
            for e in view.get("events") or ()):
         return None
@@ -1616,10 +1650,9 @@ def serve(state_dir: str | Path, request_id: str, *, rungs: Mapping[str, Any] | 
         outcome_before = (previous or {}).get("outcome")
         # A previously inapplicable SEC rung may now have an explicit filing
         # target. No old charge is erased and normal budget checks still apply.
-        from .material_retrieval import contract
-        retrieval = contract(view)
+        from .material_retrieval import filing_kinds
         if (source == "sec_edgar" and outcome_before == "not_applicable"
-                and retrieval is not None and retrieval["doc_kinds"] and rung.applies(view)):
+                and filing_kinds(view) and rung.applies(view)):
             previous, outcome_before = None, None
         if outcome_before in DONE_OUTCOMES:
             if outcome_before == "partial":
