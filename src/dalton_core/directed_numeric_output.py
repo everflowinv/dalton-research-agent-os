@@ -46,7 +46,16 @@ VERIFIER_SCHEMA = {'type':'object','additionalProperties':False,
                                'properties':{'target_ref':{'type':'string'},'verdict':{'enum':['accept','reject','unavailable']},
                                              'reason':{'type':['string','null']}}}}}}
 
+JSON_ENVELOPE_COMPATIBILITY_REF = 'directed-numeric-json-envelope:0.1'
+
+
 def _json(text):
+    # A single complete presentation fence has no numeric/source meaning.
+    # Remove only that envelope, byte-for-byte preserving its JSON body. The
+    # original model text/hash stays in the immutable invocation/formal proof.
+    # Prose, multiple blocks and an incomplete fence still fail json.loads.
+    from .annual_report_qualitative import unfence_json_text
+    text = unfence_json_text(text)
     def pairs(items):
         result={}
         for key,value in items:
