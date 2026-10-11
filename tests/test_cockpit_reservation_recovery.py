@@ -39,7 +39,11 @@ class PlanningAdapter(fallback.ChainAdapter):
 
 
 class OrphanReservationTests(unittest.TestCase):
-    _model = fallback.CockpitChainTests._model
+    def _model(self, adapter, **kwargs):
+        # These lease/settlement fixtures exercise a tiny reply with a pinned
+        # profile. Keep its budget independent of production event output caps.
+        return fallback.CockpitChainTests._model(
+            self, adapter, event_output_tokens=1_500, **kwargs)
 
     def setUp(self) -> None:
         fallback.CockpitChainTests.setUp(self)
