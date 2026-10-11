@@ -10,8 +10,11 @@ import sqlite3
 import subprocess
 import sys
 from threading import RLock
+import time
 
 _MAX_HEADERS = 128
+_MAX_READ_ATTEMPTS = 3
+_READ_TIMEOUT_SECONDS = 5
 _HEADERS: OrderedDict[tuple, bytes] = OrderedDict()
 _HEADER_LOCK = RLock()
 _READ_SCRIPT = "import sys; f=open(sys.argv[1],'rb'); sys.stdout.buffer.write(f.read(100)); f.close()"
@@ -25,23 +28,35 @@ def _fingerprint(path: Path) -> tuple[int, int, int, int, int]:
 def read_sqlite_header(path: Path) -> bytes:
     """Read at most 100 bytes, with no same-process raw database FD or writes."""
     target = path.absolute()
-    before = _fingerprint(target)
-    key = (str(target), *before)
-    with _HEADER_LOCK:
-        header = _HEADERS.get(key)
-        if header is not None:
-            _HEADERS.move_to_end(key)
-            return header
-    try:
-        result = subprocess.run(
-            [sys.executable, '-I', '-c', _READ_SCRIPT, str(target)],
-            stdin=subprocess.DEVNULL, stdout=subprocess.PIPE,
-            stderr=subprocess.DEVNULL, timeout=5, check=False,
-        )
-    except (OSError, subprocess.TimeoutExpired) as exc:
-        raise sqlite3.OperationalError('isolated SQLite header read failed') from exc
-    if result.returncode or _fingerprint(target) != before:
-        raise sqlite3.OperationalError('SQLite file changed or was unavailable during header read')
+    deadline = time.monotonic() + _READ_TIMEOUT_SECONDS
+    for attempt in range(_MAX_READ_ATTEMPTS):
+        before = _fingerprint(target)
+        key = (str(target), *before)
+        with _HEADER_LOCK:
+            header = _HEADERS.get(key)
+            if header is not None:
+                _HEADERS.move_to_end(key)
+                return header
+        remaining = deadline - time.monotonic()
+        if remaining <= 0:
+            raise sqlite3.OperationalError('isolated SQLite header read failed')
+        try:
+            result = subprocess.run(
+                [sys.executable, '-I', '-c', _READ_SCRIPT, str(target)],
+                stdin=subprocess.DEVNULL, stdout=subprocess.PIPE,
+                stderr=subprocess.DEVNULL, timeout=remaining, check=False,
+            )
+        except (OSError, subprocess.TimeoutExpired) as exc:
+            raise sqlite3.OperationalError('isolated SQLite header read failed') from exc
+        if result.returncode:
+            raise sqlite3.OperationalError('SQLite file was unavailable during header read')
+        if _fingerprint(target) == before:
+            break
+        # A concurrent commit can change the main file while the isolated
+        # process starts. Discard those bytes and prove a fresh stable read;
+        # never cache a mismatched identity or relax any caller's WAL/SHM gate.
+        if attempt + 1 == _MAX_READ_ATTEMPTS:
+            raise sqlite3.OperationalError('SQLite file changed during header read')
     header = result.stdout
     with _HEADER_LOCK:
         # Replace prior identities of this path; bounded entries contain only
