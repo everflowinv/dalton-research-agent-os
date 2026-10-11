@@ -2138,7 +2138,13 @@ class MissionDocumentResearchCoordinator:
         from .document_completed_model_replay import candidate
         local_replay = (candidate(self, admission, ticket_ref)
                         if hasattr(self.launcher, "replay_completed_models") else None)
-        if local_replay is not None:
+        from .document_unused_recovery_entry import candidate as unused_candidate
+        unused = (unused_candidate(self, admission, ticket_ref, recovery.get('work_order_ref'))
+                  if local_replay is None and hasattr(self.launcher, 'resume_unused_recovery') else None)
+        if unused is not None:
+            resumed = self.launcher.resume_unused_recovery(
+                admission_ref=admission['id'], admission_hash=admission['content_hash'], proof=unused)
+        elif local_replay is not None:
             resumed = self.launcher.replay_completed_models(
                 admission_ref=admission["id"], admission_hash=admission["content_hash"],
                 proof=local_replay)

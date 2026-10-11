@@ -112,6 +112,9 @@ class MissionDocumentResearchLauncher(LaneChildLauncher):
         ]
         if kwargs.get("completed_models_only"):
             command.append("--completed-models-only")
+        if kwargs.get('unused_recovery_link_ref'):
+            command.extend(['--unused-recovery-link-ref', kwargs['unused_recovery_link_ref'],
+                            '--unused-recovery-link-hash', kwargs['unused_recovery_link_hash']])
         return command
 
     def replay_completed_models(self, *, admission_ref, admission_hash, proof):
@@ -138,6 +141,30 @@ class MissionDocumentResearchLauncher(LaneChildLauncher):
                     "configuration_hash": content_hash(configuration), "completed_model_replay": proof},
             admission_ref=admission_ref, admission_hash=admission_hash,
             configuration=configuration, completed_models_only=True)
+
+    def resume_unused_recovery(self, *, admission_ref, admission_hash, proof):
+        """One fixed child for one already authorized, never-started Work."""
+        from .document_unused_recovery_entry import CONTRACT
+        self._validate_admission(admission_ref, admission_hash)
+        if (proof.get('contract_ref') != CONTRACT or proof.get('additional_recovery_windows') != 0
+                or proof.get('admission_ref') != admission_ref or proof.get('admission_hash') != admission_hash
+                or proof.get('content_hash') != content_hash({k:v for k,v in proof.items() if k != 'content_hash'})):
+            raise LaneChildRejected('unused recovery entry proof differs')
+        scope = {key:proof[key] for key in ('contract_ref', 'admission_ref', 'admission_hash',
+                                          'recovery_link_ref', 'recovery_link_hash')}
+        digest = content_hash(scope)[:24];ref = f"{self.TICKET_PREFIX}:{digest}"
+        if self._ticket_path(ref).exists():
+            prior = self.status(ref)
+            if prior.get('status') == 'running':
+                return prior
+            raise LaneChildRejected('unused recovery entry already attempted')
+        configuration = self.configuration()
+        return self.spawn(digest=digest,
+            record={**scope, 'configuration':configuration,
+                    'configuration_hash':content_hash(configuration), 'unused_recovery_entry':proof},
+            admission_ref=admission_ref, admission_hash=admission_hash, configuration=configuration,
+            unused_recovery_link_ref=proof['recovery_link_ref'],
+            unused_recovery_link_hash=proof['recovery_link_hash'])
 
     @staticmethod
     def _validate_admission(admission_ref: str, admission_hash: str) -> None:

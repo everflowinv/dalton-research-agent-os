@@ -32,6 +32,8 @@ def build_parser() -> argparse.ArgumentParser:
     parser.add_argument("--stack-dump-seconds", type=int, default=60)
     parser.add_argument("--quiet", action="store_true")
     parser.add_argument("--completed-models-only", action="store_true")
+    parser.add_argument('--unused-recovery-link-ref')
+    parser.add_argument('--unused-recovery-link-hash')
     return parser
 
 
@@ -64,6 +66,8 @@ def run_admission(
     draft_model_config: Path | None = None,
     verifier_model_config: Path | None = None,
     completed_models_only: bool = False,
+    unused_recovery_link_ref: str | None = None,
+    unused_recovery_link_hash: str | None = None,
 ) -> dict[str, Any]:
     outcomes: list[dict[str, Any]] = []
     with MissionDocumentResearchRuntime(
@@ -89,10 +93,28 @@ def run_admission(
             return _summary(admission_ref=admission_ref,
                 admission_hash=expected_admission_hash,
                 status=outcome["status"], outcomes=[outcome])
+        if unused_recovery_link_ref is not None or unused_recovery_link_hash is not None:
+            if completed_models_only:
+                raise ValueError('unused recovery entry cannot be a local-only replay')
+            from .document_unused_recovery_entry import qualification
+            row = runtime.scheduler.connection.execute(
+                'SELECT recovery_work_order_ref,stage_ordinal FROM mission_document_research_recovery_links '
+                'WHERE recovery_link_id=?', (unused_recovery_link_ref,)).fetchone()
+            proof = (None if row is None else qualification(runtime.authority, runtime.scheduler,
+                admission, row['recovery_work_order_ref'], runtime.executor.draft_worker
+                if row['stage_ordinal'] == 2 else runtime.executor.verifier_worker))
+            if proof is None or proof['recovery_link_hash'] != unused_recovery_link_hash:
+                raise ValueError('unused recovery entry is no longer exact and unused')
         for _transition in range(runtime.transition_budget(admission)):
             outcome = runtime.executor.run_once(admission_ref)
             outcomes.append(outcome)
             status = outcome.get("status")
+            if unused_recovery_link_ref is not None and status == 'failed':
+                # This entry spends only its existing window. It never grants
+                # another recovery link after that model attempt fails.
+                return _summary(admission_ref=admission_ref,
+                    admission_hash=expected_admission_hash, status='blocked',
+                    outcomes=outcomes, error='existing authorized recovery Work failed')
             if status in {"complete", "blocked"}:
                 return _summary(
                     admission_ref=admission_ref,
@@ -144,6 +166,8 @@ def main(argv: list[str] | None = None) -> int:
             draft_model_config=args.mission_document_draft_model_config,
             verifier_model_config=args.mission_document_verifier_model_config,
             completed_models_only=args.completed_models_only,
+            unused_recovery_link_ref=args.unused_recovery_link_ref,
+            unused_recovery_link_hash=args.unused_recovery_link_hash,
         )
     except Exception as exc:
         summary = _summary(
