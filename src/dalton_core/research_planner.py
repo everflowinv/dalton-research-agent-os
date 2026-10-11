@@ -1853,12 +1853,17 @@ def inquiry_material_request(
         "company_ref": inquiry.get("company_ref"), "question": question, "wants": wants,
     }).encode("utf-8")).hexdigest()
     section = reason or ("repair_target" if inquiry.get("repair_target_ref") else "inquiry")
+    from .material_retrieval import retrieval_fields
+    retrieval = retrieval_fields(inquiry)
+    acceptance = {"min_passages": 2, "min_coverage": 0.5}
+    if retrieval is not None:
+        acceptance["retrieval"] = retrieval
     return {
         "requester": {"lane": INQUIRY_REQUESTER_LANE, "product_ref": plan_ref,
                       "run_ref": f"inquiry:{identity[:32]}", "section": section},
         "subject": subject.strip(),
         "need": {"kind": "answer", "question": text[:2000]},
         "period": None,
-        "acceptance": {"min_passages": 2, "min_coverage": 0.5},
+        "acceptance": acceptance,
     }
 

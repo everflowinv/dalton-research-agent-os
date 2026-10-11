@@ -436,6 +436,16 @@ def build_queries(request: Mapping[str, Any], identity: Mapping[str, Any] | None
         if len(out) < 2:
             out.append(f"{ticker} {first}")
     else:
+        from .material_retrieval import contract
+        retrieval = contract(request)
+        if retrieval is not None:
+            form_words = " ".join(k.replace("sec_", "").replace("10k", "10-K").replace("10q", "10-Q").replace("8k", "8-K")
+                                  for k in retrieval["doc_kinds"])
+            # Connector searches retain the issuer/form, while local passage
+            # matching below uses each target's original-language terms.
+            out = [f"{name} {form_words} {g['terms'][0]} {period_words or label}".strip()
+                   for g in retrieval["groups"]]
+            return list(dict.fromkeys(out))[:3]
         question = str(need.get("question") or "").strip()
         out = [question[:300], f"{name} {question[:200]}"]
         keywords = [word for word in re.findall(r"[A-Za-z][A-Za-z0-9\-]{3,}|[一-鿿]{2,}", question)][:6]
@@ -623,6 +633,42 @@ def evaluate_acceptance(state_dir: str | Path, request: Mapping[str, Any], *,
         partial = unique or near
         return {"met": False, "partial": bool(partial), "items": [_passage_item(p) for p in partial[:5]],
                 "reason": "只找到其他期间提到该数据项的段落" if partial else "索引中没有给出该数据项的段落"}
+    from .material_retrieval import contract, issuer_matches, phrase_matches
+    retrieval = contract(request)
+    if retrieval is not None:
+        required_kinds = retrieval["doc_kinds"]
+        allowed = [k for k in required_kinds if not kinds or k in kinds] if required_kinds else list(kinds or [])
+        if required_kinds and not allowed:
+            return {"met": False, "partial": False, "items": [], "reason": "这个来源不提供要求的申报类型",
+                    "missing_targets": [g["target"] for g in retrieval["groups"]]}
+        hits, target_hits = {}, {}
+        minimum = float(acceptance.get("min_coverage") or 0.5)
+        for group in retrieval["groups"]:
+            collected = set()
+            for term in group["terms"]:
+                found = evidence_index.evidence_search(state_dir, term, company_ref=company,
+                    kinds=allowed or None, date_from=date_from, date_to=date_to, limit=20)
+                for item in found.get("results") or ():
+                    if (float((item.get("score_parts") or {}).get("coverage") or 0) < minimum
+                            or not phrase_matches(item.get("text") or "", term)
+                            or not issuer_matches(item, company, identity)):
+                        continue
+                    ref = item["passage_ref"]
+                    collected.add(ref); hits.setdefault(ref, item)
+            target_hits[group["target"]] = sorted(collected)
+        missing = [key for key, refs in target_hits.items() if not refs]
+        needed = max(1, int(acceptance.get("min_passages") or 2))
+        met = retrieval["scope_complete"] and not missing and len(hits) >= needed
+        return {"met": met, "partial": bool(hits) and not met,
+                "items": [_passage_item(p) | {"document_sha256": p.get("document_sha256")}
+                          for p in list(hits.values())[:12]],
+                "target_passages": target_hits, "missing_targets": missing,
+                "retrieval_contract_hash": retrieval["content_hash"],
+                "reason": ("各项所需原文段落已取得；研究答案仍由后续阅读核验" if met else
+                           "仍缺原文项目：" + "、".join(missing) if missing else
+                           f"已覆盖各项，但只有 {len(hits)} 段原文，少于要求的 {needed} 段" if len(hits) < needed else
+                           "已找到问题中的财务项目原文；复合问题的其他要求仍需逐项核对")}
+
     # answer
     min_coverage = float(acceptance.get("min_coverage") or 0.5)
     hits: dict[str, dict[str, Any]] = {}
@@ -816,6 +862,13 @@ class TargetedSourceRung:
         need = request.get("need") or {}
         kinds = list(need.get("doc_kinds") or ())
         kind = need.get("kind")
+        from .material_retrieval import contract
+        retrieval = contract(request)
+        if retrieval is not None and retrieval["doc_kinds"]:
+            if self.name == "sec_edgar":
+                return next((SEC_SPECS[k] for k in retrieval["doc_kinds"] if k in SEC_SPECS), None)
+            if self.name in {"alphaengine", "guidepoint"}:
+                return None
         if self.name == "alphaengine":
             if kind == "document":
                 return next((ALPHAENGINE_SPECS[k] for k in kinds if k in ALPHAENGINE_SPECS), None)
@@ -1450,6 +1503,49 @@ def _record(state_dir: Path, view: Mapping[str, Any], source: str, result: RungR
                       calls=result.calls, actor_ref=ACTOR_REF, now=now)
 
 
+def _free_retrieval_recheck(state: Path, view: Mapping[str, Any], *, stamp: str) -> dict[str, Any] | None:
+    """Re-evaluate a changed lexical contract once using held material only.
+
+    The append-only request/attempt/spend history is retained. A closed miss
+    stays closed after this free check; it never opens a fresh paid ladder.
+    """
+    from .material_retrieval import contract, RULE_REF
+    retrieval = contract(view)
+    if retrieval is None or (view.get("acceptance") or {}).get("numeric_contract_ref"):
+        return None
+    marker = {"rule_ref": RULE_REF, "retrieval_contract_hash": retrieval["content_hash"]}
+    if any(e.get("event_kind") == "attempt" and e.get("query") == marker
+           for e in view.get("events") or ()):
+        return None
+    closed = bool(view.get("closed") or view.get("status") in mr.TERMINAL)
+    if closed and view.get("status") not in {"exhausted", "timeout", "partial"}:
+        return None
+    # Do the read before reopening. A broken index is not a negative finding
+    # and cannot alter the request's terminal state.
+    verdict = evaluate_acceptance(state, view, now=stamp)
+    ensure_schema(state)
+    if closed:
+        mr.reopen(state, view["id"], reason="原文逐项检索规则已修正，仅免费复核已有资料",
+                  actor_ref=ACTOR_REF, now=stamp)
+    mr.record_attempt(state, view["id"], source="indexed_corpus",
+        outcome="accepted" if verdict["met"] else "partial" if verdict["partial"] else "empty",
+        detail=verdict["reason"], items=verdict["items"], query=marker, actor_ref=ACTOR_REF, now=stamp)
+    if verdict["met"]:
+        linked = link_arrivals(state, view, verdict["items"], source="indexed_corpus", now=stamp)
+        mr.close(state, view["id"], status="found", reason=verdict["reason"],
+                 items=verdict["items"], actor_ref=ACTOR_REF, now=stamp)
+        return {"request_id": view["id"], "status": "found", "outcome": "found",
+                "free_recheck": marker, "rungs": [{"source": "indexed_corpus", "outcome": "accepted"}],
+                "arrived": linked, "acceptance": verdict}
+    if closed:
+        mr.close(state, view["id"], status=view["status"], reason=verdict["reason"],
+                 items=verdict["items"], actor_ref=ACTOR_REF, now=stamp)
+        return {"request_id": view["id"], "status": view["status"], "outcome": "cached",
+                "free_recheck": marker, "rungs": [{"source": "indexed_corpus", "outcome": "partial" if verdict["partial"] else "empty"}],
+                "acceptance": verdict}
+    return None
+
+
 def serve(state_dir: str | Path, request_id: str, *, rungs: Mapping[str, Any] | None = None,
           now: str | None = None, allow_costed: bool = True) -> dict[str, Any]:
     """Work one request's source ladder as far as it can go now.
@@ -1468,6 +1564,10 @@ def serve(state_dir: str | Path, request_id: str, *, rungs: Mapping[str, Any] | 
     view = mr.request(state, request_id)
     if view is None:
         return {"request_id": request_id, "status": None, "outcome": "missing", "rungs": []}
+    rechecked = _free_retrieval_recheck(state, view, stamp=stamp)
+    if rechecked is not None:
+        return rechecked
+    view = mr.request(state, request_id) or view
     if view["closed"] or view["status"] in mr.TERMINAL:
         due, why = retry_due(state, view, now=stamp)
         if not due:
@@ -1514,6 +1614,13 @@ def serve(state_dir: str | Path, request_id: str, *, rungs: Mapping[str, Any] | 
                 trail.append({"source": source, "outcome": result.outcome})
             continue
         outcome_before = (previous or {}).get("outcome")
+        # A previously inapplicable SEC rung may now have an explicit filing
+        # target. No old charge is erased and normal budget checks still apply.
+        from .material_retrieval import contract
+        retrieval = contract(view)
+        if (source == "sec_edgar" and outcome_before == "not_applicable"
+                and retrieval is not None and retrieval["doc_kinds"] and rung.applies(view)):
+            previous, outcome_before = None, None
         if outcome_before in DONE_OUTCOMES:
             if outcome_before == "partial":
                 partial_items.extend(previous.get("items") or [])
