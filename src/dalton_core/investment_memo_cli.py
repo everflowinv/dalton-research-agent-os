@@ -489,7 +489,8 @@ def _checks(sections: Sequence[Mapping[str, Any]], questions: Sequence[Mapping[s
 
 
 def run_memo(*, store: DaltonStore, frozen: Mapping[str, Any], model: Any, verifier_model: Any,
-             max_units: int = 4, max_repairs: int = 0, quiesce: Any = None) -> dict[str, Any]:
+             max_units: int = 4, max_repairs: int = 0, quiesce: Any = None,
+             repair_budget: Any = None) -> dict[str, Any]:
     if frozen.get("status") != "ready":
         return dict(frozen)
     mission, playbook, company = frozen["mission"], frozen["playbook"], frozen["company"]
@@ -504,7 +505,7 @@ def run_memo(*, store: DaltonStore, frozen: Mapping[str, Any], model: Any, verif
     cost_micros = 0
     repairs_left = max(0, int(max_repairs))
     repaired: list[dict[str, Any]] = []
-    for group, section_indexes, question_indexes in GROUPS:
+    for group_index, (group, section_indexes, question_indexes) in enumerate(GROUPS):
         kwargs = dict(group=group, section_titles=[titles[i] for i in section_indexes],
                       questions=[questions[i] for i in question_indexes],
                       material=frozen["material"], company=company, mission=mission)
@@ -512,7 +513,9 @@ def run_memo(*, store: DaltonStore, frozen: Mapping[str, Any], model: Any, verif
             kwargs["quiesce"] = quiesce
         outcome = draft_group(model, **kwargs)
         cost_micros += int(outcome.get("model", {}).get("cost_micros") or outcome.get("cost_micros") or 0)
-        if outcome["status"] != "drafted" and outcome.get("repairable") and repairs_left:
+        if (outcome["status"] != "drafted" and outcome.get("repairable") and repairs_left
+                and (repair_budget is None or repair_budget.can_repair(
+                    remaining_groups=len(GROUPS) - group_index - 1))):
             # One paid redo, told exactly which refs were refused and why.
             repairs_left -= 1
             first = {"group": group, "reason": outcome["reason"], "refs": outcome.get("refs") or []}
@@ -632,19 +635,24 @@ def run(*, state_dir: Path, model_config_path: Path | None, verifier_model_confi
         return CockpitModel(settings, scheduler_db=str(scheduler_db or state_dir / "scheduler.sqlite"),
                             max_input_tokens=MAX_INPUT_TOKENS, max_output_tokens=MAX_OUTPUT_TOKENS,
                             max_cost_usd=MAX_COST_USD, timeout_seconds=TIMEOUT_SECONDS)
-    # A repair is one more producer call; it is offered only when the run
-    # budget can still reserve it on top of the four drafts and the verifier.
-    headroom = float(run_budget["max_cost_usd"]) - (
-        4 * float(producer_budget["max_cost_usd"]) + float(verifier_budget["max_cost_usd"]))
-    repairs = min(MAX_REPAIRS, max(0, int(headroom // float(producer_budget["max_cost_usd"]))))
+    # One repair may use savings from calls whose exact fees have settled.
+    # All remaining groups and the verifier retain their full reservations.
+    repairs = MAX_REPAIRS
+    from .investment_memo_repair_budget import MemoRepairBudget
+    repair_budget = MemoRepairBudget(
+        (model_factory or (lambda: build(config)))(),
+        run_micros=int(float(run_budget["max_cost_usd"]) * 1_000_000),
+        producer_micros=int(float(producer_budget["max_cost_usd"]) * 1_000_000),
+        verifier_micros=int(float(verifier_budget["max_cost_usd"]) * 1_000_000))
     from .investment_memo_quiesce import RunQuiesce, MemoQuiesced, MemoQuiesceUnproved
     quiesce = (RunQuiesce(summary_dir, model_config_path, verifier_model_config_path,
                          producer_bytes=producer_bytes, verifier_bytes=verifier_bytes)
                if summary_dir is not None else None)
     try:
-        result = run_memo(store=store, frozen=frozen, model=(model_factory or (lambda: build(config)))(),
+        result = run_memo(store=store, frozen=frozen, model=repair_budget,
                           verifier_model=(verifier_model_factory or (lambda: build(verifier_config)))(),
-                          max_units=int(run_budget["max_units"]), max_repairs=repairs, quiesce=quiesce)
+                          max_units=int(run_budget["max_units"]), max_repairs=repairs, quiesce=quiesce,
+                          repair_budget=repair_budget)
     except MemoQuiesced as stopped:
         result = {"status": "quiesced", "memo_status": "quiesced", "resumable": True,
                   "stop_reason": "cooperative_quiesce", "quiesce": stopped.request,
@@ -657,7 +665,8 @@ def run(*, state_dir: Path, model_config_path: Path | None, verifier_model_confi
                   "completed_work_refs": [call.get("work_order_ref") for _, call, _, _ in quiesce.calls]}
     return {"schema_version": SUMMARY_SCHEMA_VERSION, **result,
             "budget": {"run": run_budget, "producer": producer_budget,
-                       "verifier": verifier_budget, "max_repairs": repairs}}
+                       "verifier": verifier_budget, "max_repairs": repairs,
+                       "repair_accounted_micros": repair_budget.accounted_micros}}
 
 
 def main(argv: Sequence[str] | None = None) -> int:

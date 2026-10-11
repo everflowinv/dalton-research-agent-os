@@ -295,7 +295,7 @@ class InvestmentMemoDraftTests(unittest.TestCase):
                     verifier_model_factory=lambda: verifier)
         self.assertEqual(result["status"], "succeeded", result)
         self.assertEqual(result["budget"]["run"]["max_cost_usd"], 70)
-        self.assertEqual(result["budget"]["max_repairs"], 0)
+        self.assertEqual(result["budget"]["max_repairs"], 1)
         # Batch C2: the memo version stores the pack's record like the initial screen.
         self.assertEqual(authority_type.return_value.publish.call_args.kwargs["material_pack"],
                          frozen["material_pack_record"])

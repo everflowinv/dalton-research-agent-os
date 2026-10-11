@@ -121,6 +121,7 @@ def settled_call(model, call, mission, *, purpose):
         if not rows:
             raise ValueError("memo paid call has no admission")
         settled = []
+        accounted_micros = 0
         selected = False
         for row in rows:
             proof = budget.admission(work_order_ref=work["id"],
@@ -139,6 +140,10 @@ def settled_call(model, call, mission, *, purpose):
                     or admitted_route.get("work_order_hash") != wr["work_order_hash"]
                     or admitted_route.get("attempt_number") != row["attempt_number"]):
                 raise ValueError("memo admission route binding drifted")
+            charge = proof["settlement"]["actual_micros"]
+            if not isinstance(charge, int) or isinstance(charge, bool) or charge < 0:
+                raise ValueError("memo settlement amount is invalid")
+            accounted_micros += charge
             selected |= row["attempt_number"] == fr["attempt_number"]
             settled.append({"admission_ref": admission["admission_id"],
                             "admission_hash": admission["content_hash"],
@@ -148,7 +153,8 @@ def settled_call(model, call, mission, *, purpose):
             raise ValueError("memo selected route has no settled admission")
         return {"work_order_ref": work["id"], "work_order_hash": wr["work_order_hash"],
                 "result_envelope_ref": result["id"], "formal_hash": fr["content_hash"],
-                "settlements": settled, "cost_status": call.get("cost_status", "unproved")}
+                "settlements": settled, "cost_status": call.get("cost_status", "unproved"),
+                "accounted_micros": accounted_micros}
 
 
 class RunQuiesce:

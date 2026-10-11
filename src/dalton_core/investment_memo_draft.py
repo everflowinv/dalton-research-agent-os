@@ -17,7 +17,7 @@ from .store import content_hash
 
 DRAFT_PURPOSE = register_purpose("investment_memo")
 VERIFIER_PURPOSE = register_purpose("investment_memo_verifier")
-MEMO_PROMPT_CONTRACT_VERSION = "investment-memo-prompt:0.5"
+MEMO_PROMPT_CONTRACT_VERSION = "investment-memo-prompt:0.6"
 MEMO_VERIFIER_PROMPT_CONTRACT_VERSION = "investment-memo-verifier-prompt:0.3"
 _CALL_BUDGET = default_call_budget(DRAFT_PURPOSE)
 MAX_INPUT_TOKENS = _CALL_BUDGET["max_input_tokens"]
@@ -168,8 +168,13 @@ def build_group_prompt(*, group: str, section_titles: Sequence[str], questions: 
         "Reasoning rules (a deterministic lint and the verifier reject the memo on any of these):",
         *VERIFIER_LINT_INSTRUCTIONS,
         "Every section must have substance: an empty, heading-only or gap-only section refuses the memo.",
-        "If evidence is missing for a key question, set unknown true for that question,",
-        "and name the exact document, metric, period, comparison, or research action needed.",
+        'For an unanswered key question use unknown=true, answer="", refs=[].',
+        "Put the exact missing document, metric, period or next research action in falsifier.",
+        "If the evidence answers the requested question, use unknown=false,",
+        "state only the supported conclusion in answer, cite its refs, and explain its limits",
+        "and the evidence that could change it in falsifier. Never pair unknown=true with an answer or refs.",
+        "Partial background that does not answer the question belongs in the relevant section,",
+        "with its citations and gaps; keep that key question unknown until its core is answered.",
         "Citation slots are closed; a ref in the wrong slot refuses the whole draft:",
         "- sections[].claim_refs and numbers[].claim_version_ref may name ONLY Claim refs.",
         "- A figure from the company model or valuation snapshot is a numbers[] entry with",

@@ -193,7 +193,7 @@ class MemoPauseTests(unittest.TestCase):
         self.assertEqual(result['status'], 'quiesced', result)
         self.assertTrue(result['resumable'])
         self.assertEqual(result['frozen_input_hash'], content_hash(frozen))
-        self.assertEqual(result['budget']['max_repairs'], 0)
+        self.assertEqual(result['budget']['max_repairs'], 1)
         self.assertEqual(len(result['completed_calls']), 1)
         self.assertEqual(verifier.calls, [])
         publish.assert_not_called()
