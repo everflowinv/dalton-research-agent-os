@@ -210,6 +210,35 @@ class StructuredMaterialRetrievalTests(Fixture):
         self.assertFalse(result['met'])
         self.assertEqual([g['target'] for g in contract(req)['groups']],['people','workforce'])
 
+    def test_free_partial_recheck_delivers_exact_material_without_paid_retry_or_found(self):
+        for closed in [False, True]:
+            with self.subTest(closed=closed):
+                # Distinct request need identities for each historical state.
+                req=self.answer(terms='cost of revenues, selling general administrative, missing item '+str(closed),
+                                source_priority=['web'],budget={'max_calls':0,'max_usd':'1.00'})
+                ma.ensure_schema(self.state)
+                ma._record_spend(self.state,req['id'],'web',3,105000,now=NOW)
+                mr.record_attempt(self.state,req['id'],source='web',outcome='budget_blocked',
+                    detail='old refusal',now=NOW)
+                if closed:
+                    mr.close(self.state,req['id'],status='partial',reason='old incomplete materials',now=NOW)
+                before=mr.request(self.state,req['id']);self.add()
+                web=FakeRung('web',[])
+                result=ma.serve(self.state,req['id'],rungs={'web':web},now=later(hours=1))
+                self.assertIn(result['outcome'],{'budget_blocked','cached'})
+                self.assertNotEqual(result['outcome'],'found');self.assertEqual(web.runs,0)
+                after=mr.request(self.state,req['id'])
+                self.assertEqual(after['events'][:len(before['events'])],before['events'])
+                self.assertEqual(ma.request_spend(self.state,req['id']),{'calls':3,'cost_micros':105000})
+                arrivals=ma.material_arrived(self.state,request_id=req['id'])
+                self.assertTrue(arrivals)
+                self.assertTrue(all(x.get('document_sha256') for x in arrivals))
+                self.assertTrue(all(x.get('arrival_id') is not None for x in arrivals))
+                count=len(arrivals)
+                ma.serve(self.state,req['id'],rungs={'web':web},now=later(hours=2))
+                self.assertEqual(len(ma.material_arrived(self.state,request_id=req['id'])),count)
+                self.assertEqual(web.runs,0)
+
     def test_numeric_request_never_closed_by_retrieval(self):
         req=self.answer();self.add()
         numeric={**req,'acceptance':{**req['acceptance'],'numeric_contract_ref':'directed-document-numeric:0.1'}}

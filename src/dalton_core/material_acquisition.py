@@ -1563,9 +1563,13 @@ def _free_retrieval_recheck(state: Path, view: Mapping[str, Any], *, stamp: str)
                   actor_ref=ACTOR_REF, now=stamp)
     mr.record_attempt(state, view["id"], source="indexed_corpus",
         outcome="accepted" if verdict["met"] else "partial" if verdict["partial"] else "empty",
-        detail=verdict["reason"], items=verdict["items"], query=marker, actor_ref=ACTOR_REF, now=stamp)
+        detail=verdict["reason"], items=verdict["items"], query=marker,
+        status="partial" if verdict["partial"] else None, actor_ref=ACTOR_REF, now=stamp)
+    # Partial material is useful input for the normal reader/planner too.
+    # Linking it neither certifies the answer nor changes the paid ladder.
+    linked = (link_arrivals(state, view, verdict["items"], source="indexed_corpus", now=stamp)
+              if verdict["met"] or verdict["partial"] else [])
     if verdict["met"]:
-        linked = link_arrivals(state, view, verdict["items"], source="indexed_corpus", now=stamp)
         mr.close(state, view["id"], status="found", reason=verdict["reason"],
                  items=verdict["items"], actor_ref=ACTOR_REF, now=stamp)
         return {"request_id": view["id"], "status": "found", "outcome": "found",
@@ -1576,7 +1580,7 @@ def _free_retrieval_recheck(state: Path, view: Mapping[str, Any], *, stamp: str)
                  items=verdict["items"], actor_ref=ACTOR_REF, now=stamp)
         return {"request_id": view["id"], "status": view["status"], "outcome": "cached",
                 "free_recheck": marker, "rungs": [{"source": "indexed_corpus", "outcome": "partial" if verdict["partial"] else "empty"}],
-                "acceptance": verdict}
+                "acceptance": verdict, "arrived": linked}
     return None
 
 
