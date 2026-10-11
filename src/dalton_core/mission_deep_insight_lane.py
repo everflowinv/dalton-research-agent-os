@@ -61,7 +61,7 @@ LAUNCHER_KWARG = "deep_insight_gate_launcher"
 RELAUNCH_STATUSES = frozenset({"submitted", "duplicate"})
 CONTENT_TERMINAL_STATUSES = frozenset({
     "classification_conflict", "verification_failed", "rubric_refused",
-    "not_independent", "unverified", "no_new_evidence",
+    "not_independent", "unverified", "no_new_evidence", "execution_incomplete",
     # D1: the draft was well formed and well cited and still was not worth a
     # person's time.  It belongs with the other content refusals rather than
     # with the idle statuses because the reason is worth showing: "held back

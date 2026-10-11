@@ -230,7 +230,7 @@ def valuation_rows(store: Any, company_ref: str) -> list[dict[str, Any]]:
 #: refused under an old rule stayed refused after the rule was fixed, until the
 #: dossier happened to move.  Bump this when the drafting, repair or refusal
 #: rules change and every such hold lifts on the next tick.
-GATE_DRAFTING_CONTRACT = "deep-insight-gate-drafting:2026-09-17-d2"
+GATE_DRAFTING_CONTRACT = "deep-insight-gate-drafting:2026-10-11-execution-separation"
 
 
 def deep_insight_company_source_fingerprint(
@@ -1454,6 +1454,15 @@ def run_gate(
                                   retired=retired_claim_refs(store.connection))
             for group in GROUPS
         }
+        # Resolve before paying a producer: advertised references must be
+        # readable through the same authority used at final submission.
+        removed = unresolved_refs(store.connection, {"answers": [
+            {"sources": rows} for rows, _ in plan.values()]})
+        invalid = {item["ref"] for item in removed}
+        summary["excluded_material_refs"] = removed
+        if invalid:
+            plan = {group: ([row for row in rows if row["ref"] not in invalid], notes)
+                    for group, (rows, notes) in plan.items()}
         # The file's own classification, said to the group that answers q1.
         # ``classification_agrees`` refuses a draft whole when q1 differs from
         # the dossier; a model that was never told what the dossier says can
@@ -1607,9 +1616,12 @@ def run_gate(
                     {"group": group, **outcome["contract_repair"]})
             spent += int((outcome.get("model") or {}).get("cost_micros") or 0)
             if outcome["status"] != "drafted":
-                group_outcomes[group] = "refused"
+                group_outcomes[group] = ("unavailable" if outcome["status"] == "unavailable"
+                                         else "refused")
                 summary["refused"].append(
-                    {"group": group, "reason": outcome["reason"]})
+                    {"group": group, "reason": outcome["reason"],
+                     "status": outcome["status"],
+                     "failure_trace": outcome.get("failure_trace")})
                 continue
             group_outcomes[group] = "drafted"
             answers.update(outcome["answers"])
@@ -1619,6 +1631,18 @@ def run_gate(
         summary["cost_micros"] = spent
         summary["groups_drafted"] = sorted(
             {answers[ref]["group"] for ref in answers})
+        failed_groups = [group for group, status in group_outcomes.items()
+                         if status in {"unavailable", "refused"}]
+        if failed_groups:
+            # Draft/transport failures are execution outcomes, never evidence
+            # gaps. Do not fabricate unknown answers or reopen initial screen.
+            unavailable = any(group_outcomes[g] == "unavailable" for g in failed_groups)
+            summary.update({"status": "succeeded", "gate_status": "execution_incomplete",
+                            "group_outcomes": dict(group_outcomes),
+                            "failure_reason": "; ".join(str(item["reason"]) for item in summary["refused"]),
+                            "cost_status": "unproved" if unavailable else "reported",
+                            "partial_answers": answers})
+            return summary
         if not answers:
             summary.update({"status": "succeeded", "gate_status": (
                 "unverified" if run_bound_blocked else "nothing_drafted")})

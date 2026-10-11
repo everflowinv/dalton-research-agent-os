@@ -703,10 +703,15 @@ def draft_group(
         "prompt_sha": content_hash(prompt),
     })[:32]
     seen: list[tuple[str, Mapping[str, Any]]] = []
+    unavailable: list[CockpitModelError] = []
 
     def call_model(*, prompt: str, request_id: str) -> Mapping[str, Any]:
-        result = model.call(purpose=DRAFT_PURPOSE, request_id=request_id,
-                            prompt=prompt, mission=mission)
+        try:
+            result = model.call(purpose=DRAFT_PURPOSE, request_id=request_id,
+                                prompt=prompt, mission=mission)
+        except CockpitModelError as exc:
+            unavailable.append(exc)
+            raise
         seen.append((prompt, result))
         return result
 
@@ -723,8 +728,15 @@ def draft_group(
         budget_remaining_micros=budget_remaining_micros,
         repair_reserve_micros=repair_reserve_micros,
     )
-    if outcome.status == "unavailable":
-        return {"status": "unavailable", "group": group, "reason": outcome.reason}
+    if unavailable:
+        # A transport failure during either the draft or its contract repair
+        # says nothing about whether the evidence answers a research question.
+        # Keep paid successes and the failed call's trace; never infer zero fees.
+        return {"status": "unavailable", "group": group, "reason": outcome.reason,
+                "model": {"cost_micros": outcome.cost_micros},
+                "cost_status": "unproved",
+                "failure_trace": getattr(unavailable[-1], "failure_trace", None),
+                "contract_repair": outcome.summary()}
     accepted_prompt, call = seen[-1]
     provenance = {
         "work_order_ref": call.get("work_order_ref"),

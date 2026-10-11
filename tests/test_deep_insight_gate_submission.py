@@ -681,15 +681,12 @@ class HeldReturnTests(unittest.TestCase):
         self._return()
         summary = self.harness.run(
             model_factory=lambda: FakeModel(break_contract=True))
-        self.assertEqual(summary["gate_status"], "nothing_drafted")
-        assessment = read_note(self.harness.state_dir, ACN)["assessment"]
-        self.assertEqual(assessment["gate_status"], "nothing_drafted")
-        self.assertEqual(assessment["refused_groups"], list(GROUPS))
-        for group in GROUPS:
-            self.assertIn(group, "".join(assessment["shortfall_labels"]))
-        gaps = {row["question_ref"] for row in assessment["question_gaps"]}
-        self.assertEqual(gaps, set(QUESTION_REFS))
-        self.assertIn("q1", assessment["summary"])
+        self.assertEqual(summary["gate_status"], "execution_incomplete")
+        self.assertEqual({row["group"] for row in summary["refused"]}, set(GROUPS))
+        self.assertEqual(summary["unknown"], 0)
+        self.assertIsNone(summary["quality"])
+        # No research-gap note is manufactured from a broken model reply.
+        self.assertIsNone(read_note(self.harness.state_dir, ACN))
 
     def test_a_held_return_is_attempted_again_when_the_return_itself_changes(self):
         # The other half of "not permanently blocked".  A decision's id is
