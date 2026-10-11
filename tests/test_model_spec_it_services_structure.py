@@ -564,7 +564,9 @@ class RuleVersionThroughTheSchedulerTests(unittest.TestCase):
                     envelope, outputs={"text": outputs.pop(0)})
 
         adapter = SequenceAdapter({})
-        model = self._model(adapter, policy_version_ref=self.pinned_policy)
+        # A bounded synthetic structure fits the unchanged $1 model-spec cap.
+        model = self._model(adapter, policy_version_ref=self.pinned_policy,
+                            model_spec_output_tokens=6000)
         config = {"max_attempts": 1}
         first = model.call(
             purpose="model_spec",

@@ -43,6 +43,8 @@ class ModelSpecTransportCompatibilityTests(TestCase):
             adapter,
             policy_version_ref=self.fixture.pinned_policy,
             transport_retry=TRANSPORT,
+            # Test historical transport identity, not the 32K default's cost.
+            model_spec_output_tokens=6000,
         )
 
     def test_legacy_initial_and_repair_chain_replay_without_another_provider_call(self):

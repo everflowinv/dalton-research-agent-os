@@ -687,6 +687,7 @@ class CockpitChainTests(unittest.TestCase):
         transport = {"max_definitely_not_sent_retries": 0,
                      "queue_wait_seconds": 0, "retry_backoff_seconds": 0}
         model = self._model(adapter, policy_version_ref=self.pinned_policy,
+                            model_spec_output_tokens=6000,
                             transport_retry=transport)
         initial_identity = model_spec_request_identity(
             STATE["state_hash"], repair_config={"max_attempts": 1},
@@ -716,6 +717,9 @@ class CockpitChainTests(unittest.TestCase):
             ).fetchall()
             works = [json.loads(row["work_order_json"]) for row in rows]
         self.assertEqual(len(works), 2)
+        self.assertTrue(all(work["budget"]["max_output_tokens"] == 6000
+                            and work["budget"]["max_cost_usd"] == 1.0
+                            for work in works))
         self.assertTrue(all(work["metadata"]["transport_retry"] == transport
                             for work in works))
         original_work = next(
@@ -805,6 +809,7 @@ class CockpitChainTests(unittest.TestCase):
                   "queue_wait_seconds": 0, "retry_backoff_seconds": 0}
         adapter = ChainAdapter({})
         model = self._model(adapter, policy_version_ref=self.pinned_policy,
+                            model_spec_output_tokens=6000,
                             transport_retry=policy)
         args = dict(purpose="model_spec", request_id=content_hash(identity)[:32],
                     prompt="legacy model specification", mission=self.mission,
@@ -846,6 +851,7 @@ class CockpitChainTests(unittest.TestCase):
             policy = {"max_definitely_not_sent_retries": 0,
                       "queue_wait_seconds": wait, "retry_backoff_seconds": 0}
             model = self._model(adapter, policy_version_ref=self.pinned_policy,
+                                model_spec_output_tokens=6000,
                                 transport_retry=policy)
             result = model.call(**args)
             refs.append(result["work_order_ref"])
@@ -949,7 +955,8 @@ class CockpitChainTests(unittest.TestCase):
                 )
 
         adapter = TextAdapter({})
-        model = self._model(adapter, policy_version_ref=self.pinned_policy)
+        model = self._model(adapter, policy_version_ref=self.pinned_policy,
+                            model_spec_output_tokens=6000)
         identity = model_spec_request_identity(
             STATE["state_hash"], repair_config={"max_attempts": 1},
         )
@@ -1054,6 +1061,7 @@ class CockpitChainTests(unittest.TestCase):
         adapter = BusyRepairAdapter()
         model = self._model(
             adapter, policy_version_ref=self.chain_policy,
+            model_spec_output_tokens=6000,
             capacity_retry=retry, clock=clock,
         )
         identity = model_spec_request_identity(
@@ -1102,7 +1110,8 @@ class CockpitChainTests(unittest.TestCase):
                 )
 
         adapter = TextAdapter({})
-        good = self._model(adapter, policy_version_ref=self.pinned_policy)
+        good = self._model(adapter, policy_version_ref=self.pinned_policy,
+                            model_spec_output_tokens=6000)
         identity = model_spec_request_identity(
             STATE["state_hash"], repair_config={"max_attempts": 1},
         )
@@ -1115,6 +1124,7 @@ class CockpitChainTests(unittest.TestCase):
         )
         bad = self._model(
             adapter, policy_version_ref=self.pinned_policy,
+            model_spec_output_tokens=6000,
             slots=["credential-slot:not-authorized"],
         )
         args = dict(
@@ -1539,7 +1549,8 @@ class CockpitChainTests(unittest.TestCase):
 
     def _model(self, adapter: ChainAdapter, *, policy_version_ref: str,
                slots: list[str] | None = None, capacity_retry=None,
-               transport_retry=None, provider_retry=None, clock=None) -> CockpitModel:
+               transport_retry=None, provider_retry=None, clock=None,
+               model_spec_output_tokens: int | None = None) -> CockpitModel:
         config = {
             "routing_policy_ref": policy_version_ref,
             "credential_slot_refs": list(slots if slots is not None else self.slots),
@@ -1550,6 +1561,13 @@ class CockpitChainTests(unittest.TestCase):
             "expected_agent_id": "chem",
             "budget_db": str(self.root / "budget.sqlite"),
             "budget_policy_ref": BUDGET_POLICY,
+            # Transport/repair fixtures choose their own output allowance; the
+            # production 32K default cannot fit this pinned model's $1 cap.
+            **({} if model_spec_output_tokens is None else {
+                "purpose_call_budgets": {"model_spec": {
+                    "max_output_tokens": model_spec_output_tokens,
+                }},
+            }),
             **({} if capacity_retry is None else {"capacity_retry": capacity_retry}),
             **({} if transport_retry is None else {"transport_retry": transport_retry}),
             **({} if provider_retry is None else {"provider_retry": provider_retry}),
