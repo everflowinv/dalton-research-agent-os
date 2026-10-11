@@ -116,3 +116,10 @@ CREATE TABLE IF NOT EXISTS material_acquisition_service_cursor (
     record_json TEXT NOT NULL,
     content_hash TEXT NOT NULL
 );
+
+-- Priority turns are scheduling metadata only. Keep the ordinary sweep intact.
+CREATE TABLE IF NOT EXISTS material_acquisition_priority_cursor (
+    cursor_id TEXT PRIMARY KEY CHECK (cursor_id = 'current-product-gap'),
+    record_json TEXT NOT NULL,
+    content_hash TEXT NOT NULL
+);

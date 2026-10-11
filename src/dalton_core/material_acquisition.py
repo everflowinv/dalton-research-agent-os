@@ -2138,7 +2138,8 @@ def _service_order(state_dir: str | Path, pending: Sequence[Mapping[str, Any]],
 def _advance_service_cursor(state_dir: str | Path, request: Mapping[str, Any],
                             universe: Mapping[str, Mapping[str, Any]], *,
                             expected_hash: str | None, now: str,
-                            deadline: float | None = None) -> str | None:
+                            deadline: float | None = None,
+                            expected_priority_hash: Any = ...) -> str | None:
     """Claim one service turn; concurrent stale ticks must not execute it."""
     record = {"schema_version": _SERVICE_CURSOR_SCHEMA, "request_ref": request["id"],
               "priority_key": list(priority_key(request, universe)), "updated_at": now}
@@ -2148,6 +2149,12 @@ def _advance_service_cursor(state_dir: str | Path, request: Mapping[str, Any],
         _, current_hash = _decode_service_cursor(row)
         if current_hash != expected_hash:
             return None
+        if expected_priority_hash is not ...:
+            priority_row = connection.execute("SELECT record_json,content_hash FROM material_acquisition_priority_cursor WHERE cursor_id=?",
+                                              (_PRIORITY_CURSOR_ID,)).fetchone()
+            _, _, current_priority_hash = _decode_priority_cursor(priority_row)
+            if current_priority_hash != expected_priority_hash:
+                return None
         if deadline is not None and time.monotonic() >= deadline:
             return None
         record["revision"] = 1 if row is None else json.loads(row["record_json"])["revision"] + 1
@@ -2157,6 +2164,100 @@ def _advance_service_cursor(state_dir: str | Path, request: Mapping[str, Any],
             "ON CONFLICT(cursor_id) DO UPDATE SET record_json=excluded.record_json,content_hash=excluded.content_hash",
             (_SERVICE_CURSOR_ID, _canonical(record), digest))
     return digest
+
+
+_PRIORITY_CURSOR_ID = "current-product-gap"
+_PRIORITY_CURSOR_SCHEMA = "material-acquisition-priority-cursor:0.1"
+
+
+def _decode_priority_cursor(row: sqlite3.Row | None) -> tuple[tuple[Any, ...] | None, bool, str | None]:
+    if row is None:
+        return None, True, None
+    try:
+        record = json.loads(row["record_json"])
+    except (TypeError, ValueError) as exc:
+        raise MaterialAcquisitionError("material priority cursor JSON is invalid") from exc
+    if (not isinstance(record, dict) or set(record) != {"schema_version", "priority_key", "next_priority_first", "revision", "updated_at"}
+            or record["schema_version"] != _PRIORITY_CURSOR_SCHEMA or type(record["next_priority_first"]) is not bool
+            or type(record["revision"]) is not int or not 0 < record["revision"] < 2**63
+            or not isinstance(record["updated_at"], str) or _parse_ts(record["updated_at"]) is None
+            or _sha(record) != row["content_hash"]):
+        raise MaterialAcquisitionError("material priority cursor hash or fields differ")
+    key = record["priority_key"]
+    if key is not None:
+        # Reuse the ordinary cursor's exact request/key validation.
+        wire = {"schema_version": _SERVICE_CURSOR_SCHEMA, "request_ref": key[-1] if isinstance(key, list) and key else None,
+                "priority_key": key, "revision": record["revision"], "updated_at": record["updated_at"]}
+        key, _ = _decode_service_cursor({"record_json": _canonical(wire), "content_hash": _sha(wire)})
+    return key, record["next_priority_first"], str(row["content_hash"])
+
+
+def _priority_service_order(state_dir, pending, universe):
+    with _reader(state_dir) as connection:
+        if connection is None:
+            raise MaterialAcquisitionError("material priority cursor cannot be read")
+        try:
+            row = connection.execute("SELECT record_json,content_hash FROM material_acquisition_priority_cursor WHERE cursor_id=?",
+                                     (_PRIORITY_CURSOR_ID,)).fetchone()
+        except sqlite3.OperationalError as exc:
+            if str(exc) != "no such table: material_acquisition_priority_cursor":
+                raise MaterialAcquisitionError(f"material priority cursor cannot be read: {exc}") from exc
+            row = None
+    key, first, digest = _decode_priority_cursor(row)
+    ordered = sorted(pending, key=lambda v: priority_key(v, universe))
+    cut = 0 if key is None else next((i for i, v in enumerate(ordered) if priority_key(v, universe) > key), len(ordered))
+    return ordered[cut:] + ordered[:cut], first, digest
+
+
+def _advance_priority_turn(state_dir, request, universe, *, expected_hash, expected_priority_hash,
+                           priority, flip_order, now, deadline, priority_proof=None):
+    """One atomic CAS across both cursors; a losing tick must never serve."""
+    with _writer(state_dir) as connection:
+        normal_row = connection.execute("SELECT record_json,content_hash FROM material_acquisition_service_cursor WHERE cursor_id=?",
+                                        (_SERVICE_CURSOR_ID,)).fetchone()
+        _, normal_hash = _decode_service_cursor(normal_row)
+        row = connection.execute("SELECT record_json,content_hash FROM material_acquisition_priority_cursor WHERE cursor_id=?",
+                                 (_PRIORITY_CURSOR_ID,)).fetchone()
+        key, first, priority_hash = _decode_priority_cursor(row)
+        if normal_hash != expected_hash or priority_hash != expected_priority_hash or time.monotonic() >= deadline:
+            return None
+        if priority:
+            from .material_current_gap_priority import still_current
+            if not still_current(state_dir, priority_proof or {}, deadline=deadline):
+                return None
+            source = connection.execute("SELECT * FROM material_requests WHERE request_id=?", (request["id"],)).fetchone()
+            if source is None or source["content_hash"] != priority_proof["request_hash"]:
+                return None
+            status, closed, _ = mr._status_of(connection, request["id"])
+            if status not in mr.ACTIVE or closed:
+                return None
+        if time.monotonic() >= deadline:
+            return None
+        if not priority:
+            wire = {"schema_version": _SERVICE_CURSOR_SCHEMA, "request_ref": request["id"],
+                    "priority_key": list(priority_key(request, universe)), "updated_at": now,
+                    "revision": 1 if normal_row is None else json.loads(normal_row["record_json"])["revision"] + 1}
+            normal_hash = _sha(wire)
+            connection.execute("INSERT INTO material_acquisition_service_cursor VALUES(?,?,?) "
+                "ON CONFLICT(cursor_id) DO UPDATE SET record_json=excluded.record_json,content_hash=excluded.content_hash",
+                (_SERVICE_CURSOR_ID, _canonical(wire), normal_hash))
+        wire = {"schema_version": _PRIORITY_CURSOR_SCHEMA,
+                "priority_key": list(priority_key(request, universe)) if priority else None if key is None else list(key),
+                "next_priority_first": not first if flip_order else first,
+                "updated_at": now, "revision": 1 if row is None else json.loads(row["record_json"])["revision"] + 1}
+        priority_hash = _sha(wire)
+        connection.execute("INSERT INTO material_acquisition_priority_cursor VALUES(?,?,?) "
+            "ON CONFLICT(cursor_id) DO UPDATE SET record_json=excluded.record_json,content_hash=excluded.content_hash",
+            (_PRIORITY_CURSOR_ID, _canonical(wire), priority_hash))
+    return normal_hash, priority_hash
+
+
+_SERVICE_REASONS = {
+    "waiting": "已选择，等待来源或数字核对", "deferred": "已选择，来源暂时等待",
+    "budget_blocked": "已选择，现有额度门未通过", "error": "已选择，材料处理发生异常",
+    "found": "已有合格材料", "partial": "已有部分材料，缺项保留", "exhausted": "当前来源已用尽",
+    "timeout": "当前材料等待已到期", "cached": "沿用当前等待或终态记录", "missing": "请求已不存在",
+}
 
 
 def tick(state_dir: str | Path, *, max_requests: int = 4, max_seconds: float = 10.0, now: str | None = None,
@@ -2191,14 +2292,43 @@ def tick(state_dir: str | Path, *, max_requests: int = 4, max_seconds: float = 1
     # the tick then runs only the free rungs.
     allow_costed = True
     summary["pool"] = {k: pool[k] for k in ("day", "spent_calls", "cap_calls", "spent_usd_micros", "cap_usd_micros")}
-    for view in pending[:max(1, int(max_requests))]:
+    from .material_current_gap_priority import priority_gaps
+    proofs, priority_info = priority_gaps(state, pending,
+        deadline=min(started + max_seconds, time.monotonic() + 2.0))
+    summary["priority"] = priority_info
+    cap = max(1, int(max_requests))
+    # Even a no-signal tick must notice a concurrent priority claim. This is
+    # a CAS coordination read only; its ordinary order and quota are unchanged.
+    _, _, priority_hash = _priority_service_order(state, [], universe)
+    choices = [(view, False) for view in pending[:cap]]
+    if proofs:
+        urgent, first, priority_hash = _priority_service_order(state, [v for v in pending if v["id"] in proofs], universe)
+        chosen = urgent[0]
+        ordinary = [v for v in pending if v["id"] not in proofs]
+        if cap == 1:
+            choices = [(chosen, True)] if first or not ordinary else [(ordinary[0], False)]
+        else:
+            choices = [(v, False) for v in ordinary[:cap - 1]]
+            choices = ([(chosen, True)] + choices) if first else (choices + [(chosen, True)])
+    for turn, (view, is_priority) in enumerate(choices):
         if time.monotonic() - started >= max_seconds:
             summary["out_of_time"] = True
             break
-        next_cursor_hash = _advance_service_cursor(
-            state, view, universe, expected_hash=cursor_hash, now=stamp,
-            deadline=started + max_seconds)
-        if next_cursor_hash is None:
+        if proofs:
+            claimed = _advance_priority_turn(state, view, universe, expected_hash=cursor_hash,
+                expected_priority_hash=priority_hash, priority=is_priority, flip_order=turn == 0,
+                now=stamp, deadline=started + max_seconds,
+                priority_proof=proofs[view["id"]] if is_priority else None)
+            claim_failed = claimed is None
+            next_cursor_hash = cursor_hash if claimed is None else claimed[0]
+            if claimed is not None:
+                priority_hash = claimed[1]
+        else:
+            next_cursor_hash = _advance_service_cursor(
+                state, view, universe, expected_hash=cursor_hash, now=stamp,
+                deadline=started + max_seconds, expected_priority_hash=priority_hash)
+            claim_failed = next_cursor_hash is None
+        if claim_failed:
             summary["out_of_time" if time.monotonic() - started >= max_seconds
                     else "scheduling_busy"] = True
             break
@@ -2213,7 +2343,15 @@ def tick(state_dir: str | Path, *, max_requests: int = 4, max_seconds: float = 1
             summary[outcome] += 1
         if outcome == "budget_blocked" and (result.get("budget") or {}).get("scope") == "pool":
             allow_costed = False
-        summary["results"].append({k: result.get(k) for k in ("request_id", "outcome", "status")})
+        diagnostic = {k: result.get(k) for k in ("request_id", "outcome", "status")}
+        diagnostic["request_id"] = view["id"]
+        diagnostic.update(selection_class="current_product_gap" if is_priority else "ordinary_round_robin",
+                          reason_code=outcome, reason=_SERVICE_REASONS.get(outcome, "已选择，结果待核对"))
+        if is_priority:
+            diagnostic["priority_proof_hash"] = proofs[view["id"]]["content_hash"]
+        if outcome == "error":
+            diagnostic["error_type"] = str(result.get("reason") or "").split(":", 1)[0][:64]
+        summary["results"].append(diagnostic)
     return summary
 
 
