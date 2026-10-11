@@ -176,6 +176,18 @@ class UnusedRecoveryEntryTests(unittest.TestCase):
         self.assertEqual(e.scheduler.attempt_history(recovery['id'])[0]['state'],'ready')
         self.assertIsNone(self.prove(a,e,admission,recovery))
 
+    def test_cli_rejects_mixed_modes_before_local_reconciliation_or_model_loop(self):
+        f,a,admission,e,p,recovery,links=self.fixture()
+        runtime=types.SimpleNamespace(admission=admission,authority=a,scheduler=e.scheduler,executor=e)
+        with patch('dalton_core.mission_document_research_cli.MissionDocumentResearchRuntime',return_value=nullcontext(runtime)),patch('dalton_core.directed_numeric_local_reconciliation.reconcile',side_effect=AssertionError('no local mutation')),patch.object(e,'run_once',side_effect=AssertionError('no model loop')):
+            with self.assertRaisesRegex(ValueError,'cannot be a local-only replay'):
+                run_admission(state_dir=f.state,staging=f.state/'unused',planner_scheduler_db=f.state/'unused',
+                    planner_model_config=f.state/'unused',document_research_config=f.state/'unused',
+                    admission_ref=admission['id'],expected_admission_hash=admission['content_hash'],
+                    completed_models_only=True,unused_recovery_link_ref=links[-1]['id'],
+                    unused_recovery_link_hash=links[-1]['content_hash'])
+        self.assertEqual(p.calls,1)
+
     def test_cli_rechecks_used_link_before_any_executor_call(self):
         f,a,admission,e,p,recovery,links=self.fixture()
         e.scheduler.claim(owner_ref=e.draft_worker.worker_ref,work_order_id=recovery['id'],lease_seconds=1)

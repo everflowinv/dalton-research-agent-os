@@ -82,6 +82,8 @@ def run_admission(
         verifier_config_path=verifier_model_config,
     ) as runtime:
         admission = runtime.admission
+        if completed_models_only and (unused_recovery_link_ref is not None or unused_recovery_link_hash is not None):
+            raise ValueError('unused recovery entry cannot be a local-only replay')
         if completed_models_only:
             # Reuse the existing zero-cost reconciliation authority. It proves
             # every paid/source result again and owns a separate single local
@@ -94,8 +96,6 @@ def run_admission(
                 admission_hash=expected_admission_hash,
                 status=outcome["status"], outcomes=[outcome])
         if unused_recovery_link_ref is not None or unused_recovery_link_hash is not None:
-            if completed_models_only:
-                raise ValueError('unused recovery entry cannot be a local-only replay')
             from .document_unused_recovery_entry import qualification
             row = runtime.scheduler.connection.execute(
                 'SELECT recovery_work_order_ref,stage_ordinal FROM mission_document_research_recovery_links '
