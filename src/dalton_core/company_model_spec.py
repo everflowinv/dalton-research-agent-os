@@ -44,6 +44,7 @@ something needs to be delivered, not the place the thinking lives.
 
 from __future__ import annotations
 
+import copy
 import json
 import re
 from typing import Any, Mapping, Sequence
@@ -67,6 +68,10 @@ from .company_financial_statement_structure import (
 SCHEMA_VERSION = "0.4"
 LEGACY_SCHEMA_VERSION = "0.3"
 TASK_REF = "task:company-model-spec:0.9"
+
+MAX_ASSESSMENT_CHARS = 2400
+PRIOR_ASSESSMENT_CHARS = 1200
+ASSESSMENT_COMPATIBILITY_REF = "model-spec-assessment-length-compatible-replay:0.1"
 
 MAX_REVENUE_DRIVERS = 8
 MAX_EXPENSE_LINES = 14
@@ -155,7 +160,7 @@ OUTPUT_SCHEMA = {
             ),
         },
         "assessment": {
-            "type": "string", "minLength": 1, "maxLength": 1200,
+            "type": "string", "minLength": 1, "maxLength": MAX_ASSESSMENT_CHARS,
             "description": (
                 "What this company's economics actually turn on, and therefore "
                 "what this model has to get right."
@@ -330,7 +335,7 @@ EPS_NUMERATOR_BRIDGE_GUIDANCE = (
     "Missing dilution evidence remains unavailable, never zero."
 )
 
-TASK_HASH = content_hash({
+_TASK_IDENTITY = {
     "task": TASK_REF,
     "output": OUTPUT_SCHEMA,
     "authority": "describes_one_company_using_only_concepts_that_company_filed",
@@ -351,7 +356,31 @@ TASK_HASH = content_hash({
         "guidance": EPS_NUMERATOR_BRIDGE_GUIDANCE,
     },
     "structured_output_repair": "company-model-spec-repair:0.1",
-})
+}
+TASK_HASH = content_hash(_TASK_IDENTITY)
+PRIOR_ASSESSMENT_TASK_HASH = "497833a7b632a3e195fc16c60c20c99315c5ba5630d2292b33feee894cc3b0ea"
+
+
+def assessment_compatibility_contract() -> dict[str, Any]:
+    """Exactly one published task change, never a generic old-answer bridge."""
+    prior = copy.deepcopy(_TASK_IDENTITY)
+    prior["output"]["properties"]["assessment"]["maxLength"] = PRIOR_ASSESSMENT_CHARS
+    if content_hash(prior) != PRIOR_ASSESSMENT_TASK_HASH:
+        raise CompanyModelSpecError("assessment-compatible prior task contract drifted")
+    return {
+        "ref": ASSESSMENT_COMPATIBILITY_REF,
+        "prior_task_hash": PRIOR_ASSESSMENT_TASK_HASH,
+        "current_task_hash": TASK_HASH,
+        "only_change": {"path": "output.properties.assessment.maxLength",
+                        "old": PRIOR_ASSESSMENT_CHARS, "new": MAX_ASSESSMENT_CHARS},
+    }
+
+
+def prior_assessment_output_schema() -> dict[str, Any]:
+    assessment_compatibility_contract()
+    schema = copy.deepcopy(OUTPUT_SCHEMA)
+    schema["properties"]["assessment"]["maxLength"] = PRIOR_ASSESSMENT_CHARS
+    return schema
 
 
 CASH_FLOW_OPERATING_BASE_SHAPE_CODE = "cash_flow_operating_base_shape"
@@ -526,7 +555,8 @@ def _financial_note_table(state: Mapping[str, Any]) -> str:
     return canonical_json(held)
 
 
-def build_prompt(state: Mapping[str, Any]) -> str:
+def build_prompt(state: Mapping[str, Any], *,
+                 output_schema: Mapping[str, Any] | None = None) -> str:
     """The four questions, plus the driver template this kind of company gets.
 
     W4 / Chem retrospective §7.1: a commodity producer and a contracted
@@ -539,6 +569,7 @@ def build_prompt(state: Mapping[str, Any]) -> str:
     considered one is worse than no frame.
     """
 
+    output_schema = OUTPUT_SCHEMA if output_schema is None else output_schema
     company = {
         key: state.get(key)
         for key in ("company_ref", "ticker", "entity_name", "cik", "filings")
@@ -727,7 +758,7 @@ def build_prompt(state: Mapping[str, Any]) -> str:
         "* Keep each because field, including horizon.because, within "
         f"{_BECAUSE['maxLength']} characters: give the specific reason for that line or horizon. "
         "Use assessment for the overall modelling judgement, within "
-        f"{OUTPUT_SCHEMA['properties']['assessment']['maxLength']} characters. The output is "
+        f"{output_schema['properties']['assessment']['maxLength']} characters. The output is "
         "a modelling specification; investment scenarios and tracking tasks have their own "
         "downstream consumers. Do not squeeze a full scenario discussion into every because.\n"
         "* Return compact JSON matching OUTPUT_SCHEMA and nothing else. Do not "
@@ -736,7 +767,7 @@ def build_prompt(state: Mapping[str, Any]) -> str:
         "the output-token limit.\n\n"
         f"{template}\n\n"
         f"{cost_prompt_block(state.get('industry_classification'), state.get('concepts') or ())}\n\n"
-        f"OUTPUT_SCHEMA:\n{json.dumps(OUTPUT_SCHEMA, ensure_ascii=False)}\n\n"
+        f"OUTPUT_SCHEMA:\n{json.dumps(output_schema, ensure_ascii=False)}\n\n"
         f"COMPANY:\n{json.dumps(company, ensure_ascii=False, sort_keys=True)}\n\n"
         "MARKET PROXIES (never company actuals; preserve each proxy_gap when "
         "citing one):\n"
@@ -1332,7 +1363,7 @@ def spec_from_response(
         "schema_version": SCHEMA_VERSION,
         "company_ref": company_ref,
         "state_hash": state.get("state_hash"),
-        "assessment": _text(body.get("assessment"), "assessment", limit=1200,
+        "assessment": _text(body.get("assessment"), "assessment", limit=MAX_ASSESSMENT_CHARS,
                             repairable_length=True),
         "revenue_anchor_concept": revenue_anchor,
         "revenue_drivers": drivers,

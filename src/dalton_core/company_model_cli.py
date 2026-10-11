@@ -388,7 +388,11 @@ def validate_structured_output_repair_binding(
     return binding
 
 
-def _repair_prompt(original_text: str, error: CompanyModelSpecError) -> str:
+def _repair_prompt(original_text: str, error: CompanyModelSpecError, *,
+                   contract: Mapping[str, Any] | None = None,
+                   output_schema: Mapping[str, Any] | None = None) -> str:
+    contract = REPAIR_CONTRACT if contract is None else contract
+    output_schema = OUTPUT_SCHEMA if output_schema is None else output_schema
     if error.code == SIGNED_EXPENSE_REPAIR_CODE:
         head = (
             "Correct only the exact coefficient_path identified by the source-proven "
@@ -490,10 +494,10 @@ def _repair_prompt(original_text: str, error: CompanyModelSpecError) -> str:
         label=FINDINGS_LIST_LABEL)
     return (
         head +
-        f"REPAIR_CONTRACT:\n{canonical_json(REPAIR_CONTRACT)}\n\n"
+        f"REPAIR_CONTRACT:\n{canonical_json(contract)}\n\n"
         f"{listed}\n\n"
         f"VALIDATION_ERROR:\n{canonical_json({'code': error.code, 'message': str(error)})}\n\n"
-        f"OUTPUT_SCHEMA:\n{json.dumps(OUTPUT_SCHEMA, ensure_ascii=False, sort_keys=True)}\n\n"
+        f"OUTPUT_SCHEMA:\n{json.dumps(output_schema, ensure_ascii=False, sort_keys=True)}\n\n"
         f"ORIGINAL_MODEL_OUTPUT:\n{original_text}\n"
     )
 
@@ -860,6 +864,7 @@ def model_spec_validation_contract() -> dict[str, str]:
     one new repair per contract version described above.
     """
 
+    from .company_model_spec import ASSESSMENT_COMPATIBILITY_REF
     from .company_financial_statement_structure import (
         NET_INCOME_SOURCE_CARRY_VALIDATION_REF, STRUCTURE_AUTHORITY_REF,
     )
@@ -878,6 +883,7 @@ def model_spec_validation_contract() -> dict[str, str]:
         "repairable_structure_rules": REPAIRABLE_STRUCTURE_RULES_REF,
         "series_duplicate_facts": DUPLICATE_FACT_POLICY_REF,
         "repair_replay": REPAIR_REPLAY_POLICY_REF,
+        "assessment_compatible_replay": ASSESSMENT_COMPATIBILITY_REF,
     }
 
 
@@ -1191,8 +1197,16 @@ def run_model_spec(
         initial_identity = model_spec_request_identity(
             state["state_hash"], repair_config=repair_config,
         )
+        from .model_spec_assessment_replay import find_parent, validate_parent
         try:
-            call = model.call(
+            compatible_parent = find_parent(getattr(model, "scheduler_db", None) or
+                scheduler_db or state_dir / "scheduler.sqlite", state=state, mission=mission)
+        except CompanyModelSpecError as exc:
+            summary.update({"status": "succeeded", "spec_status": "refused",
+                            "failure_reason": f"{type(exc).__name__}: {exc}"})
+            return summary
+        try:
+            call = compatible_parent["call"] if compatible_parent is not None else model.call(
                 purpose="model_spec",
                 # Keyed by the disclosure, so an unchanged company replays
                 # instead of being paid for again.
@@ -1222,22 +1236,44 @@ def run_model_spec(
                 "failure_reason": f"{type(exc).__name__}: {exc}",
                 "failure_codes": failure_codes})
             return summary
+        if compatible_parent is not None:
+            summary["assessment_compatible_parent"] = {
+                **compatible_parent["contract"],
+                "company_ref": compatible_parent["company_ref"],
+                "state_hash": compatible_parent["state_hash"],
+                "mission_ref": compatible_parent["mission_ref"],
+                "mission_hash": compatible_parent["mission_hash"],
+                "root_work_ref": compatible_parent["call"]["work_order_ref"],
+                "root_work_hash": compatible_parent["call"]["work_order_hash"],
+                "root_formal_hash": compatible_parent["call"]["result_envelope_hash"],
+                "prior_prompt_sha256": compatible_parent["prior_prompt_sha256"],
+            }
         summary["replayed"] = bool(call.get("replayed"))
         summary["cost_micros"] = int(call.get("cost_micros") or 0)
         repairs: list[dict[str, Any]] = []
         try:
-            spec, repairs, accepted_call = _validated_spec_with_repair(
-                model=model,
-                state=state,
-                mission=mission,
-                original_call=call,
-                repair_config=repair_config,
-                decided_by=mission["autonomy"]["automation_principal"],
-                repair_attempts=repairs,
-                note_evidence_resolver=note_resolver,
-                financial_validator=lambda candidate: validate_financials_for_repair(
-                    missions, candidate, note_evidence_resolver=note_resolver),
-            )
+            if compatible_parent is not None:
+                spec, repairs, accepted_call, proof = validate_parent(
+                    compatible_parent, state=state, mission=mission,
+                    decided_by=mission["autonomy"]["automation_principal"],
+                    note_evidence_resolver=note_resolver, repair_attempts=repairs,
+                    financial_validator=lambda candidate: validate_financials_for_repair(
+                        missions, candidate, note_evidence_resolver=note_resolver),
+                )
+                summary["assessment_compatible_replay"] = proof
+            else:
+                spec, repairs, accepted_call = _validated_spec_with_repair(
+                    model=model,
+                    state=state,
+                    mission=mission,
+                    original_call=call,
+                    repair_config=repair_config,
+                    decided_by=mission["autonomy"]["automation_principal"],
+                    repair_attempts=repairs,
+                    note_evidence_resolver=note_resolver,
+                    financial_validator=lambda candidate: validate_financials_for_repair(
+                        missions, candidate, note_evidence_resolver=note_resolver),
+                )
         except SchedulerError as exc:
             summary.update({"status": "succeeded", "spec_status": "busy",
                             "failure_reason": f"{type(exc).__name__}: {exc}"})

@@ -151,7 +151,7 @@ class CashFlowBaseRepairTests(unittest.TestCase):
             self.assertTrue(all(c['value']is None for c in result['cells']))
 
     def test_a_new_error_after_ocf_repair_cannot_open_another_paid_window(self):
-        state,bad=proposal();bad['assessment']='x'*1201;fixed=unavailable(bad)
+        state,bad=proposal();bad['assessment']='x'*(specs.MAX_ASSESSMENT_CHARS+1);fixed=unavailable(bad)
         class Model:
             scheduler_db=None
             calls=0

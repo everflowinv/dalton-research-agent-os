@@ -32,7 +32,7 @@ from dalton_core.company_model_cli import (
 )
 from dalton_core.cockpit_model import CockpitModelError
 from dalton_core.company_model_forecast_cli import run_model_forecast
-from dalton_core.company_model_spec import TASK_HASH, spec_from_response
+from dalton_core.company_model_spec import TASK_HASH, MAX_ASSESSMENT_CHARS, spec_from_response
 from dalton_core.company_dossier import CompanyDossierAuthority
 from dalton_core.company_model_state import build_company_model_state
 from dalton_core.coverage_mission import CoverageMissionAuthority, CoverageMissionConflict
@@ -553,9 +553,9 @@ class ChooseCompanyTests(unittest.TestCase):
     def test_full_run_repairs_then_stores_the_accepted_work_and_total_cost(self):
         _, state = choose_company(self.missions, self.mission)
         original = _spec_body()
-        original["assessment"] = "x" * 1201
+        original["assessment"] = "x" * (MAX_ASSESSMENT_CHARS + 1)
         repaired = copy.deepcopy(original)
-        repaired["assessment"] = "x" * 1199
+        repaired["assessment"] = "x" * (MAX_ASSESSMENT_CHARS - 1)
         calls = [
             {
                 "text": json.dumps(original), "work_order_ref": "work:original",
@@ -722,9 +722,9 @@ class StructuredOutputRepairTests(unittest.TestCase):
 
     def test_text_length_repair_preserves_every_other_semantic_node(self):
         original = _spec_body()
-        original["assessment"] = "x" * 1201
+        original["assessment"] = "x" * (MAX_ASSESSMENT_CHARS + 1)
         repaired = copy.deepcopy(original)
-        repaired["assessment"] = "x" * 1199
+        repaired["assessment"] = "x" * (MAX_ASSESSMENT_CHARS - 1)
 
         class Model:
             def __init__(self, answer):
@@ -753,7 +753,7 @@ class StructuredOutputRepairTests(unittest.TestCase):
 
     def test_semantic_drift_in_a_length_repair_refuses_whole_and_keeps_cost(self):
         original = _spec_body()
-        original["assessment"] = "x" * 1201
+        original["assessment"] = "x" * (MAX_ASSESSMENT_CHARS + 1)
         hostile = copy.deepcopy(original)
         hostile["assessment"] = "short"
         hostile["horizon"]["forecast_quarters"] = 9
@@ -774,7 +774,7 @@ class StructuredOutputRepairTests(unittest.TestCase):
 
     def test_text_length_repair_cannot_exchange_equal_python_scalar_types(self):
         original = _spec_body()
-        original["assessment"] = "x" * 1201
+        original["assessment"] = "x" * (MAX_ASSESSMENT_CHARS + 1)
         hostile = copy.deepcopy(original)
         hostile["assessment"] = "short"
         hostile["horizon"]["forecast_quarters"] = 8.0
@@ -811,7 +811,7 @@ class StructuredOutputRepairTests(unittest.TestCase):
 
     def test_zero_and_one_attempt_limits_are_exact(self):
         original = _spec_body()
-        original["assessment"] = "x" * 1201
+        original["assessment"] = "x" * (MAX_ASSESSMENT_CHARS + 1)
 
         class Model:
             def __init__(inner):
@@ -822,7 +822,7 @@ class StructuredOutputRepairTests(unittest.TestCase):
                 return self.call(json.dumps(original), str(inner.calls), 7)
 
         disabled = Model()
-        with self.assertRaisesRegex(Exception, "longer than 1200"):
+        with self.assertRaisesRegex(Exception, f"longer than {MAX_ASSESSMENT_CHARS}"):
             _validated_spec_with_repair(
                 model=disabled, state=self.state(), mission=self.mission(),
                 original_call=self.call(json.dumps(original)),
