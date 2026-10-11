@@ -73,6 +73,32 @@ def _child_diagnostics(launcher, ticket_ref):
     return text
 
 
+def _coordinator_fixture_snapshot(fixture, admission_ref):
+    """Compare exact fixture rows on the parent and a fresh SQLite reader."""
+    from dalton_core.research_auto_commit import policy_lists_document_rule
+    def snapshot(connection):
+        rows={}
+        for table,key in (('mission_document_research_outcomes','outcome_id'),
+                          ('mission_document_research_promotions','promotion_id'),
+                          ('mission_document_research_observations','observation_id')):
+            try:
+                rows[table]=[row[0] for row in connection.execute(
+                    f'SELECT {key} FROM {table} WHERE admission_ref=?',(admission_ref,)).fetchall()]
+            except sqlite3.OperationalError as exc:rows[table]={'error':str(exc)}
+        return {'in_transaction':connection.in_transaction,'isolation_level':connection.isolation_level,'rows':rows}
+    parent=fixture.store.connection
+    file=next(row[2] for row in parent.execute('PRAGMA database_list').fetchall() if row[1]=='main')
+    result={'parent':snapshot(parent),'main_file':file,'expected_child_file':str(fixture.state/'core.sqlite'),
+            'promotion_required':policy_lists_document_rule(fixture.store.active_policy())}
+    try:
+        reader=sqlite3.connect(Path(file).as_uri()+'?mode=ro',uri=True,isolation_level=None)
+        try:
+            reader.execute('PRAGMA query_only=ON');result['fresh']=snapshot(reader)
+        finally:reader.close()
+    except Exception as exc:result['fresh']={'error':type(exc).__name__+':'+str(exc)}
+    return canonical_json(result)
+
+
 def _verifier_pass(statement):
     """The 0.2 verifier pass for the one draft these broker tests serve."""
 
@@ -718,6 +744,7 @@ class MissionDocumentResearchProductionTests(unittest.TestCase):
             after_resume = coordinator.dispatch_once()
             self.assertEqual(after_resume["status"], "idle", canonical_json(after_resume)
                              + _child_diagnostics(launcher,resumed["ticket_ref"])
+                             + _coordinator_fixture_snapshot(fixture,admission["id"])
                              if after_resume["status"] != "idle" else None)
         # One capped no-send Work, one fresh authorized draft, one verifier.
         self.assertEqual(len(broker.requests), 3)
