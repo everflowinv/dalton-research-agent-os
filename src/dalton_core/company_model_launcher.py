@@ -137,7 +137,8 @@ class CompanyModelSpecLauncher(LaneChildLauncher):
               task_hash: str | None = None,
               repair_policy_hash: str | None = None,
               controlled_reentry: str | None = None,
-              permission_control_key: str | None = None) -> dict[str, Any]:
+              permission_control_key: str | None = None,
+              expected_start_budget_hash: str | None = None) -> dict[str, Any]:
         if not isinstance(company_ref, str) or not company_ref.strip():
             raise LaneChildRejected("a model specification run needs a company")
         if not isinstance(state_hash, str) or len(state_hash) != 64:
@@ -169,6 +170,8 @@ class CompanyModelSpecLauncher(LaneChildLauncher):
                 raise LaneChildRejected("model specification permission binding differs")
         validation_hash = self.financial_validation_contract_hash()
         call_budget_hash = self.call_budget_hash()
+        if permission_control_key is not None and call_budget_hash != expected_start_budget_hash:
+            raise LaneChildRejected("model specification call budget changed before launch")
         digest = self._ticket_digest(
             company_ref=company_ref, state_hash=state_hash, task_hash=task_hash,
             repair_policy_hash=repair_policy_hash, validation_hash=validation_hash,

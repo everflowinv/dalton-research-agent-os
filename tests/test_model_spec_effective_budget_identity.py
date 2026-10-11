@@ -117,7 +117,7 @@ class ModelSpecEffectiveBudgetIdentityTests(unittest.TestCase):
         fake.permission_control_projection = self.launcher.permission_control_projection
         fake.freezes_permission_control = True
         original_start = fake.start
-        def start(*, permission_control_key, **kwargs):
+        def start(*, permission_control_key, expected_start_budget_hash, **kwargs):
             result = original_start(**kwargs)
             fake.tickets[result["id"]]["permission_control_key"] = permission_control_key
             return result
@@ -140,6 +140,32 @@ class ModelSpecEffectiveBudgetIdentityTests(unittest.TestCase):
         fake.finish(second["ticket_ref"],summary=failure)
         self.assertEqual(lane.dispatch_once()["status"],"held")
         self.assertEqual(len(fake.started),2)
+
+    def test_permission_to_start_budget_save_refuses_spawn_then_next_tick_launches_once(self):
+        lane=lane_fixture.MissionModelSpecLaneCoordinator(
+            missions=lane_fixture.FakeMissions([lane_fixture.ACN]),launcher=self.launcher,
+            mission=lambda:{"id":"coverage-mission-version:synthetic:1",
+                            "universe":[{"company_ref":lane_fixture.ACN,"ticker":"ACN"}]})
+        start=self.launcher.start
+        def save_before_start(**kwargs):
+            self.assertEqual(kwargs["expected_start_budget_hash"],self.launcher.call_budget_hash())
+            self.save(32768)
+            return start(**kwargs)
+        with patch.object(self.launcher,'spawn',create=True,return_value={'id':'synthetic-new-ticket'}) as spawn, \
+                patch.object(self.launcher,'status',create=True,return_value={'status':'running'}):
+            with patch.object(self.launcher,'start',side_effect=save_before_start), \
+                    patch.object(self.launcher,'permission_control_projection',wraps=self.launcher.permission_control_projection) as projection:
+                refused=lane.dispatch_once()
+                self.assertEqual(projection.call_count,1)
+            self.assertEqual(refused['status'],'rejected')
+            self.assertIn('call budget changed before launch',refused['reason'])
+            spawn.assert_not_called()
+            with patch.object(self.launcher,'permission_control_projection',wraps=self.launcher.permission_control_projection) as projection:
+                accepted=lane.dispatch_once()
+                self.assertEqual(projection.call_count,1)
+            self.assertEqual(accepted['status'],'launched')
+            self.assertEqual(spawn.call_count,1)
+            self.assertEqual(spawn.call_args.kwargs['expected_call_budget_hash'],self.launcher.call_budget_hash())
 
     def test_unrelated_purpose_and_same_effective_limits_do_not_change_identity(self):
         before = (self.launcher.permission_control_projection(), self.ticket())
@@ -177,7 +203,8 @@ class ModelSpecEffectiveBudgetIdentityTests(unittest.TestCase):
                                    self.mission,self.launcher)
         with patch.object(self.launcher,'spawn',create=True,return_value={'id':'synthetic-ticket'}) as spawn:
             self.launcher.start(company_ref=self.key_args['company_ref'],state_hash='a'*64,
-                                task_hash='b'*64,permission_control_key=control)
+                                task_hash='b'*64,permission_control_key=control,
+                                expected_start_budget_hash=frozen_hash)
         self.assertEqual(spawn.call_args.kwargs['record']['permission_control_key'],control)
         self.assertEqual(spawn.call_args.kwargs['expected_call_budget_hash'],frozen_hash)
         fixture=cli_fixture.ChooseCompanyTests()

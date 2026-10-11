@@ -344,8 +344,18 @@ class MissionModelSpecLaneCoordinator:
             if retired:
                 superseded.extend(retired)
 
+            # The permission and expected launch budget share one read. A save
+            # between this read and start must reject, never mix two budgets.
+            control_projection = None
+            if getattr(self.launcher, "freezes_permission_control", False):
+                try:
+                    control_projection = self.launcher.permission_control_projection()
+                except Exception as exc:  # no unreadable control grants a launch
+                    return {"status": "unavailable", "settled": settled,
+                            "reason": f"{type(exc).__name__}: {exc}"}
             permission = current_permission(
                 self.budget, key, mission, self.launcher,
+                control_projection=control_projection,
                 connection=authority_connection(
                     getattr(self, "store", None), getattr(self, "missions", None),
                     getattr(self, "models", None)))
@@ -387,6 +397,8 @@ class MissionModelSpecLaneCoordinator:
             }
             if getattr(self.launcher, "freezes_permission_control", False):
                 launch_kwargs["permission_control_key"] = permission
+                launch_kwargs["expected_start_budget_hash"] = (
+                    control_projection["model_spec_call_budget_hash"])
             if controlled_reentry is not None:
                 launch_kwargs["controlled_reentry"] = controlled_reentry
             ticket = self.launcher.start(**launch_kwargs)
