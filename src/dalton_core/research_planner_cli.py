@@ -186,6 +186,21 @@ def effective_planner_model_config(
     return result
 
 
+def planner_input_byte_bound(*, state_dir: Path, model_config_path: Path) -> int:
+    """Resolve the current conservative Work input bound without a model call.
+
+    Only reads current configuration and the shared policy. It opens no
+    scheduler/authority, and retains build_work's existing byte estimate.
+    """
+    from .call_budget import resolve_call_budget
+    config = effective_planner_model_config(state_dir=state_dir, model_config_path=model_config_path)
+    budget = resolve_call_budget(config, "plan", defaults={
+        "max_input_tokens": MAX_INPUT_TOKENS, "max_output_tokens": MAX_OUTPUT_TOKENS,
+        "max_cost_usd": MAX_COST_USD, "timeout_seconds": TIMEOUT_SECONDS,
+    })
+    return int(budget["max_input_tokens"])
+
+
 def read_spend(store: DaltonStore, mission: Mapping[str, Any], *,
                budget_db: Path | None, as_of: datetime) -> dict[str, Any]:
     """What has actually been spent, per lane, against what it is allowed.
@@ -389,11 +404,12 @@ def record_attempt(state_dir: Path, state_hash: str, summary: Mapping[str, Any])
     ledger = read_attempt_ledger(state_dir)
     previous = ledger.get(state_hash) or {}
     if (summary.get('plan_status') == 'held' and (
-            previous.get('plan_status') == 'output_recovery_failed'
+            previous.get('plan_status') in {'output_recovery_failed', 'input_too_large'}
             or (summary.get('paid_output_recovery') is not None
                 and previous.get('plan_status') in {'model_unavailable', 'skipped:pool_exhausted'}))):
-        # A read of the terminal successor is not another attempt. Preserve
-        # its reason instead of turning it into a fresh transient backoff.
+        # Reading a size hold or terminal successor is not another attempt.
+        # Preserve its reason and original bound rather than replacing it
+        # with a fresh transient backoff.
         # The same applies to a proved successor waiting on a pre-send refusal:
         # later reads must retain its identity and normal retry clock.
         return
@@ -408,6 +424,7 @@ def record_attempt(state_dir: Path, state_hash: str, summary: Mapping[str, Any])
         # of the state alone; a new rule may fit the same state.
         "projection_rule_ref": PROMPT_PROJECTION_REF,
         "work_order_prompt_bound": MAX_WORK_ORDER_PROMPT_BYTES,
+        "conservative_work_input_byte_bound": summary.get("conservative_work_input_byte_bound"),
     }
     ordered = sorted(ledger.items(), key=lambda item: str(item[1].get("at") or ""),
                      reverse=True)[:MAX_LEDGER_ENTRIES]
@@ -419,6 +436,7 @@ def record_attempt(state_dir: Path, state_hash: str, summary: Mapping[str, Any])
 
 def attempt_hold(
     ledger: Mapping[str, Any], state_hash: str, *, now: datetime,
+    input_byte_bound: int | None = None,
 ) -> dict[str, Any] | None:
     """Whether this exact state was already decided, and may not be re-asked.
 
@@ -436,7 +454,9 @@ def attempt_hold(
     reason = record.get("reason")
     if (plan_status == "input_too_large"
             and (record.get("projection_rule_ref") != PROMPT_PROJECTION_REF
-                 or record.get("work_order_prompt_bound", 64_000) != MAX_WORK_ORDER_PROMPT_BYTES)):
+                 or record.get("work_order_prompt_bound", 64_000) != MAX_WORK_ORDER_PROMPT_BYTES
+                 or (input_byte_bound is not None and
+                     record.get("conservative_work_input_byte_bound") != input_byte_bound))):
         # Decided under an older projection rule (or before the ledger named
         # one).  The same state may fit now, so it is asked once more.
         return None
@@ -660,7 +680,12 @@ def run_planner(
                 scheduler_db=scheduler_db, include_payload=True)
         if recovery is not None:
             summary['paid_output_recovery'] = {k:v for k,v in recovery.items() if k!='_parent_prompt'}
-        held = attempt_hold(attempts, state["content_hash"], now=now)
+        current_input_bound = None
+        if not dry_run and model_config_path is not None and last_attempt.get("plan_status") == "input_too_large":
+            current_input_bound = planner_input_byte_bound(
+                state_dir=state_dir, model_config_path=model_config_path)
+        held = attempt_hold(attempts, state["content_hash"], now=now,
+                            input_byte_bound=current_input_bound)
         retry_ready = recovery is not None and recovery['successor_status'] != 'failed'
         if held is not None and not retry_ready and not dry_run:
             summary.update({"status": "held", **held})
@@ -697,6 +722,10 @@ def run_planner(
         # this estimate is not a provider token count and does not raise its cap.
         conservative_work_input_bytes = int(call_budget["max_input_tokens"])
         prompt_bound = min(MAX_WORK_ORDER_PROMPT_BYTES, conservative_work_input_bytes)
+        # Persist the actual bound even when projection fails before any Work.
+        summary["conservative_work_input_byte_bound"] = conservative_work_input_bytes
+        summary["work_order_prompt_bound"] = MAX_WORK_ORDER_PROMPT_BYTES
+        summary["model_max_input_tokens"] = conservative_work_input_bytes
         try:
             prompt_state = project_state_for_prompt(state, max_input_bytes=prompt_bound)
         except ResearchPlanInputTooLarge as exc:

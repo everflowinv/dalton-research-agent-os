@@ -50,6 +50,7 @@ class PlannerStorageBoundTests(unittest.TestCase):
 
     def run_with_budget(self,state,input_tokens):
         budget={'max_input_tokens':input_tokens,'max_output_tokens':16384,'max_cost_usd':1.,'timeout_seconds':300}
+        self.config.write_text(json.dumps({'purpose_call_budgets':{'plan':budget}}))
         built_works=[]
         def call(**kwargs):
             work=build_work(purpose='plan',request_id=kwargs['request_id'],prompt=kwargs['prompt'],
@@ -112,6 +113,26 @@ class PlannerStorageBoundTests(unittest.TestCase):
         self.assertTrue(summary['prompt_input']['document_identities_preserved'])
         again,works,calls=self.run_with_budget(state,250000)
         self.assertEqual(again['plan_status'],'held');self.assertEqual(calls,0);self.assertEqual(works,[])
+
+    def test_changed_input_budget_reprojects_old_size_failure_once(self):
+        state=self.exact_64844()
+        self.config.write_text(json.dumps({"purpose_call_budgets":{"plan":{"max_input_tokens":2048}}}))
+        first,works,calls=self.run_with_budget(state,2048)
+        self.assertEqual(first['plan_status'],'input_too_large')
+        record=read_attempt_ledger(self.fx.state)[state['content_hash']]
+        self.assertEqual(record['conservative_work_input_byte_bound'],2048)
+        same,works,calls=self.run_with_budget(state,2048)
+        self.assertEqual(same['plan_status'],'held');self.assertEqual(calls,0)
+        self.config.write_text(json.dumps({"purpose_call_budgets":{"plan":{"max_input_tokens":250000}}}))
+        next_run,works,calls=self.run_with_budget(state,250000)
+        self.assertEqual(next_run['plan_status'],'fresh');self.assertEqual(calls,1)
+        again,works,calls=self.run_with_budget(state,250000)
+        self.assertEqual(again['plan_status'],'unchanged');self.assertEqual(calls,0)
+        now=datetime.now(timezone.utc)
+        refused={'at':now.isoformat(),'plan_status':'refused',
+                 'conservative_work_input_byte_bound':2048,'attempts':1}
+        self.assertEqual(attempt_hold({'s':refused},'s',now=now,input_byte_bound=250000)['held_reason'],
+                         'terminal_for_this_state')
 
     def test_old_storage_failure_reopens_once_and_current_contract_failure_remains_held(self):
         now=datetime.now(timezone.utc)
