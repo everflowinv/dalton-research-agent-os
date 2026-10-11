@@ -4887,6 +4887,7 @@ class ForecastModelAuthority:
         *,
         statement_rows: Sequence[Mapping[str, Any]] = (),
         solver_results: Sequence[Mapping[str, Any]] = (),
+        source_groups: Mapping[str, Any] | None = None,
     ) -> dict[str, Any]:
         """Store one model version, or say it is the one already stored.
 
@@ -4998,9 +4999,19 @@ class ForecastModelAuthority:
         # every other line too.
         from .economic_invariants import evaluate_forecast_model, gate
 
+        evaluate_bound = evaluate_forecast_model
+        if source_groups is not None:
+            from .forecast_consumed_source_groups import select_from_authority, evaluate as evaluate_grouped
+            expected_rows, expected_groups = select_from_authority(wire, self.connection)
+            if (dict(source_groups) != expected_groups
+                    or sorted((_statement_line_proof_row(r) for r in statement_rows), key=str)
+                       != sorted((_statement_line_proof_row(r) for r in expected_rows), key=str)):
+                raise ForecastModelValidationError("forecast consumed source selection differs from authority")
+            source_groups = expected_groups
+            evaluate_bound = evaluate_grouped
         from .forecast_statement_scope import statement_scope
         scoped_rows, model_statement_scope = statement_scope(wire, statement_rows, self.connection)
-        candidate_report = evaluate_forecast_model(
+        candidate_report = evaluate_bound(
             wire, statement_rows=scoped_rows, solver_results=solver_results)
         gate(self.store, candidate_report,
              mission_version_ref=wire.get("mission_version_ref"))
@@ -5099,7 +5110,10 @@ class ForecastModelAuthority:
                                     if row.get("period_start") == operand.get("period_start")
                                     and row.get("period_end") == operand.get("period_end")
                                     and str(row.get("value")) == str(operand.get("value"))
-                                    and str(row.get("unit")) == str(operand.get("unit"))
+                                    and _filing_units_match(
+                                        row.get("unit"), operand.get("unit"),
+                                        structured=is_structured_schema(wire.get("schema_version")),
+                                    )
                                     and str(found[str(row["ingest_id"])]["accession"])
                                     == str(operand.get("accession"))
                                     and str(found[str(row["ingest_id"])]["form"])
@@ -5146,7 +5160,7 @@ class ForecastModelAuthority:
                     if not matches:
                         raise ForecastModelValidationError("annual share forecast source does not match immutable direct annual filing rows")
         scoped_wire, model_statement_scope = statement_scope(wire, statement_wire, self.connection)
-        invariant_report = evaluate_forecast_model(
+        invariant_report = evaluate_bound(
             wire, statement_rows=scoped_wire, solver_results=solver_results)
         gate(self.store, invariant_report,
              mission_version_ref=wire.get("mission_version_ref"))
@@ -5163,6 +5177,8 @@ class ForecastModelAuthority:
             "created_at": wire["created_at"],
         }
         if filing_proof is not None:
+            if source_groups is not None:
+                filing_proof["consumed_source_groups"] = dict(source_groups)
             if model_statement_scope is not None:
                 filing_proof["model_statement_scope"] = model_statement_scope
             if context_bindings:
@@ -5282,7 +5298,15 @@ class ForecastModelAuthority:
                 raise ForecastModelConflict("forecast filing partition scope does not replay")
         else:
             scoped_wire = statement_wire
-        replay = evaluate_forecast_model(
+        evaluate_bound = evaluate_forecast_model
+        if wire.get("consumed_source_groups") is not None:
+            from .forecast_consumed_source_groups import replay_manifest, evaluate as evaluate_grouped
+            try:
+                replay_manifest(model, statement_wire, wire["consumed_source_groups"], self.connection)
+            except ForecastModelValidationError as exc:
+                raise ForecastModelConflict(str(exc)) from exc
+            evaluate_bound = evaluate_grouped
+        replay = evaluate_bound(
             model, statement_rows=scoped_wire,
             solver_results=wire.get("solver_results") or [])
         current = replay.as_dict()

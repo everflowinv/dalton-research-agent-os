@@ -529,7 +529,7 @@ class LaneStateTests(unittest.TestCase):
             [row for row in rows if not kwargs.get("statement") or
              row["statement"] == kwargs["statement"]]
             if ingest_id == filing["ingest_id"] else original(ingest_id, **kwargs))
-        with self.assertRaises(EconomicInvariantRefused):
+        with self.assertRaisesRegex(ForecastModelValidationError, "source line refs are not unique"):
             run_company_forecast(self.missions, self.missions.latest_company_model_spec(ACN),
                                  models=ForecastModelAuthority(self.store))
         self.assertEqual(ForecastModelAuthority(self.store).versions(ACN), [])
@@ -559,7 +559,7 @@ class LaneStateTests(unittest.TestCase):
             run_company_forecast(
                 self.missions, self.missions.latest_company_model_spec(ACN),
                 models=ForecastModelAuthority(self.store))
-        self.assertIn("statement rows", str(caught.exception))
+        self.assertIn("row differs from source ingest", str(caught.exception))
 
     def test_a_second_run_with_nothing_new_does_nothing(self):
         self.child()

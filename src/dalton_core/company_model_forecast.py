@@ -185,6 +185,8 @@ def model_digest(
         digest_body["derived_history_unit_rule"] = DERIVED_HISTORY_UNIT_RULE_REF
         from .forecast_presentation_partition import RULE_REF as PRESENTATION_PARTITION_RULE
         digest_body["filed_presentation_partition_rule"] = PRESENTATION_PARTITION_RULE
+        from .forecast_consumed_source_groups import RULE_REF as CONSUMED_SOURCE_GROUPS_RULE
+        digest_body["filed_consumed_source_groups_rule"] = CONSUMED_SOURCE_GROUPS_RULE
     if reporting_boundary is not None:
         digest_body["forecast_reporting_boundary"] = dict(reporting_boundary)
     # Legacy unstructured run identities remain byte-for-byte stable. Only a
@@ -536,24 +538,33 @@ def run_company_forecast(
             prior, table, actor_ref=actor_ref, structure=structure,
             replay=replay, binding=binding)
         body["forecast_policy"]["fiscal_year_end"] = boundary.get("fiscal_year_end")
-    # A comparative quarter can occur in several filings.  Segment arithmetic
-    # must use one coherent filing's consolidated row and breakdown members;
-    # flattening every filing would add repeated members while the normalizer
-    # retained only one consolidated value.  Prefer the newest filing for each
-    # concept and economic period, matching the series/restatement rule.
-    chosen: dict[tuple[str, Any, Any], tuple[str, list[Mapping[str, Any]]]] = {}
-    for filing in missions.statement_filings(company_ref):
-        by_period: dict[tuple[str, Any, Any], list[Mapping[str, Any]]] = {}
-        for line in missions.statement_lines(filing["ingest_id"]):
-            key = (str(line.get("concept")), line.get("period_start"),
-                   line.get("period_end"))
-            by_period.setdefault(key, []).append(line)
-        filed = str(filing.get("filed") or "")
-        for key, rows in by_period.items():
-            if key not in chosen or filed > chosen[key][0]:
-                chosen[key] = (filed, rows)
-    statement_rows = [line for _filed, rows in chosen.values() for line in rows]
-    stored = models.publish(body, statement_rows=statement_rows)
+    source_groups = None
+    if structure is not None:
+        from .forecast_consumed_source_groups import select_rows
+        filings = missions.statement_filings(company_ref)
+        statement_rows, source_groups = select_rows(
+            body, filings, {str(f["ingest_id"]): missions.statement_lines(f["ingest_id"])
+                            for f in filings})
+    else:
+        # A comparative quarter can occur in several filings.  Segment arithmetic
+        # must use one coherent filing's consolidated row and breakdown members;
+        # flattening every filing would add repeated members while the normalizer
+        # retained only one consolidated value.  Prefer the newest filing for each
+        # concept and economic period, matching the series/restatement rule.
+        chosen: dict[tuple[str, Any, Any], tuple[str, list[Mapping[str, Any]]]] = {}
+        for filing in missions.statement_filings(company_ref):
+            by_period: dict[tuple[str, Any, Any], list[Mapping[str, Any]]] = {}
+            for line in missions.statement_lines(filing["ingest_id"]):
+                key = (str(line.get("concept")), line.get("period_start"),
+                       line.get("period_end"))
+                by_period.setdefault(key, []).append(line)
+            filed = str(filing.get("filed") or "")
+            for key, rows in by_period.items():
+                if key not in chosen or filed > chosen[key][0]:
+                    chosen[key] = (filed, rows)
+        statement_rows = [line for _filed, rows in chosen.values() for line in rows]
+    stored = models.publish(body, statement_rows=statement_rows,
+                            **({} if source_groups is None else {"source_groups": source_groups}))
     annual_projection = _annual_projection(missions, models, stored, table)
     from .research_followup_automation import FollowupAutomationAuthority, binding as redraft_binding
     if redraft_binding(models.connection, stored["spec_ref"]) is not None:
