@@ -321,6 +321,9 @@ def period_window(period: str | None, *, now: str | None = None) -> dict[str, An
         out["date_from"] = (today - timedelta(days=365)).isoformat()
         return out
     kind, _, value = text.partition(":")
+    # Event/document period namespaces identify the request, not public dates.
+    if kind in {"event", "event_document"} and value:
+        return out
     if kind == "quarter_ending" and _day(value):
         end = _day(value)
         out.update(date_from=(end + timedelta(days=1)).isoformat(),
