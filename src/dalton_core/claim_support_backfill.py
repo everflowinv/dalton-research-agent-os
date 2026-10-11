@@ -522,7 +522,7 @@ class ClaimSupportBackfill:
 
 
 def run_backfill(*, store: Any, missions: Any, model_config: Mapping[str, Any],
-                 scheduler_db: Any, state_dir: Any, spool: Any) -> dict[str, Any]:
+                 scheduler_db: Any, state_dir: Any, spool: Any, checkpoint=None) -> dict[str, Any]:
     """One bounded run on the extraction lane's configuration, from its child."""
 
     from .claim_retirement import ClaimRetirementAuthority
@@ -539,7 +539,8 @@ def run_backfill(*, store: Any, missions: Any, model_config: Mapping[str, Any],
         store=store, model_config=model_config, scheduler_db=scheduler_db,
         purpose=BACKFILL_PURPOSE, daily_cap_usd=settings["backfill_daily_cap_usd"],
         max_items_per_call=per_batch,
-        second_opinion=bool(settings.get("second_opinion_on_rejection")))
+        second_opinion=bool(settings.get("second_opinion_on_rejection")),
+        checkpoint=checkpoint)
     reader = ClaimReviewDriver(store=store, missions=missions, challenges=challenges, spool=spool)
     return ClaimSupportBackfill(
         store=store, missions=missions, verifier=verifier, reader=reader,

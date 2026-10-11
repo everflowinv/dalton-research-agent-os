@@ -346,6 +346,8 @@ def run_extraction(
 ) -> dict[str, Any]:
     state = secure_dir(state_dir)
     out = secure_dir(summary_dir)
+    from .extraction_quiesce import RunQuiesce, ExtractionQuiesced
+    quiesce = RunQuiesce(out, model_config_path)
     spool_root = spool_dir if spool_dir is not None else state / "transcript-spool"
     raw_config = json.loads(Path(model_config_path).read_text(encoding="utf-8"))
     from .call_budget import freeze_shared_budget_policy
@@ -451,7 +453,9 @@ def run_extraction(
         model_config=None if hermetic_fixture is not None else config,
         candidate_staging=candidate_staging,
     )
+    host._extraction_checkpoint = quiesce.checkpoint
     try:
+        quiesce.checkpoint()
         if hermetic_fixture is not None:
             # Test-only: the same routed worker over a zero-cost fixture
             # adapter; the router must already carry a fixture profile/policy.
@@ -680,6 +684,7 @@ def run_extraction(
                 complete = True
                 offsets: list[int] = []
                 while True:
+                    quiesce.checkpoint()
                     # C2-1: a window a previous run proved dead is stepped over
                     # without re-deriving its context -- which means without
                     # re-fetching, re-rendering and re-hashing the whole
@@ -934,6 +939,7 @@ def run_extraction(
         # pages, so three consecutive live runs read 30 news windows and never
         # reached a single filing or transcript.  Both passes therefore sweep
         # the reviews they want, before admission closes any of them.
+        quiesce.checkpoint()
         secondary_failure = None
         if stop_reason != "systemic_model_failure" and not support_only:
             secondary_failure = _secondary_sweep(
@@ -948,6 +954,7 @@ def run_extraction(
                 require_open=False,
                 directed_reviews=numeric_directed,
                 ledger=windows, model_config_hash=window_config_hash,
+                checkpoint=quiesce.checkpoint,
             )
         if (stop_reason != "systemic_model_failure" and secondary_failure is None
                 and not support_only):
@@ -961,16 +968,19 @@ def run_extraction(
                 spent_key="discovery_fresh",
                 require_open=False,
                 ledger=windows, model_config_hash=window_config_hash,
+                checkpoint=quiesce.checkpoint,
             )
         # ADR-0005 / P9d-17b: every fully drafted review is staged and
         # policy-admitted, then closed.  Idempotent: a re-run reports
         # duplicates and writes nothing new.
+        quiesce.checkpoint()
         if candidate_staging is not None and not support_only:
             _admit_complete_reviews(host, service, complete_reviews, summary)
         # 2026-09-26: the statements a systemic support-check failure held
         # for a person (no model route from 00:00 UTC), asked again and, when
         # supported, committed -- the same candidate, the same policy door.
         # After admission, so a still-open review re-admits its own first.
+        quiesce.checkpoint()
         if (candidate_staging is not None and stop_reason != "systemic_model_failure"
                 and getattr(host, "_claim_support_verifier", None) is not None):
             summary["support_recheck"] = _run_claim_support_recheck(
@@ -979,6 +989,7 @@ def run_extraction(
         # admission-time check existed, a bounded slice per run under its own
         # daily ceiling.  Not after a systemic model failure: the provider that
         # just failed every window is not going to verify anything either.
+        quiesce.checkpoint()
         if hermetic_fixture is None and stop_reason != "systemic_model_failure":
             summary["support_backfill"] = _run_claim_support_backfill(
                 host, config, scheduler_db if scheduler_db is not None else state / "scheduler.sqlite")
@@ -1035,6 +1046,10 @@ def run_extraction(
         summary["stop_reason"] = ("support_only" if support_only else
                                   stop_reason or ("nothing_to_draft" if drafted == 0 else "drained"))
         summary["status"] = "succeeded"
+        return summary
+    except ExtractionQuiesced as stopped:
+        summary.update(status="quiesced", stop_reason="cooperative_quiesce",
+                       resumable=True, quiesce=stopped.proof)
         return summary
     except Exception as exc:  # unexpected: record for the parent, then surface it
         summary["failure_reason"] = f"unexpected {type(exc).__name__}: {exc}"
@@ -1414,7 +1429,8 @@ def _install_claim_support_verifier(host: ExtractionHost, config: Mapping[str, A
         host._claim_support_verifier = build_verifier(
             store=host.store, model_config=config, scheduler_db=scheduler_db,
             purpose=PURPOSE, daily_cap_usd=settings["daily_cap_usd"],
-            second_opinion=bool(settings.get("second_opinion_on_rejection")))
+            second_opinion=bool(settings.get("second_opinion_on_rejection")),
+            checkpoint=getattr(host, "_extraction_checkpoint", None))
     except Exception as exc:  # noqa: BLE001 - reported; admissions defer
         host._claim_support_verifier = None
         return {"status": "unavailable", "reason": f"{type(exc).__name__}: {exc}"}
@@ -1433,7 +1449,8 @@ def _run_claim_support_backfill(host: ExtractionHost, config: Mapping[str, Any],
         return run_backfill(
             store=host.store, missions=host.coverage_mission, model_config=config,
             scheduler_db=scheduler_db, state_dir=host.state_dir,
-            spool=review_spool(host.state_dir, primary=host._transcript_spool))
+            spool=review_spool(host.state_dir, primary=host._transcript_spool),
+            checkpoint=getattr(host, "_extraction_checkpoint", None))
     except Exception as exc:  # noqa: BLE001 - reported, retried next run
         return {"status": "unavailable", "reason": f"{type(exc).__name__}: {exc}"}
 
@@ -1536,6 +1553,7 @@ def _secondary_sweep(
     directed_reviews: Any = None,
     ledger: Any = None,
     model_config_hash: str | None = None,
+    checkpoint=None,
 ) -> dict[str, Any] | None:
     """Spend one secondary allowance on the documents that pass its own gate.
 
@@ -1630,6 +1648,13 @@ def _secondary_sweep(
             walked_to_end = False
             exhausted_here: tuple[str, str] | None = None
             while spent < limit:
+                if checkpoint is not None:
+                    from .extraction_quiesce import ExtractionQuiesced
+                    try:
+                        checkpoint()
+                    except ExtractionQuiesced:
+                        done()  # Preserve this pass's completed-window counts.
+                        raise
                 try:
                     context = service.view(
                         review_id=review["review_id"], expected_review_hash=review_hash,
@@ -1921,6 +1946,9 @@ def _admit_complete_reviews(host: ExtractionHost, service: DocumentExtractionSer
                         ledger = str(decision.get("duplicate_of", "")).startswith("claim-version:")
                         tally["duplicates_of_ledger" if ledger else "duplicates_in_document"] += 1
         for offset in [] if (unstageable or gated) else offsets:
+            checkpoint = getattr(host, "_extraction_checkpoint", None)
+            if checkpoint is not None:
+                checkpoint()
             try:
                 view = service.view(
                     review_id=review["review_id"], expected_review_hash=review_hash,
@@ -2115,7 +2143,7 @@ def main(argv: list[str] | None = None) -> int:
     )
     if not args.quiet:
         print(json.dumps(summary, ensure_ascii=False, sort_keys=True, indent=1))
-    return 0 if summary["status"] == "succeeded" else 1
+    return 0 if summary["status"] in {"succeeded", "quiesced"} else 1
 
 
 if __name__ == "__main__":  # pragma: no cover - exercised as a subprocess
