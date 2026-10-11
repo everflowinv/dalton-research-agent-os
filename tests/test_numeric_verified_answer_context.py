@@ -27,6 +27,32 @@ class NumericVerifiedAnswerContextTests(unittest.TestCase):
             self.assertEqual(answer['citation_text_hash'],content_hash(figure['citation_text']))
         self.assertEqual(numeric_requirements([pending,*rows]),numeric_requirements([pending]))
 
+    def test_real_partial_results_keep_verified_values_and_pending_scope_in_prompt(self):
+        from dalton_core.research_planner import project_state_for_prompt, build_prompt
+        from dalton_core.planner_numeric_requirements import numeric_waiting_targets
+        from tests import test_research_planner as planner_fixture
+        h=fixture.NumericWorkflowTests('runTest');h.addCleanup=self.addCleanup
+        f,_,a,e,_,_=h.fixture(missing=True);h.drive(e,a)
+        before=e.connection.total_changes
+        rows=numeric_feedback(e.connection,f.mission['id'])
+        self.assertEqual(rows[0]['outcome'],'numeric_waiting_evidence')
+        pending=numeric_waiting_targets(rows)
+        context=numeric_completed_context(rows,company_ref=a['company_ref'])
+        self.assertEqual(sum(len(x['targets']) for x in context['sources']),2)
+        source=context['sources'][0]
+        self.assertEqual(source['remaining_target_refs'],['target:leases'])
+        self.assertEqual(source['result_status'],'partial')
+        self.assertTrue(all('verified_answer' in t for t in source['targets']))
+        state=planner_fixture.state(checklist=[planner_fixture.entry(a['company_ref'],'SYNTH',planner_fixture.item('quarterly_financials'))],document_research_feedback={'status':'available','by_company':{a['company_ref']:rows}})
+        projected=project_state_for_prompt(state,max_input_bytes=128000)
+        company=next(c for c in projected['companies'] if c['company_ref']==a['company_ref'])
+        self.assertEqual(company['numeric_completed_context'],context)
+        self.assertEqual(numeric_waiting_targets(rows),pending)
+        prompt=build_prompt(projected)
+        for t in source['targets']:self.assertIn(t['verified_answer']['citation_text_hash'],prompt)
+        self.assertEqual(e.connection.total_changes,before)
+        self.assertLessEqual(len(prompt.encode()),128000)
+
     def test_bound_figure_drift_is_refused_not_used_as_known_answer(self):
         f,a,e,pending=self.setup_completed();ref=numeric_feedback(e.connection,f.mission['id'])[0]['completed_targets'][0]['figure_ref']
         triggers=e.connection.execute("SELECT name FROM sqlite_master WHERE type='trigger' AND tbl_name='coverage_mission_document_figures'").fetchall()

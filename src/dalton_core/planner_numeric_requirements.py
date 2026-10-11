@@ -142,7 +142,7 @@ def numeric_completed_context(feedback: Sequence[Mapping[str, Any]], *,
         return {'sources': [], 'omitted': 0}
     candidates, seen = [], set()
     for observation in sorted(feedback, key=lambda x: (str(x.get('created_at') or ''), str(x.get('id') or '')), reverse=True):
-        if observation.get('outcome') != 'numeric_targets_completed':
+        if observation.get('outcome') not in {'numeric_targets_completed', 'numeric_waiting_evidence'}:
             continue
         if observation.get('company_ref') != company_ref:
             continue
@@ -164,9 +164,23 @@ def numeric_completed_context(feedback: Sequence[Mapping[str, Any]], *,
         targets = normalize_targets(observation['numeric_targets'])
         completed = observation['completed_targets']
         bindings = {row['target_ref']: row for row in completed}
-        if observation.get('missing') or len(bindings) != len(completed) or set(bindings) != {t['target_ref'] for t in targets}:
-            raise ValueError('numeric completed feedback lacks every target')
+        target_refs = {t['target_ref'] for t in targets}
+        missing = observation.get('missing') or []
+        missing_refs = {row['target_ref'] for row in missing}
+        partial = observation['outcome'] == 'numeric_waiting_evidence'
+        if (len(bindings) != len(completed) or len(missing_refs) != len(missing)
+                or set(bindings) & missing_refs or set(bindings) | missing_refs != target_refs
+                or (partial and not missing_refs) or (not partial and missing_refs)):
+            raise ValueError('numeric completed feedback lacks every target completion or missing binding')
+        if partial:
+            if any(not isinstance(row.get('reason'), str) or not row['reason'].strip() for row in missing):
+                raise ValueError('numeric partial feedback lacks a precise missing reason')
+            # Preserve the overall unresolved status while making independently
+            # verified parts usable. No pending question or admission is closed.
+            header.update(result_status='partial', remaining_target_refs=sorted(missing_refs))
         for target in targets:
+            if target['target_ref'] not in bindings:
+                continue
             binding = bindings[target['target_ref']]
             if binding.get('metric_definition_hash') != target['metric_definition_hash']:
                 raise ValueError('numeric completed Figure definition differs')
