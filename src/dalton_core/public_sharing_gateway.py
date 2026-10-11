@@ -84,7 +84,16 @@ class Gateway:
         legacy=cfg.get('legacy_workspace')
         if legacy and legacy.get('lifecycle','active')=='active':
             if legacy.get('config_path') is not None and Path(legacy['config_path']).resolve()!=self.config.legacy_service_config.resolve():raise ValueError('legacy service target differs from registry')
-            rows.append(self._target('legacy',legacy.get('name'),self.config.legacy_service_config))
+            name=legacy.get('name')
+            # The normal rename operation stores legacy presentation metadata
+            # here; the manager entry is only the original installation name.
+            try:
+                display=json.loads((root/'legacy-display'/'display.json').read_bytes())
+                if isinstance(display,dict) and isinstance(display.get('display_name'),str) and display['display_name'].strip():
+                    name=display['display_name']
+            except (OSError,ValueError):
+                pass
+            rows.append(self._target('legacy',name,self.config.legacy_service_config))
         seen={r.port for r in rows};slugs={r.slug for r in rows}
         for path in sorted((root/'workspaces').glob('*/workspace.json')):
             workspace=load_workspace_manifest(path)

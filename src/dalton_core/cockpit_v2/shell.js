@@ -1078,7 +1078,7 @@ function boot() {
       }
       select.replaceChildren(...items.filter(x => !["archived", "deleted"].includes(x.lifecycle)).map(x => h("option", {value: x.lifecycle === "paused" ? `paused:${x.slug}` : x.url || "", selected: x.current || null,
         disabled: (!x.url && x.lifecycle !== "paused") || null},
-        (x.name || "未命名项目") + (x.slug === "legacy" ? "（主环境）" : x.current ? "（当前）" : x.lifecycle === "paused" ? "（已暂停 · 只读）" : x.status && x.status !== "running" ? "（暂不可用）" : ""))),
+        (x.name || "未命名项目") + (x.current ? "（当前）" : x.lifecycle === "paused" ? "（已暂停 · 只读）" : x.status && x.status !== "running" ? "（暂不可用）" : ""))),
         w.can_create ? h("option", {value: "__create__"}, "新建研究项目…") : null);
       select.addEventListener("change", () => {
         const target = select.value;
