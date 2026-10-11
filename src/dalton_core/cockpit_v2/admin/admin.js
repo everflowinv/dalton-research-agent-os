@@ -550,9 +550,11 @@
                                  describe: describeModel(models, info), ariaLabel: `${card.label}的 AI 服务选择顺序` });
     const cov = card.capability_coverage || {};
     const separate = (models.purposes || []).filter(p => p.tier === card.tier && p.mode === "explicit" && !p.retired_by);
+    const following = (models.purposes || []).filter(p => p.tier === card.tier && p.mode === "tier" && !p.retired_by && !p.configuration_error);
     return h("div", { class: "adm-row", dataset: { tier: card.tier } }, h("div", { class: "grow" },
       h("h3", null, card.label, " ", cov.status === "missing" ? pill("err", "能力缺口") : cov.status === "partial" ? pill("warn", "部分覆盖") : pill("ok", "可用")),
       h("div", { class: "adm-meta" }, `本档位的共用默认顺序${card.requires_restart ? " · 含常驻服务固定的环节，保存后需重启才完全生效" : ""} · 范围：本机全部研究项目共用`),
+      h("div", { class: "adm-meta" }, following.length ? `当前使用这套默认顺序：${following.map(p => p.label).join("、")}。` : "当前没有环节使用这套默认顺序。"),
       separate.length ? h("div", { class: "adm-meta" }, `单独指定、不随档位默认更新：${separate.map(p => p.label).join("、")}。要重新跟随默认，请在「各环节设置」中选择对应环节，再使用档位默认顺序。`) : null,
       cov.note ? h("div", { class: "adm-meta" }, cov.note) : null,
       card.cooldown_note ? h("div", { class: "adm-meta" }, card.cooldown_note) : null,
