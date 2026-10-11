@@ -297,6 +297,68 @@ def _required_numeric_originals(*, core: Any, mission: Mapping[str, Any],
     return originals, failures
 
 
+def _selected_plan_originals(*, core, mission, registry, purpose, selected_document_refs):
+    """Replay only exact old registrations named by the current accepted plan.
+
+    Selection narrows reads, not document authority. An admission stores the
+    immutable original; its current source must still reproduce every byte.
+    """
+    from .mission_document_research import _exact_plan, MissionDocumentResearchAuthority
+    from .document_research import validate_registration
+    from .document_mission_lineage import document_mission_versions
+    if not selected_document_refs:
+        return [], []
+    tables = {row[0] for row in core.connection.execute(
+        "SELECT name FROM sqlite_master WHERE type='table' AND name IN "
+        "('coverage_mission_research_plans','mission_document_research_admissions')")}
+    if len(tables) != 2:
+        return [], []
+    row = core.connection.execute(
+        'SELECT plan_id FROM coverage_mission_research_plans WHERE mission_version_ref=? '
+        'ORDER BY created_at DESC,plan_id DESC LIMIT 1', (mission['id'],)).fetchone()
+    if row is None:
+        return [], []
+    plan, _ = _exact_plan(core.connection, row['plan_id'])
+    companies = {item['company_ref'] for item in mission['universe']}
+    versions = document_mission_versions(core.connection, mission)
+    originals, failures, seen = [], [], set()
+    for inquiry in plan['inquiries']:
+        strategy = inquiry.get('directed_document') or {}
+        doc, digest = strategy.get('document_ref'), strategy.get('document_version_hash')
+        company = inquiry.get('company_ref')
+        if doc not in selected_document_refs or (company, digest) in seen:
+            continue
+        seen.add((company, digest))
+        if company not in companies:
+            raise ValueError('selected original escaped mission coverage')
+        # Exact authority hash seek; never scan/materialize other documents.
+        parent = core.connection.execute(
+            'SELECT * FROM mission_document_research_admissions WHERE company_ref=? '
+            'AND document_authority_hash=? ORDER BY created_at,admission_id LIMIT 1',
+            (company, digest)).fetchone()
+        if parent is None:
+            continue  # The current registered version may already be in inventory.
+        try:
+            admission = MissionDocumentResearchAuthority._read_row(None, parent)
+            registration = validate_registration(admission['request']['registration'])
+            source = registration['source_authority']
+            if (admission['mission_version_ref'] not in versions
+                    or registration['document_ref'] != doc
+                    or registration['content_hash'] != digest
+                    or source.get('company_ref') != company
+                    or source.get('mission_version_ref') not in versions):
+                raise ValueError('selected original ownership differs')
+            actual, _ = registry._reresolve(registration, purpose=purpose)
+            if actual != registration:
+                raise ValueError('selected original no longer strongly replays')
+            originals.append((company, registration))
+        except (ValueError, RuntimeError, OSError, KeyError, TypeError) as exc:
+            failures.append({'company_ref': company, 'document_ref': doc,
+                'document_version_hash': digest, 'readable': False,
+                'reason': 'selected_original_unavailable', 'detail': f'{type(exc).__name__}: {exc}'})
+    return originals, failures
+
+
 def inventory_with_registry(*, core: Any, mission: Mapping[str, Any],
                             registry: Any, purpose: str,
                             preview_chars: int = 0,
@@ -402,9 +464,14 @@ def inventory_with_registry(*, core: Any, mission: Mapping[str, Any],
             readable[company].append(projected)
             seen.add(key)
         registrations[registration["content_hash"]] = dict(registration)
-    originals, failures = ([], []) if selected_document_refs is not None else _required_numeric_originals(
-        core=core, mission=mission, registry=registry, purpose=purpose)
+    originals, failures = (_selected_plan_originals(
+        core=core, mission=mission, registry=registry, purpose=purpose,
+        selected_document_refs=selected_document_refs) if selected_document_refs is not None
+        else _required_numeric_originals(core=core, mission=mission, registry=registry, purpose=purpose))
     for company, registration in originals:
+        if selected_document_refs is not None:
+            registrations[registration['content_hash']] = dict(registration)
+            continue
         projected = inventory_document(registration=registration, company_ref=company)
         projected.update({"doc_kind": registration["doc_kind"], "doc_date": registration["doc_date"]})
         from .directed_numeric_source_capabilities import planning_capability
