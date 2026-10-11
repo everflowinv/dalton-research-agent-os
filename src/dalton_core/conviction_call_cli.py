@@ -912,10 +912,6 @@ __all__ = [
 ]
 
 
-if __name__ == "__main__":  # pragma: no cover
-    raise SystemExit(main())
-
-
 def comparable_consensus_metrics(store,company_ref,metrics,*,today=None,max_age_days=30):
     """A gap may drive conviction only after current seasonal/calendar/basis checks."""
     from datetime import date
@@ -947,3 +943,7 @@ def comparable_consensus_metrics(store,company_ref,metrics,*,today=None,max_age_
         else:continue
         valid.append(dict(item))
     return valid,None if valid else "no current gap has matching fiscal periods, units and explicit earnings basis; adjusted/unknown EPS is not compared with GAAP EPS"
+
+
+if __name__ == "__main__":  # pragma: no cover
+    raise SystemExit(main())
