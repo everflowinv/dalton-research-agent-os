@@ -354,6 +354,9 @@ TASK_HASH = content_hash({
 })
 
 
+CASH_FLOW_OPERATING_BASE_SHAPE_CODE = "cash_flow_operating_base_shape"
+
+
 class CompanyModelSpecError(ValueError):
     """The specification is malformed, or rests on something not in the filings."""
 
@@ -1031,7 +1034,9 @@ def _cash_flow_companion(
                         "quarterly_growth", "year_over_year_growth", "seasonal_factor", "share_of_line",
                     }):
                 raise CompanyModelSpecError(
-                    f"cash_flow_companion {role} base is not a forecastable filed line")
+                    f"cash_flow_companion {role} base is not a forecastable filed line",
+                    code=(CASH_FLOW_OPERATING_BASE_SHAPE_CODE
+                          if role == "operating_cash_flow" else "semantic"))
             cash_unit = str(cash_lines[concept].get("unit") or "").casefold()
             base_unit = str(base_line.get("unit") or "").casefold()
             if not cash_unit or cash_unit != base_unit:
