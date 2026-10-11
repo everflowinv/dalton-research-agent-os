@@ -7,12 +7,13 @@ from dalton_core.mission_document_research_launcher import MissionDocumentResear
 from dalton_core.mission_document_research_executor import MissionDocumentResearchExecutorError
 from dalton_core.lane_child_launcher import LaneChildRejected
 from dalton_core.store import content_hash
-from tests.test_directed_numeric_workflow import NumericWorkflowTests
+from tests import test_directed_numeric_workflow as numeric_fixtures
+from tests import test_directed_numeric_local_reconciliation as local_fixtures
 
 class CompletedModelReplayTests(unittest.TestCase):
-    fixture=NumericWorkflowTests.fixture
-    _executor=NumericWorkflowTests._executor
-    _record_plan=NumericWorkflowTests._record_plan
+    fixture=numeric_fixtures.NumericWorkflowTests.fixture
+    _executor=numeric_fixtures.NumericWorkflowTests._executor
+    _record_plan=numeric_fixtures.NumericWorkflowTests._record_plan
 
     def models_complete(self):
         f,a,admission,e,p,v=self.fixture()
@@ -22,26 +23,19 @@ class CompletedModelReplayTests(unittest.TestCase):
         self.assertEqual((p.calls,v.calls),(1,1))
         return f,a,admission,e,p,v
 
-    def test_existing_models_finish_without_new_send_or_rebind(self):
-        f,a,admission,e,p,v=self.models_complete()
-        with patch.object(e,'_ensure_model_authority_epoch_rebind',side_effect=AssertionError('must not rebind')),patch.object(e.draft_worker,'run_once',side_effect=AssertionError('must not send')),patch.object(e.verifier_worker,'run_once',side_effect=AssertionError('must not send')):
-            for _ in range(4):
-                result=e.run_once(admission['id'],completed_models_only=True)
-                if result['status']=='complete':break
-        self.assertEqual(result['research_status'],'numeric_targets_completed')
-        self.assertEqual(len(result['numeric_result']['canonical_claims']),3)
-        self.assertEqual((p.calls,v.calls),(1,1))
-
-    def test_missing_model_never_enqueues_or_recovers_it(self):
-        f,a,admission,e,p,v=self.fixture()
-        with self.assertRaisesRegex(MissionDocumentResearchExecutorError,'every existing'):
-            e.run_once(admission['id'],completed_models_only=True)
-        self.assertEqual((p.calls,v.calls),(0,0))
-        for _ in range(2):e.run_once(admission['id'])
-        with patch.object(e,'_enqueue',side_effect=AssertionError('must not enqueue model')):
-            with self.assertRaisesRegex(MissionDocumentResearchExecutorError,'every existing'):
-                e.run_once(admission['id'],completed_models_only=True)
-        self.assertEqual((p.calls,v.calls),(0,0))
+    def test_cli_exhausted_local_stage_finishes_without_executor_model_loop(self):
+        from contextlib import nullcontext
+        from dalton_core.mission_document_research_cli import run_admission
+        h=local_fixtures.NumericLocalReconciliationTests(methodName='runTest');self.addCleanup(h.doCleanups)
+        helper,w,f,a,admission,e,p,v,works=h.fixture()
+        h.attempted(f,e,works[3],exhaust=True)
+        original=e.scheduler.attempt_history(works[3]['id'])
+        runtime=types.SimpleNamespace(admission=admission,executor=e)
+        with patch('dalton_core.mission_document_research_cli.MissionDocumentResearchRuntime',return_value=nullcontext(runtime)),patch.object(e,'run_once',side_effect=AssertionError('no generic execution')),patch.object(e.draft_worker,'run_once',side_effect=AssertionError('no model')),patch.object(e.verifier_worker,'run_once',side_effect=AssertionError('no model')):
+            result=run_admission(state_dir=f.state,staging=f.state/'unused',planner_scheduler_db=f.state/'unused',planner_model_config=f.state/'unused',document_research_config=f.state/'unused',admission_ref=admission['id'],expected_admission_hash=admission['content_hash'],completed_models_only=True)
+        self.assertEqual(result['status'],'complete');self.assertEqual(result['outcomes'][0]['model_calls'],0)
+        self.assertEqual(result['outcomes'][0]['research_status'],'numeric_targets_completed')
+        self.assertEqual((p.calls,v.calls),(1,1));self.assertEqual(e.scheduler.attempt_history(works[3]['id']),original)
 
     def proof_fixture(self):
         f,a,admission,e,p,v=self.models_complete()

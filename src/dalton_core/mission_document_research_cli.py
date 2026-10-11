@@ -78,9 +78,19 @@ def run_admission(
         verifier_config_path=verifier_model_config,
     ) as runtime:
         admission = runtime.admission
+        if completed_models_only:
+            # Reuse the existing zero-cost reconciliation authority. It proves
+            # every paid/source result again and owns a separate single local
+            # stage, including when the old local stage exhausted its leases.
+            from .directed_numeric_local_reconciliation import reconcile
+            outcome = reconcile(runtime.executor, admission_ref,
+                expected_admission_hash=expected_admission_hash,
+                requested_by="automation:document-completed-model-postprocessing")
+            return _summary(admission_ref=admission_ref,
+                admission_hash=expected_admission_hash,
+                status=outcome["status"], outcomes=[outcome])
         for _transition in range(runtime.transition_budget(admission)):
-            outcome = runtime.executor.run_once(admission_ref, **(
-                {"completed_models_only": True} if completed_models_only else {}))
+            outcome = runtime.executor.run_once(admission_ref)
             outcomes.append(outcome)
             status = outcome.get("status")
             if status in {"complete", "blocked"}:
