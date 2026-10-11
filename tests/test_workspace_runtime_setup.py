@@ -182,15 +182,16 @@ class WorkspaceRuntimeSetupTests(unittest.TestCase):
                     actor_ref=actor_ref, method_foundation=params["method_foundation"])
         config = CockpitConfig(core_db=self.state / 'core.sqlite', state_dir=self.state,
             heartbeat_path=self.state / 'run/heartbeat.json', scheduler_db=self.state / 'scheduler.sqlite',
-            journal_path=self.state / 'cockpit/journal.sqlite')
+            journal_path=self.state / 'cockpit/journal.sqlite', sec_resolver_identity='Synthetic SEC identity')
         with patch.dict(os.environ, DALTON_WORKSPACE_MANIFEST=str(self.manifest)):
             plane = CockpitPlane(config, writer_socket=workspace.writer_socket,
                 token_config=self.state / 'writer-tokens.json', governance_call=governance)
             try:
-                with patch.object(plane, '_model_instance', return_value=Model()):
+                with patch.object(plane, '_model_instance', return_value=Model()), patch('dalton_core.workspace_mission_setup.resolve_sec_ticker', return_value={'ticker': 'ASML', 'cik': '937966', 'name': 'ASML Holding'}) as identity_lookup:
                     first = plane._initial_goal_draft('owner@example.com', 'Research ASML', 'first-goal')
                     repeated = plane._initial_goal_draft('owner@example.com', 'Research ASML', 'first-goal')
                 self.assertEqual(len(model_calls), 1)
+                self.assertEqual(identity_lookup.call_count, 1)
                 self.assertTrue(repeated['replayed'])
                 self.assertEqual(first['cost_usd'], .0025)
                 self.assertEqual(plane.overview()['initial_goal']['status'], 'open')

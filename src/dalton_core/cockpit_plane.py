@@ -3060,6 +3060,7 @@ class CockpitConfig:
     journal_path: Path
     model_config_path: Path | None = None
     mission_ref: str | None = None
+    sec_resolver_identity: str | None = None
     # INT2 / P14-M: the broker's own catalog, so the page can say whether the
     # models this Core holds are the models the gateway offers. A path rather
     # than a convention: this process must not go looking for the host's
@@ -3071,7 +3072,7 @@ class CockpitConfig:
     @classmethod
     def from_mapping(cls, raw: Mapping[str, Any]) -> "CockpitConfig":
         fields = {"core_db", "state_dir", "heartbeat_path", "scheduler_db", "journal_path",
-                  "model_config_path", "mission_ref", "openclaw_config_path", "workspace_manager_config_path"}
+                  "model_config_path", "mission_ref", "openclaw_config_path", "workspace_manager_config_path", "sec_resolver_identity"}
         if not isinstance(raw, Mapping) or set(raw) - fields or not {"core_db", "state_dir", "heartbeat_path",
                                                                        "scheduler_db", "journal_path"} <= set(raw):
             raise CockpitError("cockpit config has an invalid shape")
@@ -3091,6 +3092,8 @@ class CockpitConfig:
             workspace_manager_config_path=(None if raw.get("workspace_manager_config_path") is None
                 else _path(raw["workspace_manager_config_path"], "workspace_manager_config_path")),
             mission_ref=mission,
+            sec_resolver_identity=(None if raw.get("sec_resolver_identity") is None else
+                _text(raw["sec_resolver_identity"], "sec_resolver_identity", maximum=512)),
         )
 
 
@@ -10362,10 +10365,19 @@ class CockpitPlane:
                     result = model.call_setup(**kwargs)
                     call_result.update(result)
                     return result
+            identity = self.config.sec_resolver_identity
+            if identity is None:
+                # Existing installs retain the explicit workspace's SEC lane identity.
+                # No host configuration, credentials or guessed contact is consulted.
+                service = _load_json(workspace.config_path)
+                if (isinstance(service, Mapping)
+                        and Path(service.get("core_db", "")).resolve() == self.config.core_db.resolve()):
+                    value = ((service.get("bounded_planner") or {}).get("config") or {}).get("user_agent")
+                    identity = value if isinstance(value, str) and value.strip() else None
             draft = plan_first_mission_goal(
                 SetupModel(), workspace, goal=text,
                 method_foundation=json.loads(foundation_path.read_text()),
-                request_id=request_id,
+                request_id=request_id, sec_resolver_identity=identity,
                 created_at=datetime.fromtimestamp(foundation_path.stat().st_mtime, timezone.utc).isoformat())
             status = "open"
         else:

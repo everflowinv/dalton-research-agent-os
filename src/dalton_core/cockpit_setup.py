@@ -76,6 +76,11 @@ def install(config_path: str | Path) -> dict[str, Any]:
         wire["openclaw_config_path"] = existing["openclaw_config_path"]
     if isinstance(existing, dict) and "workspace_manager_config_path" in existing:
         wire["workspace_manager_config_path"] = existing["workspace_manager_config_path"]
+    identity = (existing.get("sec_resolver_identity") if isinstance(existing, dict) else None)
+    if identity is None:
+        identity = ((service.get("bounded_planner") or {}).get("config") or {}).get("user_agent")
+    if isinstance(identity, str) and identity.strip():
+        wire["sec_resolver_identity"] = identity
     CockpitConfig.from_mapping(wire)  # closed-shape check before anything is written
     (state_dir / JOURNAL_DIR).mkdir(mode=0o700, parents=True, exist_ok=True)
     changed = existing != wire

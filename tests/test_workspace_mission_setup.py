@@ -156,7 +156,8 @@ class WorkspaceFirstMissionTests(unittest.TestCase):
         model = Model()
         draft = plan_first_mission_goal(
             model, self.workspace, goal="Compare ASML", method_foundation=self.foundation,
-            request_id="goal-1", created_at="2026-09-14T12:00:00+00:00")
+            request_id="goal-1", created_at="2026-09-14T12:00:00+00:00",
+            company_resolver=lambda ticker: {"ticker": ticker, "cik": "12345", "name": "ASML"})
         self.assertEqual(draft["mission_body"]["universe"][0]["ticker"], "ASML")
         context = model.calls[0]["planning_context"]
         self.assertEqual(context["budget"]["max_daily_paid_calls"], 6)

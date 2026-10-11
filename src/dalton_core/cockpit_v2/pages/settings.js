@@ -33,7 +33,8 @@ export function goalQuestionDisplay(value) {
     "What observable events would falsify the leading view?": "哪些可观察事件会推翻当前主要判断？"})[text] || text;
 }
 const ISSUES = {"industry requires review": "请补充研究的行业或领域",
-  "at least one company and ticker require review": "请补充至少一家研究公司或股票代码",
+  "at least one company and ticker require review": "建议名单尚未完成身份核对",
+  "named company identities require verification": "指定公司的身份核对尚未完成，暂时保留原范围",
   "source plan requires review": "资料来源尚未准备好", "bounded budget defaults require review": "研究预算尚未准备好"};
 
 /** One goal draft, whichever of the three shapes the server returned. */
@@ -43,7 +44,7 @@ export function draftView(ctx, r, onDone) {
   const box = h("div", {class: "v2-panel", id: "goal-draft"});
   const result = h("div", {role: "status"});
   const actions = () => {
-    const publish = ui.button("核准发布并启动研究", async () => {
+    const publish = ui.button("确认覆盖范围并启动研究", async () => {
       publish.disabled = discard.disabled = true;
       result.replaceChildren(ui.receipt("正在发布…"));
       try {
@@ -66,15 +67,23 @@ export function draftView(ctx, r, onDone) {
   };
   if (d.schema_version === "workspace-first-mission-draft-0.1") {
     const m = d.mission_body || {};
-    box.append(h("h3", null, "投研任务书修订草案审阅"),
+    box.append(h("h3", null, "研究目标与覆盖范围草案"),
       ui.kv([["研究目标", say(m.title)], ["说明", say(m.objective)],
              ["研究公司", (m.universe || []).map(c => c.ticker).join("、") || "—"],
              ["资料来源", (m.source_plan || []).map(s => SOURCE_LABELS[s.source_ref] || "其他资料来源").join("、") || "—"],
              ["每日授权预算上限", m.budget ? fmt.usd(m.budget.max_daily_cost_usd) : "—"]]),
       h("h4", null, "研究问题"), h("ul", null, (m.research_questions || []).map(q => h("li", null, say(goalQuestionDisplay(q))))));
+    if ((d.company_recommendations || []).length) box.append(
+      h("h4", null, "建议覆盖名单"),
+      h("ul", null, d.company_recommendations.map(c => h("li", null,
+        `${c.name || c.suggested_name || c.ticker}${c.ticker ? `（${c.ticker}）` : ""}${c.included ? " · 身份已核对" : c.requested ? " · 指定公司待核对" : " · 暂未纳入建议名单"}`,
+        c.industry_role ? h("p", null, say(c.industry_role)) : null,
+        c.reason ? h("p", null, "建议覆盖理由：" + say(c.reason)) : null,
+        c.identity_error ? h("p", null, say(c.identity_error)) : null,
+        c.included && /^\d{10}$/.test(c.cik || "") ? h("a", {href: `https://www.sec.gov/edgar/browse/?CIK=${c.cik}`, target: "_blank", rel: "noopener"}, "公司资料") : null))));
     if (d.setup_state === "ready_for_confirmation") box.append(ui.note("确认后开始搜集、阅读和分析；关闭浏览器后研究会继续。"), actions());
-    else box.append(h("h4", null, "目标还需补充"), h("ul", null, (d.review_issues || []).map(x => h("li", null, ISSUES[x] || "请补充目标中的研究范围"))),
-                    ui.note("在上面补充目标后重新整理。"));
+    else box.append(h("h4", null, (d.company_recommendations || []).length ? "公司资料核对尚未完成" : "研究目标还需明确"), h("ul", null, (d.review_issues || []).map(x => h("li", null, ISSUES[x] || "请补充目标中的研究范围"))),
+                    ui.note((d.company_recommendations || []).length ? "原目标已保存，可稍后重新整理并继续核对公司资料。" : "请说明想研究的行业、市场或核心问题，系统会据此建议覆盖名单。"));
   } else if (d.schema_version === "workspace-initial-goal-draft-0.1") {
     box.append(h("h3", null, "目标草稿已保存"), ui.kv([["标题", say(d.title)], ["目标", say(d.objective)]]),
       ui.note("保存草稿不会启动研究。补齐研究公司、资料范围、预算和研究规则后，系统会请你确认并开始。"));
