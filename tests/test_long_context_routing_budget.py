@@ -48,6 +48,12 @@ class LongContextFloorTest(unittest.TestCase):
         tmp = tempfile.TemporaryDirectory()
         self.addCleanup(tmp.cleanup)
         self.dir = Path(tmp.name)
+        # Product defaults may exceed the shared minimum (Initial Screen now
+        # asks for more output). Read the installed catalog independently of
+        # the resolver so every field must still match its purpose contract.
+        self.product_defaults = json.loads(
+            Path(cb.__file__).with_name("call_budget_defaults.json").read_text(
+                encoding="utf-8"))["purposes"]
         # What every live environment stored on 2026-10-09.
         self.live_like = {
             "purpose_call_budgets": {purpose: {"max_cost_usd": 1.0} for purpose in cb.LONG_CONTEXT_PURPOSES}
@@ -74,8 +80,17 @@ class LongContextFloorTest(unittest.TestCase):
                 resolved = cb.resolve_call_budget(self.live_like, purpose, defaults={
                     "max_input_tokens": 120_000, "max_output_tokens": 3_000, "max_cost_usd": 1.0,
                     "timeout_seconds": 120})
-                self.assertEqual(resolved, cb.LONG_CONTEXT_CALL_FLOOR)
-                self.assertEqual(cb.default_call_budget(purpose), cb.LONG_CONTEXT_CALL_FLOOR)
+                default = cb.default_call_budget(purpose)
+                self.assertEqual(set(resolved), set(cb.LONG_CONTEXT_CALL_FLOOR))
+                self.assertEqual(set(default), set(cb.LONG_CONTEXT_CALL_FLOOR))
+                for field, minimum in cb.LONG_CONTEXT_CALL_FLOOR.items():
+                    with self.subTest(field=field):
+                        expected = max(minimum, self.product_defaults[purpose][field])
+                        self.assertEqual(default[field], expected)
+                        # This fixture's stored/shared cost override is $1;
+                        # the authorized product cost floor still wins.
+                        self.assertEqual(resolved[field],
+                                         minimum if field == "max_cost_usd" else expected)
 
     def test_a_higher_stored_value_still_wins(self) -> None:
         config = {"purpose_call_budgets": {"initial_screen": {"max_cost_usd": 30.0,
@@ -133,7 +148,14 @@ class LongContextFloorTest(unittest.TestCase):
         model.max_input_tokens, model.max_output_tokens = 600_000, 16_000
         model.max_cost_usd, model.timeout_seconds = None, 120
         for purpose in sorted(cb.LONG_CONTEXT_PURPOSES):
-            self.assertEqual(model.budget_for(purpose), cb.LONG_CONTEXT_CALL_FLOOR)
+            with self.subTest(purpose=purpose):
+                resolved = model.budget_for(purpose)
+                self.assertEqual(set(resolved), set(cb.LONG_CONTEXT_CALL_FLOOR))
+                for field, minimum in cb.LONG_CONTEXT_CALL_FLOOR.items():
+                    with self.subTest(field=field):
+                        expected = (minimum if field == "max_cost_usd" else
+                                    max(minimum, self.product_defaults[purpose][field]))
+                        self.assertEqual(resolved[field], expected)
 
 
 class LongContextChainTest(unittest.TestCase):
