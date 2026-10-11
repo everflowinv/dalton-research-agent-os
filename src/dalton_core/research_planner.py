@@ -171,7 +171,7 @@ PROMPT_PROJECTION_RULE = {
         "filed_statement_figures", "reading_pipeline",
         "readable_documents", "readable_documents_summary",
         "document_execution_availability", "document_execution_failures", "numeric_reading_requirements", "canonical_document_questions",
-        "model_execution_failures", "model_execution_failure_summary", "initial_screen_validation_feedback",
+        "model_execution_failures", "model_execution_failure_summary",
         "numeric_source_refusal_ids", "numeric_source_refusals", "numeric_waiting_targets", "numeric_completed_context",
         "document_research_feedback_summary", "dossier_feedback.repair_target_ids",
         "dossier_feedback.material", "document_research_reopened",
@@ -774,7 +774,7 @@ def project_state_for_prompt(
         return {
             "schema_version": "0.1",
             "rule_ref": PROMPT_PROJECTION_REF,
-            "rule_hash": PROMPT_PROJECTION_HASH,
+            "rule_hash": _projection_hash_for_state(projected),
             "full_state_hash": state.get("content_hash"),
             "full_prompt_sha256": hashlib.sha256(full_prompt.encode("utf-8")).hexdigest(),
             "full_prompt_bytes": full_prompt_bytes,
@@ -1267,7 +1267,27 @@ def project_state_for_prompt(
     return projected
 
 
+def _has_initial_screen_feedback(state: Mapping[str, Any]) -> bool:
+    return any(isinstance(feedback, Mapping) and feedback.get('status') == 'verified'
+               and feedback.get('items')
+               for company in state.get('companies', ())
+               for feedback in (company.get('initial_screen_validation_feedback'),))
+
+
+def _projection_hash_for_state(state: Mapping[str, Any]) -> str:
+    if not any('initial_screen_validation_feedback' in company
+               for company in state.get('companies', ())):
+        return PROMPT_PROJECTION_HASH
+    rule = {**PROMPT_PROJECTION_RULE, 'company_core_fields': [
+        *PROMPT_PROJECTION_RULE['company_core_fields'], 'initial_screen_validation_feedback']}
+    return content_hash(rule)
+
+
 def build_prompt(state: Mapping[str, Any]) -> str:
+    validation_notice = (
+        "initial_screen_validation_feedback: verified draft defects, not evidence or retry authority. "
+        "Fix cited defects within normal gates; invent no facts or unrelated material requests. "
+    ) if _has_initial_screen_feedback(state) else ""
     numeric_notice = (
         "numeric_reading_requirements preserves verified rejections. Address the original question with numeric "
         "strategy, its exact replaces_numeric_rejection binding and preferably verbatim question; never make a "
@@ -1366,7 +1386,7 @@ def build_prompt(state: Mapping[str, Any]) -> str:
         "numeric_admission_period_refused means a numeric target lacks an executable period: preserve the "
         "question and exact original, identify its explicit year or quarter/half-year before resubmitting; "
         "never guess a date or repeat latest/current reporting period. "
-        "initial_screen_validation_feedback: checked draft defects, not evidence or retry authority; fix citations/format within normal gates, not by inventing facts or buying unrelated material. "
+        + validation_notice +
         "model_execution_failures: hashed failures, not readiness/evidence/retry authority. "
         "Respect unlinked Work/formal status. Check held originals for driver/period gaps. "
         "Cleared/superseded failures are omitted. "

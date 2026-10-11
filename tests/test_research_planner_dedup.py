@@ -212,7 +212,9 @@ class ProjectionLadderTests(unittest.TestCase):
 
         full = len(build_prompt(built).encode("utf-8"))
         served = {}
-        for divisor in (2, 3, 4, 6, 8, 12):
+        # Probe between the eight-document fit and the minimum identity bound;
+        # skipping five can jump over every tighter feasible retention.
+        for divisor in (2, 3, 4, 5, 6, 8, 12):
             try:
                 candidate = project_state_for_prompt(
                     built, max_input_bytes=max(1_000, full // divisor))

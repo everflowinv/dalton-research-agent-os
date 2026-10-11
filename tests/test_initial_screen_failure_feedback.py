@@ -362,6 +362,22 @@ class InitialScreenFailureFeedbackTests(unittest.TestCase):
         self.assertEqual(self.read()['status'],'verified')
         self.assertEqual(len(self.adapter.served),1)
 
+    def test_guidance_and_projection_extension_only_accompany_verified_feedback(self):
+        from dalton_core import research_planner as planner
+        state={'companies':[{'company_ref':COMPANY}]}
+        self.assertNotIn('initial_screen_validation_feedback:',build_prompt(state))
+        default_hash=planner.PROMPT_PROJECTION_HASH
+        self.assertEqual(planner._projection_hash_for_state(state),default_hash)
+        for status in ('not_recorded','unverified','pending_terminal','cleared_by_published_product'):
+            state['companies'][0]['initial_screen_validation_feedback']={'status':status,'items':[]}
+            self.assertNotIn('initial_screen_validation_feedback:',build_prompt(state))
+            self.assertNotEqual(planner._projection_hash_for_state(state),default_hash)
+        state['companies'][0]['initial_screen_validation_feedback']={'status':'verified','items':[{'semantic_hash':'a'*64}]}
+        self.assertIn('initial_screen_validation_feedback: verified draft defects',build_prompt(state))
+        self.assertIn('not evidence or retry authority',build_prompt(state))
+        self.assertNotEqual(planner._projection_hash_for_state(state),default_hash)
+        self.assertIn('initial_screen_validation_feedback',planner._COMPANY_CORE_FIELDS)
+
     def test_all_companies_and_failure_bindings_survive_bounded_prompt(self):
         self.save();result=self.read();entries=[];feedbacks={}
         for i in range(5):
