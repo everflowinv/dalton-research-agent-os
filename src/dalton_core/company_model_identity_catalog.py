@@ -105,3 +105,69 @@ def coherent_revenue_groups(groups: list[list[dict[str, Any]]]
         str(group[0].get("concept") or ""),
     ), reverse=True)
     return [*ordered, *other]
+
+
+SOURCE_FAMILY_SELECTION_REF = "company-model-source-family-income-context:0.3"
+
+
+def source_family_revenue_groups(groups: list[list[dict[str, Any]]]) -> list[list[dict[str, Any]]]:
+    """Latest income chain, then latest reported disclosure families, then history.
+
+    A lone hedge/AOCI row is not a reported revenue partition. Families require
+    exact-source member and reported-total choices. Their arithmetic status is
+    retained by the candidate contract; selection never proves reconciliation.
+    Original conflict groups and every admitted cell's authority stay intact.
+    """
+    from .model_revenue_group_candidates import candidates
+    cells = [cell for group in groups for cell in group]
+    families = candidates(cells)["groups"]
+    if not families:
+        return coherent_revenue_groups(groups)
+
+    def window(cell):
+        return tuple(str(cell.get(k) or "") for k in (
+            "filing_content_hash", "accession", "statement_context_ref",
+            "period_start", "period_end", "unit"))
+
+    # One atomic unit is still the existing complete same-source conflict group.
+    owners = {}
+    for index, group in enumerate(groups):
+        for cell in group:
+            owners.setdefault(cell_identity_ref(cell), set()).add(index)
+    family_packets: dict[tuple[str, ...], set[int]] = {}
+    for family in families:
+        key = tuple(str(family[k] or "") for k in (
+            "filing_hash", "accession", "context_ref", "period_start", "period_end", "unit"))
+        refs = [family["reported_group_total_ref"], family["reported_company_total_ref"]]
+        for member in family["members"]:
+            refs.extend([member["identity_ref"], *(member.get("equivalent_refs") or [])])
+        packet = family_packets.setdefault(key, set())
+        for ref in refs:
+            packet.update(owners.get(ref, set()))
+
+    income = [(i, cell) for i, group in enumerate(groups) for cell in group
+              if cell.get("statement") == "income" and not cell.get("dimensions")
+              and not cell.get("dimension_axis")]
+    latest = max((str(cell.get("period_end") or "") for _, cell in income), default="")
+    current_packets: dict[tuple[str, ...], set[int]] = {}
+    for index, cell in income:
+        if cell.get("period_end") == latest:
+            current_packets.setdefault(window(cell), set()).add(index)
+    # When a current family exists it stays atomic with its income chain.
+    for key, packet in current_packets.items():
+        packet.update(family_packets.pop(key, set()))
+
+    def ordered(packets):
+        return sorted(packets, key=lambda key: (key[4], key[3], key[1], key[2], key[0], key[5]), reverse=True)
+
+    selected = set()
+    result = []
+    for packets in (current_packets, family_packets):
+        for key in ordered(packets):
+            indices = packets[key] - selected
+            if indices:
+                result.append([cell for i in sorted(indices) for cell in groups[i]])
+                selected.update(indices)
+    remaining = [group for i, group in enumerate(groups) if i not in selected]
+    result.extend(coherent_revenue_groups(remaining))
+    return result

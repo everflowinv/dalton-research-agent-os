@@ -324,11 +324,11 @@ def _numeric_context(
         ))
         ordered_groups.extend(at_depth)
     from .company_model_identity_catalog import (
-        IDENTITY_CATALOG_REF, coherent_revenue_groups,
+        IDENTITY_CATALOG_REF, SOURCE_FAMILY_SELECTION_REF, source_family_revenue_groups,
     )
     selected_groups: list[list[dict[str, Any]]] = []
     selected_count = 0
-    for group in coherent_revenue_groups(ordered_groups):
+    for group in source_family_revenue_groups(ordered_groups):
         # Neither a same-source conflict nor a revenue disclosure may be
         # partially admitted just because one member sorts later.
         if selected_count + len(group) <= int(policy["max_total_cells"]):
@@ -342,7 +342,7 @@ def _numeric_context(
     body = {
         "schema_version": NUMERIC_CONTEXT_SCHEMA_VERSION,
         "identity_catalog_contract": IDENTITY_CATALOG_REF,
-        "selection_contract": "company-model-coherent-income-context:0.2",
+        "selection_contract": SOURCE_FAMILY_SELECTION_REF,
         "policy": dict(policy),
         "filing_authorities": filing_authorities,
         "available_cells": available_cells,
