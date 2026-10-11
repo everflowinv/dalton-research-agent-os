@@ -30,6 +30,7 @@ from __future__ import annotations
 
 import argparse
 import hashlib
+import copy
 import json
 import os
 import sqlite3
@@ -342,7 +343,7 @@ def validate_structured_output_repair_binding(
         "repair_number",
     }
     binding = dict(value)
-    if set(binding) != expected or binding.get("schema_version") != (
+    if set(binding) not in (expected, expected | {"typed_field_proof"}) or binding.get("schema_version") != (
         "company-model-spec-repair-binding-0.1"
     ):
         raise CockpitModelError("structured output repair binding is invalid")
@@ -393,6 +394,12 @@ def validate_structured_output_repair_binding(
         or request_id != "model-spec-repair:" + content_hash(binding)[:32]
     ):
         raise CockpitModelError("structured output repair binding is invalid")
+    typed = error["code"] in TYPED_FIELD_ERROR_CODES
+    if typed != ("typed_field_proof" in binding):
+        raise CockpitModelError("typed structured output repair proof is missing or unexpected")
+    if typed and (not isinstance(binding["typed_field_proof"], Mapping)
+                  or binding["typed_field_proof"].get("code") != error["code"]):
+        raise CockpitModelError("typed structured output repair proof is invalid")
     return binding
 
 
@@ -737,6 +744,8 @@ def _validated_spec_with_repair(
                 "repair_config": dict(repair_config),
                 "repair_number": depth + 1,
             }
+            if error.code in TYPED_FIELD_ERROR_CODES:
+                binding["typed_field_proof"] = copy.deepcopy(error.proof)
             if any(not isinstance(value, str) or not value
                    for value in binding["root_original"].values()):
                 raise CompanyModelSpecError(

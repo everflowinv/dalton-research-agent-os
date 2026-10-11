@@ -174,3 +174,56 @@ def assert_only_typed_fields_changed(original, repaired, scope, *, state):
         refuse()
     if content_hash(frozen) != content_hash(original):
         refuse()
+
+
+def validate_frozen_parent(body, scope, *, state_hash, root_prompt):
+    """Reprove transported scope from the immutable paid root's input.
+
+    The producer rederives the choices from full state; admission independently
+    uses the choices frozen in that root Work, never caller-supplied choices.
+    The repaired response still undergoes full-state and financial validation.
+    """
+    import json
+    from .company_model_spec import CompanyModelSpecError
+    from .model_revenue_group_candidates import CONTRACT_REF as GROUP_REF
+    def refuse():
+        raise CompanyModelSpecError("typed repair proof differs from the frozen parent input", code="semantic")
+    if not isinstance(scope, Mapping) or scope.get("code") not in ERROR_CODES:
+        refuse()
+    code = scope["code"]
+    if code != IDENTITY_CODE:
+        validate_parent(body, scope, state={})
+        detail = (
+            "Correct this temporal enum only; do not change metric, source, period, or any other field."
+            if code == PERIODICITY_CODE else
+            "Choose a supported cash-line method and base, or unavailable with null base; preserve every filed authority and amount."
+        )
+        if content_hash(scope) != content_hash(proof(body, code, scope["paths"], detail=detail)):
+            refuse()
+        return
+    contexts = [json.loads(line[len("CONTEXT="):]) for line in root_prompt.splitlines()
+                if line.startswith("CONTEXT=")]
+    if len(contexts) != 1:
+        refuse()
+    groups = contexts[0].get("revenue_group_candidates")
+    if not isinstance(groups, Mapping) or groups.get("contract_ref") != GROUP_REF:
+        refuse()
+    paths, choices = [], {}
+    for index, driver in enumerate(body.get("revenue_drivers") or []):
+        if not isinstance(driver, Mapping) or driver.get("kind") != "segment" or not driver.get("basis_concept"):
+            continue
+        refs = sorted({ref for group in groups["groups"] if group["concept"] == driver["basis_concept"]
+                       for member in group["members"]
+                       for ref in [member["identity_ref"], *(member.get("equivalent_refs") or [])]})
+        if not refs:
+            refuse()
+        paths.append(["revenue_drivers", index, "basis_identity"])
+        choices[str(index)] = refs
+    if not paths:
+        refuse()
+    expected = proof(body, code, paths, detail={
+        "state_hash": state_hash, "source_groups_hash": content_hash(groups),
+        "allowed_catalog_refs": choices,
+        "instruction": "Select exact source-bound member identities; do not infer from labels, invent a residual, or reuse a consolidated total. Preserve all other fields."})
+    if content_hash(scope) != content_hash(expected):
+        refuse()

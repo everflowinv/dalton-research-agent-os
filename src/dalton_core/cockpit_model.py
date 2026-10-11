@@ -1301,7 +1301,7 @@ def _validate_structured_output_repair_authority(
         _repair_prompt,
         validate_model_spec_request_identity,
     )
-    from .company_model_spec import CompanyModelSpecError
+    from .company_model_spec import CompanyModelSpecError, parse_response
     try:
         root_identity = validate_model_spec_request_identity(
             root_work["metadata"]["model_spec_request_identity"]
@@ -1371,9 +1371,21 @@ def _validate_structured_output_repair_authority(
     if same_contract > binding["repair_config"]["max_attempts"]:
         raise CockpitModelError(
             "structured output repair exceeds its contract's attempts")
+    from .model_spec_typed_field_repair import ERROR_CODES, validate_frozen_parent
+    typed_proof = binding.get("typed_field_proof")
+    if binding["validation_error"]["code"] in ERROR_CODES:
+        try:
+            validate_frozen_parent(
+                parse_response(parent_text), typed_proof,
+                state_hash=root_identity["state_hash"], root_prompt=root_work["question"],
+            )
+        except (ValueError, TypeError, KeyError, CompanyModelSpecError) as exc:
+            raise CockpitModelError("typed structured output repair parent proof differs") from exc
+    elif typed_proof is not None:
+        raise CockpitModelError("unexpected typed structured output repair proof")
     error = CompanyModelSpecError(
         binding["validation_error"]["message"],
-        code=binding["validation_error"]["code"],
+        code=binding["validation_error"]["code"], proof=typed_proof,
     )
     if child_work.question != _repair_prompt(parent_text, error):
         raise CockpitModelError("structured output repair prompt differs from its parent")
