@@ -14,6 +14,7 @@ import base64
 import json
 import hashlib
 import os
+import subprocess
 import tempfile
 import time
 import unittest
@@ -283,6 +284,33 @@ class LauncherTests(unittest.TestCase):
         self.assertEqual(adopted["pid"], ticket["pid"])
         self.assertEqual(adopted["generation"], 1)
         self.assertIn("original", log.read_text(encoding="utf-8"))
+
+    def test_parent_delay_after_spawn_preserves_identity_and_pid_reuse_refusal(self):
+        launcher = self.launcher("import time; time.sleep(30)")
+        real_popen = subprocess.Popen
+
+        def delayed_parent(*args, **kwargs):
+            child = real_popen(*args, **kwargs)
+            # Real live child, delayed parent: longer than the identity gate's
+            # one-second timestamp allowance, without mocking that gate.
+            time.sleep(2.2)
+            return child
+
+        with patch("dalton_core.lane_child_launcher.subprocess.Popen",
+                   side_effect=delayed_parent):
+            ticket = launcher.spawn(digest="5" * 24, record={"generation": 1})
+        self.assertIsNone(launcher._children[ticket["id"]].poll())
+        fresh = self.launcher("raise SystemExit('must not launch')")
+        adopted = fresh.spawn(digest="5" * 24, record={"generation": 2})
+        self.assertEqual(adopted["pid"], ticket["pid"])
+        self.assertEqual(adopted["generation"], 1)
+        self.assertEqual(fresh.status(ticket["id"])["status"], "running")
+        path = fresh._ticket_path(ticket["id"])
+        record = json.loads(path.read_text(encoding="utf-8"))
+        record["pid"] = os.getpid()
+        record["command"] = ["definitely-not-this-test-process"]
+        path.write_text(json.dumps(record), encoding="utf-8")
+        self.assertEqual(fresh.status(ticket["id"])["status"], "orphaned")
 
     def test_restart_refuses_a_different_digest_while_child_is_alive(self):
         launcher = self.launcher("import time; time.sleep(30)")
