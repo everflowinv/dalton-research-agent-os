@@ -277,27 +277,38 @@ class ClaimReviewDriver:
             for row in self.connection.execute(
                 "SELECT claim_version_id, evidence_version_id FROM evidence_relations "
                 "WHERE relation='supports'"
-            ).fetchall()
+            )
         }
         bindings: dict[str, tuple[Any, Any, Any]] = {}
         for row in self.connection.execute(
             "SELECT binding_id, correction_set_version_ref, source_start, source_end "
             "FROM transcript_claim_citation_bindings"
-        ).fetchall():
+        ):
             bindings[row["binding_id"]] = (
                 row["correction_set_version_ref"], row["source_start"], row["source_end"])
         corrections = {}
         for row in self.connection.execute(
             "SELECT record_json FROM transcript_correction_set_versions"
-        ).fetchall():
+        ):
             record = json.loads(row["record_json"])
-            corrections[record["id"]] = record
+            # Keep the old global traversal and canonical source choice, but
+            # not unrelated correction payloads while resolving citations.
+            metadata = {key: record[key] for key in (
+                "source_content_hash", "document_ref", "raw_review"
+            ) if key in record}
+            review = metadata.get("raw_review")
+            if isinstance(review, dict):
+                metadata["raw_review"] = {"rationale": review.get("rationale")}
+            corrections[record["id"]] = metadata
         evidence = {}
         for row in self.connection.execute(
             "SELECT evidence_json FROM evidence_versions"
-        ).fetchall():
+        ):
             record = json.loads(row["evidence_json"])
-            evidence[record["id"]] = record
+            evidence[record["id"]] = {
+                key: record[key] for key in ("artifact_refs", "source_envelope_ref")
+                if key in record
+            }
         chain: dict[str, dict[str, Any]] = {}
         for claim_ref, evidence_ref in evidence_by_claim.items():
             record = evidence.get(evidence_ref)
