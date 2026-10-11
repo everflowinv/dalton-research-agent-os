@@ -1550,7 +1550,8 @@ class CockpitChainTests(unittest.TestCase):
     def _model(self, adapter: ChainAdapter, *, policy_version_ref: str,
                slots: list[str] | None = None, capacity_retry=None,
                transport_retry=None, provider_retry=None, clock=None,
-               model_spec_output_tokens: int | None = None) -> CockpitModel:
+               model_spec_output_tokens: int | None = None,
+               event_output_tokens: int | None = None) -> CockpitModel:
         config = {
             "routing_policy_ref": policy_version_ref,
             "credential_slot_refs": list(slots if slots is not None else self.slots),
@@ -1563,11 +1564,14 @@ class CockpitChainTests(unittest.TestCase):
             "budget_policy_ref": BUDGET_POLICY,
             # Transport/repair fixtures choose their own output allowance; the
             # production 32K default cannot fit this pinned model's $1 cap.
-            **({} if model_spec_output_tokens is None else {
-                "purpose_call_budgets": {"model_spec": {
-                    "max_output_tokens": model_spec_output_tokens,
-                }},
-            }),
+            "purpose_call_budgets": {
+                **({} if model_spec_output_tokens is None else {
+                    "model_spec": {"max_output_tokens": model_spec_output_tokens},
+                }),
+                **({} if event_output_tokens is None else {
+                    "event_judgement": {"max_output_tokens": event_output_tokens},
+                }),
+            },
             **({} if capacity_retry is None else {"capacity_retry": capacity_retry}),
             **({} if transport_retry is None else {"transport_retry": transport_retry}),
             **({} if provider_retry is None else {"provider_retry": provider_retry}),
@@ -1897,7 +1901,7 @@ class CockpitChainTests(unittest.TestCase):
 
     def test_event_verifier_work_order_binds_provider_contract_into_identity(self) -> None:
         producer = self._model(
-            ChainAdapter({}), policy_version_ref=self.chain_policy
+            ChainAdapter({}), policy_version_ref=self.chain_policy, event_output_tokens=1500
         ).call(purpose="event_judgement", request_id="event-provider-contract",
                prompt="draft", mission=self.mission)
         verifier = self._model(
@@ -2076,7 +2080,7 @@ class CockpitChainTests(unittest.TestCase):
 
     def test_required_controls_failure_halts_without_trying_another_provider(self) -> None:
         producer = self._model(
-            ChainAdapter({}), policy_version_ref=self.chain_policy
+            ChainAdapter({}), policy_version_ref=self.chain_policy, event_output_tokens=1500
         ).call(purpose="event_judgement", request_id="controls-producer",
                prompt="draft", mission=self.mission)
         adapter = ChainAdapter({
@@ -2104,7 +2108,7 @@ class CockpitChainTests(unittest.TestCase):
 
     def test_proved_local_required_controls_failure_uses_authorized_fallback(self) -> None:
         producer = self._model(
-            ChainAdapter({}), policy_version_ref=self.chain_policy
+            ChainAdapter({}), policy_version_ref=self.chain_policy, event_output_tokens=1500
         ).call(purpose="event_judgement", request_id="controls-producer-proved",
                prompt="draft", mission=self.mission)
         class FirstControlUnavailable(ChainAdapter):
@@ -3125,7 +3129,7 @@ class CockpitSettlementLeaseTests(unittest.TestCase):
 
     def test_a_call_that_costs_more_than_its_reservation_still_completes(self) -> None:
         adapter = MeteredChainAdapter(usd=2.0)
-        answer = self._model(adapter, policy_version_ref=self.chain_policy).call(
+        answer = self._model(adapter, policy_version_ref=self.chain_policy, event_output_tokens=1500).call(
             purpose="event_judgement", request_id="overrun", prompt="judge",
             mission=self.mission)
         self.assertEqual(answer["cost_micros"], 2_000_000)
@@ -3149,7 +3153,7 @@ class CockpitSettlementLeaseTests(unittest.TestCase):
             self.assertEqual(
                 scheduler.status(answer["work_order_ref"])["state"], "succeeded")
         again_adapter = MeteredChainAdapter(usd=2.0)
-        again = self._model(again_adapter, policy_version_ref=self.chain_policy).call(
+        again = self._model(again_adapter, policy_version_ref=self.chain_policy, event_output_tokens=1500).call(
             purpose="event_judgement", request_id="overrun", prompt="judge",
             mission=self.mission)
         self.assertTrue(again["replayed"])
@@ -3174,7 +3178,7 @@ class CockpitSettlementLeaseTests(unittest.TestCase):
         with patch.object(ThesisImpactBudgetStore, "settle",
                           side_effect=ThesisImpactBudgetConflict("synthetic refusal")), \
                 redirect_stderr(stderr):
-            answer = self._model(ChainAdapter({}), policy_version_ref=self.chain_policy
+            answer = self._model(ChainAdapter({}), policy_version_ref=self.chain_policy, event_output_tokens=1500
                                  ).call(purpose="event_judgement",
                                         request_id="settle-refused", prompt="judge",
                                         mission=self.mission)
@@ -3192,7 +3196,7 @@ class CockpitSettlementLeaseTests(unittest.TestCase):
     def test_an_unexpected_fault_releases_the_attempt_for_the_next_ask(self) -> None:
         exploding = ExplodingAdapter({})
         with self.assertRaisesRegex(RuntimeError, "synthetic fault"):
-            self._model(exploding, policy_version_ref=self.chain_policy).call(
+            self._model(exploding, policy_version_ref=self.chain_policy, event_output_tokens=1500).call(
                 purpose="event_judgement", request_id="fault", prompt="judge",
                 mission=self.mission)
         self.assertTrue(exploding.served)
@@ -3205,7 +3209,7 @@ class CockpitSettlementLeaseTests(unittest.TestCase):
         self.assertEqual(status["attempt_number"], 2)
         self.assertIn("retryable", [event["state"] for event in history])
         # The next ask gets a fresh attempt instead of "already running".
-        answer = self._model(ChainAdapter({}), policy_version_ref=self.chain_policy
+        answer = self._model(ChainAdapter({}), policy_version_ref=self.chain_policy, event_output_tokens=1500
                              ).call(purpose="event_judgement", request_id="fault",
                                     prompt="judge", mission=self.mission)
         self.assertIn("answered by", answer["text"])
@@ -3237,7 +3241,7 @@ class CockpitSettlementLeaseTests(unittest.TestCase):
             gateway, prompt_bytes=0, max_output_tokens=0),
             Decimal(4 * CLI_GATEWAY_SYSTEM_PROMPT_TOKENS) / 1_000_000)
         # Wired into the reservation of a chain that can reach a gateway link.
-        self._model(ChainAdapter({}), policy_version_ref=self.chain_policy).call(
+        self._model(ChainAdapter({}), policy_version_ref=self.chain_policy, event_output_tokens=1500).call(
             purpose="event_judgement", request_id="ceiling", prompt="judge",
             mission=self.mission)
         admissions, _, _ = self._ledger()
