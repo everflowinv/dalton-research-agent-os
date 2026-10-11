@@ -907,7 +907,20 @@ class FetchChildTests(unittest.TestCase):
                 "live argument under Application Support",
             ])
             restarted = self.launcher()
-            self.assertEqual(restarted.status(ticket["id"])["process_identity"], "matched")
+            status = restarted.status(ticket["id"])
+            diagnostic = None
+            if status.get("process_identity") != "matched":
+                from dalton_core.launch_drain import (
+                    _process_command_matches, _process_started_at)
+                path = restarted._ticket_path(ticket["id"])
+                diagnostic = {
+                    "status": status, "child_exit": launcher._current[1].poll(),
+                    "command_match": _process_command_matches(ticket["pid"], ticket["command"]),
+                    "process_started_epoch": _process_started_at(ticket["pid"]),
+                    "ticket_mtime": path.stat().st_mtime,
+                    "clock_ticks": os.sysconf("SC_CLK_TCK"),
+                }
+            self.assertEqual(status.get("process_identity"), "matched", diagnostic)
             restarted._command = lambda **_ignored: (
                 _ for _ in ()).throw(AssertionError("second spawn reached"))
             with self.assertRaisesRegex(FetchLaunchConflict, ticket["id"]):

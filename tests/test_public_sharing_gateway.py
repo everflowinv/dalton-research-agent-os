@@ -308,6 +308,19 @@ class SharingNetworkTests(unittest.TestCase):
         manifest=add('project-a',18791,'active');add('project-b',18792,'paused')
         gateway=Gateway(self.cfg);rows=gateway.registry()
         self.assertEqual([(r.slug,r.lifecycle) for r in rows],[('legacy','active'),('project-a','active'),('project-b','paused')])
+        # A formal rename changes presentation metadata, not the original
+        # manager row or any protected legacy identity/lifecycle.
+        from dalton_core.workspace_manager import rename_workspace
+        rename_workspace(self.cfg.manager_config,'owner@example.com',{'slug':'legacy','name':'实际研究项目'})
+        fresh=gateway.registry()
+        self.assertEqual(fresh[0].name,'实际研究项目')
+        self.assertEqual(fresh[0].slug,'legacy')
+        self.assertEqual(fresh[0].lifecycle,'active')
+        self.assertEqual(json.loads(self.cfg.manager_config.read_text())['legacy_workspace']['name'],'主项目')
+        landing=gateway.landing(fresh).decode()
+        self.assertIn('实际研究项目',landing)
+        self.assertNotIn('主项目',landing)
+
         wire=json.loads(manifest.read_text());wire.pop('content_hash');wire['lifecycle']='deleted';wire['content_hash']=content_hash(wire);manifest.write_text(json.dumps(wire))
         self.assertEqual([r.slug for r in gateway.registry()],['legacy','project-b'])
         add('project-c',18793,'active');self.assertIn('project-c',[r.slug for r in gateway.registry()])

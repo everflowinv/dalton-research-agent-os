@@ -6,7 +6,7 @@ on:
       modules:
         description: Focused modules to diagnose
         type: choice
-        options: [all-six, subprocess-only]
+        options: [all-six, subprocess-only, child-identity]
         default: all-six
 
 permissions:
@@ -40,9 +40,13 @@ jobs:
           DIAGNOSTIC_MODULE_SET: ${{ inputs.modules }}
         run: |
           mkdir -p "$DALTON_TEST_DIAGNOSTICS_DIR"
-          modules=(tests.test_mission_document_research_production tests.test_workspace_runtime_acceptance tests.test_mission_document_research_lane)
-          if [[ "$DIAGNOSTIC_MODULE_SET" == "all-six" ]]; then
-            modules+=(tests.test_deployment_model_pairs tests.test_installer_startup_wait tests.test_projection_work_order_cover)
+          if [[ "$DIAGNOSTIC_MODULE_SET" == "child-identity" ]]; then
+            modules=(tests.test_lane_child_launcher tests.test_public_web_fetch_lane tests.test_launch_drain tests.test_cockpit_lease_lock_contention tests.test_cockpit_reservation_recovery tests.test_long_context_routing_budget)
+          else
+            modules=(tests.test_mission_document_research_production tests.test_workspace_runtime_acceptance tests.test_mission_document_research_lane)
+            if [[ "$DIAGNOSTIC_MODULE_SET" == "all-six" ]]; then
+              modules+=(tests.test_deployment_model_pairs tests.test_installer_startup_wait tests.test_projection_work_order_cover)
+            fi
           fi
           set -o pipefail
           python -m unittest -v "${modules[@]}" 2>&1 | tee "$DALTON_TEST_DIAGNOSTICS_DIR/unittest.log"

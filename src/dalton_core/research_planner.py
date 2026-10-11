@@ -316,7 +316,7 @@ OUTPUT_SCHEMA = {
                         "required": ["strategy_version", "document_ref", "document_version_hash",
                                      "query_terms", "query_rationale"],
                         "properties": {
-                            "strategy_version": {"enum": [STRATEGY_VERSION, "directed-document-numeric:0.1"]},
+                            "strategy_version": {"enum": [STRATEGY_VERSION, "directed-document-numeric:0.1", "directed-document-spoken-numeric:0.1"]},
                             "document_ref": {"type": "string", "minLength": 1},
                             "document_version_hash": {"type": "string", "pattern": "^[0-9a-f]{64}$"},
                             "query_terms": {"type": "array", "minItems": 1,
@@ -1071,6 +1071,7 @@ def project_state_for_prompt(
                 "document_ref", "document_version_hash", "doc_kind", "doc_date",
                 "title", "source_ref", "readability", "completeness", "readable", "authority_ref",
                 "authority_hash", "operations", "evidence_targets",
+                "source_grade",
             )
             slim_documents = []
             for document in company.get("readable_documents") or ():
@@ -1317,7 +1318,7 @@ def build_prompt(state: Mapping[str, Any]) -> str:
           "authority. Never retag it; omit for ordinary qualitative work.\n\n"
         f"{numeric_notice}"
         "An unavailable_evidence_targets entry is an explicit authority gap, not a target you may select or a "
-        "reason to infer a value from labels.\n\nNumeric questions require directed-document-numeric:0.1 and ALL "
+        "reason to infer a value from labels.\n\nNumeric questions require the original authority's source_grade: directed-document-numeric:0.1 for company-filed-document; directed-document-spoken-numeric:0.1 for earnings-call-transcript. Spoken answers preserve management attribution, exact quote and source-provided date (explicitly unknown if missing) and never become filed financial facts. Unknown grades cannot authorize numeric research. Numeric questions require typed targets and ALL "
         "numeric_targets: target_ref/metric_ref, question-scoped metric_definition {label,meaning}, "
         "period/unit/currency/basis. Follow the exact target schema: metric refs use "
         "metric:lowercase-hyphenated-words; money uses unit currency with currency USD (not unit usd), and a "
@@ -1335,7 +1336,7 @@ def build_prompt(state: Mapping[str, Any]) -> str:
         "target_ref/metric_ref, definition/rationale wording or deletion alone never qualify; completed/partial "
         "results cannot qualify. Never invent amounts; calculated YoY needs a separate calculation task, not a "
         "reported Figure. Old unmet targets and the broader question stay open. Missing targets remain source "
-        "gaps; complete requires every target's verified Figure/formal Claim. numeric_completed_context records "
+        "gaps; complete requires every target's independently verified Figure; FILED answers additionally require formal quantitative Claims, while SPOKEN answers require quoted management attribution and source-provided date (unknown if absent) and no such Claims. numeric_completed_context records "
         "strongly verified completed targets from the same exact original. Use their full definitions and Figure "
         "bindings as planning context, not to automatically close different metric definitions or rejection "
         "bindings; identify the remaining difference. An aggregate or average does not prove narrower business "
@@ -1348,7 +1349,7 @@ def build_prompt(state: Mapping[str, Any]) -> str:
         "missing material. Never repeat an unsuccessful same-version/query by changing rationale. candidate_staged"
         " awaits publication, not a Claim/Dossier fix; recovery_required blocks execution, not the answer. "
         "numeric_admission_source_grade_refused proves a source restriction: keep that task blocked and ask a "
-        "separate numeric inquiry from eligible company-filed material. Never move its replaces_numeric_rejection "
+        "compatible source-authority numeric strategy (SPOKEN management statements or FILED facts) on that exact original, or a separate inquiry from another eligible source. Never move its replaces_numeric_rejection "
         "binding across document/version. Unverified source feedback is not a grade refusal. "
         "document_research_feedback_summary aggregates tried history only to fit input; the summary is not a "
         "finding.\n\nContinue canonical_document_questions with exact canonical_question version_ref/content_hash "
@@ -1853,12 +1854,17 @@ def inquiry_material_request(
         "company_ref": inquiry.get("company_ref"), "question": question, "wants": wants,
     }).encode("utf-8")).hexdigest()
     section = reason or ("repair_target" if inquiry.get("repair_target_ref") else "inquiry")
+    from .material_retrieval import retrieval_fields
+    retrieval = retrieval_fields(inquiry)
+    acceptance = {"min_passages": 2, "min_coverage": 0.5}
+    if retrieval is not None:
+        acceptance["retrieval"] = retrieval
     return {
         "requester": {"lane": INQUIRY_REQUESTER_LANE, "product_ref": plan_ref,
                       "run_ref": f"inquiry:{identity[:32]}", "section": section},
         "subject": subject.strip(),
         "need": {"kind": "answer", "question": text[:2000]},
         "period": None,
-        "acceptance": {"min_passages": 2, "min_coverage": 0.5},
+        "acceptance": acceptance,
     }
 

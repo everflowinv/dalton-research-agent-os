@@ -267,6 +267,7 @@ class PlannerChildTests(unittest.TestCase):
         })
         with (
             patch("dalton_core.research_planner_cli.build_state", return_value=built),
+            patch("dalton_core.research_planner_cli.MAX_WORK_ORDER_PROMPT_BYTES", bound),
             patch("dalton_core.research_planner_cli.CockpitModel") as model,
         ):
             model.return_value.budget_for.return_value = {

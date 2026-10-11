@@ -149,8 +149,13 @@ def acknowledge_entry(item: Mapping[str, Any]) -> dict[str, Any] | None:
             option["label"] = f"{_term('ack', 'snooze')}（选天数）"
         if choice == "approve_spend":
             detail = item.get("detail") if isinstance(item.get("detail"), Mapping) else {}
-            option["confirm"] = (f"批准追加材料获取额度 {detail.get('approve_usd')} 美元"
-                                 f"（约 {detail.get('approve_calls')} 次检索）？批准后系统继续检索剩下的来源。")
+            if detail.get("approve_usd") == "0.00":
+                option["label"] = "批准追加检索次数"
+                option["confirm"] = (f"批准追加 {detail.get('approve_calls')} 次检索？"
+                                     "金额上限保持不变，系统继续检索本轮剩余来源。")
+            else:
+                option["confirm"] = (f"批准追加材料获取额度 {detail.get('approve_usd')} 美元"
+                                     f"（另加 {detail.get('approve_calls')} 次检索）？批准后系统继续检索剩下的来源。")
         if choice == "abandon_document":
             option["danger"] = True
             option["confirm"] = ("忽略该缺失资料：系统不再尝试获取它，这张卡片也不再出现；"

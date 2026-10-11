@@ -314,6 +314,22 @@ OUTPUT_SCHEMA = {
     },
 }
 
+EPS_NUMERATOR_BRIDGE_RULE_REF = "company-model-spec-accounting-eps-bridge:0.1"
+EPS_NUMERATOR_BRIDGE_GUIDANCE = (
+    "Keep accounting net_income separate from diluted_eps_numerator. When "
+    "net income is calculated from pretax income, taxes and filed company "
+    "components, retain that line and its formula with role net_income; do "
+    "not retag it diluted_eps_numerator. Add a separate derived numerator "
+    "bridge using the exact net_income or parent_net_income line and only "
+    "disclosed dilution adjustments. If the filed diluted EPS proves that "
+    "net income itself is the numerator, the bridge is sum(+1 * net-income), "
+    "and the EPS divide refers to this bridge and the filed diluted shares. "
+    "A numerator sum cannot directly use pretax_income or income_tax_expense. "
+    "Tie the accounting total and numerator to their exact filed authorities "
+    "and validate the numerator through filed diluted EPS in every period. "
+    "Missing dilution evidence remains unavailable, never zero."
+)
+
 TASK_HASH = content_hash({
     "task": TASK_REF,
     "output": OUTPUT_SCHEMA,
@@ -329,9 +345,16 @@ TASK_HASH = content_hash({
         "ref": COST_REGISTRY_REF, "hash": COST_REGISTRY_HASH,
     },
     "authority_projection": "company-model-state-with-financial-notes:0.4",
-    "prompt_contract": "company-model-spec-prompt:0.16",
+    "prompt_contract": "company-model-spec-prompt:0.17",
+    "eps_numerator_bridge": {
+        "ref": EPS_NUMERATOR_BRIDGE_RULE_REF,
+        "guidance": EPS_NUMERATOR_BRIDGE_GUIDANCE,
+    },
     "structured_output_repair": "company-model-spec-repair:0.1",
 })
+
+
+CASH_FLOW_OPERATING_BASE_SHAPE_CODE = "cash_flow_operating_base_shape"
 
 
 class CompanyModelSpecError(ValueError):
@@ -620,7 +643,8 @@ def build_prompt(state: Mapping[str, Any]) -> str:
         "diluted_weighted_average_shares and a derived diluted_eps when the "
         "company files them. Diluted EPS divides the company's disclosed "
         "diluted_eps_numerator by diluted_weighted_average_shares. Parent net "
-        "income is not automatically that numerator. Use "
+        "income is not automatically that numerator. "
+        f"{EPS_NUMERATOR_BRIDGE_GUIDANCE} Use "
         "company_presented_component for a filed company-specific bridge item "
         "and place it only through the formula where the filing presents it; "
         "use company_presented_subtotal for a derived subtotal tied to an exact "
@@ -1010,7 +1034,9 @@ def _cash_flow_companion(
                         "quarterly_growth", "year_over_year_growth", "seasonal_factor", "share_of_line",
                     }):
                 raise CompanyModelSpecError(
-                    f"cash_flow_companion {role} base is not a forecastable filed line")
+                    f"cash_flow_companion {role} base is not a forecastable filed line",
+                    code=(CASH_FLOW_OPERATING_BASE_SHAPE_CODE
+                          if role == "operating_cash_flow" else "semantic"))
             cash_unit = str(cash_lines[concept].get("unit") or "").casefold()
             base_unit = str(base_line.get("unit") or "").casefold()
             if not cash_unit or cash_unit != base_unit:

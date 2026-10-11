@@ -3345,7 +3345,10 @@ def completion_entry(item: Mapping[str, Any]) -> dict[str, Any]:
                  "note": "无需你操作；申报数入库后这张卡会自动消失。"}
     elif kind == "material_budget_exceeded":
         entry = {"mode": "none", "label": where,
-                 "note": "在本卡片上批准追加额度即可；不批准，系统按额度继续，等待中的请求以后自动继续。"}
+                 "note": ("这项请求超过单项额度。可批准本卡片列出的追加量；保留现有额度时，"
+                          "系统继续利用已有材料，到截止时间按现有证据起草。"
+                          if detail.get("scope") == "request" else
+                          "今天的材料获取额度不足；可追加额度，也可等明天的日额度恢复后继续。")}
     elif kind == "connector_login_expired":
         entry = {"mode": "none", "label": where,
                  "note": "工作台上没有重新登录的按钮；请在本机的这个应用里重新登录，恢复后系统自动继续。"}

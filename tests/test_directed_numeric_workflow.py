@@ -21,7 +21,8 @@ TEXT='Synthetic issuer FY2025: Remaining performance obligations were $12.3 bill
 class NumericWorkflowTests(unittest.TestCase):
     _record_plan=docfixtures.MissionDocumentResearchTests._record_plan
     _executor=docfixtures.MissionDocumentResearchTests._executor
-    def fixture(self,*,missing=False,old_rejection=False,extra_text=""):
+    def fixture(self,*,missing=False,old_rejection=False,extra_text="",
+                source_spec="annual-report-10k", strategy_version=CONTRACT_REF, basis="gaap-reported"):
         from tests import test_mission_annual_research as mission_fixture
         original_params=mission_fixture.mission_params
         def with_discovery(method):
@@ -43,7 +44,7 @@ class NumericWorkflowTests(unittest.TestCase):
         authorization=coverage.authorize_source_discovery(company_ref=COMPANY,source_ref='source:web-search',requested_by='automation:test',mission_version_ref=f.mission['id'])
         discovery=coverage.record_source_discovery(authorization=authorization,
             discovery_plan_ref='discovery-plan:synthetic-numeric',discovery_plan_hash='d'*64,
-            spec_ref='annual-report-10k',query_hash='e'*64,parameters={'query':'annual report','date_after':'2025-01-01','date_before':'2026-01-01'},
+            spec_ref=source_spec,query_hash='e'*64,parameters={'query':'annual report','date_after':'2025-01-01','date_before':'2026-01-01'},
             connector_invocation_ref=invocation['id'],connector_invocation_hash=invocation['content_hash'],
             source_envelope_ref=envelope['id'],source_envelope_hash=envelope['content_hash'],
             document_refs=envelope['source_record_refs'],in_authority_document_refs=[])
@@ -68,11 +69,11 @@ class NumericWorkflowTests(unittest.TestCase):
                ('leases','Uncommenced leases','Issuer total leases not yet commenced at year-end','currency','USD','2.5','billion')]
         targets=normalize_targets([{'target_ref':'target:'+ref,'metric_ref':'metric:synthetic-'+ref,
             'metric_definition':{'label':label,'meaning':meaning},'period':'FY2025',
-            'unit':unit,'currency':currency,'basis':'gaap-reported'} for ref,label,meaning,unit,currency,value,scale in specs])
+            'unit':unit,'currency':currency,'basis':basis} for ref,label,meaning,unit,currency,value,scale in specs])
         inquiry={'rank':0,'company_ref':COMPANY,'question':'What are RPO total, recognition duration and uncommenced leases at FY2025?',
             'wants':'All three exact numeric facts from the original, each with explicit period and unit.',
             'because':'The specified original contains these issuer disclosure lines.',
-            'directed_document':{'strategy_version':CONTRACT_REF,'document_ref':document_ref,
+            'directed_document':{'strategy_version':strategy_version,'document_ref':document_ref,
             'document_version_hash':registration['content_hash'],'query_terms':['Remaining performance obligations'],
             'query_rationale':'Read exactly these filed notes.','numeric_targets':targets}}
         plan={'schema_version':'0.1','task_ref':'task:research-plan-directives:0.1','created_at':f.mission['created_at'],
@@ -121,7 +122,7 @@ class NumericWorkflowTests(unittest.TestCase):
             else:
                 rows.append({'target_ref':target['target_ref'],'status':'supported','figure':{'quote_id':quote_id,
                     'metric_ref':target['metric_ref'],'subject_as_named':'Synthetic issuer','as_reported_label':label,
-                    'value':value,'unit':unit,'currency':currency,'period':'FY2025','basis':'gaap-reported','scale':scale},'reason':None})
+                    'value':value,'unit':unit,'currency':currency,'period':'FY2025','basis':basis,'scale':scale},'reason':None})
         draft={'schema_version':CONTRACT_REF,'targets':rows}
         verdict={'schema_version':'0.1','candidate_ref':candidate_ref(draft),'verdict':'pass',
                  'targets':[{'target_ref':r['target_ref'],'verdict':'accept' if r['status']=='supported' else 'unavailable',

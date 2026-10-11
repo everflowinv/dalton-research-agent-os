@@ -580,7 +580,7 @@ class CacheAndBudgetTests(Fixture):
         self.assertEqual(len(cards), 1)
         self.assertIn("批准追加", cards[0]["action"])
         parsed = ma.parse_budget_card_ref(cards[0]["ref"])
-        self.assertEqual((parsed["scope"], parsed["key"], parsed["calls"]), ("request", req["id"], 3))
+        self.assertEqual((parsed["scope"], parsed["key"], parsed["calls"]), ("request", req["id"], 4))
         self.core_execute("INSERT INTO needs_human_acknowledgements(ack_id,sequence,card_ref,kind,choice,created_at)"
                           " VALUES ('a1',1,?,'material_budget_exceeded','approve_spend',?)", (cards[0]["ref"], NOW))
         self.assertEqual(ma.serve(self.state, req["id"], rungs={"alphaengine": alpha}, now=later(hours=1))["outcome"],
@@ -801,7 +801,7 @@ class OwnerDoorTests(Fixture):
         self.assertEqual(budget["entry"]["mode"], "acknowledge")
         choices = [c["choice"] for c in budget["entry"]["choices"]]
         self.assertEqual(choices[0], "approve_spend")
-        self.assertIn("美元", budget["entry"]["choices"][0]["confirm"])
+        self.assertIn("金额上限保持不变", budget["entry"]["choices"][0]["confirm"])
         for row in mine.values():
             for name in ("title", "why_blocked", "consequence", "where"):
                 self.assertEqual(banned_hits(row[name]), [], (name, row[name]))

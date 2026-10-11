@@ -99,6 +99,45 @@ class CoordinatorTests(unittest.TestCase):
         self.now += IDLE_HOLD + timedelta(minutes=1)
         self.assertEqual(self.coordinator.dispatch_once()["status"], "launched")
 
+    def test_changed_storage_bound_wakes_old_idle_once_without_changed_research(self):
+        self.coordinator.dispatch_once()
+        self.launcher.finish({"status":"succeeded","plan_status":"input_too_large"})
+        path=self.root/"latest.json"
+        old=json.loads(path.read_text())
+        old["idle_signature"].pop("planner_work_order_prompt_bytes")
+        path.write_text(json.dumps(old))
+        self.assertEqual(self.coordinator.dispatch_once()["status"],"launched")
+        self.assertEqual(self.launcher.starts,2)
+        self.launcher.finish({"status":"succeeded","plan_status":"input_too_large"})
+        self.assertEqual(self.coordinator.dispatch_once()["status"],"held")
+        self.assertEqual(self.launcher.starts,2)
+
+    def test_input_budget_change_wakes_idle_once_without_changed_research(self):
+        from dalton_core.shared_call_budget_policy import updated_shared_limits, LIMITS_SCHEMA_VERSION
+        from dalton_core.store import content_hash
+        policy = {"schema_version": LIMITS_SCHEMA_VERSION, "default_max_cost_usd": 1.,
+                  "purpose_max_cost_usd": {}, "purpose_call_limits": {"plan": {"max_input_tokens": 80000}},
+                  "purpose_run_limits": {}, "revision": 1, "prior_hash": None,
+                  "updated_at": NOW.isoformat(), "actor_ref": "human:test"}
+        policy["content_hash"] = content_hash(policy)
+        shared = self.root / "shared.json"
+        shared.write_text(json.dumps(policy))
+        self.launcher.model_config_path = self.root / "model.json"
+        self.launcher.state_dir = self.root
+        self.launcher.model_config_path.write_text(json.dumps({"shared_call_budget_policy_path": str(shared)}))
+        self.coordinator.dispatch_once()
+        self.assertEqual(self.coordinator._signature()["planner_input_byte_bound"], 80000)
+        self.launcher.finish({"status": "succeeded", "plan_status": "input_too_large"})
+        self.assertEqual(self.coordinator.dispatch_once()["status"], "held")
+        changed = updated_shared_limits(policy, purpose="plan", kind="call",
+            budget={"max_input_tokens": 250000}, actor_ref="human:test", updated_at=NOW.isoformat())
+        shared.write_text(json.dumps(changed))
+        self.assertEqual(self.coordinator.dispatch_once()["status"], "launched")
+        self.assertEqual(self.coordinator._signature()["planner_input_byte_bound"], 250000)
+        self.launcher.finish({"status": "succeeded", "plan_status": "input_too_large"})
+        self.assertEqual(self.coordinator.dispatch_once()["status"], "held")
+        self.assertEqual(self.launcher.starts, 2)
+
     def test_the_signature_counts_what_the_state_is_built_from(self):
         signature = self.coordinator._signature()
         self.assertEqual(
@@ -106,9 +145,9 @@ class CoordinatorTests(unittest.TestCase):
             {"documents", "reviews_open", "claims", "figures", "metrics",
              "mission_versions", "dossier_feedback", "document_versions", "document_research_feedback",
              "document_research_settlement", "reflection_requests", "followup_decisions",
-             "backlog_versions", "backlog_events"})
+             "backlog_versions", "backlog_events", "planner_work_order_prompt_bytes", "planner_input_byte_bound", "planner_task_hash"})
         self.assertTrue(all(isinstance(v, int) for key, v in signature.items()
-                            if key not in {"dossier_feedback", "document_versions", "document_research_feedback",
+                            if key not in {"planner_task_hash", "planner_input_byte_bound", "dossier_feedback", "document_versions", "document_research_feedback",
                                            "document_research_settlement", "reflection_requests", "followup_decisions",
              "backlog_versions", "backlog_events"}))
         self.assertEqual(len(signature["document_research_settlement"]), 64)

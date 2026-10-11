@@ -91,6 +91,14 @@ def derive_numeric_work(admission,scheduler,registry,blueprints,index,*,
                                'admission_hash':admission['content_hash'],'numeric_authority':numeric,
                                'draft_hash':draft['content_hash'],'verifier_hash':verifier['content_hash']})
     else:raise DirectedNumericError('numeric stage ordinal is invalid')
+    from .directed_numeric_source_capabilities import spoken_answer, SPOKEN_CONTRACT_REF
+    if spoken_answer(admission):
+        payload=json.loads(prompt)
+        payload['answer_contract_ref']=SPOKEN_CONTRACT_REF
+        payload['source_attribution']={**numeric['source_binding'], 'attribution':'管理层表述'}
+        payload['source_rule']='Verify management statements on the exact transcript, not filed financial facts. Preserve the exact quote, source grade, period and scope; never substitute a filed fact or upgrade management guidance to reported actuals.'
+        prompt=canonical_json(payload)
+        metadata['answer_contract_ref']=SPOKEN_CONTRACT_REF
     metadata['prompt_hash']=content_hash(prompt)
     metadata['model_request_binding_hash']=content_hash({
         'prompt_hash':metadata['prompt_hash'],'admission_hash':admission['content_hash'],
@@ -105,21 +113,32 @@ def derive_numeric_work(admission,scheduler,registry,blueprints,index,*,
 # Final stage functions will strongly replay all Model/Source/Scheduler authority
 # before recording Figures; no public entry point grants a caller these writes.
 
-def source_binding(connection,registration,company_ref):
-    from .document_figure_grade import grade_for, FILED
-    authority=registration['source_authority']
-    rows=connection.execute(
-        'SELECT r.review_id,r.company_ref,r.document_ref,r.discovered_document_ref,d.source_ref,s.spec_ref '
-        'FROM coverage_mission_document_reviews r JOIN coverage_mission_discovered_documents d '
-        'ON d.record_id=r.discovered_document_ref JOIN coverage_mission_source_discoveries s '
-        'ON s.record_id=d.discovery_ref WHERE d.record_id=? AND r.document_ref=? AND r.company_ref=?',
-        (authority['ref'],registration['document_ref'],company_ref)).fetchall()
-    if len(rows)!=1 or rows[0]['source_ref']!=registration['source_ref']:
-        raise DirectedNumericError('numeric source has no exact mission review chain')
-    row=dict(rows[0]);grade=grade_for(row['spec_ref'])
-    if grade!=FILED:raise DirectedNumericError('numeric directed formal claims require a company-filed source; source grade is not admissible')
-    row['source_grade']=grade;row['source_manifest_hash']=registration['manifest_hash']
+def source_binding(connection,registration,company_ref,*,strategy_version=CONTRACT_REF):
+    from .document_figure_grade import FILED, SPOKEN
+    from .directed_numeric_source_capabilities import source_capability, SPOKEN_CONTRACT_REF
+    try:
+        row=source_capability(connection,registration,company_ref)
+    except ValueError as exc:
+        raise DirectedNumericError(str(exc)) from exc
+    if strategy_version == CONTRACT_REF:
+        if row['source_grade'] != FILED:
+            raise DirectedNumericError('numeric directed formal claims require a company-filed source; source grade is not admissible')
+    elif strategy_version == SPOKEN_CONTRACT_REF:
+        if row['source_grade'] != SPOKEN:
+            raise DirectedNumericError('spoken numeric answers require an earnings-call transcript')
+        from .directed_numeric_source_capabilities import document_date
+        try: row['document_date']=document_date(registration)
+        except ValueError as exc:raise DirectedNumericError(str(exc)) from exc
+    else:
+        raise DirectedNumericError('numeric answer strategy is unsupported')
     return row
+
+
+def _admitted_source_binding(connection,admission):
+    from .directed_numeric_source_capabilities import spoken_answer
+    spoken_answer(admission)  # Reject a missing/foreign branch marker before use.
+    return source_binding(connection,admission['request']['registration'],admission['company_ref'],
+        strategy_version=admission['planner_inquiry']['directed_document']['strategy_version'])
 
 def _execution_proof(executor,admission,works):
     from .mission_document_research_executor import exact_mission_document_model_execution_authority
@@ -143,7 +162,9 @@ def _record_numeric(executor,admission,works):
     from .store import GateRejected
     from .directed_numeric_output import quotes
     proof,draft,verifier,accounting=_execution_proof(executor,admission,works)
-    source=source_binding(executor.connection,admission['request']['registration'],admission['company_ref']);quote_map=quotes(proof)
+    source=_admitted_source_binding(executor.connection,admission);quote_map=quotes(proof)
+    from .directed_numeric_source_capabilities import spoken_answer
+    spoken=spoken_answer(admission)
     votes={item['target_ref']:item['verdict'] for item in verifier['output']['targets']}
     targets={item['target_ref']:item for item in admission['numeric_authority']['targets']}
     figures=[];pending=[];claims=[];supports=[]
@@ -178,6 +199,10 @@ def _record_numeric(executor,admission,works):
                 except NumericMeasureIdentityConflict as exc:
                     pending.append({'target_ref':ref,'reason':str(exc),'measure_conflict_proof':exc.proof})
                     continue
+            if spoken:
+                if support is not None:supports.append(support)
+                figures.append({**figure,'metric_definition_hash':target['metric_definition_hash']})
+                continue  # Management's spoken Figure is never a FILED quantitative Claim.
             resolver=MissionFigureAuthorityResolver(executor.connection)
             try:
                 from .directed_numeric_figure_support import stage_exact_figure
@@ -222,10 +247,11 @@ def _record_numeric(executor,admission,works):
         request=open_request(Path(executor.authority.store.path).parent,
             requester={'lane':'mission_document_research','product_ref':admission['question_version_ref'],
                        'run_ref':admission['id'],'section':item['target_ref']},
-            subject=admission['company_ref'],need={'kind':'answer','doc_kinds':['annual_report','quarterly_report','earnings_release'],
+            subject=admission['company_ref'],need={'kind':'answer','doc_kinds':(['earnings_call'] if spoken_answer(admission) else ['annual_report','quarterly_report','earnings_release']),
                 'data_item':target['metric_ref'], 'question':f"{admission['planner_inquiry']['question']}\nRequired: {canonical_json(target)}"},
             period=target['period'],source_priority=[admission['source_ref']],
-            acceptance={'numeric_contract_ref':CONTRACT_REF,'numeric_target':target,'admission_ref':admission['id'],
+            acceptance={'numeric_contract_ref':CONTRACT_REF,
+                        **({'answer_contract_ref':admission['numeric_authority']['answer_contract_ref']} if spoken_answer(admission) else {}),'numeric_target':target,'admission_ref':admission['id'],
                         'document_authority_ref':admission['document_authority_ref'],'document_authority_hash':admission['document_authority_hash']},
             actor_ref=admission['actor_ref'],now=executor.clock().isoformat())
         material_requests.append({'target_ref':target['target_ref'],'request_ref':request['id'],'request_digest':request['digest']})
@@ -237,17 +263,17 @@ def _record_numeric(executor,admission,works):
         previous=pending_numeric_result(executor.connection,resume['admission_ref'])
         if previous is None or previous['numeric_result_hash']!=resume['numeric_result_hash']:
             raise DirectedNumericError('numeric source resume proof disappeared')
-        committed_targets={item['target_ref']:item for item in claims}
+        committed_targets={item['target_ref']:item for item in (result['completed_targets'] if spoken else claims)}
         completed_targets={item['target_ref']:item for item in result['completed_targets']}
         for item in previous['result']['material_requests']:
             ref=item['target_ref']
             if ref not in committed_targets:continue
             held=read_request(Path(executor.authority.store.path).parent,item['request_ref'])
-            if held is None or held['digest']!=item['request_digest'] or held['acceptance'].get('numeric_target')!=targets[ref] or held['acceptance'].get('admission_ref')!=resume['admission_ref']:
+            if held is None or held['digest']!=item['request_digest'] or held['acceptance'].get('numeric_target')!=targets[ref] or held['acceptance'].get('admission_ref')!=resume['admission_ref'] or held['acceptance'].get('answer_contract_ref')!=admission['numeric_authority'].get('answer_contract_ref'):
                 raise DirectedNumericError('numeric source resume request binding differs')
             if held['status'] in {'open','partial'}:
                 closed=close_request(Path(executor.authority.store.path).parent,item['request_ref'],status='found',
-                    reason='The exact requested numeric definition is now source-proved and canonically admitted.',
+                    reason=('The exact management statement is now independently verified from the original transcript; it is not a filed financial fact.' if spoken else 'The exact requested numeric definition is now source-proved and canonically admitted.'),
                     items=[{**committed_targets[ref],**completed_targets[ref],'admission_ref':admission['id'],'admission_hash':admission['content_hash']}],
                     actor_ref=admission['actor_ref'],now=executor.clock().isoformat())
                 resolved_requests.append({'target_ref':ref,'request_ref':item['request_ref'],'status':closed['status']})
@@ -259,6 +285,8 @@ def _record_numeric(executor,admission,works):
           'source_binding':source,'model_accounting_proofs':accounting,'draft_proof_hash':draft['content_hash'],
           'verifier_proof_hash':verifier['content_hash'],'canonical_claims':claims,'material_requests':material_requests,'resolved_material_requests':resolved_requests,**result,
           'created_at':executor.clock().isoformat()}
+    if spoken:
+        body['management_answer']=management_answer(admission,source,result['completed_targets'],figures,proof,draft)
     if 'numeric_local_reconciliation_ref' in works[3]['metadata']:
         body['local_reconciliation']={k:works[3]['metadata'][k] for k in (
             'numeric_local_reconciliation_ref','numeric_local_reconciliation_hash','numeric_local_reconciliation_contract')}
@@ -271,6 +299,30 @@ def _record_numeric(executor,admission,works):
         body.update(figure_support_contract=contract,figure_supports=supports)
     body['content_hash']=content_hash(body)
     return body
+
+def management_answer(admission,source,completed,figures,proof,draft):
+    from .directed_numeric_source_capabilities import SPOKEN_CONTRACT_REF, spoken_answer
+    from .directed_numeric_output import quotes
+    if not spoken_answer(admission):raise DirectedNumericError('management answer requires spoken authority')
+    target_map={t['target_ref']:t for t in admission['numeric_authority']['targets']}
+    figure_map={f['figure_id']:f for f in figures}
+    candidates={r['target_ref']:r['figure'] for r in draft['output']['targets'] if r['status']=='supported'}
+    quote_map=quotes(proof)
+    statements=[]
+    for item in completed:
+        target=target_map[item['target_ref']];figure=figure_map[item['figure_ref']]
+        if figure['source_grade']!=source['source_grade']:raise DirectedNumericError('management Figure grade differs')
+        candidate=candidates[item['target_ref']]
+        statements.append({**target,'figure_ref':figure['figure_id'],'figure_hash':figure['content_hash'],
+            **{key:figure[key] for key in ('value','scale','as_reported_label')},
+            'quote_id':candidate['quote_id'],'original_quote':quote_map[candidate['quote_id']],
+            'source_proof_ref':proof['id'],'source_proof_hash':proof['content_hash']})
+    return {'answer_contract_ref':SPOKEN_CONTRACT_REF,'attribution':'管理层表述',
+        'company_ref':admission['company_ref'],'document_ref':admission['request']['registration']['document_ref'],
+        'document_version_hash':admission['document_authority_hash'],'source_binding':source,
+        'document_date_status':'source_provided' if source['document_date'] is not None else 'not_provided',
+        'document_date_label':source['document_date'] if source['document_date'] is not None else '原文日期未提供',
+        'statements':statements}
 
 def complete_numeric_stage(executor,admission,works,*,failure_as_terminal=False):
     work=works[3];lease=executor.scheduler.claim(executor.actor_ref,work_order_id=work['id'])
@@ -323,7 +375,7 @@ def read_numeric_result(executor,admission,works,formal):
     if formal is None or formal['terminal_state']!='succeeded' or formal['result_envelope']['outputs']!=receipt:raise DirectedNumericError('numeric Scheduler final result differs')
     executor._stage_owned(works[3],formal)
     proof,draft,verifier,accounting=_execution_proof(executor,admission,works)
-    if (receipt['source_binding']!=source_binding(executor.connection,admission['request']['registration'],admission['company_ref']) or receipt['source_proof_hash']!=proof['content_hash']
+    if (receipt['source_binding']!=_admitted_source_binding(executor.connection,admission) or receipt['source_proof_hash']!=proof['content_hash']
         or receipt['draft_proof_hash']!=draft['content_hash'] or receipt['verifier_proof_hash']!=verifier['content_hash'] or receipt['model_accounting_proofs']!=accounting):
         raise DirectedNumericError('numeric execution receipt differs from actual source/paid proofs')
     if 'numeric_local_reconciliation_ref' in works[3]['metadata'] or 'local_reconciliation' in receipt:
@@ -333,6 +385,8 @@ def read_numeric_result(executor,admission,works,formal):
             'numeric_local_reconciliation_ref','numeric_local_reconciliation_hash','numeric_local_reconciliation_contract')}
         if receipt.get('local_reconciliation')!=expected_binding:
             raise DirectedNumericError('numeric local reconciliation receipt binding differs')
+    from .directed_numeric_source_capabilities import spoken_answer
+    spoken=spoken_answer(admission)
     resolver=MissionFigureAuthorityResolver(executor.connection)
     from .claim_index_figures import build_figure_candidate
     from .research_auto_commit import validate_policy_commit_decision
@@ -344,7 +398,7 @@ def read_numeric_result(executor,admission,works,formal):
     approved={r['target_ref'] for r in verifier['output']['targets'] if r['verdict']=='accept'}
     completed={r['target_ref']:r for r in receipt['completed_targets']}
     claims={r['target_ref']:r for r in receipt['canonical_claims']}
-    if len(completed)!=len(receipt['completed_targets']) or len(claims)!=len(receipt['canonical_claims']) or set(claims)!=set(completed):
+    if len(completed)!=len(receipt['completed_targets']) or len(claims)!=len(receipt['canonical_claims']) or (set(claims) != (set() if spoken else set(completed))):
         raise DirectedNumericError('numeric result duplicates or drops target proof')
     supports={}
     if 'figure_support_contract' in receipt or 'figure_supports' in receipt:
@@ -373,6 +427,11 @@ def read_numeric_result(executor,admission,works,formal):
         elif any(figure[k]!=expected[k] for k in ('quote_id','metric_ref','as_reported_label','period','value','unit','currency','scale','basis')) or figure['citation_text']!=quotes(proof)[expected['quote_id']]:
             # Historical receipts keep their original exact-quote contract.
             raise DirectedNumericError('completed numeric Figure differs from source-bound typed definition')
+        if spoken:
+            if figure['source_grade']!='earnings-call-transcript':
+                raise DirectedNumericError('spoken numeric Figure lost its source grade')
+            figures.append({**figure,'metric_definition_hash':target['metric_definition_hash']})
+            continue
         bundle=build_figure_candidate(executor.connection,figure=figure,actor_ref=admission['actor_ref'],resolver=resolver)
         committed=claims[ref]
         for table,key,json_key,version_class,hash_key in (
@@ -426,6 +485,11 @@ def read_numeric_result(executor,admission,works,formal):
                     raise DirectedNumericError('numeric measure conflict proof does not replay')
             else:
                 raise DirectedNumericError('numeric measure conflict is not proved')
+    if spoken:
+        if receipt.get('management_answer') != management_answer(admission,receipt['source_binding'],receipt['completed_targets'],figures,proof,draft):
+            raise DirectedNumericError('management answer attribution or original quote differs')
+    elif 'management_answer' in receipt:
+        raise DirectedNumericError('filed numeric result carries a management answer')
     replayed=coverage(list(targets.values()),figures,company_ref=admission['company_ref'],document_ref=admission['request']['registration']['document_ref'],source_manifest_hash=receipt['source_binding']['source_manifest_hash'])
     if receipt['status']!=replayed['status'] or receipt['completed_targets']!=replayed['completed_targets'] or {x['target_ref'] for x in receipt['pending_targets']}!={x['target_ref'] for x in replayed['pending_targets']}:
         raise DirectedNumericError('numeric completion declaration differs from canonical target coverage')
@@ -463,19 +527,33 @@ def numeric_feedback(connection,mission_version_ref):
                 'completed_targets':value['completed_targets'],'missing':value['pending_targets'],
                 'material_requests':value['material_requests'],'created_at':value['created_at'],
                 **({'resumes_numeric_result':{'admission_ref':admission['id'],'admission_hash':parent_hash,'numeric_result_hash':digest}} if value['status']=='waiting_evidence' else {})}
+        from .directed_numeric_source_capabilities import spoken_answer
+        spoken=spoken_answer(admission)
+        if spoken:
+            if value['source_binding'] != _admitted_source_binding(connection,admission):
+                raise DirectedNumericError('spoken numeric feedback original grade/date differs')
+            answer=value.get('management_answer')
+            if not isinstance(answer,Mapping) or answer.get('answer_contract_ref')!=admission['numeric_authority']['answer_contract_ref'] or answer.get('attribution')!='管理层表述' or answer.get('source_binding')!=value['source_binding']:
+                raise DirectedNumericError('spoken numeric feedback lacks its attributed answer')
+            if value['canonical_claims'] or value['source_binding']['source_grade']!='earnings-call-transcript':
+                raise DirectedNumericError('spoken numeric feedback has filed claim authority')
+            result.update({'answer_contract_ref':admission['numeric_authority']['answer_contract_ref'],
+                'source_grade':value['source_binding']['source_grade'],
+                'document_date':value['source_binding']['document_date'],'attribution':'管理层表述',
+                'management_answer':answer})
         if value['numeric_authority'] != admission.get('numeric_authority'):
             raise DirectedNumericError('numeric feedback target authority differs')
         if value['status'] == 'completed':
             required = {t['target_ref'] for t in value['numeric_authority']['targets']}
             completed = [t['target_ref'] for t in value['completed_targets']]
             canonical = [t['target_ref'] for t in value['canonical_claims']]
-            if value['pending_targets'] or set(completed) != required or set(canonical) != required or len(completed) != len(required) or len(canonical) != len(required):
+            if value['pending_targets'] or set(completed) != required or set(canonical) != (set() if spoken else required) or len(completed) != len(required) or len(canonical) != (0 if spoken else len(required)):
                 raise DirectedNumericError('numeric completed feedback lacks every target')
             result['resolved_numeric_rejections'] = [
                 {k: proof[k] for k in ('admission_ref','admission_hash','rejection_ref','rejection_hash')}
                 for proof in admission['numeric_authority'].get('capability_upgrade_proofs', ())]
         from .numeric_target_revision import revision_source_candidate
-        if revision_source_candidate(connection, admission, value, digest):
+        if not spoken and revision_source_candidate(connection, admission, value, digest):
             result['target_revision_candidate'] = True
         result['content_hash']=content_hash(result);results.append(result)
     return results
@@ -483,14 +561,16 @@ def numeric_feedback(connection,mission_version_ref):
 def query_miss_requests(executor,admission):
     """A failed bounded search is a continuing input need, never absence proof."""
     from .material_requests import open_request
+    from .directed_numeric_source_capabilities import spoken_answer
     requests=[]
     for target in admission['numeric_authority']['targets']:
         found=open_request(Path(executor.authority.store.path).parent,
             requester={'lane':'mission_document_research','product_ref':admission['question_version_ref'],'run_ref':admission['id'],'section':target['target_ref']},
-            subject=admission['company_ref'],need={'kind':'answer','doc_kinds':['annual_report','quarterly_report','earnings_release'],
+            subject=admission['company_ref'],need={'kind':'answer','doc_kinds':(['earnings_call'] if spoken_answer(admission) else ['annual_report','quarterly_report','earnings_release']),
                 'data_item':target['metric_ref'],'question':f"{admission['planner_inquiry']['question']}\nRequired: {canonical_json(target)}"},
             period=target['period'],source_priority=[admission['source_ref']],
-            acceptance={'numeric_contract_ref':CONTRACT_REF,'numeric_target':target,'admission_ref':admission['id'],
+            acceptance={'numeric_contract_ref':CONTRACT_REF,
+                        **({'answer_contract_ref':admission['numeric_authority']['answer_contract_ref']} if spoken_answer(admission) else {}),'numeric_target':target,'admission_ref':admission['id'],
                         'document_authority_ref':admission['document_authority_ref'],'document_authority_hash':admission['document_authority_hash']},
             actor_ref=admission['actor_ref'],now=executor.clock().isoformat())
         requests.append({'target_ref':target['target_ref'],'request_ref':found['id'],'request_digest':found['digest'],

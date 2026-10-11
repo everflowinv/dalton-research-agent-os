@@ -436,6 +436,16 @@ def build_queries(request: Mapping[str, Any], identity: Mapping[str, Any] | None
         if len(out) < 2:
             out.append(f"{ticker} {first}")
     else:
+        from .material_retrieval import contract
+        retrieval = contract(request)
+        if retrieval is not None:
+            form_words = " ".join(k.replace("sec_", "").replace("10k", "10-K").replace("10q", "10-Q").replace("8k", "8-K")
+                                  for k in retrieval["doc_kinds"])
+            # Connector searches retain the issuer/form, while local passage
+            # matching below uses each target's original-language terms.
+            out = [f"{name} {form_words} {g['terms'][0]} {period_words or label}".strip()
+                   for g in retrieval["groups"]]
+            return list(dict.fromkeys(out))[:3]
         question = str(need.get("question") or "").strip()
         out = [question[:300], f"{name} {question[:200]}"]
         keywords = [word for word in re.findall(r"[A-Za-z][A-Za-z0-9\-]{3,}|[一-鿿]{2,}", question)][:6]
@@ -623,6 +633,53 @@ def evaluate_acceptance(state_dir: str | Path, request: Mapping[str, Any], *,
         partial = unique or near
         return {"met": False, "partial": bool(partial), "items": [_passage_item(p) for p in partial[:5]],
                 "reason": "只找到其他期间提到该数据项的段落" if partial else "索引中没有给出该数据项的段落"}
+    from .material_retrieval import contract, issuer_matches, phrase_matches
+    retrieval = contract(request)
+    if retrieval is not None:
+        required_kinds = retrieval["doc_kinds"]
+        allowed = [k for k in required_kinds if not kinds or k in kinds] if required_kinds else list(kinds or [])
+        if required_kinds and not allowed:
+            return {"met": False, "partial": False, "items": [], "reason": "这个来源不提供要求的申报类型",
+                    "missing_targets": [g["target"] for g in retrieval["groups"]]}
+        hits, target_hits = {}, {}
+        minimum = float(acceptance.get("min_coverage") or 0.5)
+        for group in retrieval["groups"]:
+            collected = set()
+            for term in group["terms"]:
+                found = evidence_index.evidence_search(state_dir, term, company_ref=company,
+                    kinds=allowed or None, date_from=date_from, date_to=date_to, limit=20)
+                for item in found.get("results") or ():
+                    if (float((item.get("score_parts") or {}).get("coverage") or 0) < minimum
+                            or not phrase_matches(item.get("text") or "", term)
+                            or not issuer_matches(item, company, identity)
+                            or (retrieval.get("selected_document") is not None and
+                                item.get("document_ref") != retrieval["selected_document"]["document_ref"])):
+                        continue
+                    ref = item["passage_ref"]
+                    collected.add(ref); hits.setdefault(ref, item)
+            target_hits[group["target"]] = sorted(collected)
+        missing = [key for key, refs in target_hits.items() if not refs]
+        needed = max(1, int(acceptance.get("min_passages") or 2))
+        met = retrieval["scope_complete"] and not missing and len(hits) >= needed
+        return {"met": met, "partial": bool(hits) and not met,
+                "items": [_passage_item(p) | {"document_sha256": p.get("document_sha256")}
+                          for p in list(hits.values())[:12]],
+                "target_passages": target_hits, "missing_targets": missing,
+                "retrieval_contract_hash": retrieval["content_hash"],
+                "reason": ("各项所需原文段落已取得；研究答案仍由后续阅读核验" if met else
+                           "仍缺原文项目：" + "、".join(missing) if missing else
+                           f"已覆盖各项，但只有 {len(hits)} 段原文，少于要求的 {needed} 段" if len(hits) < needed else
+                           "已找到相关原文；选定原文的确切版本仍需由正式阅读核验" if retrieval.get("selected_document") else
+                           "已找到相关原文；问题指定的财政期间仍需核对" if retrieval["period_unproved"] else
+                           "已找到问题中的财务项目原文；复合问题的其他要求仍需逐项核对")}
+
+
+    from .material_retrieval import filing_kinds
+    required_filings = filing_kinds(request)
+    if required_filings:
+        kinds = [k for k in required_filings if not kinds or k in kinds]
+        if not kinds:
+            return {"met": False, "partial": False, "items": [], "reason": "这个来源不提供要求的申报类型"}
     # answer
     min_coverage = float(acceptance.get("min_coverage") or 0.5)
     hits: dict[str, dict[str, Any]] = {}
@@ -633,14 +690,19 @@ def evaluate_acceptance(state_dir: str | Path, request: Mapping[str, Any], *,
         except Exception:  # noqa: BLE001
             continue
         for item in found.get("results") or ():
-            if float((item.get("score_parts") or {}).get("coverage") or 0) >= min_coverage:
+            if (float((item.get("score_parts") or {}).get("coverage") or 0) >= min_coverage
+                    and (not required_filings or issuer_matches(item, company, identity))):
                 hits.setdefault(item["passage_ref"], item)
     needed = max(1, int(acceptance.get("min_passages") or 2))
     items = [_passage_item(p) for p in list(hits.values())[:6]]
-    if len(hits) >= needed:
+    period_unproved = bool(re.search(r"\bFY\s*\d{2,4}\b|\bQ[1-4]\b|20\d{2}|第[一二三四1234]季度|[一二三四]季度",
+                                     str(need.get("question") or ""), re.I))
+    if len(hits) >= needed and not period_unproved and len(required_filings) <= 1:
         return {"met": True, "partial": False, "items": items, "reason": f"索引中有 {len(hits)} 段相关材料"}
     return {"met": False, "partial": bool(hits), "items": items,
-            "reason": "相关材料不足" if hits else "索引中没有相关材料"}
+            "reason": ("已找到相关段落，但问题指定的财政期间或多种申报类型仍需核对"
+                           if hits and (period_unproved or len(required_filings) > 1) else
+                           "相关材料不足" if hits else "索引中没有相关材料")}
 
 
 # ---------------------------------------------------------------------------
@@ -816,6 +878,13 @@ class TargetedSourceRung:
         need = request.get("need") or {}
         kinds = list(need.get("doc_kinds") or ())
         kind = need.get("kind")
+        from .material_retrieval import filing_kinds
+        required_filings = filing_kinds(request) if kind == "answer" else []
+        if required_filings:
+            if self.name == "sec_edgar":
+                return next((SEC_SPECS[k] for k in required_filings if k in SEC_SPECS), None)
+            if self.name in {"alphaengine", "guidepoint"}:
+                return None
         if self.name == "alphaengine":
             if kind == "document":
                 return next((ALPHAENGINE_SPECS[k] for k in kinds if k in ALPHAENGINE_SPECS), None)
@@ -1181,12 +1250,16 @@ def _approvals(state_dir: str | Path) -> list[dict[str, Any]]:
     return out
 
 
-def budget_card_ref(scope: str, key: str, usd_micros: int, calls: int) -> str:
-    return f"material-budget:{scope}:{key}:{_usd(usd_micros)}:{int(calls)}"
+def budget_card_ref(scope: str, key: str, usd_micros: int, calls: int, *,
+                    basis: Mapping[str, Any] | None = None) -> str:
+    # Approval amounts must cover fractional cents, not round them down.
+    cents = (max(0, int(usd_micros)) + 9999) // 10000
+    ref = f"material-budget:{scope}:{key}:{_usd(cents * 10000)}:{int(calls)}"
+    return ref if basis is None else ref + ":basis:" + _sha(dict(basis))[:16]
 
 
 def parse_budget_card_ref(ref: str) -> dict[str, Any] | None:
-    match = re.fullmatch(r"material-budget:(pool|request):(.+):(\d+\.\d{2}):(\d+)", ref or "")
+    match = re.fullmatch(r"material-budget:(pool|request):(.+):(\d+\.\d{2}):(\d+)(?::basis:[a-f0-9]{16})?", ref or "")
     if match is None:
         return None
     return {"scope": match.group(1), "key": match.group(2), "usd_micros": _micros(match.group(3)),
@@ -1257,11 +1330,43 @@ def _budget_check(state_dir: str | Path, request: Mapping[str, Any], calls: int,
     spent = request_spend(state_dir, str(request["id"]))
     if spent["calls"] + calls > caps["calls"] or spent["cost_micros"] + cost_micros > caps["usd_micros"]:
         return {"scope": "request", "key": str(request["id"]),
-                "approve_calls": max(calls, spent["calls"] + calls - caps["calls"]),
-                "approve_usd_micros": max(cost_micros, spent["cost_micros"] + cost_micros - caps["usd_micros"]),
+                "approve_calls": max(0, spent["calls"] + calls - caps["calls"]),
+                "approve_usd_micros": max(0, spent["cost_micros"] + cost_micros - caps["usd_micros"]),
                 "spent_calls": spent["calls"], "cap_calls": caps["calls"],
                 "spent_usd_micros": spent["cost_micros"], "cap_usd_micros": caps["usd_micros"]}
     return None
+
+
+def _request_budget_proposal(request: Mapping[str, Any], blocked: Mapping[str, Any], *,
+                             source: str, rungs: Mapping[str, Any]) -> dict[str, Any]:
+    """Estimate the remaining round once; this is a proposal, never a grant."""
+    attempts = _round_attempts(request)
+    last = {str(a.get("source")): a for a in attempts}
+    tried = {str(a.get("source")) for a in attempts if a.get("outcome") in TRIED_OUTCOMES}
+    max_attempts = int((request.get("budget") or {}).get("max_attempts") or len(LADDER))
+    sources = list(request.get("source_priority") or LADDER)
+    sources = sources[sources.index(source):] if source in sources else [source]
+    calls = cost = 0
+    remaining = []
+    for name in sources:
+        rung = rungs.get(name)
+        if (rung is None or not getattr(rung, "costed", False)
+                or (last.get(name) or {}).get("outcome") in DONE_OUTCOMES | {"dispatched"}
+                or not rung.applies(request)):
+            continue
+        if name not in tried and len(tried) >= max_attempts:
+            continue
+        tried.add(name)
+        count = int(getattr(rung, "estimate_calls", lambda r: CALL_ESTIMATES.get(name, 1))(request))
+        calls += count
+        cost += int(USD_PER_CALL.get(name, Decimal(0)) * count * 1_000_000)
+        remaining.append(name)
+    return {**blocked,
+            "approve_calls": max(0, int(blocked["spent_calls"]) + calls - int(blocked["cap_calls"])),
+            "approve_usd_micros": max(0, int(blocked["spent_usd_micros"]) + cost
+                                     - int(blocked["cap_usd_micros"])),
+            "remaining_sources": remaining, "remaining_estimated_calls": calls,
+            "remaining_estimated_usd_micros": cost}
 
 
 def _record_spend(state_dir: str | Path, request_id: str, source: str, calls: int, cost_micros: int, *,
@@ -1301,15 +1406,30 @@ def link_arrivals(state_dir: str | Path, request: Mapping[str, Any], items: Sequ
                 arrival = None
                 if index is not None and item.get("kind") != "xbrl_fact":
                     try:
-                        found = index.execute("SELECT MIN(arrival_id) FROM material_arrivals WHERE company_ref=? "
-                                              "AND document_ref=?", (company, ref)).fetchone()
+                        digest = item.get("document_sha256")
+                        if digest is not None:
+                            if re.fullmatch(r"[a-f0-9]{64}", str(digest)) is None:
+                                raise MaterialAcquisitionError("indexed document version hash is invalid")
+                            found = index.execute("SELECT MIN(arrival_id) FROM material_arrivals WHERE company_ref=? "
+                                                  "AND document_ref=? AND digest=?", (company, ref, digest)).fetchone()
+                        else:
+                            # Preserve the old link contract for historical
+                            # items that did not carry a source text version.
+                            found = index.execute("SELECT MIN(arrival_id) FROM material_arrivals WHERE company_ref=? "
+                                                  "AND document_ref=?", (company, ref)).fetchone()
                         arrival = found[0] if found else None
                     except sqlite3.Error:
+                        if item.get("document_sha256") is not None:
+                            raise
                         arrival = None
+                if item.get("document_sha256") is not None and arrival is None:
+                    raise MaterialAcquisitionError("the exact indexed document version has no matching arrival")
                 body = {"event": "material_arrived", "request_id": request["id"], "document_ref": ref,
                         "kind": item.get("kind"), "passage_ref": item.get("passage_ref"), "source": source,
                         "need": request.get("need"), "period": request.get("period"),
                         "requesters": [r.get("lane") for r in request.get("requesters") or ()]}
+                if item.get("document_sha256") is not None:
+                    body["document_sha256"] = item["document_sha256"]
                 cursor = connection.execute(
                     "INSERT OR IGNORE INTO material_request_arrivals(request_id,company_ref,document_ref,arrival_id,"
                     "kind,source,record_json,created_at) VALUES (?,?,?,?,?,?,?,?)",
@@ -1414,6 +1534,57 @@ def _record(state_dir: Path, view: Mapping[str, Any], source: str, result: RungR
                       calls=result.calls, actor_ref=ACTOR_REF, now=now)
 
 
+def _free_retrieval_recheck(state: Path, view: Mapping[str, Any], *, stamp: str) -> dict[str, Any] | None:
+    """Re-evaluate a changed lexical contract once using held material only.
+
+    The append-only request/attempt/spend history is retained. A closed miss
+    stays closed after this free check; it never opens a fresh paid ladder.
+    """
+    from .material_retrieval import contract, filing_kinds, RULE_REF
+    retrieval = contract(view)
+    required_filings = filing_kinds(view)
+    if (retrieval is None and not required_filings) or (view.get("acceptance") or {}).get("numeric_contract_ref"):
+        return None
+    retrieval_hash = (retrieval["content_hash"] if retrieval is not None else
+                      _sha({"rule_ref": RULE_REF, "need": view.get("need"), "doc_kinds": required_filings}))
+    marker = {"rule_ref": RULE_REF, "retrieval_contract_hash": retrieval_hash}
+    if any(e.get("event_kind") == "attempt" and e.get("query") == marker
+           for e in view.get("events") or ()):
+        return None
+    closed = bool(view.get("closed") or view.get("status") in mr.TERMINAL)
+    if closed and view.get("status") not in {"exhausted", "timeout", "partial"}:
+        return None
+    # Do the read before reopening. A broken index is not a negative finding
+    # and cannot alter the request's terminal state.
+    verdict = evaluate_acceptance(state, view, now=stamp)
+    ensure_schema(state)
+    # The links table permits append-only links for closed requests. Verify
+    # and commit exact text versions before reopening or recording a marker:
+    # a failed link must leave the original request eligible for a later read.
+    linked = (link_arrivals(state, view, verdict["items"], source="indexed_corpus", now=stamp)
+              if verdict["met"] or verdict["partial"] else [])
+    if closed:
+        mr.reopen(state, view["id"], reason="原文逐项检索规则已修正，仅免费复核已有资料",
+                  actor_ref=ACTOR_REF, now=stamp)
+    mr.record_attempt(state, view["id"], source="indexed_corpus",
+        outcome="accepted" if verdict["met"] else "partial" if verdict["partial"] else "empty",
+        detail=verdict["reason"], items=verdict["items"], query=marker,
+        status="partial" if verdict["partial"] else None, actor_ref=ACTOR_REF, now=stamp)
+    if verdict["met"]:
+        mr.close(state, view["id"], status="found", reason=verdict["reason"],
+                 items=verdict["items"], actor_ref=ACTOR_REF, now=stamp)
+        return {"request_id": view["id"], "status": "found", "outcome": "found",
+                "free_recheck": marker, "rungs": [{"source": "indexed_corpus", "outcome": "accepted"}],
+                "arrived": linked, "acceptance": verdict}
+    if closed:
+        mr.close(state, view["id"], status=view["status"], reason=verdict["reason"],
+                 items=verdict["items"], actor_ref=ACTOR_REF, now=stamp)
+        return {"request_id": view["id"], "status": view["status"], "outcome": "cached",
+                "free_recheck": marker, "rungs": [{"source": "indexed_corpus", "outcome": "partial" if verdict["partial"] else "empty"}],
+                "acceptance": verdict, "arrived": linked}
+    return None
+
+
 def serve(state_dir: str | Path, request_id: str, *, rungs: Mapping[str, Any] | None = None,
           now: str | None = None, allow_costed: bool = True) -> dict[str, Any]:
     """Work one request's source ladder as far as it can go now.
@@ -1432,6 +1603,10 @@ def serve(state_dir: str | Path, request_id: str, *, rungs: Mapping[str, Any] | 
     view = mr.request(state, request_id)
     if view is None:
         return {"request_id": request_id, "status": None, "outcome": "missing", "rungs": []}
+    rechecked = _free_retrieval_recheck(state, view, stamp=stamp)
+    if rechecked is not None:
+        return rechecked
+    view = mr.request(state, request_id) or view
     if view["closed"] or view["status"] in mr.TERMINAL:
         due, why = retry_due(state, view, now=stamp)
         if not due:
@@ -1478,6 +1653,12 @@ def serve(state_dir: str | Path, request_id: str, *, rungs: Mapping[str, Any] | 
                 trail.append({"source": source, "outcome": result.outcome})
             continue
         outcome_before = (previous or {}).get("outcome")
+        # A previously inapplicable SEC rung may now have an explicit filing
+        # target. No old charge is erased and normal budget checks still apply.
+        from .material_retrieval import filing_kinds
+        if (source == "sec_edgar" and outcome_before == "not_applicable"
+                and filing_kinds(view) and rung.applies(view)):
+            previous, outcome_before = None, None
         if outcome_before in DONE_OUTCOMES:
             if outcome_before == "partial":
                 partial_items.extend(previous.get("items") or [])
@@ -1508,6 +1689,8 @@ def serve(state_dir: str | Path, request_id: str, *, rungs: Mapping[str, Any] | 
                 cost = int(USD_PER_CALL.get(source, Decimal(0)) * calls * 1_000_000)
                 blocked = _budget_check(state, view, calls, cost, now=stamp)
                 if blocked is not None:
+                    if blocked["scope"] == "request":
+                        blocked = _request_budget_proposal(view, blocked, source=source, rungs=rungs)
                     result = RungResult("budget_blocked", query=queries, detail=_canonical(blocked))
                     if outcome_before != "budget_blocked" or (previous or {}).get("detail") != result.detail:
                         _record(state, view, source, result, now=stamp)
@@ -1867,9 +2050,87 @@ def retry_sweep(state_dir: str | Path, *, now: str | None = None, limit: int = 3
     return out
 
 
+_SERVICE_CURSOR_ID = "priority-round-robin"
+_SERVICE_CURSOR_SCHEMA = "material-acquisition-service-cursor:0.1"
+
+
+def _decode_service_cursor(row: sqlite3.Row | None) -> tuple[tuple[Any, ...] | None, str | None]:
+    if row is None:
+        return None, None
+    try:
+        record = json.loads(row["record_json"])
+    except (TypeError, ValueError) as exc:
+        raise MaterialAcquisitionError("material scheduling cursor JSON is invalid") from exc
+    if not isinstance(record, dict):
+        raise MaterialAcquisitionError("material scheduling cursor must be an object")
+    if _sha(record) != row["content_hash"]:
+        raise MaterialAcquisitionError("material scheduling cursor content hash differs")
+    key = record.get("priority_key")
+    if (set(record) != {"schema_version", "request_ref", "priority_key", "updated_at", "revision"}
+            or record["schema_version"] != _SERVICE_CURSOR_SCHEMA
+            or type(record["revision"]) is not int or not 0 < record["revision"] < 2**63
+            or not isinstance(key, list) or len(key) != 5
+            or any(type(value) is not int or value not in (0, 1) for value in key[:3])
+            or not all(isinstance(value, str) for value in key[3:])
+            or key[4] != record["request_ref"]
+            or not _REQUEST_ID_RE.fullmatch(key[4])
+            or not isinstance(record["updated_at"], str) or _parse_ts(record["updated_at"]) is None):
+        raise MaterialAcquisitionError("material scheduling cursor identity or priority is invalid")
+    return tuple(key), str(row["content_hash"])
+
+
+def _service_order(state_dir: str | Path, pending: Sequence[Mapping[str, Any]],
+                   universe: Mapping[str, Mapping[str, Any]]) -> tuple[list[Mapping[str, Any]], str | None]:
+    """Resume the priority-ordered sweep even when its last request has closed."""
+    with _reader(state_dir) as connection:
+        if connection is None:
+            raise MaterialAcquisitionError("material scheduling cursor ledger cannot be read")
+        try:
+            rows = connection.execute(
+                "SELECT record_json,content_hash FROM material_acquisition_service_cursor WHERE cursor_id=?",
+                (_SERVICE_CURSOR_ID,)).fetchall()
+        except sqlite3.OperationalError as exc:
+            # This table is additive: only its genuine pre-migration absence
+            # starts a new sweep. Other schema/read errors must not reset it.
+            if str(exc) != "no such table: material_acquisition_service_cursor":
+                raise MaterialAcquisitionError(f"material scheduling cursor cannot be read: {exc}") from exc
+            rows = []
+    key, digest = _decode_service_cursor(rows[0] if rows else None)
+    ordered = sorted(pending, key=lambda item: priority_key(item, universe))
+    if key is None:
+        return ordered, digest
+    start = next((index for index, item in enumerate(ordered)
+                  if priority_key(item, universe) > key), len(ordered))
+    return ordered[start:] + ordered[:start], digest
+
+
+def _advance_service_cursor(state_dir: str | Path, request: Mapping[str, Any],
+                            universe: Mapping[str, Mapping[str, Any]], *,
+                            expected_hash: str | None, now: str,
+                            deadline: float | None = None) -> str | None:
+    """Claim one service turn; concurrent stale ticks must not execute it."""
+    record = {"schema_version": _SERVICE_CURSOR_SCHEMA, "request_ref": request["id"],
+              "priority_key": list(priority_key(request, universe)), "updated_at": now}
+    with _writer(state_dir) as connection:
+        row = connection.execute("SELECT record_json,content_hash FROM material_acquisition_service_cursor "
+                                 "WHERE cursor_id=?", (_SERVICE_CURSOR_ID,)).fetchone()
+        _, current_hash = _decode_service_cursor(row)
+        if current_hash != expected_hash:
+            return None
+        if deadline is not None and time.monotonic() >= deadline:
+            return None
+        record["revision"] = 1 if row is None else json.loads(row["record_json"])["revision"] + 1
+        digest = _sha(record)
+        connection.execute(
+            "INSERT INTO material_acquisition_service_cursor(cursor_id,record_json,content_hash) VALUES (?,?,?) "
+            "ON CONFLICT(cursor_id) DO UPDATE SET record_json=excluded.record_json,content_hash=excluded.content_hash",
+            (_SERVICE_CURSOR_ID, _canonical(record), digest))
+    return digest
+
+
 def tick(state_dir: str | Path, *, max_requests: int = 4, max_seconds: float = 10.0, now: str | None = None,
          rungs: Mapping[str, Any] | None = None, convert: bool = True) -> dict[str, Any]:
-    """One bounded pass: convert dead ends, reopen what left the cache, serve the top requests."""
+    """One bounded pass over a durable priority-ordered round-robin sweep."""
 
     started = time.monotonic()
     stamp = now or _now()
@@ -1892,7 +2153,7 @@ def tick(state_dir: str | Path, *, max_requests: int = 4, max_seconds: float = 1
     if not pending:
         return summary
     universe = mission_universe(state)
-    pending.sort(key=lambda item: priority_key(item, universe))
+    pending, cursor_hash = _service_order(state, pending, universe)
     pool = pool_status(state, now=stamp)
     # The first request that reaches a costed rung on a spent pool records
     # ``budget_blocked`` (that is what raises the one pool card); the rest of
@@ -1903,6 +2164,14 @@ def tick(state_dir: str | Path, *, max_requests: int = 4, max_seconds: float = 1
         if time.monotonic() - started >= max_seconds:
             summary["out_of_time"] = True
             break
+        next_cursor_hash = _advance_service_cursor(
+            state, view, universe, expected_hash=cursor_hash, now=stamp,
+            deadline=started + max_seconds)
+        if next_cursor_hash is None:
+            summary["out_of_time" if time.monotonic() - started >= max_seconds
+                    else "scheduling_busy"] = True
+            break
+        cursor_hash = next_cursor_hash
         try:
             result = serve(state, view["id"], rungs=rungs, now=stamp, allow_costed=allow_costed)
         except Exception as exc:  # noqa: BLE001 - one request's failure is not the tick's
@@ -1937,7 +2206,8 @@ def _need_text(request: Mapping[str, Any]) -> str:
         return "、".join(KIND_LABELS.get(k, k) for k in need.get("doc_kinds") or ())
     if need.get("kind") in ("data", "model"):
         return f"数据项「{str(need.get('data_item') or '').replace('check:', '')}」"
-    return f"问题「{str(need.get('question') or '')[:60]}」"
+    question = re.split(r"\s+-- (?:wants|terms):", str(need.get("question") or ""), maxsplit=1)[0]
+    return f"问题「{question[:60]}」"
 
 
 def owner_door_cards(state_dir: str | Path, *, now: str | None = None,
@@ -1980,6 +2250,20 @@ def owner_door_cards(state_dir: str | Path, *, now: str | None = None,
             if blocked.get("scope") == "pool" and blocked.get("key") == stamp[:10]:
                 budget_pool.append(view)
             elif blocked.get("scope") == "request":
+                # The last attempt predates a possible approval. Render from
+                # current caps, not that stale refusal; no request is dispatched.
+                source = str(attempts[-1].get("source") or "")
+                rungs = default_rungs()
+                rung = rungs.get(source)
+                if rung is not None and rung.applies(view):
+                    calls = int(rung.estimate_calls(view))
+                    cost = int(USD_PER_CALL.get(source, Decimal(0)) * calls * 1_000_000)
+                    caps, spent = request_caps(state_dir, view), request_spend(state_dir, view["id"])
+                    if spent["calls"] + calls <= caps["calls"] and spent["cost_micros"] + cost <= caps["usd_micros"]:
+                        continue
+                    blocked = {**blocked, "spent_calls": spent["calls"], "spent_usd_micros": spent["cost_micros"],
+                               "cap_calls": caps["calls"], "cap_usd_micros": caps["usd_micros"]}
+                    blocked = _request_budget_proposal(view, blocked, source=source, rungs=rungs)
                 budget_request.append((view, blocked))
     for subject, views in sorted(exhausted.items()):
         name = labels.get(subject) or subject
@@ -2030,21 +2314,41 @@ def owner_door_cards(state_dir: str | Path, *, now: str | None = None,
                        "request_refs": [v["id"] for v in budget_pool][:50]},
         })
     for view, blocked in budget_request:
-        usd = int(blocked.get("approve_usd_micros") or _micros("0.50"))
-        calls = int(blocked.get("approve_calls") or 3)
+        usd = int(blocked.get("approve_usd_micros", _micros("0.50")))
+        calls = int(blocked.get("approve_calls", 3))
+        ref = budget_card_ref("request", view["id"], usd, calls, basis={
+            key: blocked.get(key) for key in ("cap_calls", "cap_usd_micros", "spent_calls",
+                                             "spent_usd_micros", "remaining_sources")})
+        approved = [a for a in _approvals(state_dir) if a["scope"] == "request" and a["key"] == view["id"]]
+        prior_calls = sum(a["calls"] for a in approved)
+        prior_usd = sum(a["usd_micros"] for a in approved)
+        remaining_usd = max(0, int(blocked.get("cap_usd_micros") or 0) - int(blocked.get("spent_usd_micros") or 0))
+        money = parse_budget_card_ref(ref)["usd_micros"]
+        shortage = "检索次数" if not money else "金额" if not calls else "检索次数和金额"
+        approval_text = (f"批准追加 {calls} 次检索；金额上限保持不变"
+                         if not money else f"批准追加 {_usd(money)} 美元和 {calls} 次检索"
+                         if calls else f"批准追加 {_usd(money)} 美元；检索次数上限保持不变")
+        prior_text = (f"此前已批准追加 {_usd(prior_usd)} 美元、{prior_calls} 次检索，已计入当前上限。"
+                      if approved else "")
+        source_text = "、".join(_source_label(s) for s in blocked.get("remaining_sources") or ())
         name = labels.get(str(view["subject"])) or view["subject"]
         cards.append({
-            "kind": "material_budget_exceeded", "ref": budget_card_ref("request", view["id"], usd, calls),
+            "kind": "material_budget_exceeded", "ref": ref,
             "at": str(view.get("last_event_at") or stamp),
-            "title": f"{name}：「{_need_text(view)}」的获取额度已用完",
-            "why": (f"这项请求已用 {blocked.get('spent_calls')} 次检索、约 {_usd(blocked.get('spent_usd_micros') or 0)} 美元，"
-                    f"达到单项上限 {blocked.get('cap_calls')} 次、{_usd(blocked.get('cap_usd_micros') or 0)} 美元。"
+            "title": f"{name}：{_need_text(view)}的{shortage}额度不足",
+            "why": (prior_text + f"这项请求累计已用 {blocked.get('spent_calls')} 次检索、"
+                    f"{Decimal(int(blocked.get('spent_usd_micros') or 0)) / 1_000_000:.3f} 美元；"
+                    f"当前上限 {blocked.get('cap_calls')} 次、{_usd(blocked.get('cap_usd_micros') or 0)} 美元。"
+                    f"金额还剩 {Decimal(remaining_usd) / 1_000_000:.3f} 美元。"
+                    + (f"本轮尚待检索：{source_text}。" if source_text else "") +
                     "已尝试：" + "；".join(tried_sources(view))),
-            "action": f"批准追加 {_usd(usd)} 美元（约 {calls} 次检索）后，系统继续检索剩下的来源。",
+            "action": approval_text + "。追加建议覆盖本轮剩余来源，找到所需材料即停止。",
             "consequence": "不处理，到截止时间后按现有材料起草，并注明这项材料缺少。",
             "where": "本卡片",
             "detail": {"scope": "request", "request_ref": view["id"], "company_ref": view["subject"],
-                       "approve_usd": _usd(usd), "approve_calls": calls},
+                       "approve_usd": _usd(money), "approve_calls": calls,
+                       "approved_extra_usd": _usd(prior_usd), "approved_extra_calls": prior_calls,
+                       "remaining_sources": blocked.get("remaining_sources") or []},
         })
     return cards
 

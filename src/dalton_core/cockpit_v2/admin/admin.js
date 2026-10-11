@@ -1482,7 +1482,7 @@
             after: () => { setTimeout(() => reload("projects"), 1500); } })); }
         }
         const next = h("input", { type: "text", maxlength: "80", value: label, "aria-label": `${label}的新名称` });
-        return h("div", { class: "adm-row" }, h("div", { class: "grow" }, h("div", null, label, " ", item.slug === "legacy" ? pill("ok", "主环境") : item.current ? pill("ok", "当前项目") : null),
+        return h("div", { class: "adm-row" }, h("div", { class: "grow" }, h("div", null, label, " ", item.current ? pill("ok", "当前项目") : null),
           h("div", { class: "adm-meta" }, ({active: "运行中", paused: "已暂停 · 只读", archived: "已归档", deleted: "已删除"}[lifecycle] || item.status_label || item.status)), tech("项目标识", item.slug || item.workspace_id)),
           item.url && !item.current ? h("a", { href: item.url, class: "adm-btn" }, "进入") : null,
           item.lifecycle_operation ? h("p", {class: "adm-meta"}, `最近操作：${{pause: "暂停项目", archive: "归档项目", restore: "恢复项目", delete: "永久删除项目", keep: "继续保留项目"}[item.lifecycle_operation.action] || "项目管理"} · ${{processing: "正在执行", failed: "未完成，请重试同一次请求", complete: "已完成"}[item.lifecycle_operation.status] || "状态待核实"}`) : null,

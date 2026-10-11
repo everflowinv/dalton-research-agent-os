@@ -33,6 +33,7 @@ REVENUE_PRETAX_SCHEMA_VERSION = "0.5"
 COVERAGE_SCHEMA_VERSION = "0.6"
 SCHEMA_VERSION = COVERAGE_SCHEMA_VERSION
 STRUCTURE_AUTHORITY_REF = "company-financial-statement-structure:0.6"
+NET_INCOME_SOURCE_CARRY_VALIDATION_REF = "filed-net-income-source-carry:0.1"
 _STRUCTURE_AUTHORITY_REFS = {
     LEGACY_SCHEMA_VERSION: "company-financial-statement-structure:0.1",
     ANNUAL_SCHEMA_VERSION: "company-financial-statement-structure:0.2",
@@ -679,7 +680,8 @@ def _normalize_line(
             raise FinancialStatementStructureError(
                 f"lines[{index}].concept is not a filed line in this input authority"
             )
-        if source.get("statement") != line["statement"]:
+        if (source.get("statement") != line["statement"]
+                and not _same_net_income_source(line, source, concept)):
             raise FinancialStatementStructureError("filed line statement differs from authority")
         if source.get("period_basis") != line["period_kind"]:
             raise FinancialStatementStructureError("filed line period kind differs from authority")
@@ -833,6 +835,28 @@ def _normalize_statement_leaf(
     line["concept"] = concept
 
 
+def _same_net_income_source(line: Mapping[str, Any], source: Mapping[str, Any],
+                            concept: str) -> bool:
+    """A consolidated earnings fact may open cash flow and tie income.
+
+    The filed authority retains its original cash statement, values, contexts
+    and evidence. This mirrors the presentation's exact-concept carry; it
+    does not move arbitrary cash lines or permit a different accounting fact.
+    Unit, duration, source evidence and numeric tie checks still run normally.
+    """
+    from .company_model_inputs import NET_INCOME_CONCEPTS
+
+    return (
+        concept in NET_INCOME_CONCEPTS
+        and source.get("status") == "filed"
+        and source.get("statement") == "cash"
+        and source.get("period_basis") == "duration"
+        and line.get("statement") == "income"
+        and line.get("period_kind") == "duration"
+        and line.get("role") in {"net_income", "diluted_eps_numerator"}
+    )
+
+
 def _normalize_formula(
     raw: Any, index: int, lines: Mapping[str, Mapping[str, Any]],
     filed: Mapping[str, Mapping[str, Any]], allowed_evidence: set[str], *,
@@ -861,7 +885,8 @@ def _normalize_formula(
         target = filed.get(tie)
         if target is None or target.get("status") != "filed":
             raise FinancialStatementStructureError("formula tie-out concept is not filed")
-        if target.get("statement") != lines[output]["statement"]:
+        if (target.get("statement") != lines[output]["statement"]
+                and not _same_net_income_source(lines[output], target, tie)):
             raise FinancialStatementStructureError("formula tie-out statement differs")
         if _units(
             target, include_duration=schema_version in _TYPED_NOTE_STRUCTURE_VERSIONS,
@@ -951,7 +976,19 @@ def _normalize_formula(
             for term in normalized
         )):
             raise FinancialStatementStructureError(
-                "sum formula roles do not match its company statement output"
+                "sum formula roles do not match its company statement output; "
+                f"formulas[{index}].output_ref={output!r}, output_role={output_role!r}; "
+                "disallowed_terms=" + repr([
+                    {"line_ref": term["line_ref"],
+                     "role": lines[term["line_ref"]]["role"]}
+                    for term in normalized
+                    if allowed_roles is None or lines[term["line_ref"]]["role"] not in (
+                        allowed_roles | {_COMPANY_COMPONENT_ROLE, _COMPANY_SUBTOTAL_ROLE}
+                    )
+                ]) + "; allowed_roles=" + repr(sorted(
+                    (allowed_roles or frozenset())
+                    | {_COMPANY_COMPONENT_ROLE, _COMPANY_SUBTOTAL_ROLE}
+                ))
             )
         if tie is None:
             cited_notes = [ref for ref in refs if ref in (note_evidence or {})]
@@ -976,7 +1013,10 @@ def _normalize_formula(
             raise FinancialStatementStructureError("divide is reserved for diluted EPS")
         if lines[numerator]["role"] != "diluted_eps_numerator":
             raise FinancialStatementStructureError(
-                "EPS numerator must use the company-specific diluted EPS numerator role"
+                "EPS numerator must use the company-specific diluted EPS numerator role; "
+                f"formulas[{index}].output_ref={output!r}, "
+                f"numerator_ref={numerator!r}, "
+                f"numerator_role={lines[numerator]['role']!r}"
             )
         if lines[denominator]["role"] != "diluted_weighted_average_shares":
             raise FinancialStatementStructureError(

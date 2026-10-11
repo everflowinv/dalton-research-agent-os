@@ -690,6 +690,10 @@ class LaneChildLauncher:
             log_path = ticket_dir / "run.log"
             preserve_prior_run_log(ticket_dir)
             log_fd = os.open(str(log_path), os.O_WRONLY | os.O_CREAT | os.O_TRUNC, 0o600)
+            # Capture before Popen: the parent can be descheduled after the
+            # child is born. A post-spawn timestamp would falsely prove that
+            # this live child predates its ticket after a writer restart.
+            started_at = wire_time(self.clock())
             try:
                 process = subprocess.Popen(
                     command, cwd=str(self.state_dir), stdin=subprocess.DEVNULL,
@@ -702,7 +706,7 @@ class LaneChildLauncher:
                 "schema_version": TICKET_SCHEMA_VERSION,
                 "id": ticket_id,
                 **dict(record),
-                "started_at": wire_time(self.clock()),
+                "started_at": started_at,
                 "pid": process.pid,
                 "command": command,
                 "status": "running",

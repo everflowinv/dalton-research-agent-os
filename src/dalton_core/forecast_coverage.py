@@ -40,6 +40,7 @@ from itertools import product
 from typing import Any, Iterable, Mapping, Sequence
 
 COVERAGE_RULE_REF = "rule:forecast-coverage:1"
+PROPOSAL_METHOD_COMPLETION_REF = "rule:forecast-proposal-method-completion:0.2"
 COVERAGE_SCHEMA_VERSION = "0.6"
 UPGRADEABLE_STRUCTURE_VERSIONS = frozenset({"0.3", "0.4", "0.5", "0.6"})
 MIN_HISTORY_QUARTERS = 8
@@ -1154,7 +1155,7 @@ def complete_methods_by_role(proposal: Mapping[str, Any],
         if line.get("kind") != "filed" or line.get("forecast_method") != "unavailable":
             continue
         role = str(line.get("role"))
-        if role in EARNINGS_TOTAL_ROLES or role == "diluted_eps":
+        if role in EARNINGS_TOTAL_ROLES or role in {"diluted_eps", "diluted_eps_numerator"}:
             continue
         if str(line.get("concept")) in TOTAL_COST_CONCEPTS:
             continue
