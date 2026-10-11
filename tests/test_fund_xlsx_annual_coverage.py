@@ -81,7 +81,7 @@ class AnnualWorkbookCoverageTests(unittest.TestCase):
             self.assertTrue(annual_columns)
             self.assertTrue(all(sheet.cell(row, column).value is None
                                 for column in annual_columns))
-            self.assertTrue(any(result["ref"] in gap and "does not cover" in gap
+            self.assertTrue(any(result["ref"] in gap and "暂未生成年度汇总" in gap
                                 for gap in exported["gaps"]))
         self.assertEqual(annual, original)
 

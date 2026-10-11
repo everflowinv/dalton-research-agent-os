@@ -1150,9 +1150,8 @@ def export_fund_workbook(
                 if projection_outcome is None:
                     if result["ref"] not in annual_result_coverage:
                         gaps.append(
-                            f"{result['ref']} {label}: annual unavailable; "
-                            "annual projection contract does not cover this "
-                            "statement line; available quarters are retained"
+                            f"{result['ref']} {label}: "
+                            "此科目暂未生成年度汇总，已保留可用的季度预测。"
                         )
                         continue
                     raise FundWorkbookExportError(
