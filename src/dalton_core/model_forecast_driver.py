@@ -5276,7 +5276,8 @@ class ForecastModelAuthority:
         from .economic_invariants import evaluate_forecast_model
         if wire.get("model_statement_scope") is not None:
             from .forecast_statement_scope import statement_scope
-            scoped_wire, scope_replay = statement_scope(model, statement_wire, self.connection)
+            scoped_wire, scope_replay = statement_scope(
+                model, statement_wire, self.connection, frozen_scope=wire["model_statement_scope"])
             if scope_replay != wire["model_statement_scope"]:
                 raise ForecastModelConflict("forecast filing partition scope does not replay")
         else:

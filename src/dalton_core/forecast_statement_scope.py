@@ -14,7 +14,7 @@ RULE_REF = "rule:forecast-statement-scope:1"
 
 
 def statement_scope(record: Mapping[str, Any], rows: Sequence[Mapping[str, Any]],
-                    connection: Any = None) -> tuple[list[Mapping[str, Any]], dict[str, Any] | None]:
+                    connection: Any = None, *, frozen_scope: Mapping[str, Any] | None = None) -> tuple[list[Mapping[str, Any]], dict[str, Any] | None]:
     from .model_forecast_driver import ForecastModelValidationError
     declarations = {d["ref"]: d for d in (record.get("execution_contract") or {}).get("specification", {}).get("revenue_drivers") or []}
     plans = (record.get("execution_contract") or {}).get("specification", {}).get("driver_formulas") or []
@@ -74,8 +74,39 @@ def statement_scope(record: Mapping[str, Any], rows: Sequence[Mapping[str, Any]]
                 full.extend(statement_rows(connection, ingest, version_id=next(iter(bindings))))
         current = [r for r in full if in_family(r) and r.get("period_end") == latest]
         current_members = {(r.get("dimensions") or {})[axis] for r in current}
+        presentation_proofs = []
         if current_members != expected:
-            raise ForecastModelValidationError("segment scope must declare every current filed member; missing=" + str(sorted(current_members - expected)) + "; unknown=" + str(sorted(expected - current_members)))
+            refusal = "segment scope must declare every current filed member; missing=" + str(sorted(current_members - expected)) + "; unknown=" + str(sorted(expected - current_members))
+            if connection is None or not filing_map or not expected < current_members:
+                raise ForecastModelValidationError(refusal)
+            from .forecast_presentation_partition import presentation_partition
+            from .sec_filing_units import FilingUnitError
+            try:
+                for ingest in sorted(current_ingests):
+                    filing = dict(connection.execute("SELECT * FROM coverage_mission_statement_filings WHERE ingest_id=?", (ingest,)).fetchone())
+                    source_rows = [r for r in current if str(r.get("ingest_id")) == ingest]
+                    source = None
+                    if frozen_scope is not None:
+                        if frozen_scope.get("content_hash") != content_hash({k: v for k, v in frozen_scope.items() if k != "content_hash"}):
+                            raise FilingUnitError("frozen presentation scope hash drifted")
+                        partitions = [p for p in frozen_scope.get("partitions") or []
+                                      if p.get("output_ref") == plan["output_ref"] and p.get("concept") == concept
+                                      and p.get("statement") == statement and p.get("axis") == axis
+                                      and p.get("fixed_dimensions") == fixed and p.get("members") == sorted(expected)]
+                        if len(partitions) != 1:
+                            raise FilingUnitError("frozen presentation scope identity differs")
+                        originals = [p.get("source") for p in partitions[0].get("presentation_partitions") or []
+                                     if (p.get("source") or {}).get("document_ref") == "sec:filing:" + filing["accession"]]
+                        if len(originals) != 1:
+                            raise FilingUnitError("frozen presentation scope lacks one exact original receipt")
+                        source = originals[0]
+                    presentation_proofs.append(presentation_partition(
+                        connection, filing, source_rows, expected,
+                        concept=concept, axis=axis, fixed=fixed, source=source))
+            except (FilingUnitError, ValueError, KeyError, TypeError, OSError) as exc:
+                raise ForecastModelValidationError(refusal + "; presentation proof refused: " + str(exc)) from exc
+            if not presentation_proofs:
+                raise ForecastModelValidationError(refusal)
         scoped = [r for r in rows if in_family(r) and (r.get("dimensions") or {})[axis] in expected
                   and ((str((filing_map.get(str(r.get("ingest_id"))) or {}).get("accession") or r.get("accession")), str(r.get("period_end"))) in requested
                        if filing_map else r.get("period_end") in common)]
@@ -92,7 +123,8 @@ def statement_scope(record: Mapping[str, Any], rows: Sequence[Mapping[str, Any]]
                           "historical_quarters": common, "periods": [list(k) for k in sorted(groups, key=str)],
                           "context_refs": sorted({str(r["statement_context_ref"]) for r in scoped if r.get("statement_context_ref")}),
                           "statement_line_refs": sorted({str(r["line_id"]) for r in scoped if r.get("line_id")}),
-                          "current_membership_rows_hash": content_hash(current)})
+                          "current_membership_rows_hash": content_hash(current),
+                          **({"presentation_partitions": presentation_proofs} if presentation_proofs else {})})
     if not manifests:
         return list(rows), None
     # Consolidated leaves are still checked. Dimensional data from other

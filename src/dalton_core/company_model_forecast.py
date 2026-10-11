@@ -183,6 +183,8 @@ def model_digest(
         # same spec/filings. This changes only the new structured run identity,
         # not any stored Work, model, source fact or validation arithmetic.
         digest_body["derived_history_unit_rule"] = DERIVED_HISTORY_UNIT_RULE_REF
+        from .forecast_presentation_partition import RULE_REF as PRESENTATION_PARTITION_RULE
+        digest_body["filed_presentation_partition_rule"] = PRESENTATION_PARTITION_RULE
     if reporting_boundary is not None:
         digest_body["forecast_reporting_boundary"] = dict(reporting_boundary)
     # Legacy unstructured run identities remain byte-for-byte stable. Only a
