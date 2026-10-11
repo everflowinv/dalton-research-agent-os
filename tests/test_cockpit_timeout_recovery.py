@@ -28,7 +28,7 @@ class CockpitTimeoutRecoveryTests(unittest.TestCase):
         self.kw = dict(purpose='deep_insight_gate',request_id='one-semantic-group',
                        prompt='exact source-supported questions', mission=self.mission)
 
-    def fail(self):
+    def timeout_parent(self):
         with self.assertRaises(CockpitModelError):self.model.call(**self.kw)
         with Scheduler(self.model.scheduler_db) as scheduler:
             rows=scheduler.connection.execute('SELECT work_order_id FROM scheduler_work_orders ORDER BY rowid').fetchall()
@@ -44,7 +44,7 @@ class CockpitTimeoutRecoveryTests(unittest.TestCase):
                 'SELECT settlement_id,record_json FROM thesis_impact_day_settlements ORDER BY rowid')]
 
     def test_single_successor_keeps_unknown_full_fee_and_replays_after_deadline(self):
-        parent,formal=self.fail(); old=self.snapshot(); self.clock.advance(61)
+        parent,formal=self.timeout_parent(); old=self.snapshot(); self.clock.advance(61)
         self.adapter.script={}
         result=self.model.call(**self.kw)
         self.assertNotEqual(result['work_order_ref'],parent['work_order']['id'])
@@ -62,7 +62,7 @@ class CockpitTimeoutRecoveryTests(unittest.TestCase):
         self.assertEqual(len(self.adapter.served),2)
 
     def test_child_timeout_never_generates_third_paid_generation(self):
-        self.fail();self.clock.advance(61)
+        self.timeout_parent();self.clock.advance(61)
         for _ in range(3):
             with self.assertRaises(CockpitModelError):self.model.call(**self.kw)
         self.clock.advance(86400)
@@ -75,7 +75,7 @@ class CockpitTimeoutRecoveryTests(unittest.TestCase):
     def test_backoff_and_expired_frozen_policy_refuse_without_more_calls(self):
         self.model.config['provider_retry']['unknown_recovery']={
             'max_fresh_work_orders':2,'retry_backoff_seconds':120,'max_elapsed_seconds':300}
-        self.fail()
+        self.timeout_parent()
         with self.assertRaises(CockpitModelError):self.model.call(**self.kw)
         self.clock.advance(301)
         with self.assertRaises(CockpitModelError):self.model.call(**self.kw)
@@ -84,13 +84,13 @@ class CockpitTimeoutRecoveryTests(unittest.TestCase):
     def test_frozen_optout_is_not_replaced_by_maintenance_policy(self):
         self.model.config['provider_retry']['unknown_recovery']={
             'max_fresh_work_orders':0,'retry_backoff_seconds':0,'max_elapsed_seconds':300}
-        self.fail();self.clock.advance(61)
+        self.timeout_parent();self.clock.advance(61)
         with self.assertRaises(CockpitModelError):self.model.call(**self.kw)
         self.assertEqual(len(self.adapter.served),1)
 
     def test_normal_mission_day_budget_still_refuses_successor(self):
         self.mission['budget']['max_daily_paid_calls']=1
-        self.fail();old=self.snapshot();self.clock.advance(61);self.adapter.script={}
+        self.timeout_parent();old=self.snapshot();self.clock.advance(61);self.adapter.script={}
         with self.assertRaises(CockpitModelError):self.model.call(**self.kw)
         self.assertEqual(len(self.adapter.served),1)
         self.assertEqual(self.snapshot(),old)
@@ -103,7 +103,7 @@ class CockpitTimeoutRecoveryTests(unittest.TestCase):
         self.assertEqual(len(self.adapter.served),1)
 
     def test_parent_formal_tamper_refuses_before_new_dispatch(self):
-        parent,formal=self.fail();self.clock.advance(61)
+        parent,formal=self.timeout_parent();self.clock.advance(61)
         with Scheduler(self.model.scheduler_db) as s:
             for row in s.connection.execute("SELECT name FROM sqlite_master WHERE type='trigger' AND tbl_name='scheduler_formal_results'").fetchall():
                 s.connection.execute('DROP TRIGGER '+row[0])
@@ -113,7 +113,7 @@ class CockpitTimeoutRecoveryTests(unittest.TestCase):
         self.assertEqual(len(self.adapter.served),1)
 
     def test_current_user_policy_routes_child_without_replacing_old_route(self):
-        parent,formal=self.fail();self.clock.advance(61);self.adapter.script={}
+        parent,formal=self.timeout_parent();self.clock.advance(61);self.adapter.script={}
         from dalton_core.research_planner_setup import ensure_planner_policy, credential_slots_for
         with ModelRouter(self.router_db) as router:
             policy=ensure_planner_policy(router,profile_ids=['profile:claude-fable-5-1'],
@@ -133,7 +133,7 @@ class CockpitTimeoutRecoveryTests(unittest.TestCase):
         self.assertEqual(result['task_accounted_micros'],result['cost_micros']+result['prior_unknown_accounted_micros'])
 
     def test_later_epoch_cannot_consume_second_physical_child(self):
-        self.fail();self.clock.advance(61)
+        self.timeout_parent();self.clock.advance(61)
         with self.assertRaises(CockpitModelError):self.model.call(**self.kw)
         # Changing retry controls must not grant another child under the same
         # semantic certificate. Same budget/same prompt, different Work body.
@@ -143,7 +143,7 @@ class CockpitTimeoutRecoveryTests(unittest.TestCase):
         self.assertEqual(len(self.adapter.served),2)
 
     def test_old_timeout_without_policy_uses_new_single_authorization_clock(self):
-        self.fail();self.clock.advance(172800);self.adapter.script={}
+        self.timeout_parent();self.clock.advance(172800);self.adapter.script={}
         result=self.model.call(**self.kw)
         with Scheduler(self.model.scheduler_db) as s:
             rec=json.loads(s.connection.execute('SELECT record_json FROM '+TABLE).fetchone()[0])
@@ -153,7 +153,7 @@ class CockpitTimeoutRecoveryTests(unittest.TestCase):
 
 
     def test_changed_config_replays_completed_child_for_free(self):
-        self.fail();self.clock.advance(61);self.adapter.script={}
+        self.timeout_parent();self.clock.advance(61);self.adapter.script={}
         answered=self.model.call(**self.kw)
         self.model.config['provider_retry']['max_same_profile_retries']=0
         replay=self.model.call(**self.kw)
@@ -163,7 +163,7 @@ class CockpitTimeoutRecoveryTests(unittest.TestCase):
 
     def test_unknown_pending_original_reservation_is_preserved(self):
         with patch('dalton_core.cockpit_model._settle_without_losing_the_lease',return_value=None):
-            parent,formal=self.fail()
+            parent,formal=self.timeout_parent()
         self.clock.advance(61);self.adapter.script={}
         result=self.model.call(**self.kw)
         with ThesisImpactBudgetStore(self.root/'budget.sqlite') as b:
@@ -174,7 +174,7 @@ class CockpitTimeoutRecoveryTests(unittest.TestCase):
 
     def test_concurrent_ticks_share_one_authorization_and_one_child(self):
         from concurrent.futures import ThreadPoolExecutor
-        self.fail();self.clock.advance(61);self.adapter.script={}
+        self.timeout_parent();self.clock.advance(61);self.adapter.script={}
         def tick():
             try:return self.model.call(**self.kw)
             except CockpitModelError:return None
@@ -188,10 +188,55 @@ class CockpitTimeoutRecoveryTests(unittest.TestCase):
     def test_frozen_policy_can_use_one_successor_within_original_elapsed(self):
         self.model.config['provider_retry']['unknown_recovery']={
             'max_fresh_work_orders':2,'retry_backoff_seconds':120,'max_elapsed_seconds':300}
-        self.fail();self.clock.advance(121);self.adapter.script={}
+        self.timeout_parent();self.clock.advance(121);self.adapter.script={}
         self.model.call(**self.kw)
         with Scheduler(self.model.scheduler_db) as s:
             rec=json.loads(s.connection.execute('SELECT record_json FROM '+TABLE).fetchone()[0])
         self.assertEqual(rec['policy_source'],'frozen_unknown_recovery')
         self.assertEqual(rec['maximum_successors'],1)
+        self.assertEqual(len(self.adapter.served),2)
+
+
+    def test_day_refusal_same_child_resumes_after_reset_without_new_window(self):
+        from datetime import timedelta
+        self.mission['budget']['max_daily_paid_calls']=1
+        parent,formal=self.timeout_parent();self.clock.advance(61);self.adapter.script={}
+        with self.assertRaises(CockpitModelError):self.model.call(**self.kw)
+        with Scheduler(self.model.scheduler_db) as s:
+            children=s.connection.execute('SELECT work_order_id FROM scheduler_work_orders WHERE work_order_id!=?',(parent['work_order']['id'],)).fetchall()
+            self.assertEqual(len(children),1);child=children[0][0]
+            status=s.status(child);self.assertEqual(status['state'],'ready')
+            self.assertIsNone(s.formal_result(child));self.assertIsNotNone(status['not_before'])
+            attempt=status['attempt_number']
+        for _ in range(3):
+            with self.assertRaises(CockpitModelError):self.model.call(**self.kw)
+        self.assertEqual(len(self.adapter.served),1)
+        with Scheduler(self.model.scheduler_db) as s:self.assertEqual(s.status(child)['attempt_number'],attempt)
+        self.clock.value=self.clock().replace(hour=0,minute=0,second=0,microsecond=0)+timedelta(days=1)
+        result=self.model.call(**self.kw)
+        self.assertEqual(result['work_order_ref'],child);self.assertEqual(len(self.adapter.served),2)
+        with Scheduler(self.model.scheduler_db) as s:
+            self.assertEqual(s.connection.execute('SELECT count(*) FROM '+TABLE).fetchone()[0],1)
+            self.assertEqual(s.connection.execute('SELECT count(*) FROM scheduler_work_orders').fetchone()[0],2)
+
+
+    def test_pool_refusal_same_child_is_retried_only_after_budget_day(self):
+        from datetime import timedelta
+        self.mission['budget']['max_daily_cost_usd']=2.4
+        # Pool borrowing uses the budget clock, which must share the model's
+        # synthetic pre-midday clock rather than treating this day as past.
+        budget_clock = patch('dalton_core.cockpit_model.ThesisImpactBudgetStore',
+            side_effect=lambda *a, **kw: ThesisImpactBudgetStore(*a, clock=self.clock, **kw))
+        budget_clock.start();self.addCleanup(budget_clock.stop)
+        parent,formal=self.timeout_parent();self.clock.advance(61);self.adapter.script={}
+        with self.assertRaises(CockpitModelError):self.model.call(**self.kw)
+        with Scheduler(self.model.scheduler_db) as s:
+            child=s.connection.execute('SELECT work_order_id FROM scheduler_work_orders WHERE work_order_id!=?',(parent['work_order']['id'],)).fetchone()[0]
+            self.assertEqual(s.status(child)['state'],'ready')
+            row=s.connection.execute('SELECT result_envelope_json FROM scheduler_result_envelopes WHERE work_order_id=?',(child,)).fetchone()
+            self.assertEqual(json.loads(row[0])['metadata']['timeout_budget_refusal_proof']['table'],'model_budget_pool_rejections')
+        with self.assertRaises(CockpitModelError):self.model.call(**self.kw)
+        self.assertEqual(len(self.adapter.served),1)
+        self.clock.value=self.clock().replace(hour=0,minute=0,second=0,microsecond=0)+timedelta(days=1)
+        self.assertEqual(self.model.call(**self.kw)['work_order_ref'],child)
         self.assertEqual(len(self.adapter.served),2)

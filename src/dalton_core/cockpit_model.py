@@ -2871,9 +2871,23 @@ class CockpitModel:
                             )
                             if paid_retry is not None:
                                 result = paid_retry
+                        timeout_budget_retry_at = None
+                        if _timeout_recovery is not None:
+                            from .cockpit_timeout_recovery import budget_refusal_proof
+                            refusal_proof = budget_refusal_proof(budget, router, work, attempt, outcome)
+                            if refusal_proof is not None:
+                                # A zero-send budget refusal is not a failed
+                                # paid maintenance attempt. Keep the same Work
+                                # and original Scheduler cap; no daily child.
+                                timeout_budget_retry_at = self.clock().astimezone(timezone.utc).replace(
+                                    hour=0, minute=0, second=0, microsecond=0) + timedelta(days=1)
+                                result = ResultEnvelope.from_dict({**result.to_dict(),
+                                    'status':'retryable', 'metadata':{**dict(result.metadata),
+                                        'timeout_budget_refusal_proof':refusal_proof,
+                                        'retry_at':timeout_budget_retry_at.isoformat()}})
                         completion = guard.complete(
                             result, idempotency_key=f"cockpit-complete:{work.id}:{attempt}",
-                            retry_at=(
+                            retry_at=(timeout_budget_retry_at if timeout_budget_retry_at is not None else
                                 self.clock() + timedelta(
                                     seconds=self.config["provider_retry"][
                                         "retry_backoff_seconds"])

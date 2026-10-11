@@ -239,3 +239,40 @@ def saved_successor(scheduler, record):
             or result.status!='succeeded'):
         raise ValueError('timeout successor formal authority drifted')
     return work, formal
+
+
+def budget_refusal_proof(budget, router, work, attempt, outcome):
+    """Only an atomic local day/pool no-send refusal may defer this same Work."""
+    result = outcome['result']
+    code = (result.error or {}).get('code')
+    if (code not in {'BUDGET_REFUSED','POOL_EXHAUSTED'}
+            or outcome.get('invocation') is not None or outcome.get('cost_micros') != 0
+            or result.metadata.get('dispatch_state', 'not_started') != 'not_started'
+            or not result.invocation_ref.startswith('invocation:not-started:')
+            or budget.admission(work_order_ref=work.id,attempt_number=attempt,phase='assessment') is not None):
+        return None
+    table = 'model_budget_pool_rejections' if code=='POOL_EXHAUSTED' else 'thesis_impact_day_rejections'
+    rows=budget.connection.execute('SELECT * FROM '+table+' WHERE work_order_ref=? AND attempt_number=? AND phase=?',
+                                   (work.id,attempt,'assessment')).fetchall()
+    if len(rows)!=1:
+        return None
+    row=rows[0];wire=json.loads(row['record_json'])
+    if (canonical_json(wire)!=row['record_json'] or wire.get('content_hash')!=row['content_hash']
+            or content_hash({k:v for k,v in wire.items() if k!='content_hash'})!=row['content_hash']
+            or wire.get('work_order_ref')!=work.id or wire.get('attempt_number')!=attempt
+            or wire.get('phase')!='assessment'):
+        raise ValueError('timeout budget refusal authority drifted')
+    if code=='POOL_EXHAUSTED':
+        if outcome.get('pool_rejection')!=wire or wire.get('reason')!='pool_exhausted':
+            return None
+    elif (wire.get('reason') not in {'mission_budget_exceeded','outer_research_budget_exceeded',
+                                     'shared_daily_budget_exceeded','owner_budget_exceeded'}
+          or result.metadata.get('route_decision_ref') not in (None, wire.get('route_decision_ref'))):
+        return None
+    if code=='BUDGET_REFUSED':
+        route=router.get_decision(wire['route_decision_ref'])
+        if (route['work_order_ref']!=work.id or route['work_order_hash']!=content_hash(work.to_dict())
+                or route['attempt_number']!=attempt or route['outcome']!='selected'):
+            raise ValueError('timeout budget refusal route differs')
+    return {'table':table,'rejection_ref':wire['rejection_id'],'rejection_hash':wire['content_hash'],
+            'day':wire['day'],'work_ref':work.id,'attempt':attempt}
