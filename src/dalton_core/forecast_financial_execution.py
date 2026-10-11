@@ -16,6 +16,7 @@ from .forecast_seasonality import seasonal_profile, year_ago
 
 RULE_REF = "rule:financial-driver-execution:1"
 SCHEMA_VERSION = "financial-execution:1"
+DERIVED_HISTORY_UNIT_RULE_REF = "rule:filed-derived-history-unit-case:0.1"
 
 
 def execution_spec(spec: Mapping[str, Any]) -> dict[str, Any]:
@@ -71,9 +72,19 @@ def additional_drivers(spec: Mapping[str, Any], table: Mapping[str, Any],
         units = {str(c.get("unit")).casefold() for c in (source.get("cells") or {}).values() if c.get("unit")}
         if not history or len(units) != 1:
             continue
+        unit = next(iter(units))
+        # The driver already uses the case-folded filed unit. Its cumulative
+        # operands must use that same spelling, without changing the held
+        # source, amount, period or evidence. Other units remain mismatches
+        # for the strict arithmetic/source validator; this converts no units.
+        for cell in history:
+            for operand in cell.get("derived_from") or []:
+                source_unit = operand.get("unit")
+                if isinstance(source_unit, str) and source_unit.casefold() == unit:
+                    operand["unit"] = unit
         driver_ref = ("fcf-input:" if declared["ref"].startswith("fcf-") else "economic:") + declared["ref"]
         out.append({"ref": driver_ref, "kind": "statement_line",
-                    "concept": concept, "statement": source.get("statement"), "unit": next(iter(units)),
+                    "concept": concept, "statement": source.get("statement"), "unit": unit,
                     "status": "filed", "role": None, "spec_rows": [declared["ref"]], "note": None,
                     "label": declared["label"], "history": history,
                     **({"statement_identity":source["statement_identity"]} if source.get("statement_identity") is not None else {}),

@@ -155,7 +155,9 @@ def model_digest(
         )
     else:
         cash_companion = None
-    from .forecast_financial_execution import RULE_REF as FINANCIAL_EXECUTION_RULE
+    from .forecast_financial_execution import (
+        RULE_REF as FINANCIAL_EXECUTION_RULE, DERIVED_HISTORY_UNIT_RULE_REF,
+    )
     digest_body = {
         "financial_execution_rule": FINANCIAL_EXECUTION_RULE,
         "spec_ref": str(spec.get("spec_id") or ""),
@@ -176,9 +178,14 @@ def model_digest(
         "forecast_structure_binding": statement_binding,
         "cash_flow_companion": cash_companion,
     }
+    if statement_binding is not None:
+        # A corrected builder must not replay the old refused child of the
+        # same spec/filings. This changes only the new structured run identity,
+        # not any stored Work, model, source fact or validation arithmetic.
+        digest_body["derived_history_unit_rule"] = DERIVED_HISTORY_UNIT_RULE_REF
     if reporting_boundary is not None:
         digest_body["forecast_reporting_boundary"] = dict(reporting_boundary)
-    # Historical model identities remain byte-for-byte stable.  Only the new
+    # Legacy unstructured run identities remain byte-for-byte stable. Only a
     # note-backed structure adds this authority to its digest.
     if note_context_binding is not None:
         digest_body["financial_note_context_binding"] = note_context_binding
