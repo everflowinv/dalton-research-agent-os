@@ -36,16 +36,18 @@ class PlannerStorageBoundTests(unittest.TestCase):
             context.pop('content_hash',None);context['content_hash']=content_hash(context)
         s.pop('content_hash',None);s['content_hash']=content_hash(s);return s
 
-    def exact_64844(self):
-        s=self.inventory(55)
+    def exact_96000(self):
+        # A fixed sample above the retired64KB gate and below128KB.
+        # New static contracts changed the old64844-byte sample baseline.
+        s=self.inventory(100)
         measured=len(build_prompt(project_state_for_prompt(s,max_input_bytes=MAX_WORK_ORDER_PROMPT_BYTES)).encode())
-        remaining=64844-measured
+        remaining=96000-measured
         self.assertGreaterEqual(remaining,0)
         questions=s['reflection_followup_context']['backlog_questions']
         for i in range(remaining):questions[i%len(questions)]['question']+='Q'
         self.assertTrue(all(len(q['question'])<=600 for q in questions))
         s=self.rebind(s)
-        self.assertEqual(len(build_prompt(project_state_for_prompt(s,max_input_bytes=MAX_WORK_ORDER_PROMPT_BYTES)).encode()),64844)
+        self.assertEqual(len(build_prompt(project_state_for_prompt(s,max_input_bytes=MAX_WORK_ORDER_PROMPT_BYTES)).encode()),96000)
         return s
 
     def run_with_budget(self,state,input_tokens):
@@ -69,13 +71,13 @@ class PlannerStorageBoundTests(unittest.TestCase):
             calls=model.return_value.call.call_count
         return summary,built_works,calls
 
-    def test_current_64844_size_reaches_normal_work_with_all_company_and_open_question_identity(self):
-        state=self.exact_64844();before=copy.deepcopy(state)
+    def test_current_96000_size_reaches_normal_work_with_all_company_and_open_question_identity(self):
+        state=self.exact_96000();before=copy.deepcopy(state)
         summary,works,calls=self.run_with_budget(state,250000)
         self.assertEqual(summary['plan_status'],'fresh');self.assertEqual(calls,1)
         self.assertEqual(summary['work_order_prompt_bound'],128000)
         self.assertEqual(summary['model_max_input_tokens'],250000)
-        self.assertEqual(summary['prompt_bytes'],64844)
+        self.assertEqual(summary['prompt_bytes'],96000)
         self.assertEqual(works[0].budget['max_input_tokens'],250000)
         # The actual Work carries every company and every original question;
         # none was removed merely to fit the former 64KB ceiling.
@@ -86,7 +88,7 @@ class PlannerStorageBoundTests(unittest.TestCase):
         self.assertEqual(state,before)
 
     def test_smaller_model_authority_limits_projection_and_real_work_admission(self):
-        state=self.exact_64844()
+        state=self.exact_96000()
         summary,works,calls=self.run_with_budget(state,2048)
         self.assertEqual(summary['plan_status'],'input_too_large')
         self.assertEqual(summary['prompt_input']['configured_max_input_bytes'],2048)
@@ -115,7 +117,7 @@ class PlannerStorageBoundTests(unittest.TestCase):
         self.assertEqual(again['plan_status'],'held');self.assertEqual(calls,0);self.assertEqual(works,[])
 
     def test_changed_input_budget_reprojects_old_size_failure_once(self):
-        state=self.exact_64844()
+        state=self.exact_96000()
         self.config.write_text(json.dumps({"purpose_call_budgets":{"plan":{"max_input_tokens":2048}}}))
         first,works,calls=self.run_with_budget(state,2048)
         self.assertEqual(first['plan_status'],'input_too_large')
