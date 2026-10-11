@@ -106,14 +106,16 @@ def company_state(
     waiting = numeric_waiting_targets(document_research_feedback)
     if waiting["targets"]:
         extra["numeric_waiting_targets"] = waiting
+    from .numeric_source_admission_feedback import ADMISSION_OUTCOMES
     refusals = sorted({item["id"] for item in document_research_feedback
-                       if item.get("outcome") == "numeric_admission_source_grade_refused"})
+                       if item.get("outcome") in ADMISSION_OUTCOMES})
     if refusals:
         extra["numeric_source_refusal_ids"] = refusals
         extra["numeric_source_refusals"] = [{key:item[key] for key in (
-            "id", "document_ref", "document_version_hash", "reason", "source_grade")}
+            "id", "document_ref", "document_version_hash", "reason", "source_grade",
+            *(("unexecutable_period_targets",) if item.get("unexecutable_period_targets") else ()))}
             for item in document_research_feedback
-            if item.get("outcome") == "numeric_admission_source_grade_refused"]
+            if item.get("outcome") in ADMISSION_OUTCOMES]
     return {
         "company_ref": entry.get("company_ref"),
         "ticker": entry.get("ticker"),

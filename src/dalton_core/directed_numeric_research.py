@@ -34,7 +34,7 @@ def numeric_target_schema() -> dict[str, Any]:
                     'required': ['label', 'meaning'],
                     'properties': {'label': dict(text), 'meaning': {**text, 'maxLength': 600}},
                 },
-                'period': {**text, 'description': 'The exact period sought in the original disclosure.'},
+                'period': {**text, 'description': 'The exact period sought in the original disclosure; name the year or quarter/half-year, not current or latest reporting period.'},
                 'unit': {'type': 'string', 'enum': list(numeric_units(CONTRACT_REF))},
                 'currency': {'type': ['string', 'null'],
                              'description': 'Three uppercase letters when unit is currency; null for every other unit.'},
@@ -83,6 +83,19 @@ def normalize_targets(value: Any) -> list[dict[str, Any]]:
         refs.add(target['target_ref']);identities.add(identity)
         output.append({**dict(target),'metric_definition':dict(definition),'metric_definition_hash':digest})
     return output
+
+def unexecutable_period_targets(value: Any) -> list[dict[str, str]]:
+    """A new-write preflight, separate from immutable historical normalization."""
+    from .document_numeric_claim import _names_a_period
+    return [{'target_ref': target['target_ref'], 'period': target['period']}
+            for target in normalize_targets(value) if not _names_a_period(target['period'])]
+
+def assert_executable_target_periods(value: Any) -> None:
+    missing = unexecutable_period_targets(value)
+    if missing:
+        raise DirectedNumericError('numeric_target_period_unspecified: ' +
+            ', '.join(f"{item['target_ref']}={item['period']!r}" for item in missing) +
+            '; name the exact year or quarter/half-year from the original disclosure before reading; do not guess a date')
 
 def coverage(targets:Sequence[Mapping[str,Any]], figures:Sequence[Mapping[str,Any]], *,
              company_ref:str,document_ref:str,source_manifest_hash:str) -> dict[str,Any]:

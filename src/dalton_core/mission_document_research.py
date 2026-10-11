@@ -839,6 +839,11 @@ class MissionDocumentResearchAuthority:
             stored = self._read_row(row)
             self.resolve_for_execution(stored["id"])
             return {"status_marker": "duplicate", **stored}
+        # New admissions must be executable by the existing Figure period gate.
+        # Historical identities/replay remain governed by their original rules.
+        if identity.get("numeric_authority") is not None:
+            from .directed_numeric_research import assert_executable_target_periods
+            assert_executable_target_periods(identity["numeric_authority"]["targets"])
         equivalent = self.equivalent_open_admission(identity)
         if equivalent is not None:
             raise MissionDocumentResearchEquivalentPending(equivalent)

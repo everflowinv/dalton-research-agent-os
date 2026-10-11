@@ -75,7 +75,7 @@ def document_research_feedback_signature(core: Any) -> str:
             "ORDER BY v.mission_version_id")
         body = [read_document_research_feedback(core, json.loads(row["record_json"]))
                 for row in missions]
-        from .numeric_source_admission_feedback import OUTCOME, semantic_feedback
+        from .numeric_source_admission_feedback import ADMISSION_OUTCOMES, semantic_feedback
         for feedback in body:
             if "admission_source_feedback_status" not in feedback:
                 continue  # preserve the signature of historical feedback unchanged
@@ -84,7 +84,7 @@ def document_research_feedback_signature(core: Any) -> str:
             status["unverified"] = [semantic_feedback(item) for item in status["unverified"]]
             for company, rows in feedback.get("by_company", {}).items():
                 feedback["by_company"][company] = [semantic_feedback(item)
-                    if item.get("outcome") == OUTCOME else item for item in rows]
+                    if item.get("outcome") in ADMISSION_OUTCOMES else item for item in rows]
     except Exception as exc:
         body = {"status": "unavailable", "reason": type(exc).__name__}
     return content_hash(body)

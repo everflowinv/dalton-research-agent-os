@@ -854,8 +854,8 @@ def project_state_for_prompt(
                 continue
             company["document_research_feedback"] = [
                 {key: row[key] for key in (*_FEEDBACK_PLANNER_FIELDS,
-                    *(("reason", "source_grade", "document_version_hash")
-                      if row.get("outcome") == "numeric_admission_source_grade_refused" else ())) if key in row}
+                    *(("reason", "source_grade", "document_version_hash", "unexecutable_period_targets")
+                      if row.get("outcome") in ("numeric_admission_source_grade_refused", "numeric_admission_period_refused") else ())) if key in row}
                 if isinstance(row, Mapping) else row
                 for row in rows
             ]
@@ -1358,6 +1358,9 @@ def build_prompt(state: Mapping[str, Any]) -> str:
         "numeric_admission_source_grade_refused proves a source restriction: keep that task blocked and ask a "
         "compatible source-authority numeric strategy (SPOKEN management statements or FILED facts) on that exact original, or a separate inquiry from another eligible source. Never move its replaces_numeric_rejection "
         "binding across document/version. Unverified source feedback is not a grade refusal. "
+        "numeric_admission_period_refused means a numeric target lacks an executable period: preserve the "
+        "question and exact original, identify its explicit year or quarter/half-year before resubmitting; "
+        "never guess a date or repeat latest/current reporting period. "
         "document_research_feedback_summary aggregates tried history only to fit input; the summary is not a "
         "finding.\n\nContinue canonical_document_questions with exact canonical_question version_ref/content_hash "
         "and document/version, even when rewording. In-flight means wait; settled is not necessarily answered. New"
