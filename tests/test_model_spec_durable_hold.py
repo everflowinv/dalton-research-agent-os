@@ -39,7 +39,9 @@ from dalton_core.company_model_cli import (
     REQUEST_IN_FLIGHT_STATUS,
     _repair_prompt,
     _request_in_flight,
+    model_spec_request_id,
 )
+from dalton_core.store import content_hash
 from dalton_core.cockpit_model import CockpitModelError
 from dalton_core.company_model_spec import (
     REPAIRABLE_STRUCTURE_RULES,
@@ -340,7 +342,16 @@ class RequestInFlightTests(unittest.TestCase):
         # the same judgement is bought once.  Minting a fresh id to dodge the
         # lease would buy it twice.
         self.assertEqual(REQUEST_IN_FLIGHT_STATUS, "request_in_flight")
-        self.assertIn("0.6", REPAIR_CONTRACT_REF)
+        self.assertEqual(REPAIR_CONTRACT_REF,
+                         "contract:company-model-spec-structured-output-repair:0.9")
+        self.assertEqual(REPAIR_CONTRACT["ref"], REPAIR_CONTRACT_REF)
+        self.assertEqual(REPAIR_CONTRACT_HASH, content_hash(REPAIR_CONTRACT))
+        state_hash = "a" * 64
+        repair = {"max_attempts": 1}
+        request = model_spec_request_id(state_hash, repair_config=repair)
+        self.assertEqual(request, model_spec_request_id(state_hash, repair_config=repair))
+        self.assertNotEqual(request, model_spec_request_id(
+            state_hash, repair_config={"max_attempts": 0}))
 
 
 if __name__ == "__main__":  # pragma: no cover

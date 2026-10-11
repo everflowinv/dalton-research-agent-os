@@ -81,7 +81,11 @@ class ReadableOriginalAvailabilityTests(unittest.TestCase):
         self.assertIn("without a preview; no preview does not mean missing material", prompt)
         self.assertIn("withdrawn executions, not pending reads", prompt)
         self.assertIn("versions remain selectable, not verified numeric answers", prompt)
-        self.assertIn("Numeric questions require directed-document-numeric:0.1 and ALL numeric_targets", prompt)
+        self.assertIn("Numeric questions require the original authority's source_grade", prompt)
+        self.assertIn("directed-document-numeric:0.1 for company-filed-document", prompt)
+        self.assertIn("directed-document-spoken-numeric:0.1 for earnings-call-transcript", prompt)
+        self.assertIn("Numeric questions require typed targets and ALL numeric_targets", prompt)
+        self.assertIn("Unknown grades cannot authorize numeric research", prompt)
 
 
 class WithdrawnExecutionTests(unittest.TestCase):

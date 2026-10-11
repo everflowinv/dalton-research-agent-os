@@ -1551,7 +1551,8 @@ class CockpitChainTests(unittest.TestCase):
                slots: list[str] | None = None, capacity_retry=None,
                transport_retry=None, provider_retry=None, clock=None,
                model_spec_output_tokens: int | None = None,
-               event_output_tokens: int | None = None) -> CockpitModel:
+               event_output_tokens: int | None = None,
+               initial_screen_output_tokens: int | None = None) -> CockpitModel:
         config = {
             "routing_policy_ref": policy_version_ref,
             "credential_slot_refs": list(slots if slots is not None else self.slots),
@@ -1570,6 +1571,9 @@ class CockpitChainTests(unittest.TestCase):
                 }),
                 **({} if event_output_tokens is None else {
                     "event_judgement": {"max_output_tokens": event_output_tokens},
+                }),
+                **({} if initial_screen_output_tokens is None else {
+                    "initial_screen": {"max_output_tokens": initial_screen_output_tokens},
                 }),
             },
             **({} if capacity_retry is None else {"capacity_retry": capacity_retry}),
@@ -1934,8 +1938,12 @@ class CockpitChainTests(unittest.TestCase):
 
     def test_initial_screen_verifier_work_order_binds_provider_contract_into_identity(self) -> None:
         import dalton_core.initial_screen_cli  # registers the real stage purposes
+        # This tests verifier identity, not the production 128K allowance.
+        # Give the $50/M synthetic producer the supported 16K product floor,
+        # which fits this fixture's pool without changing the production limit.
         producer = self._model(
-            ChainAdapter({}), policy_version_ref=self.chain_policy
+            ChainAdapter({}), policy_version_ref=self.chain_policy,
+            initial_screen_output_tokens=16000,
         ).call(purpose="initial_screen", request_id="initial-screen-provider-contract",
                prompt="draft", mission=self.mission)
         verifier = self._model(
@@ -1948,6 +1956,8 @@ class CockpitChainTests(unittest.TestCase):
         )
         with Scheduler(self.root / "scheduler.sqlite") as scheduler:
             stored = scheduler.work_order_authority(verifier["work_order_ref"])
+            producer_work = scheduler.work_order_authority(producer["work_order_ref"])
+        self.assertEqual(producer_work["work_order"]["budget"]["max_output_tokens"], 16000)
         metadata = stored["work_order"]["metadata"]
         self.assertEqual(
             stored["work_order"]["requested_capabilities"],

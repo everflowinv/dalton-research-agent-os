@@ -4,7 +4,8 @@ import copy
 import unittest
 from dalton_core.planner_numeric_requirements import numeric_requirements
 from dalton_core.research_planner import (
-    ResearchPlanInputTooLarge, build_prompt, plan_from_response, project_state_for_prompt,
+    ResearchPlanInputTooLarge, build_prompt, followup_context_matches_prompt,
+    plan_from_response, project_state_for_prompt,
 )
 from dalton_core.store import content_hash
 from tests import test_research_planner as f
@@ -94,7 +95,16 @@ class AllCompanySkeletonTests(unittest.TestCase):
         }
         built = f.FeedbackProjectionTests.rebind(built)
         projected = self.project(built)
-        self.assertEqual(projected['reflection_followup_context'], built['reflection_followup_context'])
+        context = projected['reflection_followup_context']
+        full = built['reflection_followup_context']
+        # Bounded prompt material adds provenance, not a different obligation.
+        self.assertEqual(context['groups'], full['groups'])
+        self.assertEqual(context['backlog_questions'], full['backlog_questions'])
+        self.assertEqual(context['projection']['full_context_hash'], content_hash(full))
+        self.assertTrue(followup_context_matches_prompt(context, full))
+        changed = copy.deepcopy(context)
+        changed['groups'][0]['suggestions'][0]['reason'] = 'Unbound replacement obligation'
+        self.assertFalse(followup_context_matches_prompt(changed, full))
 
     def test_twelve_companies_all_have_a_selectable_document_under_the_bound(self):
         projected = self.project(self.inventory(12))
