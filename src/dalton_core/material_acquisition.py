@@ -93,6 +93,7 @@ from . import material_requests as mr
 SCHEMA_VERSION = "material-acquisition:0.1"
 _SCHEMA_PATH = Path(__file__).with_name("material_acquisition_schema.sql")
 ACTOR_REF = "automation:material-acquisition"
+HELD_FILING_ANSWER_WINDOW_RULE_REF = "rule:unperioded-filing-answer-window:0.1"
 
 #: The default ladder (the diagnosis's order).
 LADDER: tuple[str, ...] = mr.DEFAULT_SOURCE_PRIORITY
@@ -494,11 +495,22 @@ def _is_company(subject: str) -> bool:
     return not str(subject).startswith(("industry:", "industry-"))
 
 
+def _unperioded_filing_answer(request: Mapping[str, Any]) -> bool:
+    from .material_retrieval import filing_kinds
+    return (not str(request.get("period") or "").strip()
+            and (request.get("need") or {}).get("kind") == "answer"
+            and bool(filing_kinds(request)))
+
+
 def _window_with_acceptance(request: Mapping[str, Any], *, now: str | None) -> tuple[str | None, str | None]:
     window = period_window(request.get("period"), now=now)
     acceptance = request.get("acceptance") or {}
     today = (_parse_ts(now) or datetime.now(timezone.utc)).date()
     date_from, date_to = window["date_from"], window["date_to"]
+    if _unperioded_filing_answer(request):
+        # A filing question without a period is not a rolling publication
+        # year. Explicit bounds below and fiscal/version proofs still apply.
+        date_from, date_to = None, None
     after = _day(acceptance.get("published_after"))
     if after is not None:
         candidate = (after + timedelta(days=1)).isoformat()
@@ -1548,6 +1560,10 @@ def _free_retrieval_recheck(state: Path, view: Mapping[str, Any], *, stamp: str)
     retrieval_hash = (retrieval["content_hash"] if retrieval is not None else
                       _sha({"rule_ref": RULE_REF, "need": view.get("need"), "doc_kinds": required_filings}))
     marker = {"rule_ref": RULE_REF, "retrieval_contract_hash": retrieval_hash}
+    if _unperioded_filing_answer(view):
+        # Permit one free local recheck after the corrected window rule,
+        # including requests that consumed the old lexical-contract recheck.
+        marker["window_rule_ref"] = HELD_FILING_ANSWER_WINDOW_RULE_REF
     if any(e.get("event_kind") == "attempt" and e.get("query") == marker
            for e in view.get("events") or ()):
         return None
