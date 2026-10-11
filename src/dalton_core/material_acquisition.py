@@ -1181,12 +1181,16 @@ def _approvals(state_dir: str | Path) -> list[dict[str, Any]]:
     return out
 
 
-def budget_card_ref(scope: str, key: str, usd_micros: int, calls: int) -> str:
-    return f"material-budget:{scope}:{key}:{_usd(usd_micros)}:{int(calls)}"
+def budget_card_ref(scope: str, key: str, usd_micros: int, calls: int, *,
+                    basis: Mapping[str, Any] | None = None) -> str:
+    # Approval amounts must cover fractional cents, not round them down.
+    cents = (max(0, int(usd_micros)) + 9999) // 10000
+    ref = f"material-budget:{scope}:{key}:{_usd(cents * 10000)}:{int(calls)}"
+    return ref if basis is None else ref + ":basis:" + _sha(dict(basis))[:16]
 
 
 def parse_budget_card_ref(ref: str) -> dict[str, Any] | None:
-    match = re.fullmatch(r"material-budget:(pool|request):(.+):(\d+\.\d{2}):(\d+)", ref or "")
+    match = re.fullmatch(r"material-budget:(pool|request):(.+):(\d+\.\d{2}):(\d+)(?::basis:[a-f0-9]{16})?", ref or "")
     if match is None:
         return None
     return {"scope": match.group(1), "key": match.group(2), "usd_micros": _micros(match.group(3)),
@@ -1257,11 +1261,43 @@ def _budget_check(state_dir: str | Path, request: Mapping[str, Any], calls: int,
     spent = request_spend(state_dir, str(request["id"]))
     if spent["calls"] + calls > caps["calls"] or spent["cost_micros"] + cost_micros > caps["usd_micros"]:
         return {"scope": "request", "key": str(request["id"]),
-                "approve_calls": max(calls, spent["calls"] + calls - caps["calls"]),
-                "approve_usd_micros": max(cost_micros, spent["cost_micros"] + cost_micros - caps["usd_micros"]),
+                "approve_calls": max(0, spent["calls"] + calls - caps["calls"]),
+                "approve_usd_micros": max(0, spent["cost_micros"] + cost_micros - caps["usd_micros"]),
                 "spent_calls": spent["calls"], "cap_calls": caps["calls"],
                 "spent_usd_micros": spent["cost_micros"], "cap_usd_micros": caps["usd_micros"]}
     return None
+
+
+def _request_budget_proposal(request: Mapping[str, Any], blocked: Mapping[str, Any], *,
+                             source: str, rungs: Mapping[str, Any]) -> dict[str, Any]:
+    """Estimate the remaining round once; this is a proposal, never a grant."""
+    attempts = _round_attempts(request)
+    last = {str(a.get("source")): a for a in attempts}
+    tried = {str(a.get("source")) for a in attempts if a.get("outcome") in TRIED_OUTCOMES}
+    max_attempts = int((request.get("budget") or {}).get("max_attempts") or len(LADDER))
+    sources = list(request.get("source_priority") or LADDER)
+    sources = sources[sources.index(source):] if source in sources else [source]
+    calls = cost = 0
+    remaining = []
+    for name in sources:
+        rung = rungs.get(name)
+        if (rung is None or not getattr(rung, "costed", False)
+                or (last.get(name) or {}).get("outcome") in DONE_OUTCOMES | {"dispatched"}
+                or not rung.applies(request)):
+            continue
+        if name not in tried and len(tried) >= max_attempts:
+            continue
+        tried.add(name)
+        count = int(getattr(rung, "estimate_calls", lambda r: CALL_ESTIMATES.get(name, 1))(request))
+        calls += count
+        cost += int(USD_PER_CALL.get(name, Decimal(0)) * count * 1_000_000)
+        remaining.append(name)
+    return {**blocked,
+            "approve_calls": max(0, int(blocked["spent_calls"]) + calls - int(blocked["cap_calls"])),
+            "approve_usd_micros": max(0, int(blocked["spent_usd_micros"]) + cost
+                                     - int(blocked["cap_usd_micros"])),
+            "remaining_sources": remaining, "remaining_estimated_calls": calls,
+            "remaining_estimated_usd_micros": cost}
 
 
 def _record_spend(state_dir: str | Path, request_id: str, source: str, calls: int, cost_micros: int, *,
@@ -1508,6 +1544,8 @@ def serve(state_dir: str | Path, request_id: str, *, rungs: Mapping[str, Any] | 
                 cost = int(USD_PER_CALL.get(source, Decimal(0)) * calls * 1_000_000)
                 blocked = _budget_check(state, view, calls, cost, now=stamp)
                 if blocked is not None:
+                    if blocked["scope"] == "request":
+                        blocked = _request_budget_proposal(view, blocked, source=source, rungs=rungs)
                     result = RungResult("budget_blocked", query=queries, detail=_canonical(blocked))
                     if outcome_before != "budget_blocked" or (previous or {}).get("detail") != result.detail:
                         _record(state, view, source, result, now=stamp)
@@ -1937,7 +1975,8 @@ def _need_text(request: Mapping[str, Any]) -> str:
         return "、".join(KIND_LABELS.get(k, k) for k in need.get("doc_kinds") or ())
     if need.get("kind") in ("data", "model"):
         return f"数据项「{str(need.get('data_item') or '').replace('check:', '')}」"
-    return f"问题「{str(need.get('question') or '')[:60]}」"
+    question = re.split(r"\s+-- (?:wants|terms):", str(need.get("question") or ""), maxsplit=1)[0]
+    return f"问题「{question[:60]}」"
 
 
 def owner_door_cards(state_dir: str | Path, *, now: str | None = None,
@@ -1980,6 +2019,20 @@ def owner_door_cards(state_dir: str | Path, *, now: str | None = None,
             if blocked.get("scope") == "pool" and blocked.get("key") == stamp[:10]:
                 budget_pool.append(view)
             elif blocked.get("scope") == "request":
+                # The last attempt predates a possible approval. Render from
+                # current caps, not that stale refusal; no request is dispatched.
+                source = str(attempts[-1].get("source") or "")
+                rungs = default_rungs()
+                rung = rungs.get(source)
+                if rung is not None and rung.applies(view):
+                    calls = int(rung.estimate_calls(view))
+                    cost = int(USD_PER_CALL.get(source, Decimal(0)) * calls * 1_000_000)
+                    caps, spent = request_caps(state_dir, view), request_spend(state_dir, view["id"])
+                    if spent["calls"] + calls <= caps["calls"] and spent["cost_micros"] + cost <= caps["usd_micros"]:
+                        continue
+                    blocked = {**blocked, "spent_calls": spent["calls"], "spent_usd_micros": spent["cost_micros"],
+                               "cap_calls": caps["calls"], "cap_usd_micros": caps["usd_micros"]}
+                    blocked = _request_budget_proposal(view, blocked, source=source, rungs=rungs)
                 budget_request.append((view, blocked))
     for subject, views in sorted(exhausted.items()):
         name = labels.get(subject) or subject
@@ -2030,21 +2083,41 @@ def owner_door_cards(state_dir: str | Path, *, now: str | None = None,
                        "request_refs": [v["id"] for v in budget_pool][:50]},
         })
     for view, blocked in budget_request:
-        usd = int(blocked.get("approve_usd_micros") or _micros("0.50"))
-        calls = int(blocked.get("approve_calls") or 3)
+        usd = int(blocked.get("approve_usd_micros", _micros("0.50")))
+        calls = int(blocked.get("approve_calls", 3))
+        ref = budget_card_ref("request", view["id"], usd, calls, basis={
+            key: blocked.get(key) for key in ("cap_calls", "cap_usd_micros", "spent_calls",
+                                             "spent_usd_micros", "remaining_sources")})
+        approved = [a for a in _approvals(state_dir) if a["scope"] == "request" and a["key"] == view["id"]]
+        prior_calls = sum(a["calls"] for a in approved)
+        prior_usd = sum(a["usd_micros"] for a in approved)
+        remaining_usd = max(0, int(blocked.get("cap_usd_micros") or 0) - int(blocked.get("spent_usd_micros") or 0))
+        money = parse_budget_card_ref(ref)["usd_micros"]
+        shortage = "检索次数" if not money else "金额" if not calls else "检索次数和金额"
+        approval_text = (f"批准追加 {calls} 次检索；金额上限保持不变"
+                         if not money else f"批准追加 {_usd(money)} 美元和 {calls} 次检索"
+                         if calls else f"批准追加 {_usd(money)} 美元；检索次数上限保持不变")
+        prior_text = (f"此前已批准追加 {_usd(prior_usd)} 美元、{prior_calls} 次检索，已计入当前上限。"
+                      if approved else "")
+        source_text = "、".join(_source_label(s) for s in blocked.get("remaining_sources") or ())
         name = labels.get(str(view["subject"])) or view["subject"]
         cards.append({
-            "kind": "material_budget_exceeded", "ref": budget_card_ref("request", view["id"], usd, calls),
+            "kind": "material_budget_exceeded", "ref": ref,
             "at": str(view.get("last_event_at") or stamp),
-            "title": f"{name}：「{_need_text(view)}」的获取额度已用完",
-            "why": (f"这项请求已用 {blocked.get('spent_calls')} 次检索、约 {_usd(blocked.get('spent_usd_micros') or 0)} 美元，"
-                    f"达到单项上限 {blocked.get('cap_calls')} 次、{_usd(blocked.get('cap_usd_micros') or 0)} 美元。"
+            "title": f"{name}：{_need_text(view)}的{shortage}额度不足",
+            "why": (prior_text + f"这项请求累计已用 {blocked.get('spent_calls')} 次检索、"
+                    f"{Decimal(int(blocked.get('spent_usd_micros') or 0)) / 1_000_000:.3f} 美元；"
+                    f"当前上限 {blocked.get('cap_calls')} 次、{_usd(blocked.get('cap_usd_micros') or 0)} 美元。"
+                    f"金额还剩 {Decimal(remaining_usd) / 1_000_000:.3f} 美元。"
+                    + (f"本轮尚待检索：{source_text}。" if source_text else "") +
                     "已尝试：" + "；".join(tried_sources(view))),
-            "action": f"批准追加 {_usd(usd)} 美元（约 {calls} 次检索）后，系统继续检索剩下的来源。",
+            "action": approval_text + "。追加建议覆盖本轮剩余来源，找到所需材料即停止。",
             "consequence": "不处理，到截止时间后按现有材料起草，并注明这项材料缺少。",
             "where": "本卡片",
             "detail": {"scope": "request", "request_ref": view["id"], "company_ref": view["subject"],
-                       "approve_usd": _usd(usd), "approve_calls": calls},
+                       "approve_usd": _usd(money), "approve_calls": calls,
+                       "approved_extra_usd": _usd(prior_usd), "approved_extra_calls": prior_calls,
+                       "remaining_sources": blocked.get("remaining_sources") or []},
         })
     return cards
 
