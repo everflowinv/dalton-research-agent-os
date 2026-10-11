@@ -989,6 +989,12 @@ class MissionDocumentResearchAuthority:
         for admission_id, created_at, matched in candidates:
             at = settled.get(admission_id)
             if at is None:
+                from .document_execution_failure import read_execution_failure
+                failure = read_execution_failure(self.connection, admission_id)
+                if failure is not None:
+                    return {"admission_ref": admission_id, "state": failure["execution_state"],
+                            "matched_on": matched, "rule_ref": EQUIVALENT_INQUIRY_RULE_REF,
+                            "execution_failure": failure}
                 state = "in_flight"
             else:
                 moment = datetime.fromisoformat(at)

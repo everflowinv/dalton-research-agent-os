@@ -46,6 +46,18 @@ def read_document_research_feedback(core: Any, mission: Mapping[str, Any]) -> di
             # Keep the validated observation identity with all attempted terms
             # and missing evidence, rather than reducing it to a success count.
             grouped[observation["company_ref"]].append(dict(observation))
+        from .document_execution_failure import failure_from_observations
+        from .mission_document_research import MissionDocumentResearchAuthority
+        for ref in sorted({item['admission_ref'] for item in observations
+                           if item.get('outcome') == 'recovery_required'}):
+            row = core.connection.execute(
+                'SELECT * FROM mission_document_research_admissions WHERE admission_id=?', (ref,)).fetchone()
+            if row is None:
+                raise ValueError('document failure admission unavailable')
+            admission = MissionDocumentResearchAuthority._read_row(None, row)
+            failure = failure_from_observations(core.connection, admission, observations)
+            if failure is not None:
+                grouped[admission['company_ref']].append(failure)
         body = {"status": "available", "by_company": grouped}
     except Exception as exc:
         body = {"status": "unavailable", "by_company": {}, "reason": type(exc).__name__}

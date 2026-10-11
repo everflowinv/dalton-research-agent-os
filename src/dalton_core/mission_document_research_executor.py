@@ -1334,8 +1334,8 @@ def _historical_derived_work(
         return current
     builders = [_pre_numeric_normalization_draft_prompt]
     if admission.get("numeric_authority") is not None:
-        from .directed_numeric_output import legacy_draft_prompt_v0, legacy_draft_prompt_v1
-        builders = [legacy_draft_prompt_v1, legacy_draft_prompt_v0]
+        from .directed_numeric_output import legacy_draft_prompt_v0, legacy_draft_prompt_v1, legacy_draft_prompt_v2
+        builders = [legacy_draft_prompt_v2, legacy_draft_prompt_v1, legacy_draft_prompt_v0]
     for builder in builders:
         legacy = _derive(
             admission, scheduler, registry, blueprints, index,
@@ -2002,13 +2002,20 @@ def _failure_execution_authority(scheduler: Scheduler, work: Mapping[str, Any],
                 and (envelope.get("error") or {}).get("code") in ROUTE_REJECTED_CODES
                 and envelope.get("metadata", {}).get("control_plane_failure") is True
                 and envelope.get("status") == "failed")
+    route_attempt_matches = route.get('attempt_number') == formal['attempt_number']
+    if not route_attempt_matches:
+        authority = getattr(worker, 'mission_document_research_authority', None)
+        if authority is not None:
+            index = 1 if work['metadata']['stage'] == 'qualitative_model_draft' else 2
+            route_attempt_matches = _paid_contract_failure_proof(
+                authority, work, formal, index, worker) is not None
     if (canonical_json(route) != row["decision_json"]
             or asserted != row["decision_hash"] or asserted != content_hash(route_body)
             or route.get("id") != route_ref
             or (route.get("outcome") != "selected" and not rejected)
             or route.get("work_order_ref") != work["id"]
             or route.get("work_order_hash") != content_hash(work)
-            or route.get("attempt_number") != formal["attempt_number"]
+            or not route_attempt_matches
             or event["attempt_number"] != formal["attempt_number"]
             or route.get("policy_version_ref") != work["metadata"]["routing_policy_ref"]
             or (not rejected and (route.get("selected_endpoint") or {}).get(
@@ -2208,7 +2215,8 @@ def _verify_recovery_failure_proof(authority: Any, scheduler: Scheduler,
                 "paid recovery authorization drifted")
         if "numeric_output_repair" in proof:
             from .directed_numeric_recovery import build_numeric_output_repair
-            if proof["numeric_output_repair"] != build_numeric_output_repair(failed, formal):
+            if proof["numeric_output_repair"] != build_numeric_output_repair(
+                    failed, formal, contract_ref=proof["numeric_output_repair"].get("contract_ref")):
                 raise MissionDocumentResearchExecutorError("numeric output repair differs from formal failure")
         return
     if proof.get("classification") == "reconstructed_historical_provider_controls_no_send":
@@ -4329,6 +4337,10 @@ class MissionDocumentResearchExecutor:
             worker = self.draft_worker if index == 1 else self.verifier_worker
             route = worker.router.get_decision(route_ref)
             endpoint = route.get("selected_endpoint") if isinstance(route, Mapping) else None
+            from .document_paid_replay import paid_replay_attempt
+            served_attempt = (paid_replay_attempt(self.authority.store.connection,
+                worker.router, work, formal, route, worker.worker_ref)
+                if isinstance(route, Mapping) else None)
             if (alias != invocation_ref
                     or canonical_json({**invocation, "invocation_id": alias})
                     != row["invocation_json"]
@@ -4340,7 +4352,7 @@ class MissionDocumentResearchExecutor:
                     or route.get("id") != route_ref
                     or route.get("work_order_ref") != work["id"]
                     or route.get("work_order_hash") != content_hash(work)
-                    or route.get("attempt_number") != formal["attempt_number"]
+                    or served_attempt is None
                     or route.get("outcome") != "selected"
                     or not isinstance(endpoint, Mapping)
                     or invocation.get("profile_ref")
@@ -4355,7 +4367,7 @@ class MissionDocumentResearchExecutor:
             if budget_store is None:
                 return None
             exact = budget_store.admission(
-                work_order_ref=work["id"], attempt_number=formal["attempt_number"],
+                work_order_ref=work["id"], attempt_number=served_attempt,
                 phase=self._phase(index),
             )
             if not isinstance(exact, Mapping):

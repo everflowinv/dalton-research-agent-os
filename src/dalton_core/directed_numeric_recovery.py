@@ -11,9 +11,12 @@ from typing import Mapping
 
 from .directed_numeric_output import (
     DRAFT_IDENTITY_CONTRACT, DRAFT_IDENTITY_TASK_V1, TARGET_IDENTITY_FIELDS, quotes,
+    LABEL_PERIOD_CONTRACT_REF, LABEL_PERIOD_INSTRUCTIONS,
 )
 from .directed_numeric_research import CONTRACT_REF, DirectedNumericError, normalize_targets
 from .store import canonical_json, content_hash
+
+OUTPUT_REPAIR_V2 = 'directed-numeric-output-format-repair:0.2'
 
 _FIELDS = {
     'contract_ref', 'source_work_hash', 'source_prompt_hash', 'replacement_prompt',
@@ -39,7 +42,7 @@ def _source(work):
     return dict(source), targets
 
 
-def _replacement(source, targets, diagnostic):
+def _replacement(source, targets, diagnostic, *, contract_ref=OUTPUT_REPAIR_V2):
     value = copy.deepcopy(source)
     value['task'] = DRAFT_IDENTITY_TASK_V1
     value['identity_contract_ref'] = DRAFT_IDENTITY_CONTRACT
@@ -48,11 +51,14 @@ def _replacement(source, targets, diagnostic):
          'figure_identity': {key: target[key] for key in TARGET_IDENTITY_FIELDS}}
         for target in targets
     ]
+    if contract_ref == OUTPUT_REPAIR_V2:
+        value['label_period_contract_ref'] = LABEL_PERIOD_CONTRACT_REF
+        value['label_period_instructions'] = LABEL_PERIOD_INSTRUCTIONS
     value['previous_output_error'] = diagnostic
     return canonical_json(value)
 
 
-def build_numeric_output_repair(work, formal):
+def build_numeric_output_repair(work, formal, *, contract_ref=OUTPUT_REPAIR_V2):
     """Only the executor's already-proved failed envelope supplies diagnostics."""
     metadata = work.get('metadata') or {}
     if (metadata.get('numeric_contract_ref') != CONTRACT_REF
@@ -68,15 +74,19 @@ def build_numeric_output_repair(work, formal):
     diagnostic = rejected.get('error_message')
     safe_prefixes = ('numeric figure differs from typed target', 'numeric draft ',
                      'numeric output is invalid JSON', 'duplicate JSON key', 'nonfinite JSON')
+    if contract_ref not in {DRAFT_IDENTITY_CONTRACT, OUTPUT_REPAIR_V2}:
+        raise DirectedNumericError('numeric repair version is unsupported')
+    if contract_ref == OUTPUT_REPAIR_V2:
+        safe_prefixes += ('as_reported_label must name the line', 'period must identify')
     if (rejected.get('diagnostic_only') is not True or not isinstance(diagnostic, str)
             or not diagnostic.startswith(safe_prefixes)):
         diagnostic = None
     elif len(diagnostic) > 300:
         diagnostic = diagnostic[:300]
     source, targets = _source(work)
-    prompt = _replacement(source, targets, diagnostic)
+    prompt = _replacement(source, targets, diagnostic, contract_ref=contract_ref)
     record = {
-        'contract_ref': DRAFT_IDENTITY_CONTRACT,
+        'contract_ref': contract_ref,
         'source_work_hash': content_hash(work),
         'source_prompt_hash': content_hash(work['question']),
         'replacement_prompt': prompt,
@@ -88,20 +98,20 @@ def build_numeric_output_repair(work, formal):
 
 
 def replay_numeric_output_repair(work, record):
-    """Replay the frozen 0.1 repair, without replacing targets, source or budget."""
+    """Replay the frozen 0.1 or 0.2 repair, without replacing targets, source or budget."""
     if not isinstance(record, Mapping) or set(record) != _FIELDS:
         raise DirectedNumericError('numeric format repair has invalid closed shape')
     body = dict(record)
     digest = body.pop('content_hash')
     diagnostic = record['diagnostic']
-    if (record['contract_ref'] != DRAFT_IDENTITY_CONTRACT
+    if (record['contract_ref'] not in {DRAFT_IDENTITY_CONTRACT, OUTPUT_REPAIR_V2}
             or digest != content_hash(body)
             or record['source_work_hash'] != content_hash(work)
             or record['source_prompt_hash'] != content_hash(work['question'])
             or diagnostic is not None and (not isinstance(diagnostic, str) or len(diagnostic) > 300)):
         raise DirectedNumericError('numeric format repair binding differs')
     source, targets = _source(work)
-    expected = _replacement(source, targets, diagnostic)
+    expected = _replacement(source, targets, diagnostic, contract_ref=record['contract_ref'])
     if (record['replacement_prompt'] != expected
             or record['replacement_prompt_hash'] != content_hash(expected)):
         raise DirectedNumericError('numeric format repair changed more than output instructions')

@@ -97,6 +97,10 @@ def company_state(
         # review -- so a gap is reported as its cause, not as "uneven depth".
         extra["reading_pipeline"] = dict(reading_pipeline)
     from .planner_numeric_requirements import numeric_requirements, numeric_waiting_targets, numeric_completed_context
+    from .document_execution_failure import compact_failures
+    failed = compact_failures(document_research_feedback)
+    if failed['failures']:
+        extra['document_execution_failures'] = failed
     numeric = numeric_requirements(document_research_feedback)
     if numeric["requirements"]:
         extra["numeric_reading_requirements"] = numeric
@@ -446,6 +450,8 @@ def _material_subject(subject: Mapping[str, Any] | None) -> dict[str, Any] | Non
         "stage": subject.get("stage"),
         "stage_status": subject.get("stage_status"),
         "source_base_ready": bool(subject.get("source_base_ready")),
+        **({'document_execution_failures': content_hash(subject['document_execution_failures'])}
+           if 'document_execution_failures' in subject else {}),
         **({"numeric_source_refusal_ids": subject["numeric_source_refusal_ids"]}
            if "numeric_source_refusal_ids" in subject else {}),
         **({"numeric_completed_context": content_hash(subject["numeric_completed_context"])}

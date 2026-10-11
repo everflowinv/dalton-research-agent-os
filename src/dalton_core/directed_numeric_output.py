@@ -126,6 +126,9 @@ def parse_verifier(text, *, metadata):
 # Immutable 0.1 instruction: future wording revisions need a new contract marker.
 DRAFT_IDENTITY_TASK_V1 = 'Answer ALL required numeric targets solely from the exact registered excerpts. Never calculate, convert units, infer a period, assign issuer amounts, or substitute a segment. Copy target_ref and every figure identity field (metric_ref, period, unit, currency, basis) EXACTLY from identity_templates, including null currency. Do not replace a target period such as FY2025 with a source phrase such as year ended December 31, 2025; the exact quote retains that source wording. as_reported_label must remain the metric label, not a date or period description. Each output target has exactly target_ref, status, figure and reason; never copy metric_definition or add other keys to that row. Supported rows have reason null; unavailable rows have figure null and a specific reason. Templates contain identity only: fill quote_id, subject_as_named, as_reported_label, value and scale from the exact excerpt. A matching year or digits do not prove the target period, issuer or metric. If the quote does not support the exact requested identity, return unavailable with no figure. Every supported figure must bind its own metric meaning, as-reported label, quote, issuer, period, unit, currency and basis. Unsupported targets remain unavailable with a precise missing evidence reason. Numbers hidden in prose do not satisfy a target. Return JSON only.'
 
+LABEL_PERIOD_CONTRACT_REF = 'directed-numeric-original-label-period:0.1'
+LABEL_PERIOD_INSTRUCTIONS = ("Copy as_reported_label verbatim from the original disclosure line in its original language; never translate the target label or use an amount/date as the label. Copy figure.period EXACTLY from identity_templates only when the quote explicitly supports that period. Preserve the source's actual date/period wording in the quote, never replace typed period identity with it. If a line's metric meaning or its exact reporting year/quarter/half-year is not established by the supplied original, return unavailable and identify what is missing; never guess current/latest period or invent a year.")
+
 def draft_prompt(*,question,search_proof,targets,catalog):
     identities = [{'target_ref': target['target_ref'],
                    'figure_identity': {key: target[key] for key in TARGET_IDENTITY_FIELDS}}
@@ -136,11 +139,21 @@ def draft_prompt(*,question,search_proof,targets,catalog):
                            'question':question,'targets':targets,'metric_definitions':catalog,
                            'quotes':quotes(search_proof),'output_schema':DRAFT_SCHEMA,
                            'scale_contract_ref':SCALE_CONTRACT_REF,
-                           'scale_instructions':SCALE_INSTRUCTIONS})
+                           'scale_instructions':SCALE_INSTRUCTIONS,
+                           'label_period_contract_ref':LABEL_PERIOD_CONTRACT_REF,
+                           'label_period_instructions':LABEL_PERIOD_INSTRUCTIONS})
+
+def legacy_draft_prompt_v2(*,question,search_proof,targets,catalog):
+    """Exact published scale+identity prompt before original-label instructions."""
+    value = json.loads(draft_prompt(question=question,search_proof=search_proof,targets=targets,catalog=catalog))
+    del value['label_period_contract_ref']
+    del value['label_period_instructions']
+    return canonical_json(value)
+
 
 def legacy_draft_prompt_v1(*,question,search_proof,targets,catalog):
     """Exact published identity prompt before canonical scale instructions."""
-    value = json.loads(draft_prompt(question=question,search_proof=search_proof,targets=targets,catalog=catalog))
+    value = json.loads(legacy_draft_prompt_v2(question=question,search_proof=search_proof,targets=targets,catalog=catalog))
     del value['scale_contract_ref']
     del value['scale_instructions']
     value['output_schema'] = LEGACY_DRAFT_SCHEMA

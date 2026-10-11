@@ -170,7 +170,7 @@ PROMPT_PROJECTION_RULE = {
         "gaps", "blocked_on", "source_base_ready", "figures",
         "filed_statement_figures", "reading_pipeline",
         "readable_documents", "readable_documents_summary",
-        "document_execution_availability", "numeric_reading_requirements", "canonical_document_questions",
+        "document_execution_availability", "document_execution_failures", "numeric_reading_requirements", "canonical_document_questions",
         "numeric_source_refusal_ids", "numeric_source_refusals", "numeric_waiting_targets", "numeric_completed_context",
         "document_research_feedback_summary", "dossier_feedback.repair_target_ids",
         "dossier_feedback.material", "document_research_reopened",
@@ -210,7 +210,7 @@ _COMPANY_CORE_FIELDS: tuple[str, ...] = (
     "gaps", "blocked_on", "source_base_ready", "figures",
     "filed_statement_figures", "reading_pipeline",
     "readable_documents", "readable_documents_summary",
-    "document_execution_availability", "numeric_reading_requirements", "canonical_document_questions",
+    "document_execution_availability", "document_execution_failures", "numeric_reading_requirements", "canonical_document_questions",
     "document_research_feedback_summary",
     "document_research_reopened", "document_research_reopened_omitted",
 )
@@ -1364,6 +1364,8 @@ def build_prompt(state: Mapping[str, Any]) -> str:
         "numeric_admission_period_refused means a numeric target lacks an executable period: preserve the "
         "question and exact original, identify its explicit year or quarter/half-year before resubmitting; "
         "never guess a date or repeat latest/current reporting period. "
+        "document_execution_failures preserves exact failed/recovery-pending executions, not answers or source absence. "
+        "Use the existing bounded recovery or exact new-source/revision gates; do not buy an equivalent duplicate. "
         "document_research_feedback_summary aggregates tried history only to fit input; the summary is not a "
         "finding.\n\nContinue canonical_document_questions with exact canonical_question version_ref/content_hash "
         "and document/version, even when rewording. In-flight means wait; settled is not necessarily answered. New"

@@ -52,7 +52,7 @@ def evidence(authority, scheduler, admission, work, formal, index, worker):
     if _failure_execution_authority(scheduler, work, formal, worker):
         return None
     if index == 1:
-        from .directed_numeric_recovery import build_numeric_output_repair
+        from .directed_numeric_recovery import build_numeric_output_repair, DRAFT_IDENTITY_CONTRACT
         from .directed_numeric_output import legacy_draft_prompt_v0
         paid = _paid_contract_failure_proof(authority, work, formal, index, worker)
         if paid is None:
@@ -68,7 +68,9 @@ def evidence(authority, scheduler, admission, work, formal, index, worker):
                 'numeric figure differs from typed target', 'numeric draft target binding differs',
                 'numeric draft has invalid closed shape', 'numeric draft must account'))):
             return None
-        repair = build_numeric_output_repair(work, formal)
+        # This maintenance version froze the original 0.1 repair. Never
+        # rewrite an existing authorization when new draft instructions ship.
+        repair = build_numeric_output_repair(work, formal, contract_ref=DRAFT_IDENTITY_CONTRACT)
         if repair is None:
             return None
         defect = {'kind': 'legacy_target_identity_instructions', 'repair': repair}
