@@ -165,6 +165,11 @@ class LaunchDrainTests(unittest.TestCase):
                   "started_at": "2026-09-11T01:00:00+00:00"}
         ticket_epoch = datetime.fromisoformat(record["started_at"]).timestamp()
         ticket_mtime = ticket_epoch + 10
+        # This existing test asserts BSD ps's whole-second allowance. Linux
+        # has a separate btime-plus-tick interval tested below.
+        precision = mock.patch("dalton_core.launch_drain.Path.is_file", return_value=False)
+        precision.start()
+        self.addCleanup(precision.stop)
         with mock.patch("dalton_core.launch_drain._process_command_matches", return_value=True), \
              mock.patch("dalton_core.launch_drain._process_started_at", return_value=ticket_epoch - 1):
             self.assertTrue(_ticket_process_matches(record, ticket_mtime))
@@ -174,6 +179,35 @@ class LaunchDrainTests(unittest.TestCase):
         with mock.patch("dalton_core.launch_drain._process_command_matches", return_value=True), \
              mock.patch("dalton_core.launch_drain._process_started_at", return_value=ticket_epoch + 11.001):
             self.assertFalse(_ticket_process_matches(record, ticket_mtime))
+
+    def test_linux_last_tick_quantization_matches_but_outside_birth_is_refused(self) -> None:
+        from dalton_core.launch_drain import _ticket_process_matches
+        from datetime import datetime
+        record = {"pid": 123, "command": ["python3", "child.py"],
+                  "started_at": "2026-09-11T01:00:00+00:00"}
+        started = datetime.fromisoformat(record["started_at"]).timestamp()
+        mtime = started + 0.1
+        with mock.patch("dalton_core.launch_drain.Path.is_file", return_value=True), \
+             mock.patch("dalton_core.launch_drain.os.sysconf", return_value=100), \
+             mock.patch("dalton_core.launch_drain._process_command_matches", return_value=True):
+            # Integral btime plus a truncated 100 Hz tick can understate the
+            # true birth by 1.005 seconds: valid argv must still match.
+            with mock.patch("dalton_core.launch_drain._process_started_at",
+                            return_value=started - 1.005):
+                self.assertTrue(_ticket_process_matches(record, mtime))
+            # A process outside the full 1 + 1/HZ interval is still PID reuse.
+            with mock.patch("dalton_core.launch_drain._process_started_at",
+                            return_value=started - 1.011):
+                self.assertFalse(_ticket_process_matches(record, mtime))
+            # Linux rounds down, so even a sub-tick later birth cannot match.
+            with mock.patch("dalton_core.launch_drain._process_started_at",
+                            return_value=mtime + 0.001):
+                self.assertFalse(_ticket_process_matches(record, mtime))
+            with mock.patch("dalton_core.launch_drain._process_started_at",
+                            return_value=started - 1.005), \
+                 mock.patch("dalton_core.launch_drain._process_command_matches",
+                            return_value=False):
+                self.assertFalse(_ticket_process_matches(record, mtime))
 
     def test_delayed_launch_inside_ticket_write_interval_is_live(self) -> None:
         from dalton_core.launch_drain import _ticket_process_matches
