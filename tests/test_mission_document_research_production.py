@@ -811,3 +811,33 @@ class ChildDiagnosticsTests(unittest.TestCase):
             self.assertEqual(state['sidecars']['-wal'],{'exists':True,'size':len(b'partial-sidecar-marker')})
             self.assertEqual(state['sidecars']['-shm'],{'exists':False,'size':None})
             self.assertEqual({p.name:p.read_bytes() for p in root.iterdir() if p.is_file()},before)
+
+
+class SQLiteHeaderLockIsolationDiagnosticTests(unittest.TestCase):
+    def test_isolated_header_preserves_actual_reserved_lock(self):
+        import subprocess
+        from dalton_core.readonly_sqlite import _read_header_without_releasing_process_locks
+        probe = """import fcntl,os,sys
+fd=os.open(sys.argv[1],os.O_RDWR)
+try:
+ try:
+  fcntl.lockf(fd,fcntl.LOCK_EX|fcntl.LOCK_NB,1,1073741825,os.SEEK_SET)
+  print('available')
+ except BlockingIOError: print('held')
+finally: os.close(fd)
+"""
+        with tempfile.TemporaryDirectory() as directory:
+            path=Path(directory)/'synthetic.sqlite'
+            connection=sqlite3.connect(path,isolation_level=None)
+            try:
+                connection.execute('CREATE TABLE fixture(value)')
+                connection.execute('BEGIN IMMEDIATE')
+                def status():
+                    return subprocess.check_output([sys.executable,'-I','-c',probe,str(path)],text=True).strip()
+                self.assertEqual(status(),'held')
+                self.assertEqual(_read_header_without_releasing_process_locks(path)[:16],b'SQLite format 3\x00')
+                self.assertEqual(status(),'held')
+                with path.open('rb') as handle: handle.read(100)
+                self.assertEqual(status(),'available')
+            finally:
+                connection.rollback();connection.close()

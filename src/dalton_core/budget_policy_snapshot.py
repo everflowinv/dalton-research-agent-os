@@ -6,6 +6,7 @@ only the existing registered-policy validator can use this snapshot.
 """
 from pathlib import Path
 import sqlite3
+from .readonly_sqlite import _read_header_without_releasing_process_locks
 from typing import Any
 
 
@@ -42,8 +43,7 @@ def read_checkpointed_budget_policy(path: str | Path, policy_ref: str) -> dict[s
     target = Path(path).absolute()
     wal, shm = Path(str(target) + '-wal'), Path(str(target) + '-shm')
     before = _fingerprint(target)
-    with target.open('rb') as handle:
-        header = handle.read(100)
+    header = _read_header_without_releasing_process_locks(target)
     if header[:16] != b'SQLite format 3\x00' or header[18:20] != b'\x02\x02':
         raise sqlite3.OperationalError('budget policy snapshot requires a WAL database')
     if _present(shm):
