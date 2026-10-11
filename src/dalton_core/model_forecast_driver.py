@@ -853,6 +853,14 @@ def _structure_historical_values(
                             seen.add(key)
                             combined.append(dict(item))
                 refs[output][end] = combined
+            composition = structure.get("historical_income_composition")
+            if composition is not None and composition["output_ref"] == output:
+                from .filed_period_composition import historical_replay
+                exact = historical_replay(composition, formula, values[output])
+                if exact is not None:
+                    values[output], source_refs = exact
+                    for end, held_refs in source_refs.items():
+                        refs[output][end].extend(held_refs)
             del pending[output]
             progressed = True
         if not progressed:

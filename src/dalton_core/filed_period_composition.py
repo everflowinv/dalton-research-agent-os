@@ -1,7 +1,7 @@
 """Exact filed-parent history, separate from an explicitly ordinary forecast.
 
 No missing series is zero-filled.  A period uses all children in one held
-statement context, or the difference of two complete same-year contexts.
+statement context, or the difference of two complete contexts from the same fiscal year.
 """
 from __future__ import annotations
 
@@ -12,7 +12,9 @@ from typing import Any, Mapping
 
 from .store import content_hash
 
-CONTRACT_REF = "filed-period-income-composition:0.1"
+LEGACY_CONTRACT_REF = "filed-period-income-composition:0.1"
+CONTRACT_REF = "filed-period-income-composition:0.2"
+FILED_EXPENSE_SUBTOTALS = frozenset({"us-gaap:CostsAndExpenses", "us-gaap:OperatingExpenses"})
 MAX_SOURCES = 32
 MAX_PERIODS = 24
 MAX_GROUP_CHILDREN = 16
@@ -26,7 +28,9 @@ def _decimal(value: Any) -> Decimal:
         raise FiledCompositionError("filed composition amount must be finite")
     return result
 
-def _base(spec: Mapping[str, Any], inputs: Mapping[str, Any]):
+def _base(spec: Mapping[str, Any], inputs: Mapping[str, Any], *, contract_ref: str = CONTRACT_REF):
+    if contract_ref not in (LEGACY_CONTRACT_REF, CONTRACT_REF):
+        raise FiledCompositionError("unknown filed composition contract")
     structure = spec.get("financial_statement_structure") or {}
     if structure.get("schema_version") != "0.6":
         return None
@@ -35,7 +39,11 @@ def _base(spec: Mapping[str, Any], inputs: Mapping[str, Any]):
     candidates = []
     for formula in structure.get("formulas") or []:
         out = lines.get(formula.get("output_ref"), {})
-        if formula.get("operator") != "sum" or out.get("role") != "operating_income":
+        eligible = out.get("role") == "operating_income" or (
+            contract_ref == CONTRACT_REF
+            and out.get("role") == "company_presented_subtotal"
+            and formula.get("tie_out_concept") in FILED_EXPENSE_SUBTOTALS)
+        if formula.get("operator") != "sum" or not eligible:
             continue
         target = filed.get(formula.get("tie_out_concept"))
         terms = formula.get("terms") or []
@@ -67,9 +75,22 @@ def _base(spec: Mapping[str, Any], inputs: Mapping[str, Any]):
                 candidates.append((formula, coefficients, target, periods))
     return candidates[0] if len(candidates)==1 else None
 
-def derive(spec: Mapping[str, Any], inputs: Mapping[str, Any], sources: list[dict[str, Any]]) -> dict[str, Any] | None:
+def _fiscal_quarter_window(fiscal_start: str, quarter_start: str, quarter_end: str) -> bool:
+    """Bound complete YTD subtraction to one fiscal year, including 52/53-week years.
+
+    Exact prior-end adjacency and identical cumulative starts are checked by
+    the caller. This adds duration proof without assuming a January year start.
+    """
+    first, start, end = map(date.fromisoformat, (fiscal_start, quarter_start, quarter_end))
+    quarter_days = (end - start).days + 1
+    prior_days = (start - first).days
+    total_days = (end - first).days + 1
+    return 70 <= quarter_days <= 105 and 70 <= prior_days <= 294 and total_days <= 380
+
+def derive(spec: Mapping[str, Any], inputs: Mapping[str, Any], sources: list[dict[str, Any]], *,
+           contract_ref: str = CONTRACT_REF) -> dict[str, Any] | None:
     """All-period unique composition, using only already-held exact source rows."""
-    base = _base(spec, inputs)
+    base = _base(spec, inputs, contract_ref=contract_ref)
     if base is None:
         return None
     formula, coefficients, target, required = base
@@ -135,7 +156,9 @@ def derive(spec: Mapping[str, Any], inputs: Mapping[str, Any], sources: list[dic
             prior=(date.fromisoformat(start)-timedelta(days=1)).isoformat()
             candidates=[([a,b],["1","-1"]) for a in available for b in available
                         if a["end"]==end and b["end"]==prior and a["start"]==b["start"]
-                        and a["start"] and a["start"]<start and a["start"][:4]==start[:4]]
+                        and a["start"] and a["start"]<start
+                        and (a["start"][:4]==start[:4] if contract_ref == LEGACY_CONTRACT_REF
+                             else _fiscal_quarter_window(a["start"], start, end))]
         accepted=[]
         for gs, weights in candidates:
             unit=str(cell.get("unit") or "").casefold()
@@ -164,7 +187,7 @@ def derive(spec: Mapping[str, Any], inputs: Mapping[str, Any], sources: list[dic
             return None
         accepted.sort(key=content_hash)
         period_proofs.append(accepted[0])
-    result={"contract_ref":CONTRACT_REF,"company_ref":inputs["company_ref"],
+    result={"contract_ref":contract_ref,"company_ref":inputs["company_ref"],
             "spec_ref":inputs.get("spec_ref"),"output_ref":formula["output_ref"],"tie_out_concept":parent,
             "formula_hash":content_hash(formula),"ordinary_coefficients":coefficients,
             "one_off_coefficients":signs[0],"periods":period_proofs,
@@ -202,9 +225,45 @@ def collect(missions: Any, spec: Mapping[str,Any], inputs: Mapping[str,Any]) -> 
 
 def verify(proof: Mapping[str,Any], spec: Mapping[str,Any], inputs: Mapping[str,Any]) -> dict[str,Any]:
     body={k:v for k,v in proof.items() if k!="content_hash"}
-    if proof.get("contract_ref")!=CONTRACT_REF or proof.get("content_hash")!=content_hash(body):
+    if proof.get("contract_ref") not in (LEGACY_CONTRACT_REF, CONTRACT_REF) or proof.get("content_hash")!=content_hash(body):
         raise FiledCompositionError("filed composition proof hash/contract differs")
-    recomputed=derive(spec,inputs,list(proof.get("sources") or []))
+    recomputed=derive(spec,inputs,list(proof.get("sources") or []), contract_ref=proof["contract_ref"])
     if recomputed!=proof:
         raise FiledCompositionError("filed composition proof does not replay")
     return dict(proof)
+
+
+def historical_replay(proof: Mapping[str, Any], formula: Mapping[str, Any],
+                      calculated: Mapping[str, Decimal]):
+    """Replay a validated 0.2 composition for downstream historical assumptions.
+
+    Stored 0.1 models keep their original execution semantics. New structures
+    have already passed source/financial validation; recheck the exact formula,
+    all periods and every ordinary operand before consuming their parent rows.
+    """
+    if proof.get("contract_ref") == LEGACY_CONTRACT_REF:
+        return None
+    if (proof.get("contract_ref") != CONTRACT_REF
+            or proof.get("content_hash") != content_hash({k:v for k,v in proof.items() if k != "content_hash"})
+            or proof.get("formula_hash") != content_hash(formula)):
+        raise FiledCompositionError("historical composition execution binding differs")
+    periods = proof.get("periods") or []
+    ends = [p["period_end"] for p in periods]
+    if len(ends) != len(set(ends)) or set(ends) != set(calculated):
+        raise FiledCompositionError("historical composition execution periods differ")
+    values, refs = {}, {}
+    for period in periods:
+        end = period["period_end"]
+        ordinary = Decimal(0)
+        for group in period["groups"]:
+            children = {r["concept"]:r for r in group["children"]}
+            ordinary += _decimal(group["weight"]) * sum(
+                (_decimal(coefficient) * _decimal(children[concept]["value"])
+                 for concept, coefficient in proof["ordinary_coefficients"].items()), Decimal(0))
+        if ordinary != calculated[end]:
+            raise FiledCompositionError("historical composition execution ordinary terms differ")
+        values[end] = _decimal(period["value"])
+        refs[end] = [{"kind":"filing", "ref":g["accession"],
+                      "concept":proof["tie_out_concept"], "period_end":g["period_end"],
+                      "accession":g["accession"]} for g in period["groups"]]
+    return values, refs
