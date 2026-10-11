@@ -865,6 +865,7 @@ def model_spec_validation_contract() -> dict[str, str]:
     """
 
     from .company_model_spec import ASSESSMENT_COMPATIBILITY_REF
+    from .model_spec_assessment_replay import SIGNED_COMPATIBLE_REPLAY_REF
     from .company_financial_statement_structure import (
         CASH_LEAF_DURATION_UNIT_VALIDATION_REF,
         NET_INCOME_SOURCE_CARRY_VALIDATION_REF, STRUCTURE_AUTHORITY_REF,
@@ -888,6 +889,7 @@ def model_spec_validation_contract() -> dict[str, str]:
         "series_duplicate_facts": DUPLICATE_FACT_POLICY_REF,
         "repair_replay": REPAIR_REPLAY_POLICY_REF,
         "assessment_compatible_replay": ASSESSMENT_COMPATIBILITY_REF,
+        "assessment_compatible_signed_repair": SIGNED_COMPATIBLE_REPLAY_REF,
     }
 
 

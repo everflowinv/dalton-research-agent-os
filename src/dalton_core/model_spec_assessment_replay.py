@@ -19,6 +19,8 @@ from .scheduler import Scheduler, SchedulerError
 from .readonly_sqlite import connect_read_only
 from .store import canonical_json, content_hash
 
+SIGNED_COMPATIBLE_REPLAY_REF = "model-spec-assessment-compatible-signed-repair:0.1"
+
 MAX_MATCHED_ROOTS = 32
 MAX_MATCHED_REPAIRS = 16
 _KNOWN_CASH_CONTRACTS = {
@@ -98,7 +100,8 @@ def _rows(connection, clause, args, limit):
         'ON f.work_order_id=w.work_order_id '
         "WHERE w.work_order_id >= 'work:cockpit-model_spec-' "
         "AND w.work_order_id < 'work:cockpit-model_spec.' AND " + clause +
-        ' ORDER BY w.created_at DESC,w.work_order_id DESC LIMIT ?', (*args, limit),
+        ' ORDER BY w.created_at DESC,w.work_order_id DESC,'
+        'f.attempt_number DESC,f.created_at DESC,f.result_record_id DESC LIMIT ?', (*args, limit),
     ).fetchall()
 
 
@@ -145,12 +148,63 @@ def find_parent(scheduler_db: str | Path, *, state: Mapping[str, Any],
                 'mission_hash': mission['content_hash'], 'prior_prompt_sha256': _digest(expected_prompt)}
 
 
+
+def _signed_error(binding, current, original):
+    from .model_spec_signed_expense_repair import SignedExpenseRepairError, validate_coefficient_parent
+    try:
+        old = json.loads(binding['validation_error']['message'])
+        if (not isinstance(old, Mapping) or set(old) != set(current.proof)
+                or old.get('content_hash') != content_hash({k: v for k, v in old.items() if k != 'content_hash'})
+                or current.proof.get('content_hash') != content_hash({k: v for k, v in current.proof.items() if k != 'content_hash'})):
+            raise ValueError('signed proof hash/fields differ')
+        # These hashes keep their historical values. Current source metadata
+        # can change under the widened validator; every economic observation
+        # and the exact one-coefficient scope must still agree independently.
+        opaque = {'content_hash', 'spec_hash', 'financial_inputs_hash'}
+        if {k: v for k, v in old.items() if k not in opaque} != {k: v for k, v in current.proof.items() if k not in opaque}:
+            raise ValueError('signed economic proof/scope differs')
+        validate_coefficient_parent(original, old)
+        validate_coefficient_parent(original, current.proof)
+        return SignedExpenseRepairError(old)
+    except (ValueError, TypeError, KeyError) as exc:
+        raise AssessmentReplayError('assessment replay signed proof differs from frozen parent') from exc
+
+
+def _settled_signed_repair(scheduler_db, call, mission):
+    from .planner_paid_output_recovery import _authority_connection
+    from .thesis_impact_budget import ThesisImpactBudgetStore, ThesisImpactBudgetError
+    path = Path(scheduler_db).parent / 'thesis-impact-budget.sqlite'
+    if not path.is_file():
+        raise AssessmentReplayError('assessment replay signed repair settlement is unavailable')
+    try:
+        with _authority_connection(path) as connection:
+            keys = connection.execute("SELECT attempt_number FROM thesis_impact_day_admissions WHERE work_order_ref=? AND phase='assessment' AND route_decision_ref=? LIMIT 2",
+                                      (call['work_order_ref'], call['route_decision_ref'])).fetchall()
+            if len(keys) != 1:
+                raise ValueError('exact settled repair admission is not unique')
+            budget = object.__new__(ThesisImpactBudgetStore); budget.connection = connection
+            paid = budget.admission(work_order_ref=call['work_order_ref'], attempt_number=keys[0]['attempt_number'], phase='assessment')
+            admission, settlement, binding = paid['admission'], paid['settlement'], paid.get('mission_binding')
+            if (settlement is None or type(settlement['actual_micros']) is not int or settlement['actual_micros'] < 0
+                    or admission['route_decision_ref'] != call['route_decision_ref']
+                    or admission.get('purpose') != 'model_spec'
+                    or not isinstance(binding, Mapping)
+                    or binding.get('mission_version_ref') != mission['id']
+                    or binding.get('mission_version_hash') != mission['content_hash']):
+                raise ValueError('signed repair paid settlement/mission binding differs')
+            return {'admission_ref': admission['admission_id'], 'admission_hash': admission['content_hash'],
+                    'settlement_ref': settlement['settlement_id'], 'settlement_hash': settlement['content_hash'],
+                    'actual_micros': settlement['actual_micros']}
+    except (ValueError, TypeError, KeyError, sqlite3.Error, ThesisImpactBudgetError) as exc:
+        raise AssessmentReplayError('assessment replay signed repair settlement is incomplete or differs') from exc
+
+
 def validate_parent(parent: Mapping[str, Any], *, state: Mapping[str, Any],
                     mission: Mapping[str, Any], decided_by: str,
                     financial_validator: Callable[[dict[str, Any]], Any] | None = None,
                     note_evidence_resolver: Any = None,
                     repair_attempts: list[dict[str, Any]] | None = None):
-    """At most one already-paid exact cash-shape repair; errors never buy another."""
+    """Reuse one already-paid bounded repair; never buy a new repair."""
     # Re-read the exact immutable root instead of trusting caller-supplied text/proof.
     fresh = find_parent(parent['scheduler_db'], state=state, mission=mission)
     if fresh is None or fresh != dict(parent):
@@ -159,8 +213,12 @@ def validate_parent(parent: Mapping[str, Any], *, state: Mapping[str, Any],
     try:
         spec = spec_from_response(state, call['text'], decided_by=decided_by,
                                   note_evidence_resolver=note_evidence_resolver)
+        if financial_validator is not None:
+            financial_validator(spec)
     except CompanyModelSpecError as error:
-        if error.code != CASH_FLOW_OPERATING_BASE_SHAPE_CODE:
+        from .model_spec_signed_expense_repair import ERROR_CODE as SIGNED_CODE
+        signed = error.code == SIGNED_CODE
+        if error.code not in {CASH_FLOW_OPERATING_BASE_SHAPE_CODE, SIGNED_CODE}:
             raise
         root_proof = {key: call.get(key) for key in _PROOF_KEYS}
         if any(not isinstance(value, str) or not value for value in root_proof.values()):
@@ -173,6 +231,8 @@ def validate_parent(parent: Mapping[str, Any], *, state: Mapping[str, Any],
                 (call['work_order_ref'], PRIOR_ASSESSMENT_TASK_HASH), MAX_MATCHED_REPAIRS)
             if not rows:
                 raise AssessmentReplayError('assessment replay exact paid cash repair is unavailable') from error
+            if signed and (len(rows) >= MAX_MATCHED_REPAIRS or len({r['work_order_id'] for r in rows}) != 1):
+                raise AssessmentReplayError('assessment replay signed repair is not unique')
             work, repaired = _load(connection, rows[0])
         binding = (work.get('metadata') or {}).get('structured_output_repair')
         expected_keys = {'schema_version','root_original','repair_parent','original_text_sha256',
@@ -186,7 +246,11 @@ def validate_parent(parent: Mapping[str, Any], *, state: Mapping[str, Any],
                 or binding['original_text_sha256'] != _digest(call['text'])
                 or binding['parent_text_sha256'] != _digest(call['text'])
                 or binding['repair_prompt_sha256'] != _digest(work['question'])
-                or binding['validation_error'] != {'code': error.code, 'message': str(error)}
+                or (not signed and binding['validation_error'] != {'code': error.code, 'message': str(error)})
+                or (signed and (not isinstance(binding['validation_error'], Mapping)
+                                or set(binding['validation_error']) != {'code', 'message'}
+                                or binding['repair_contract_ref'] != 'contract:company-model-spec-structured-output-repair:0.9'
+                                or binding['validation_error'].get('code') != SIGNED_CODE))
                 or binding['repair_config'] != fresh['work']['metadata']['model_spec_request_identity']['structured_output_repair']
                 or binding['repair_number'] != 1
                 or not str((work.get('metadata') or {}).get('request_id','')).startswith(
@@ -199,22 +263,34 @@ def validate_parent(parent: Mapping[str, Any], *, state: Mapping[str, Any],
             old_contract = json.JSONDecoder().raw_decode(work['question'].split('REPAIR_CONTRACT:\n',1)[1])[0]
         except (IndexError, TypeError, ValueError) as exc:
             raise AssessmentReplayError('assessment replay frozen repair contract is unreadable') from exc
+        frozen_error = error
+        if signed:
+            frozen_error = _signed_error(binding, error, parse_response(call['text']))
         if (content_hash(old_contract) != binding['repair_contract_hash']
                 or old_contract.get('ref') != binding['repair_contract_ref']
                 or work['question'] != _repair_prompt(
-                    call['text'], error, contract=old_contract,
+                    call['text'], frozen_error, contract=old_contract,
                     output_schema=prior_assessment_output_schema())):
             raise AssessmentReplayError('assessment replay exact repair prompt differs')
+        settlement = _settled_signed_repair(fresh['scheduler_db'], repaired, mission) if signed else None
         repairs.append({**{key: repaired.get(key) for key in _PROOF_KEYS},
                         'replayed': True, 'cost_micros': 0, 'repair_number': 1,
                         'binding_hash': content_hash(binding),
                         'repair_contract_hash': binding['repair_contract_hash']})
-        _assert_cash_flow_operating_base_only_changed(parse_response(call['text']),parse_response(repaired['text']))
+        if signed:
+            from .model_spec_signed_expense_repair import assert_only_coefficient_changed
+            assert_only_coefficient_changed(parse_response(call['text']), parse_response(repaired['text']), frozen_error.proof)
+            assert_only_coefficient_changed(parse_response(call['text']), parse_response(repaired['text']), error.proof)
+            repairs[-1]['prior_validation_proof_hash'] = frozen_error.proof['content_hash']
+            repairs[-1]['current_validation_proof_hash'] = error.proof['content_hash']
+            repairs[-1]['settlement'] = settlement
+        else:
+            _assert_cash_flow_operating_base_only_changed(parse_response(call['text']),parse_response(repaired['text']))
         call = repaired
         spec = spec_from_response(state, call['text'], decided_by=decided_by,
                                   note_evidence_resolver=note_evidence_resolver)
-    if financial_validator is not None:
-        financial_validator(spec)
+        if financial_validator is not None:
+            financial_validator(spec)
     proof = {**fresh['contract'], 'company_ref': state['company_ref'],
              'state_hash': state['state_hash'], 'mission_version_ref': mission['id'],
              'mission_version_hash': mission['content_hash'],
