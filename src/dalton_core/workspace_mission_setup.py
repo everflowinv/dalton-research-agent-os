@@ -28,7 +28,8 @@ from .store import content_hash
 from .sec_plan_specs import generator_specs
 from .research_constitution import ResearchConstitutionAuthority
 from .research_playbook import read_exact_playbook_version
-from .workspace import WorkspacePaths
+from .workspace import WorkspaceError, WorkspacePaths
+from .workspace_goal_binding import stable_binding, verify_binding
 
 SCHEMA_VERSION = "workspace-first-mission-draft-0.1"
 _SHA = re.compile(r"^[0-9a-f]{64}$")
@@ -186,6 +187,7 @@ def draft_first_mission(
     proposal_body = {
         "schema_version": SCHEMA_VERSION, "workspace_id": workspace.workspace_id,
         "workspace_manifest_hash": workspace.content_hash,
+        "workspace_identity_binding": stable_binding(workspace),
         "method_foundation_hash": foundation["content_hash"],
         "setup_state": "review_required" if issues else "ready_for_confirmation",
         "review_issues": issues, "mission_body": body,
@@ -401,9 +403,12 @@ def publish_first_mission(
     asserted = wire.pop("content_hash", None)
     if asserted != proposal_hash or asserted != content_hash(wire):
         raise WorkspaceMissionSetupError("proposal confirmation hash differs")
-    if wire.get("schema_version") != SCHEMA_VERSION or wire.get("workspace_id") != workspace.workspace_id \
-            or wire.get("workspace_manifest_hash") != workspace.content_hash:
+    if wire.get("schema_version") != SCHEMA_VERSION or wire.get("workspace_id") != workspace.workspace_id:
         raise WorkspaceMissionSetupError("proposal belongs to another workspace")
+    try:
+        verify_binding(workspace, wire)
+    except (WorkspaceError, ValueError, OSError, KeyError, TypeError) as exc:
+        raise WorkspaceMissionSetupError("proposal workspace binding cannot be verified: " + str(exc)) from exc
     if wire.get("setup_state") != "ready_for_confirmation" or wire.get("review_issues") != []:
         raise WorkspaceMissionSetupError("proposal still requires review")
     actor_ref = _text(actor_ref, "actor_ref")
