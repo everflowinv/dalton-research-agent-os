@@ -1558,6 +1558,11 @@ def _free_retrieval_recheck(state: Path, view: Mapping[str, Any], *, stamp: str)
     # and cannot alter the request's terminal state.
     verdict = evaluate_acceptance(state, view, now=stamp)
     ensure_schema(state)
+    # The links table permits append-only links for closed requests. Verify
+    # and commit exact text versions before reopening or recording a marker:
+    # a failed link must leave the original request eligible for a later read.
+    linked = (link_arrivals(state, view, verdict["items"], source="indexed_corpus", now=stamp)
+              if verdict["met"] or verdict["partial"] else [])
     if closed:
         mr.reopen(state, view["id"], reason="原文逐项检索规则已修正，仅免费复核已有资料",
                   actor_ref=ACTOR_REF, now=stamp)
@@ -1565,10 +1570,6 @@ def _free_retrieval_recheck(state: Path, view: Mapping[str, Any], *, stamp: str)
         outcome="accepted" if verdict["met"] else "partial" if verdict["partial"] else "empty",
         detail=verdict["reason"], items=verdict["items"], query=marker,
         status="partial" if verdict["partial"] else None, actor_ref=ACTOR_REF, now=stamp)
-    # Partial material is useful input for the normal reader/planner too.
-    # Linking it neither certifies the answer nor changes the paid ladder.
-    linked = (link_arrivals(state, view, verdict["items"], source="indexed_corpus", now=stamp)
-              if verdict["met"] or verdict["partial"] else [])
     if verdict["met"]:
         mr.close(state, view["id"], status="found", reason=verdict["reason"],
                  items=verdict["items"], actor_ref=ACTOR_REF, now=stamp)

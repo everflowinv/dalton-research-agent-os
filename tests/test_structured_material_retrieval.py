@@ -239,6 +239,63 @@ class StructuredMaterialRetrievalTests(Fixture):
                 self.assertEqual(len(ma.material_arrived(self.state,request_id=req['id'])),count)
                 self.assertEqual(web.runs,0)
 
+    def test_closed_partial_link_failure_preserves_terminal_history_and_allows_later_recheck(self):
+        from unittest.mock import patch
+        from dalton_core import evidence_index as ei
+        for missing_arrival in [True, False]:
+            with self.subTest(missing_arrival=missing_arrival):
+                req=self.answer(terms='cost of revenues, selling general administrative, unavailable '+str(missing_arrival),
+                                source_priority=['web'],budget={'max_calls':0,'max_usd':'1.00'})
+                ma.ensure_schema(self.state)
+                ma._record_spend(self.state,req['id'],'web',3,105000,now=NOW)
+                mr.close(self.state,req['id'],status='partial',reason='old incomplete answer',now=NOW)
+                before=mr.request(self.state,req['id'])
+                before_spend=ma.request_spend(self.state,req['id'])
+                if missing_arrival:
+                    # Real indexed body/company projection, deliberately no
+                    # corresponding arrival fact; no old ledger row is edited.
+                    ref=self.add(company=None)
+                    c=ei.open_index(self.state)
+                    try:
+                        doc=c.execute('SELECT doc_id FROM evidence_documents WHERE document_ref=?',(ref,)).fetchone()[0]
+                        ei._add_company(c,doc,SYNW,'filed',now=NOW,epoch=NOW,arrival=False)
+                        c.commit()
+                    finally:c.close()
+                    self.add()  # a valid link first must also roll back
+                else:
+                    ref=self.add()
+                verdict=ma.evaluate_acceptance(self.state,req,now=NOW)
+                self.assertTrue(verdict['partial']);self.assertFalse(verdict['met'])
+                if not missing_arrival:
+                    # Mutate the actual FTS verdict at its boundary, then use
+                    # the real serve/SQL link transaction, not a mocked linker.
+                    verdict['items'][-1]={**verdict['items'][-1],'document_sha256':'0'*64}
+                web=FakeRung('web',[])
+                with patch('dalton_core.material_acquisition.evaluate_acceptance',return_value=verdict):
+                    with self.assertRaisesRegex(ma.MaterialAcquisitionError,'exact indexed document version'):
+                        ma.serve(self.state,req['id'],rungs={'web':web},now=later(hours=1))
+                after=mr.request(self.state,req['id'])
+                self.assertTrue(after['closed']);self.assertEqual(after['status'],'partial')
+                self.assertEqual(after['events'],before['events'])
+                self.assertEqual(ma.request_spend(self.state,req['id']),before_spend)
+                self.assertEqual(ma.material_arrived(self.state,request_id=req['id']),[])
+                self.assertEqual(web.runs,0)
+                if missing_arrival:
+                    # Add only the missing arrival using the ordinary index
+                    # helper; this must remain retryable because no marker was
+                    # recorded by the failed attempt.
+                    c=ei.open_index(self.state)
+                    try:
+                        ei._add_company(c,doc,SYNW,'filed',now=NOW,epoch=NOW)
+                        c.commit()
+                    finally:c.close()
+                result=ma.serve(self.state,req['id'],rungs={'web':web},now=later(hours=2))
+                self.assertEqual(result['outcome'],'cached')
+                self.assertTrue(ma.material_arrived(self.state,request_id=req['id']))
+                self.assertEqual(web.runs,0)
+                self.assertEqual(ma.request_spend(self.state,req['id']),before_spend)
+                self.assertTrue(mr.request(self.state,req['id'])['closed'])
+
     def test_numeric_request_never_closed_by_retrieval(self):
         req=self.answer();self.add()
         numeric={**req,'acceptance':{**req['acceptance'],'numeric_contract_ref':'directed-document-numeric:0.1'}}
