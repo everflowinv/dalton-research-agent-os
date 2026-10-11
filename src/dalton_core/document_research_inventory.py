@@ -360,6 +360,8 @@ def inventory_with_registry(*, core: Any, mission: Mapping[str, Any],
         projected = inventory_document(registration=registration, company_ref=company)
         projected.update({"doc_kind": registration["doc_kind"],
                           "doc_date": registration["doc_date"]})
+        from .directed_numeric_source_capabilities import planning_capability
+        projected.update(planning_capability(core.connection, registration, company))
         evidence_targets = financial_note_targets_for_registration(
             connection=core.connection, mission=mission, company_ref=company,
             registration=registration,
@@ -405,6 +407,8 @@ def inventory_with_registry(*, core: Any, mission: Mapping[str, Any],
     for company, registration in originals:
         projected = inventory_document(registration=registration, company_ref=company)
         projected.update({"doc_kind": registration["doc_kind"], "doc_date": registration["doc_date"]})
+        from .directed_numeric_source_capabilities import planning_capability
+        projected.update(planning_capability(core.connection, registration, company))
         key = (company, projected["document_ref"], projected["document_version_hash"])
         if key not in seen:
             readable[company].append(projected)

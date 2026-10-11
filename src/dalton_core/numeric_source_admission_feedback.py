@@ -21,7 +21,8 @@ def read_numeric_source_feedback(core, mission, *, inventory_loader=None):
     from .mission_document_research import _exact_plan
     from .research_task import inquiry_content_hash, inquiry_ref_for
     from .document_research_inventory import load_document_inventory_authority
-    from .document_figure_grade import grade_for, FILED
+    from .document_figure_grade import grade_for, FILED, SPOKEN
+    from .directed_numeric_source_capabilities import FILED_CONTRACT_REF, SPOKEN_CONTRACT_REF
     from .document_mission_lineage import document_mission_versions
     from .directed_numeric_research import normalize_targets
     from .document_research import validate_registration
@@ -67,15 +68,18 @@ def read_numeric_source_feedback(core, mission, *, inventory_loader=None):
                 or discovery['spec_ref']!=source['spec_ref'] or discovery['company_ref']!=company
                 or discovery['source_ref']!=source['source_ref']):raise ValueError('numeric source discovery grade proof differs')
             grade=grade_for(source['spec_ref'])
-            if grade==FILED:continue  # eligible source is not a refusal or a verified answer
+            expected_grade = SPOKEN if strategy['strategy_version'] == SPOKEN_CONTRACT_REF else FILED
+            if grade==expected_grade:continue  # eligible source is not a refusal or a verified answer
+            reason = ('numeric_spoken_source_requires_earnings_call_transcript'
+                      if expected_grade == SPOKEN else REASON)
             identity={'company_ref':company,'inquiry_hash':digest,'document_ref':registration['document_ref'],
-                'document_version_hash':registration['content_hash'],'source_grade':grade,'reason':REASON}
+                'document_version_hash':registration['content_hash'],'source_grade':grade,'reason':reason}
             record={'id':'numeric-source-refusal:'+content_hash(identity)[:32],**binding,
                 'mission_version_ref':mission['id'],'company_ref':company,'source_ref':registration['source_ref'],
                 'document_authority_ref':registration['id'],'review_ref':source['review_id'],'discovery_ref':source['discovery_ref'],'discovery_hash':source['discovery_hash'],'source_grade':grade,
-                'created_at':plan['created_at'],'stage':'admission','outcome':OUTCOME,'reason':REASON,
+                'created_at':plan['created_at'],'stage':'admission','outcome':OUTCOME,'reason':reason,
                 'question':inquiry['question'],'wants':inquiry['wants'],
-                'missing_evidence':['This source grade cannot support formal numeric figures; use a separate numeric inquiry bound to an eligible company-filed original. Do not move the old rejection binding to another document; the old-source task remains blocked.']}
+                'missing_evidence':[('This source supports management statements only: use directed-document-spoken-numeric:0.1 with exact source/target bindings, never promote it to filed facts.' if grade == SPOKEN and expected_grade == FILED else 'This source does not support the requested numeric answer contract; select an authority-advertised compatible strategy and exact original. Do not transfer a rejection binding to another source.')]}
             record['content_hash']=content_hash(record);records.append(record)
         except Exception as exc:
             unverified.append({**binding,'reason':type(exc).__name__})

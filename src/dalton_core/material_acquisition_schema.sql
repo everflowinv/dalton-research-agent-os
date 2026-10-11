@@ -1,6 +1,6 @@
 -- Batch E: the material acquisition service's own tables, in the same file as
--- the MaterialRequest ledger (``material-requests.sqlite``), append-only like
--- it.  Nothing here stores a document: found material is acquired through the
+-- the MaterialRequest ledger (``material-requests.sqlite``). Research and
+-- accounting facts remain append-only; the scheduling cursor is mutable metadata.  Nothing here stores a document: found material is acquired through the
 -- existing acquisition manifests and indexed by the evidence index; these
 -- tables only say what was spent, what was asked of a connector on a
 -- request's behalf, and which arrived document answered which request.
@@ -107,3 +107,12 @@ END;
 CREATE TRIGGER IF NOT EXISTS material_acquisition_conversions_no_delete BEFORE DELETE ON material_acquisition_conversions BEGIN
     SELECT RAISE(ABORT, 'material acquisition conversions are append-only');
 END;
+
+-- Mutable scheduling metadata, not an acquisition attempt or budget entry.
+-- Resume a bounded priority sweep without allowing waiting requests to occupy
+-- its first slots forever. Old request, event and spend rows remain immutable.
+CREATE TABLE IF NOT EXISTS material_acquisition_service_cursor (
+    cursor_id TEXT PRIMARY KEY CHECK (cursor_id = 'priority-round-robin'),
+    record_json TEXT NOT NULL,
+    content_hash TEXT NOT NULL
+);

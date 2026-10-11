@@ -53,8 +53,9 @@ class NumericSourceFeedbackTests(unittest.TestCase):
         self.assertEqual(row['plan_ref'],plan['plan_id'])
         self.assertEqual(row['plan_hash'],plan['content_hash'])
         self.assertEqual(row['source_grade'],'earnings-call-transcript')
-        self.assertIn('separate numeric inquiry',row['missing_evidence'][0])
-        self.assertIn('Do not move the old rejection binding',row['missing_evidence'][0])
+        self.assertIn('directed-document-spoken-numeric:0.1',row['missing_evidence'][0])
+        self.assertIn('never promote it to filed facts',row['missing_evidence'][0])
+        self.assertIn('exact source/target bindings',row['missing_evidence'][0])
         self.assertEqual((producer.calls,verifier.calls),(0,0))
 
     def test_missing_exact_version_is_unverified_not_source_grade_refusal(self):
@@ -127,4 +128,5 @@ class NumericSourceFeedbackTests(unittest.TestCase):
         self.assertEqual(planning_core_hash(state),planning_core_hash(projection))
         self.assertIn('numeric_admission_source_grade_refused',build_prompt(projection))
         self.assertIn('Never move its replaces_numeric_rejection binding across document/version',build_prompt(projection))
-        self.assertIn('keep that task blocked and ask a separate numeric inquiry from eligible company-filed material',build_prompt(projection))
+        self.assertIn('keep that task blocked and ask a compatible source-authority numeric strategy',build_prompt(projection))
+        self.assertIn('Never move its replaces_numeric_rejection',build_prompt(projection))

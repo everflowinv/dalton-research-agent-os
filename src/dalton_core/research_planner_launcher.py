@@ -380,6 +380,7 @@ class ResearchPlannerCoordinator:
             document_research_feedback_signature, document_research_settlement_signature,
         )
 
+        from .research_planner import TASK_HASH
         from .research_planner_cli import MAX_WORK_ORDER_PROMPT_BYTES, planner_input_byte_bound
 
         model_path = getattr(self.launcher, "model_config_path", None)
@@ -391,6 +392,7 @@ class ResearchPlannerCoordinator:
             # A new finite storage contract can fit an unchanged state whose
             # previous attempt stopped before creating a model Work.
             "planner_work_order_prompt_bytes": MAX_WORK_ORDER_PROMPT_BYTES,
+            "planner_task_hash": TASK_HASH,
             "planner_input_byte_bound": input_bound,
             # What is held, and what has been read out of it.
             "documents": count("SELECT COUNT(*) FROM coverage_mission_discovered_documents"),

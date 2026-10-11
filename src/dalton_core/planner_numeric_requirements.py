@@ -45,7 +45,7 @@ def numeric_requirements(feedback: Sequence[Mapping[str, Any]], *, limit: int | 
 
 def validate_numeric_requirement(inquiry: Mapping[str, Any], state: Mapping[str, Any]) -> None:
     """Only explicit rejection identity or exact question binds a requirement."""
-    from .directed_numeric_research import CONTRACT_REF
+    from .directed_numeric_source_capabilities import NUMERIC_STRATEGIES
     strategy = inquiry.get('directed_document')
     if not isinstance(strategy, Mapping):
         return
@@ -73,7 +73,7 @@ def validate_numeric_requirement(inquiry: Mapping[str, Any], state: Mapping[str,
                  and r['document_ref'] == strategy.get('document_ref')
                  and (r.get('document_version_hash') is None or r['document_version_hash'] == strategy.get('document_version_hash'))]
     if match:
-        if strategy.get('strategy_version') != CONTRACT_REF:
+        if strategy.get('strategy_version') not in NUMERIC_STRATEGIES:
             raise ValueError('the bound numeric requirement cannot use a qualitative strategy')
         if binding is None:
             raise ValueError('the bound numeric requirement needs its exact rejection binding')
@@ -101,7 +101,7 @@ def numeric_waiting_targets(feedback: Sequence[Mapping[str, Any]]) -> dict[str, 
         completed = {row['target_ref'] for row in observation['completed_targets']}
         missing = {row['target_ref']: row for row in observation['missing']}
         for ref, target in targets.items():
-            identity = (ref, content_hash(target))
+            identity = (ref, content_hash(target), observation.get('answer_contract_ref'))
             if identity in seen:
                 continue
             seen.add(identity)
@@ -117,6 +117,8 @@ def numeric_waiting_targets(feedback: Sequence[Mapping[str, Any]]) -> dict[str, 
             row = {'target_ref': ref, 'reason': reason[:180],
                    'document_ref': observation['document_ref'], 'document_version_hash': version,
                    'numeric_result_hash': observation['numeric_result_hash']}
+            for key in ('answer_contract_ref', 'source_grade', 'document_date', 'attribution'):
+                if key in observation: row[key] = observation[key]
             if observation.get('target_revision_candidate') is True:
                 row['target_revision_candidate'] = True
             if len(reason) > 180:
@@ -157,6 +159,8 @@ def numeric_completed_context(feedback: Sequence[Mapping[str, Any]], *,
             raise ValueError('numeric completed feedback hash differs')
         header = {key: observation[key] for key in (
             'document_ref', 'document_version_hash', 'numeric_result_hash', 'admission_ref', 'admission_hash')}
+        for key in ('answer_contract_ref', 'source_grade', 'document_date', 'attribution'):
+            if key in observation: header[key] = observation[key]
         for key in ('document_version_hash', 'numeric_result_hash', 'admission_hash'):
             if not isinstance(header[key], str) or len(header[key]) != 64 or any(c not in '0123456789abcdef' for c in header[key]):
                 raise ValueError('numeric completed feedback lacks an exact hash')

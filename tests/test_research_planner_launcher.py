@@ -145,9 +145,9 @@ class CoordinatorTests(unittest.TestCase):
             {"documents", "reviews_open", "claims", "figures", "metrics",
              "mission_versions", "dossier_feedback", "document_versions", "document_research_feedback",
              "document_research_settlement", "reflection_requests", "followup_decisions",
-             "backlog_versions", "backlog_events", "planner_work_order_prompt_bytes", "planner_input_byte_bound"})
+             "backlog_versions", "backlog_events", "planner_work_order_prompt_bytes", "planner_input_byte_bound", "planner_task_hash"})
         self.assertTrue(all(isinstance(v, int) for key, v in signature.items()
-                            if key not in {"planner_input_byte_bound", "dossier_feedback", "document_versions", "document_research_feedback",
+                            if key not in {"planner_task_hash", "planner_input_byte_bound", "dossier_feedback", "document_versions", "document_research_feedback",
                                            "document_research_settlement", "reflection_requests", "followup_decisions",
              "backlog_versions", "backlog_events"}))
         self.assertEqual(len(signature["document_research_settlement"]), 64)

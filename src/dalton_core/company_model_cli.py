@@ -42,6 +42,7 @@ from .cockpit_model import (
     CockpitModel, CockpitModelError, lane_status_for, model_failure_trace,
 )
 from .company_model_spec import (
+    CASH_FLOW_OPERATING_BASE_SHAPE_CODE,
     EPS_NUMERATOR_BRIDGE_GUIDANCE,
     EPS_NUMERATOR_BRIDGE_RULE_REF,
     REPAIRABLE_STRUCTURE_RULES,
@@ -85,7 +86,12 @@ MAX_OUTPUT_TOKENS = int(DEFAULT_MODEL_SPEC_CALL_BUDGET["max_output_tokens"])
 # structure rather than to look frugal.
 MAX_COST_USD = float(DEFAULT_MODEL_SPEC_CALL_BUDGET["max_cost_usd"])
 TIMEOUT_SECONDS = int(DEFAULT_MODEL_SPEC_CALL_BUDGET["timeout_seconds"])
-REPAIR_CONTRACT_REF = "contract:company-model-spec-structured-output-repair:0.6"
+from .model_spec_signed_expense_repair import (
+    CONTRACT_REF as SIGNED_EXPENSE_REPAIR_REF, ERROR_CODE as SIGNED_EXPENSE_REPAIR_CODE,
+    assert_only_coefficient_changed, validate_coefficient_parent, validate_financials_for_repair,
+)
+
+REPAIR_CONTRACT_REF = "contract:company-model-spec-structured-output-repair:0.9"
 # One repair call, which is the number every other lane in this repository
 # uses for the same bargain (``draft_contract_repair.MAX_REPAIR_ATTEMPTS``).
 DEFAULT_REPAIR_ATTEMPTS = 1
@@ -111,10 +117,11 @@ REPAIR_CONTRACT = {
     # filings ("this formula does not tie to filed history") stays a whole
     # refusal, because a repair there is an invitation to make the numbers
     # agree.  12 live refusals between 2026-09-11 and 09-13 were wiring.
-    "eligible_error_codes": ["format", "structure", "text_length"],
+    "eligible_error_codes": ["format", "structure", "text_length",
+                             CASH_FLOW_OPERATING_BASE_SHAPE_CODE, SIGNED_EXPENSE_REPAIR_CODE],
     "eligible_structure_rules_ref": REPAIRABLE_STRUCTURE_RULES_REF,
     "eligible_structure_rules": list(REPAIRABLE_STRUCTURE_RULES),
-    "validation": "full_spec_from_response_after_every_attempt",
+    "validation": "full_spec_from_response_and_supplied_financial_validator_after_every_attempt",
     "text_length_change": "only_overlong_schema_strings_may_change",
     "structure_change": "only_the_named_rule_may_change",
     "eps_numerator_bridge": {
@@ -123,6 +130,21 @@ REPAIR_CONTRACT = {
         "change": "one_derived_numerator_bridge_and_its_consuming_eps_formula_only",
         "accounting_line": "retain_or_restore_accounting_net_income_role_and_formula",
     },
+    "filed_subtotal_placement": {
+        "ref": "model-spec-filed-subtotal-concept-placement:0.1",
+        "change": "same_line_concept_to_matching_formula_tie_only",
+        "source_identity": "exact_filed_concept_and_evidence_remain_unchanged",
+    },
+    "cash_flow_operating_base_shape": {
+        "ref": "rule:cash-flow-operating-base-unavailable-repair:0.1",
+        "allowed_fields": ["forecast_method", "forecast_base_ref", "because"],
+        "change": "operating_cash_flow_only_to_unavailable_and_null_base",
+        "preserve": "all_other_fields_including_filed_concept_and_fcf_formula",
+        "scope_validation": "exact_parent_and_repaired_body_comparison",
+    },
+    "signed_filed_income_sum": {"ref": SIGNED_EXPENSE_REPAIR_REF,
+        "scope": "one_exact_coefficient_only_with_all_held_periods_strictly_proven",
+        "validation": "full_financial_validation_after_every_new_or_replayed_answer"},
     "semantic_failure": "whole_refusal",
     # 0.5: a new contract is a new question only where nobody has answered it.
     # A repair already made under an earlier contract for this disclosure,
@@ -367,7 +389,30 @@ def validate_structured_output_repair_binding(
 
 
 def _repair_prompt(original_text: str, error: CompanyModelSpecError) -> str:
-    if error.code == "structure":
+    if error.code == SIGNED_EXPENSE_REPAIR_CODE:
+        head = (
+            "Correct only the exact coefficient_path identified by the source-proven "
+            "signed expense proof in VALIDATION_ERROR, to its required_coefficient. Do not change "
+            "any other field, filed fact, period, concept, evidence, line, formula, "
+            "amount, source, or assessment. The original filed values are already "
+            "signed; do not reinterpret or take their absolute value. Every held historical period "
+            "must still tie exactly. Return the complete original JSON with only "
+            "that one coefficient changed.\n\n"
+        )
+    elif error.code == CASH_FLOW_OPERATING_BASE_SHAPE_CODE:
+        head = (
+            "Repair only cash_flow_companion operating_cash_flow whose declared "
+            "forecast base is not a forecastable filed line. Keep its exact filed "
+            "cash concept, line role and position. Change only its forecast_method "
+            "to unavailable, forecast_base_ref to null, and because to explain "
+            "that this base is unsupported and no OCF forecast is available. "
+            "Do not substitute a revenue or another economic base; do not change "
+            "the income DAG, any concept, figure, ref, period, capital expenditure "
+            "line, FCF formula or any unrelated field. Do not claim that FCF "
+            "or the whole forecast is complete. Return JSON matching OUTPUT_SCHEMA "
+            "and nothing else.\n\n"
+        )
+    elif error.code == "structure":
         head = (
             "Repair one company-model specification response. Its financial "
             "statement structure broke one deterministic wiring rule, named "
@@ -380,6 +425,25 @@ def _repair_prompt(original_text: str, error: CompanyModelSpecError) -> str:
             "inventing a line that would satisfy it. Return JSON matching "
             "OUTPUT_SCHEMA and nothing else.\n\n"
         )
+        if "a filed subtotal may only be actual/tie authority or unavailable" in str(error):
+            head = (
+                "Repair only the named filed-subtotal wiring rule. A filed subtotal "
+                "may remain filed with forecast_method unavailable: do not invent "
+                "a forecast for an unsupported total. To make this same subtotal "
+                "formula-derived, change only that line to kind derived, concept "
+                "null and forecast_method formula, and put its original exact "
+                "filed concept in the matching formula's tie_out_concept. This is "
+                "a field placement change, never removal or replacement of the "
+                "source authority. Preserve the exact filed concept and existing "
+                "source evidence in that tie. Use only already provided component "
+                "line refs with the company's proven statement bridge. Do not "
+                "change any figure, ref, period, source concept identity or "
+                "unrelated line. Do not add, remove or rename any line, invent "
+                "a component, delete an anchor, or use an untied subtotal. If "
+                "the provided source authorities cannot prove the bridge, keep "
+                "the subtotal unavailable. Return JSON matching OUTPUT_SCHEMA "
+                "and nothing else.\n\n"
+            )
         # The closed EPS rule needs a distinct derived bridge, not a retagged
         # accounting subtotal. Other wiring errors retain the original scope.
         if (
@@ -490,11 +554,52 @@ def _assert_text_length_only_changed(original: Any, repaired: Any) -> None:
     compare(original, repaired)
 
 
+def _assert_cash_flow_operating_base_only_changed(original: Any, repaired: Any) -> None:
+    """One typed repair may only admit the absence of an OCF forecast basis."""
+    def refused() -> None:
+        raise CompanyModelSpecError("cash-flow base repair changed fields outside its exact scope")
+
+    if not isinstance(original, Mapping) or not isinstance(repaired, Mapping):
+        refused()
+    left_cash, right_cash = original.get("cash_flow_companion"), repaired.get("cash_flow_companion")
+    if not isinstance(left_cash, Mapping) or not isinstance(right_cash, Mapping):
+        refused()
+    left_lines, right_lines = left_cash.get("lines"), right_cash.get("lines")
+    if not isinstance(left_lines, list) or not isinstance(right_lines, list) or len(left_lines) != len(right_lines):
+        refused()
+    positions = [i for i, line in enumerate(left_lines)
+                 if isinstance(line, Mapping) and line.get("role") == "operating_cash_flow"]
+    if len(positions) != 1:
+        refused()
+    index = positions[0]
+    old, new = left_lines[index], right_lines[index]
+    if (not isinstance(new, Mapping) or set(old) != set(new)
+            or old.get("forecast_method") != "share_of_line"
+            or new.get("forecast_method") != "unavailable"
+            or new.get("forecast_base_ref") is not None
+            or not isinstance(new.get("because"), str) or not new["because"].strip()):
+        refused()
+    # Restoring only the three permitted source fields must reproduce every
+    # parent byte represented by the JSON body, including order and types.
+    expected = dict(repaired)
+    expected_cash = dict(right_cash)
+    expected_lines = list(right_lines)
+    expected_line = dict(new)
+    for field in ("forecast_method", "forecast_base_ref", "because"):
+        expected_line[field] = old[field]
+    expected_lines[index] = expected_line
+    expected_cash["lines"] = expected_lines
+    expected["cash_flow_companion"] = expected_cash
+    if canonical_json(expected) != canonical_json(original):
+        refused()
+
+
 def _validated_spec_with_repair(
     *, model: CockpitModel, state: Mapping[str, Any], mission: Mapping[str, Any],
     original_call: Mapping[str, Any], repair_config: Mapping[str, int], decided_by: str,
     repair_attempts: list[dict[str, Any]] | None = None,
     note_evidence_resolver: Any | None = None,
+    financial_validator: Any | None = None,
 ) -> tuple[dict[str, Any], list[dict[str, Any]], dict[str, Any]]:
     root_call = dict(original_call)
     current_call = dict(original_call)
@@ -504,18 +609,28 @@ def _validated_spec_with_repair(
     # more chance per disclosure, never an open-ended one: every step either
     # consumes a distinct held answer or one of ``max_attempts``.
     contract_calls = 0
+    signed_repair_attempted = False
     depth = 0
     replayed_refs: set[str] = set()
+    cash_base_repair_applied = False
     while True:
         try:
             spec = spec_from_response(
                 state, current_call["text"], decided_by=decided_by,
                 note_evidence_resolver=note_evidence_resolver,
             )
+            if financial_validator is not None:
+                financial_validator(spec)
             return spec, repairs, current_call
         except CompanyModelSpecError as error:
+            # This narrow gap declaration gets one reconsideration only, even
+            # if the original response reveals another invalid field afterwards.
+            if cash_base_repair_applied:
+                raise
             if error.code not in REPAIR_CONTRACT["eligible_error_codes"]:
                 raise
+            if error.code == SIGNED_EXPENSE_REPAIR_CODE:
+                validate_coefficient_parent(parse_response(current_call["text"]),error.proof)
             prior = _prior_contract_repair(
                 getattr(model, "scheduler_db", None),
                 state_hash=str(state["state_hash"]),
@@ -546,13 +661,22 @@ def _validated_spec_with_repair(
                         parse_response(current_call["text"]),
                         parse_response(prior["text"]),
                     )
+                if error.code == CASH_FLOW_OPERATING_BASE_SHAPE_CODE:
+                    _assert_cash_flow_operating_base_only_changed(
+                        parse_response(current_call["text"]), parse_response(prior["text"]))
+                    cash_base_repair_applied = True
+                if error.code == SIGNED_EXPENSE_REPAIR_CODE:
+                    assert_only_coefficient_changed(parse_response(current_call["text"]),
+                        parse_response(prior["text"]), error.proof)
                 current_call = {
                     key: value for key, value in prior.items()
                     if key not in {"binding_hash", "repair_contract_hash",
                                    "repair_number"}
                 }
                 continue
-            if contract_calls >= repair_config["max_attempts"]:
+            if (contract_calls >= repair_config["max_attempts"]
+                    or signed_repair_attempted
+                    or (error.code == SIGNED_EXPENSE_REPAIR_CODE and contract_calls >= 1)):
                 raise
             prompt = _repair_prompt(current_call["text"], error)
             binding = {
@@ -615,12 +739,20 @@ def _validated_spec_with_repair(
                 "binding_hash": content_hash(binding),
             })
             contract_calls += 1
+            signed_repair_attempted = signed_repair_attempted or error.code == SIGNED_EXPENSE_REPAIR_CODE
             depth += 1
             if error.code == "text_length":
                 _assert_text_length_only_changed(
                     parse_response(current_call["text"]),
                     parse_response(repaired_call["text"]),
                 )
+            if error.code == CASH_FLOW_OPERATING_BASE_SHAPE_CODE:
+                _assert_cash_flow_operating_base_only_changed(
+                    parse_response(current_call["text"]), parse_response(repaired_call["text"]))
+                cash_base_repair_applied = True
+            if error.code == SIGNED_EXPENSE_REPAIR_CODE:
+                assert_only_coefficient_changed(parse_response(current_call["text"]),
+                    parse_response(repaired_call["text"]), error.proof)
             current_call = dict(repaired_call)
 
 
@@ -728,16 +860,21 @@ def model_spec_validation_contract() -> dict[str, str]:
     one new repair per contract version described above.
     """
 
-    from .company_financial_statement_structure import STRUCTURE_AUTHORITY_REF
+    from .company_financial_statement_structure import (
+        NET_INCOME_SOURCE_CARRY_VALIDATION_REF, STRUCTURE_AUTHORITY_REF,
+    )
+    from .forecast_coverage import PROPOSAL_METHOD_COMPLETION_REF
     from .company_model_series import DUPLICATE_FACT_POLICY_REF
     from .model_forecast_driver import (
         CASH_FLOW_COMPANION_VALIDATION_CONTRACT_HASH,
     )
 
     return {
-        "contract": "company-model-spec-pre-persistence-validation:0.1",
+        "contract": "company-model-spec-pre-persistence-validation:0.2",
+        "proposal_method_completion": PROPOSAL_METHOD_COMPLETION_REF,
         "cash_flow_companion": CASH_FLOW_COMPANION_VALIDATION_CONTRACT_HASH,
         "financial_statement_structure": STRUCTURE_AUTHORITY_REF,
+        "net_income_source_carry": NET_INCOME_SOURCE_CARRY_VALIDATION_REF,
         "repairable_structure_rules": REPAIRABLE_STRUCTURE_RULES_REF,
         "series_duplicate_facts": DUPLICATE_FACT_POLICY_REF,
         "repair_replay": REPAIR_REPLAY_POLICY_REF,
@@ -1094,6 +1231,8 @@ def run_model_spec(
                 decided_by=mission["autonomy"]["automation_principal"],
                 repair_attempts=repairs,
                 note_evidence_resolver=note_resolver,
+                financial_validator=lambda candidate: validate_financials_for_repair(
+                    missions, candidate, note_evidence_resolver=note_resolver),
             )
         except SchedulerError as exc:
             summary.update({"status": "succeeded", "spec_status": "busy",
@@ -1106,7 +1245,8 @@ def run_model_spec(
                                 else lane_status_for(exc, "model_unavailable")),
                 "failure_reason": f"{type(exc).__name__}: {exc}"})
             return summary
-        except CompanyModelSpecError as exc:
+        except (CompanyModelSpecError, ModelInputError, FinancialStatementStructureError,
+                ForecastModelError) as exc:
             # Refused whole. A specification with the invented lines stripped
             # out is no longer the model the model meant to describe.
             #
@@ -1115,6 +1255,9 @@ def run_model_spec(
             # which statement, which item" is the difference between a refusal
             # an operator can act on and one they can only count.
             gaps = financial_line_gaps(state)
+            if (isinstance(exc, (ModelInputError, FinancialStatementStructureError, ForecastModelError))
+                    or getattr(exc, "code", None) == SIGNED_EXPENSE_REPAIR_CODE):
+                summary["pre_persistence_validation"] = "refused"
             summary["financial_line_gaps"] = gaps
             summary.update({"status": "succeeded", "spec_status": "refused",
                             "failure_reason": (

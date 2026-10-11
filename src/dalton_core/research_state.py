@@ -311,9 +311,11 @@ def build_research_state(
     open_gaps = sum(len(c["gaps"]) for c in companies)
     if industry_block:
         open_gaps += len(industry_block["gaps"])
+    from .research_planner import TASK_HASH
     state = {
         "schema_version": SCHEMA_VERSION,
         "document_research_contract_ref": "directed-document:0.1",
+        "planner_task_hash": TASK_HASH,
         "document_research_policy": None if document_research_policy is None else dict(document_research_policy),
         "document_research_availability": dict(document_research_availability or {}),
         **({"numeric_admission_source_feedback_status": dict(document_research_feedback["admission_source_feedback_status"])}
@@ -567,6 +569,8 @@ def _planning_body(state: Mapping[str, Any]) -> dict[str, Any]:
     return {
         "schema_version": state.get("schema_version"),
         "document_research_contract_ref": state.get("document_research_contract_ref"),
+        **({"planner_task_hash": state["planner_task_hash"]}
+           if "planner_task_hash" in state else {}),
         **({"document_research_numeric_contract_ref": state["document_research_numeric_contract_ref"]}
            if "document_research_numeric_contract_ref" in state else {}),
         "document_research_policy": (

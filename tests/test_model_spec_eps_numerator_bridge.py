@@ -133,7 +133,7 @@ class AccountingEPSBridgeTests(unittest.TestCase):
 
     def test_versioned_contract_changes_normal_request_identity_without_clearing_old_key(self):
         self.assertNotEqual(specs.TASK_HASH, OLD_TASK_HASH)
-        self.assertEqual(cli.REPAIR_CONTRACT_REF, 'contract:company-model-spec-structured-output-repair:0.6')
+        self.assertEqual(cli.REPAIR_CONTRACT_REF, 'contract:company-model-spec-structured-output-repair:0.9')
         self.assertEqual(cli.DEFAULT_REPAIR_ATTEMPTS, 1)
         common = dict(company_ref='company:synthetic', state_hash='a'*64, repair_policy_hash='b'*64, validation_hash='c'*64)
         old = business_key(**common, task_hash=OLD_TASK_HASH, repair_contract_hash='d'*64)

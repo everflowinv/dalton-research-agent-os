@@ -88,7 +88,7 @@ class CallBudgetTests(unittest.TestCase):
             # Initial-screen drafting has a larger evidence-backed output
             # default; the shared minimum and independent verifier are unchanged.
             expected = {**LONG_CONTEXT_CALL_FLOOR,
-                        **({"max_output_tokens": 64000} if name == "initial_screen" else {})}
+                        **({"max_output_tokens": 128000} if name == "initial_screen" else {})}
             self.assertEqual(wire["purposes"][name], expected)
 
     def test_long_form_brain_drafts_leave_room_for_reasoning(self):

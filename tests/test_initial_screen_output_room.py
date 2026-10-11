@@ -25,7 +25,7 @@ class InitialScreenOutputRoomTests(unittest.TestCase):
         model.max_cost_usd = None
         model.timeout_seconds = 900
         self.assertEqual(model.budget_for('initial_screen'), {
-            'max_input_tokens': 600000, 'max_output_tokens': 64000,
+            'max_input_tokens': 600000, 'max_output_tokens': 128000,
             'max_cost_usd': 14.0, 'timeout_seconds': 900,
         })
         self.assertEqual(default_call_budget('initial_screen_verifier'), {
@@ -53,22 +53,22 @@ class InitialScreenOutputRoomTests(unittest.TestCase):
         old_budget = resolve_call_budget(frozen, 'initial_screen', defaults=defaults)
         self.assertEqual(old_budget['max_output_tokens'], 16000)
         saved = set_shared_model_budget(fixture.path, 'owner@example.com', 'initial_screen',
-            {'max_output_tokens': 64000}, first['content_hash'])['policy']
+            {'max_output_tokens': 128000}, first['content_hash'])['policy']
         self.assertEqual(load_shared_call_budget_policy(path), saved)
         for config in configs:
             actual = resolve_call_budget(config, 'initial_screen', defaults=defaults)
-            self.assertEqual(actual, {**old_budget, 'max_output_tokens': 64000})
+            self.assertEqual(actual, {**old_budget, 'max_output_tokens': 128000})
         self.assertEqual(resolve_call_budget(frozen, 'initial_screen', defaults=defaults), old_budget)
         for key in ('default_max_cost_usd', 'purpose_max_cost_usd', 'purpose_run_limits'):
             self.assertEqual(saved[key], first[key])
         self.assertEqual(saved['prior_hash'], first['content_hash'])
-        self.assertEqual(saved['purpose_call_limits']['initial_screen'], {'max_output_tokens': 64000})
+        self.assertEqual(saved['purpose_call_limits']['initial_screen'], {'max_output_tokens': 128000})
 
     def test_same_request_new_budget_has_new_work_identity_and_old_replay_is_exact(self):
         register_purpose('initial_screen')
         old_budget = {'max_input_tokens': 600000, 'max_output_tokens': 16000,
                       'max_cost_usd': 14.0, 'timeout_seconds': 900}
-        new_budget = {**old_budget, 'max_output_tokens': 64000}
+        new_budget = {**old_budget, 'max_output_tokens': 128000}
         def work(budget):
             return build_work(purpose='initial_screen', request_id='synthetic-screen:document:0',
                 prompt='Read only the registered filing evidence.',
@@ -83,7 +83,7 @@ class InitialScreenOutputRoomTests(unittest.TestCase):
         self.assertNotEqual(new.id, old.id)
         self.assertEqual(work(old_budget).to_dict(), before)
         self.assertEqual(old.to_dict(), before)
-        self.assertEqual(new.budget['max_total_tokens'], 664000)
+        self.assertEqual(new.budget['max_total_tokens'], 728000)
         self.assertEqual({k:v for k,v in new.budget.items() if k not in {'max_output_tokens', 'max_total_tokens'}},
                          {k:v for k,v in old.budget.items() if k not in {'max_output_tokens', 'max_total_tokens'}})
         self.assertNotEqual(content_hash(new.to_dict()), content_hash(before))

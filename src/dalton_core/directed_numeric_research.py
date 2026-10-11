@@ -151,5 +151,11 @@ def pending_numeric_result(connection,admission_ref):
     envelope=json.loads(formal['result_envelope_json'])
     if formal['terminal_state']!='succeeded' or content_hash(envelope)!=formal['result_envelope_hash'] or envelope['outputs']!=result:
         raise DirectedNumericError('pending numeric result lacks exact formal settlement')
+    from .directed_numeric_source_capabilities import spoken_answer
+    spoken=spoken_answer(parent)
+    if result.get('numeric_authority')!=parent.get('numeric_authority'):
+        raise DirectedNumericError('pending numeric answer contract differs')
+    if spoken and (result.get('canonical_claims') or result.get('management_answer',{}).get('answer_contract_ref')!=parent['numeric_authority']['answer_contract_ref']):
+        raise DirectedNumericError('pending spoken answer has invalid filed or answer authority')
     if result['status']!='waiting_evidence' or not result['pending_targets']:return None
     return {'admission_ref':admission_ref,'admission_hash':parent_hash,'numeric_result_hash':digest,'parent':parent,'result':result}

@@ -349,7 +349,7 @@ class MissionDocumentResearchAuthority:
                 normalized["repair_target_ref"] = candidate["repair_target_ref"]
             if candidate.get("directed_document") is not None:
                 normalized["directed_document"] = candidate["directed_document"]
-                if candidate["directed_document"].get("strategy_version") == "directed-document-numeric:0.1":
+                if candidate["directed_document"].get("numeric_targets") is not None:
                     from .document_research_strategy import normalize_strategy
                     normalized["directed_document"] = normalize_strategy(candidate["directed_document"],
                         max_query_terms=self.registry.policy["max_query_terms"],
@@ -559,7 +559,7 @@ class MissionDocumentResearchAuthority:
             raise MissionDocumentResearchError("inquiry is absent or ambiguous in the exact plan")
         ordinal, inquiry, inquiry_hash = matches[0]
         strategy = inquiry.get("directed_document")
-        if isinstance(strategy, Mapping) and strategy.get("strategy_version") == "directed-document-numeric:0.1":
+        if isinstance(strategy, Mapping) and strategy.get("numeric_targets") is not None:
             from .directed_numeric_research import normalize_targets
             if normalize_targets(strategy.get("numeric_targets")) != strategy.get("numeric_targets"):
                 raise MissionDocumentResearchError("stored numeric target normalization differs")
@@ -710,6 +710,7 @@ class MissionDocumentResearchAuthority:
                 raise MissionDocumentResearchError("numeric source resume lacks exact incomplete result")
             old=prior["parent"];old_registration=old["request"]["registration"]
             if (old["company_ref"]!=inquiry["company_ref"] or old["numeric_authority"]["targets"]!=strategy["numeric_targets"]
+                or old["planner_inquiry"]["directed_document"]["strategy_version"]!=strategy["strategy_version"]
                 or signatures_equivalent(inquiry_signature_for(inquiry["company_ref"],inquiry),inquiry_signature_for(inquiry["company_ref"],old["planner_inquiry"])) is None):
                 raise MissionDocumentResearchError("numeric resume needs the same question and complete required targets")
             numeric_resume_proof=dict(selected_resume)
@@ -764,6 +765,7 @@ class MissionDocumentResearchAuthority:
         if set(executions) != {"draft", "verifier"} or set(model_authority) != {"draft", "verifier"}:
             raise MissionDocumentResearchError("directed document model authority has an invalid shape")
         from .directed_numeric_executor import source_binding
+        from .directed_numeric_source_capabilities import SPOKEN_CONTRACT_REF
         return {
             "schema_version": SCHEMA_VERSION,
             "workflow_contract_ref": WORKFLOW_CONTRACT_REF,
@@ -787,12 +789,15 @@ class MissionDocumentResearchAuthority:
             "model_authority": model_authority,
             **({"numeric_authority": {
                 "contract_ref": "directed-document-numeric:0.1",
+                **({"answer_contract_ref": SPOKEN_CONTRACT_REF}
+                   if strategy["strategy_version"] == SPOKEN_CONTRACT_REF else {}),
                 "capability_upgrade_proofs":numeric_upgrades,
                 "resume_proof":numeric_resume_proof,
                 **({"target_revision_proof": target_revision} if target_revision else {}),
                 "targets": strategy["numeric_targets"],
                 "source_binding": source_binding(
-                    self.connection, registration, inquiry["company_ref"]),
+                    self.connection, registration, inquiry["company_ref"],
+                    strategy_version=strategy["strategy_version"]),
                 "metric_definitions": [{"metric_ref":target["metric_ref"],
                                         "metric_definition":target["metric_definition"],
                                         "metric_definition_hash":target["metric_definition_hash"],
@@ -895,10 +900,11 @@ class MissionDocumentResearchAuthority:
         # The host performs this check before recording its backlog question.
         # Its inquiry already came from the exact formal planner output.
         from .directed_numeric_research import numeric_rejection, CONTRACT_REF
+        from .directed_numeric_source_capabilities import NUMERIC_STRATEGIES
         strategy = inquiry.get("directed_document") or {}
         selected = strategy.get("replaces_numeric_rejection") or {}
         selected_upgrade_valid = False
-        if strategy.get("strategy_version") == CONTRACT_REF and selected:
+        if strategy.get("strategy_version") in NUMERIC_STRATEGIES and selected:
             proof = numeric_rejection(self.connection, selected.get("admission_ref"))
             if proof is not None and all(selected.get(k) == proof[k] for k in selected):
                 parent = self.admission(proof["admission_ref"])
@@ -938,14 +944,15 @@ class MissionDocumentResearchAuthority:
                     matched = "canonical_question"
             if matched is not None:
                 from .directed_numeric_research import numeric_rejection, CONTRACT_REF
+                from .directed_numeric_source_capabilities import NUMERIC_STRATEGIES
                 rejection = numeric_rejection(self.connection, admission_id)
                 strategy = inquiry.get("directed_document") or {}
-                if rejection is not None and strategy.get("strategy_version") == CONTRACT_REF and (
+                if rejection is not None and strategy.get("strategy_version") in NUMERIC_STRATEGIES and (
                     rejection in identity.get("numeric_authority", {}).get("capability_upgrade_proofs", [])
                     or ("numeric_authority" not in identity and selected_upgrade_valid)):
                     # Different source-bound numeric workflow, never a revival of the refused admission.
                     continue
-                if strategy.get("strategy_version")==CONTRACT_REF:
+                if strategy.get("strategy_version") in NUMERIC_STRATEGIES:
                     from .directed_numeric_research import pending_numeric_result
                     pending=pending_numeric_result(self.connection,admission_id)
                     resume=strategy.get("resumes_numeric_result") or {}

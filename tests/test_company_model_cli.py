@@ -667,8 +667,12 @@ class ChooseCompanyTests(unittest.TestCase):
             )
         self.assertEqual(summary["spec_status"], "refused")
         self.assertEqual(summary["pre_persistence_validation"], "refused")
-        self.assertIn("does not tie to filed history", summary["failure_reason"])
-        self.assertEqual(len(model_calls), 1)
+        self.assertIn("exact coefficient scope", summary["failure_reason"])
+        self.assertEqual(len(model_calls), 2)
+        self.assertEqual(len(summary["repair_attempts"]), 1)
+        self.assertEqual(summary["cost_micros"], 22)
+        self.assertEqual(model_calls[1]["_structured_output_repair"]["validation_error"]["code"],
+                         "signed_filed_income_sum_coefficient")
         self.assertEqual(self.missions.company_model_specs(ACN), [])
         self.assertEqual(choose_company(self.missions, self.mission)[0], ACN)
 
