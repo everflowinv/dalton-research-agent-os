@@ -170,5 +170,8 @@ def pending_numeric_result(connection,admission_ref):
         raise DirectedNumericError('pending numeric answer contract differs')
     if spoken and (result.get('canonical_claims') or result.get('management_answer',{}).get('answer_contract_ref')!=parent['numeric_authority']['answer_contract_ref']):
         raise DirectedNumericError('pending spoken answer has invalid filed or answer authority')
+    from .directed_numeric_measure_reconciliation import feedback_supplement
+    supplement=feedback_supplement(connection,parent,result)
+    if supplement is not None:result=supplement;digest=result['content_hash']
     if result['status']!='waiting_evidence' or not result['pending_targets']:return None
     return {'admission_ref':admission_ref,'admission_hash':parent_hash,'numeric_result_hash':digest,'parent':parent,'result':result}

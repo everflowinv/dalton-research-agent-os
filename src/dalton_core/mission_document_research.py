@@ -215,6 +215,7 @@ def _settlement_instants(connection: sqlite3.Connection,
     wanted = set(admission_refs)
     for query in (
         "SELECT n.admission_ref, n.created_at FROM mission_document_numeric_results n JOIN scheduler_formal_results f ON f.work_order_id=n.work_order_ref WHERE f.terminal_state='succeeded' AND json_extract(n.record_json,'$.status')='completed'",
+        "SELECT n.admission_ref, n.created_at FROM mission_document_numeric_measure_results n JOIN scheduler_formal_results f ON f.work_order_id=n.work_order_ref WHERE f.terminal_state='succeeded' AND json_extract(n.record_json,'$.status')='completed'",
         "SELECT admission_ref, created_at FROM mission_document_research_outcomes",
         "SELECT admission_ref, created_at FROM mission_document_research_candidate_rejections",
         "SELECT admission_ref, created_at FROM mission_document_research_observations "

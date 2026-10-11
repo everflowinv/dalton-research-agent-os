@@ -120,13 +120,14 @@ class MissionDocumentResearchLauncher(LaneChildLauncher):
     def replay_completed_models(self, *, admission_ref, admission_hash, proof):
         """One versioned child per admission, independent of config/day changes."""
         from .document_completed_model_replay import CONTRACT
+        from .directed_numeric_measure_reconciliation import REPLAY_CONTRACT
         self._validate_admission(admission_ref, admission_hash)
-        if (proof.get("contract_ref") != CONTRACT or proof.get("model_calls_allowed") != 0
+        if (proof.get("contract_ref") not in {CONTRACT,REPLAY_CONTRACT} or proof.get("model_calls_allowed") != 0
                 or proof.get("admission_ref") != admission_ref
                 or proof.get("admission_hash") != admission_hash
                 or proof.get("content_hash") != content_hash({k:v for k,v in proof.items() if k != "content_hash"})):
             raise LaneChildRejected("completed model replay proof differs")
-        scope = {"contract_ref": CONTRACT, "admission_ref": admission_ref,
+        scope = {"contract_ref": proof["contract_ref"], "admission_ref": admission_ref,
                  "admission_hash": admission_hash}
         digest = content_hash(scope)[:24]
         ref = f"{self.TICKET_PREFIX}:{digest}"

@@ -89,3 +89,16 @@ CREATE TRIGGER IF NOT EXISTS numeric_local_reconciliations_no_delete
 BEFORE DELETE ON mission_document_numeric_local_reconciliations BEGIN
     SELECT RAISE(ABORT, 'local numeric reconciliation is append-only');
 END;
+
+CREATE TABLE IF NOT EXISTS mission_document_numeric_measure_reconciliations (
+ admission_ref TEXT PRIMARY KEY REFERENCES mission_document_research_admissions(admission_id),
+ authorization_ref TEXT NOT NULL UNIQUE,
+ admission_hash TEXT NOT NULL, record_json TEXT NOT NULL, content_hash TEXT NOT NULL, created_at TEXT NOT NULL
+);
+CREATE TRIGGER IF NOT EXISTS mission_document_numeric_measure_reconciliations_authorized_insert
+BEFORE INSERT ON mission_document_numeric_measure_reconciliations WHEN dalton_mission_document_research_authorized()=0
+BEGIN SELECT RAISE(ABORT,'numeric measure reconciliation requires authority'); END;
+CREATE TRIGGER IF NOT EXISTS mission_document_numeric_measure_reconciliations_no_update BEFORE UPDATE ON mission_document_numeric_measure_reconciliations
+BEGIN SELECT RAISE(ABORT,'numeric measure reconciliation is append-only'); END;
+CREATE TRIGGER IF NOT EXISTS mission_document_numeric_measure_reconciliations_no_delete BEFORE DELETE ON mission_document_numeric_measure_reconciliations
+BEGIN SELECT RAISE(ABORT,'numeric measure reconciliation is append-only'); END;

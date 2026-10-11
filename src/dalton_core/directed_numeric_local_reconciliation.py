@@ -140,9 +140,9 @@ def _repair_evidence(executor, admission, works):
             continue
         target = targets[item['target_ref']]
         rows = executor.connection.execute('SELECT figure_id FROM coverage_mission_document_figures '
-            'WHERE company_ref=? AND document_ref=? AND metric_ref=? AND period=? AND source_manifest_hash=?',
+            'WHERE company_ref=? AND document_ref=? AND metric_ref=? AND period=? AND source_manifest_hash=? AND figure_id NOT LIKE ?',
             (admission['company_ref'], admission['request']['registration']['document_ref'], target['metric_ref'],
-             target['period'], admission['request']['registration']['manifest_hash'])).fetchall()
+             target['period'], admission['request']['registration']['manifest_hash'],'mission-document-figure:source-measure:%')).fetchall()
         if not rows:
             continue
         if len(rows) != 1:
@@ -205,6 +205,10 @@ def qualification(executor, admission_ref, expected_admission_hash):
 def reconcile(executor, admission_ref, *, expected_admission_hash, requested_by):
     """Official maintenance operation; the sole executable stage is local."""
     from .directed_numeric_executor import complete_numeric_stage, read_numeric_result
+    existing_result=executor.connection.execute('SELECT record_json FROM mission_document_numeric_results WHERE admission_ref=?',(admission_ref,)).fetchone()
+    if existing_result is not None and any('measure_conflict_proof' in item for item in json.loads(existing_result[0]).get('pending_targets',[])):
+        from .directed_numeric_measure_reconciliation import reconcile as reconcile_measure
+        return reconcile_measure(executor,admission_ref,expected_admission_hash=expected_admission_hash,requested_by=requested_by)
     admission, works, candidate = qualification(executor,admission_ref,expected_admission_hash)
     row = _row(executor.connection, admission_ref)
     if row is None:

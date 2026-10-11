@@ -858,7 +858,12 @@ class MissionDocumentResearchCoordinator:
                     where = f"WHERE ({pending}) AND r.rejection_id IS NULL "
             if self.store.connection.execute("SELECT 1 FROM sqlite_master WHERE type='table' AND name='mission_document_numeric_results'").fetchone():
                 joins += "LEFT JOIN mission_document_numeric_results n ON n.admission_ref=a.admission_id LEFT JOIN scheduler_formal_results nf ON nf.work_order_id=n.work_order_ref "
-                where = (where.rstrip() + " AND (n.admission_ref IS NULL OR nf.terminal_state IS NULL OR nf.terminal_state!='succeeded') " if where else "WHERE (n.admission_ref IS NULL OR nf.terminal_state IS NULL OR nf.terminal_state!='succeeded') ")
+                measure_pending=""
+                if self.store.connection.execute("SELECT 1 FROM sqlite_master WHERE type='table' AND name='mission_document_numeric_measure_reconciliations'").fetchone():
+                    joins += "LEFT JOIN mission_document_numeric_measure_reconciliations nm ON nm.admission_ref=a.admission_id LEFT JOIN scheduler_formal_results nmf ON nmf.work_order_id=('work:' || nm.authorization_ref) "
+                    measure_pending=" OR (json_extract(n.record_json,'$.status')='waiting_evidence' AND json_extract(n.record_json,'$.measure_conflict_contract')='directed-numeric-measure-conflict:0.1' AND (nm.admission_ref IS NULL OR nmf.terminal_state IS NULL))"
+                numeric_pending="(n.admission_ref IS NULL OR nf.terminal_state IS NULL OR nf.terminal_state!='succeeded'"+measure_pending+") "
+                where = where.rstrip()+" AND "+numeric_pending if where else "WHERE "+numeric_pending
             query = (
                 "SELECT a.* FROM mission_document_research_admissions a "
                 + joins + where + "ORDER BY a.created_at,a.admission_id"
@@ -2247,6 +2252,30 @@ class MissionDocumentResearchCoordinator:
         latest = self._latest()
         settled = None
         errors: list[dict[str, Any]] = []
+        if hasattr(self.launcher,'replay_completed_models'):
+            # Respect the existing physical child first; a local maintenance
+            # hint does not create a concurrent child slot.
+            active = None if latest is None else self.launcher.status(latest['ticket_ref'])
+            if active is None or active['status']!='running':
+                from .directed_numeric_measure_reconciliation import replay_candidate
+                # Older unrelated failed admissions must not permanently
+                # hide a settled numeric maintenance case behind the batch cap.
+                local_admissions=[a for a in admissions if a.get('numeric_authority') is not None and
+                    self.store.connection.execute("SELECT 1 FROM mission_document_numeric_results WHERE admission_ref=? AND json_extract(record_json,'$.measure_conflict_contract')='directed-numeric-measure-conflict:0.1'",(a['id'],)).fetchone() is not None]
+                for admission in local_admissions[:MAX_RECOVERY_EVALUATIONS_PER_TICK]:
+                    try:
+                        candidate=replay_candidate(self,admission)
+                        if candidate is None:continue
+                        ticket=self.launcher.replay_completed_models(admission_ref=admission['id'],
+                            admission_hash=admission['content_hash'],proof=candidate)
+                    except LaneChildConflict as exc:
+                        return {'status':'busy','reason':str(exc)}
+                    except Exception as exc:
+                        self._isolate_admission_error(holds,admission,exc,errors)
+                        continue
+                    pointer={'ticket_ref':ticket['id'],'admission_ref':admission['id'],'admission_hash':admission['content_hash']}
+                    write_owner_only(self.latest_path,{**pointer,'content_hash':content_hash(pointer)})
+                    return {'status':'resumed','reason':'source_measure_local_reconciliation',**pointer}
         if latest is not None and latest["admission_ref"] in by_ref:
             admission = by_ref[latest["admission_ref"]]
             if latest["admission_hash"] != admission["content_hash"]:
