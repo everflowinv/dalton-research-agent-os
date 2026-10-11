@@ -94,10 +94,11 @@ from .model_spec_signed_expense_repair import (
 
 from .model_spec_typed_field_repair import (
     CONTRACT_REF as TYPED_FIELD_REPAIR_REF, ERROR_CODES as TYPED_FIELD_ERROR_CODES,
+    COST_SLOT_PAIR_REF,
     assert_only_typed_fields_changed, validate_parent as validate_typed_parent,
 )
 
-REPAIR_CONTRACT_REF = "contract:company-model-spec-structured-output-repair:0.10"
+REPAIR_CONTRACT_REF = "contract:company-model-spec-structured-output-repair:0.11"
 # One repair call, which is the number every other lane in this repository
 # uses for the same bargain (``draft_contract_repair.MAX_REPAIR_ATTEMPTS``).
 DEFAULT_REPAIR_ATTEMPTS = 1
@@ -154,6 +155,9 @@ REPAIR_CONTRACT = {
     "typed_field_change": {"ref": TYPED_FIELD_REPAIR_REF,
         "scope": "exact_parent_paths_only_with_source_group_reconstruction_for_identity",
         "validation": "full_spec_and_financial_validation_after_every_new_or_replayed_answer"},
+    "cost_slot_exclusive_pair": {"ref": COST_SLOT_PAIR_REF,
+        "scope": "one_exact_expense_pair_only_original_slot_or_explicit_unbound",
+        "preserve": "all_other_parent_fields_and_all_financial_source_authorities"},
     "semantic_failure": "whole_refusal",
     # 0.5: a new contract is a new question only where nobody has answered it.
     # A repair already made under an earlier contract for this disclosure,
@@ -413,6 +417,9 @@ def _repair_prompt(original_text: str, error: CompanyModelSpecError, *,
             "Correct only the exact paths in TYPED_FIELD_PROOF. For periodicity choose quarterly or annual. "
             "For acquisitions select a permitted forecast method and its base, or unavailable with null base; never treat acquisitions as zero. "
             "For revenue identity choose exact member catalog_refs from the given source-group choices. "
+            "For a cost slot pair either keep the original cost_driver_slot and omit cost_driver_unbound_reason, "
+            "or set cost_driver_slot to null with a nonempty cost_driver_unbound_reason. "
+            "A legal template slot alone is not proof of an executable cost base; never silently erase a real evidence gap. "
             "Labels are not identity; do not invent residuals or reuse a consolidated total for independent segments. "
             "Do not change any other field, filed concept, amount, period, unit, source, evidence, line, formula, or assessment. "
             "A missing reconciliation remains a gap, not a forecast. Return the complete original JSON with only the named fields corrected.\n\n"

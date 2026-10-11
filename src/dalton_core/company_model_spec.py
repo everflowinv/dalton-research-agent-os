@@ -1252,9 +1252,12 @@ def spec_from_response(
                         f"expense_lines[{index}].cost_driver_slot {slot!r} is not in "
                         "this classification's cost template")
                 if reason is not None:
+                    from .model_spec_typed_field_repair import COST_SLOT_PAIR_CODE, cost_slot_pair_scope
+                    scope = cost_slot_pair_scope(state, body, index)
                     raise CompanyModelSpecError(
                         f"expense_lines[{index}] binds a cost slot and cannot carry "
-                        "cost_driver_unbound_reason")
+                        "cost_driver_unbound_reason",
+                        **({'code': COST_SLOT_PAIR_CODE, 'proof': scope} if scope is not None else {}))
                 expense["cost_driver_slot"] = slot
         elif "cost_driver_unbound_reason" in item:
             raise CompanyModelSpecError(
