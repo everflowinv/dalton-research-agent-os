@@ -46,6 +46,28 @@ class AnnualProjectionError(ValueError):
     """The supplied authorities cannot produce this annual projection."""
 
 
+def annual_projection_result_refs(model: Mapping[str, Any]) -> frozenset[str]:
+    """Result coverage promised by the existing annual projection contract.
+
+    Structured income lines and the 0.4 cash companion are projected. Other
+    balance/cash statement lines retain their quarterly authority, but this
+    contract does not yet produce annual outcomes for them.
+    """
+
+    structure = model.get("financial_statement_structure") or {}
+    refs = structure_result_refs(structure)
+    covered = {
+        refs[str(line["ref"])] for line in structure.get("lines") or []
+        if line.get("statement") == "income"
+    }
+    if model.get("schema_version") == STRUCTURED_CASH_SCHEMA_VERSION:
+        covered.update({
+            "result:operating_cash_flow", "result:capital_expenditure",
+            "result:free_cash_flow",
+        })
+    return frozenset(covered)
+
+
 def calendar_binding_from_annual_filing(
     filing: Mapping[str, Any], *, company_ref: str,
 ) -> dict[str, Any]:
