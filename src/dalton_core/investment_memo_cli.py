@@ -643,8 +643,11 @@ def run(*, state_dir: Path, model_config_path: Path | None, verifier_model_confi
     # All remaining groups and the verifier retain their full reservations.
     repairs = MAX_REPAIRS
     from .investment_memo_repair_budget import MemoRepairBudget
+    from .investment_memo_failure_cost import MemoFailureCostReporter, with_failure_costs
+    producer_report = MemoFailureCostReporter((model_factory or (lambda: build(config)))())
+    verifier_report = MemoFailureCostReporter((verifier_model_factory or (lambda: build(verifier_config)))())
     repair_budget = MemoRepairBudget(
-        (model_factory or (lambda: build(config)))(),
+        producer_report,
         run_micros=int(float(run_budget["max_cost_usd"]) * 1_000_000),
         producer_micros=int(float(producer_budget["max_cost_usd"]) * 1_000_000),
         verifier_micros=int(float(verifier_budget["max_cost_usd"]) * 1_000_000))
@@ -654,7 +657,7 @@ def run(*, state_dir: Path, model_config_path: Path | None, verifier_model_confi
                if summary_dir is not None else None)
     try:
         result = run_memo(store=store, frozen=frozen, model=repair_budget,
-                          verifier_model=(verifier_model_factory or (lambda: build(verifier_config)))(),
+                          verifier_model=verifier_report,
                           max_units=int(run_budget["max_units"]), max_repairs=repairs, quiesce=quiesce,
                           repair_budget=repair_budget)
     except MemoQuiesced as stopped:
@@ -667,6 +670,7 @@ def run(*, state_dir: Path, model_config_path: Path | None, verifier_model_confi
         result = {"status": "held", "memo_status": "quiesce_boundary_unproved", "resumable": False,
                   "reason": str(exc), "cost_status": "unproved",
                   "completed_work_refs": [call.get("work_order_ref") for _, call, _, _ in quiesce.calls]}
+    result = with_failure_costs(result, producer_report, verifier_report)
     return {"schema_version": SUMMARY_SCHEMA_VERSION, **result,
             "budget": {"run": run_budget, "producer": producer_budget,
                        "verifier": verifier_budget, "max_repairs": repairs,
