@@ -61,7 +61,7 @@ LAUNCHER_KWARG = "deep_insight_gate_launcher"
 RELAUNCH_STATUSES = frozenset({"submitted", "duplicate"})
 CONTENT_TERMINAL_STATUSES = frozenset({
     "classification_conflict", "verification_failed", "rubric_refused",
-    "not_independent", "unverified", "no_new_evidence", "execution_incomplete",
+    "not_independent", "unverified", "no_new_evidence",
     # D1: the draft was well formed and well cited and still was not worth a
     # person's time.  It belongs with the other content refusals rather than
     # with the idle statuses because the reason is worth showing: "held back
@@ -329,6 +329,10 @@ class MissionDeepInsightLaneCoordinator:
             self.budget.record(
                 str(signature),
                 status="gated:not permitted", reason=f"gated:not permitted: {status}")
+        elif status == "execution_incomplete" and signature:
+            # Technical failure gets the existing bounded execution backoff,
+            # never a terminal verdict that the research content is deficient.
+            self.budget.record_settled(str(signature), {**settled, "status": "failed"})
         elif settled.get("status") not in ("succeeded", "orphaned"):
             if signature:
                 decision = self.budget.record_settled(str(signature), settled)
