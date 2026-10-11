@@ -951,7 +951,19 @@ def _normalize_formula(
             for term in normalized
         )):
             raise FinancialStatementStructureError(
-                "sum formula roles do not match its company statement output"
+                "sum formula roles do not match its company statement output; "
+                f"formulas[{index}].output_ref={output!r}, output_role={output_role!r}; "
+                "disallowed_terms=" + repr([
+                    {"line_ref": term["line_ref"],
+                     "role": lines[term["line_ref"]]["role"]}
+                    for term in normalized
+                    if allowed_roles is None or lines[term["line_ref"]]["role"] not in (
+                        allowed_roles | {_COMPANY_COMPONENT_ROLE, _COMPANY_SUBTOTAL_ROLE}
+                    )
+                ]) + "; allowed_roles=" + repr(sorted(
+                    (allowed_roles or frozenset())
+                    | {_COMPANY_COMPONENT_ROLE, _COMPANY_SUBTOTAL_ROLE}
+                ))
             )
         if tie is None:
             cited_notes = [ref for ref in refs if ref in (note_evidence or {})]
@@ -976,7 +988,10 @@ def _normalize_formula(
             raise FinancialStatementStructureError("divide is reserved for diluted EPS")
         if lines[numerator]["role"] != "diluted_eps_numerator":
             raise FinancialStatementStructureError(
-                "EPS numerator must use the company-specific diluted EPS numerator role"
+                "EPS numerator must use the company-specific diluted EPS numerator role; "
+                f"formulas[{index}].output_ref={output!r}, "
+                f"numerator_ref={numerator!r}, "
+                f"numerator_role={lines[numerator]['role']!r}"
             )
         if lines[denominator]["role"] != "diluted_weighted_average_shares":
             raise FinancialStatementStructureError(

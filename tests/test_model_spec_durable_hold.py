@@ -340,7 +340,7 @@ class RequestInFlightTests(unittest.TestCase):
         # the same judgement is bought once.  Minting a fresh id to dodge the
         # lease would buy it twice.
         self.assertEqual(REQUEST_IN_FLIGHT_STATUS, "request_in_flight")
-        self.assertIn("0.5", REPAIR_CONTRACT_REF)
+        self.assertIn("0.6", REPAIR_CONTRACT_REF)
 
 
 if __name__ == "__main__":  # pragma: no cover

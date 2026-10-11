@@ -42,6 +42,8 @@ from .cockpit_model import (
     CockpitModel, CockpitModelError, lane_status_for, model_failure_trace,
 )
 from .company_model_spec import (
+    EPS_NUMERATOR_BRIDGE_GUIDANCE,
+    EPS_NUMERATOR_BRIDGE_RULE_REF,
     REPAIRABLE_STRUCTURE_RULES,
     REPAIRABLE_STRUCTURE_RULES_REF,
     TASK_HASH,
@@ -83,7 +85,7 @@ MAX_OUTPUT_TOKENS = int(DEFAULT_MODEL_SPEC_CALL_BUDGET["max_output_tokens"])
 # structure rather than to look frugal.
 MAX_COST_USD = float(DEFAULT_MODEL_SPEC_CALL_BUDGET["max_cost_usd"])
 TIMEOUT_SECONDS = int(DEFAULT_MODEL_SPEC_CALL_BUDGET["timeout_seconds"])
-REPAIR_CONTRACT_REF = "contract:company-model-spec-structured-output-repair:0.5"
+REPAIR_CONTRACT_REF = "contract:company-model-spec-structured-output-repair:0.6"
 # One repair call, which is the number every other lane in this repository
 # uses for the same bargain (``draft_contract_repair.MAX_REPAIR_ATTEMPTS``).
 DEFAULT_REPAIR_ATTEMPTS = 1
@@ -115,6 +117,12 @@ REPAIR_CONTRACT = {
     "validation": "full_spec_from_response_after_every_attempt",
     "text_length_change": "only_overlong_schema_strings_may_change",
     "structure_change": "only_the_named_rule_may_change",
+    "eps_numerator_bridge": {
+        "ref": EPS_NUMERATOR_BRIDGE_RULE_REF,
+        "guidance": EPS_NUMERATOR_BRIDGE_GUIDANCE,
+        "change": "one_derived_numerator_bridge_and_its_consuming_eps_formula_only",
+        "accounting_line": "retain_or_restore_accounting_net_income_role_and_formula",
+    },
     "semantic_failure": "whole_refusal",
     # 0.5: a new contract is a new question only where nobody has answered it.
     # A repair already made under an earlier contract for this disclosure,
@@ -360,6 +368,28 @@ def _repair_prompt(original_text: str, error: CompanyModelSpecError) -> str:
             "inventing a line that would satisfy it. Return JSON matching "
             "OUTPUT_SCHEMA and nothing else.\n\n"
         )
+        # The closed EPS rule needs a distinct derived bridge, not a retagged
+        # accounting subtotal. Other wiring errors retain the original scope.
+        if (
+            "EPS numerator must use the company-specific diluted EPS numerator role"
+            in str(error)
+            or (
+                "sum formula roles do not match its company statement output" in str(error)
+                and "output_role='diluted_eps_numerator'" in str(error)
+            )
+        ):
+            head = (
+                "Repair only the named EPS numerator wiring rule. "
+                f"{EPS_NUMERATOR_BRIDGE_GUIDANCE} "
+                "For this rule only, you may add one derived numerator line and "
+                "its formula, retain or restore the existing accounting net_income "
+                "line's role and formula, and point the existing EPS divide at "
+                "the bridge. Keep every other line, filed concept, ref, period "
+                "and figure unchanged. Do not add a filed line or invent dilution "
+                "evidence. If the existing filed authorities cannot prove the "
+                "bridge, return the original content unchanged. Return JSON "
+                "matching OUTPUT_SCHEMA and nothing else.\n\n"
+            )
     else:
         head = (
             "Repair one company-model specification response. Do not add, remove, "

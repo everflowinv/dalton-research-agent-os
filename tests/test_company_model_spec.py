@@ -250,8 +250,8 @@ class CompanyModelSpecTests(unittest.TestCase):
         self.assertEqual(json.loads(pretty), json.loads(compact))
         self.assertEqual(
             TASK_HASH,
-            # Complete driver formulas change the proposal task; historical specs remain readable.
-            "6cbcf38fe0a5b774cbc098606c36998169e870d637b72fe5ff4f2f4e79387d94",
+            # The accounting/EPS bridge guidance changes the task; historical specs remain readable.
+            "497833a7b632a3e195fc16c60c20c99315c5ba5630d2292b33feee894cc3b0ea",
         )
         self.assertNotEqual(
             TASK_HASH,
