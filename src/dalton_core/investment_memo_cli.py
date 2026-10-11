@@ -644,8 +644,9 @@ def run(*, state_dir: Path, model_config_path: Path | None, verifier_model_confi
     repairs = MAX_REPAIRS
     from .investment_memo_repair_budget import MemoRepairBudget
     from .investment_memo_failure_cost import MemoFailureCostReporter, with_failure_costs
-    producer_report = MemoFailureCostReporter((model_factory or (lambda: build(config)))())
-    verifier_report = MemoFailureCostReporter((verifier_model_factory or (lambda: build(verifier_config)))())
+    failure_cost_watermarks = {}
+    producer_report = MemoFailureCostReporter((model_factory or (lambda: build(config)))(), watermarks=failure_cost_watermarks)
+    verifier_report = MemoFailureCostReporter((verifier_model_factory or (lambda: build(verifier_config)))(), watermarks=failure_cost_watermarks)
     repair_budget = MemoRepairBudget(
         producer_report,
         run_micros=int(float(run_budget["max_cost_usd"]) * 1_000_000),

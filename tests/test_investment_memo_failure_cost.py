@@ -131,3 +131,56 @@ class FailureCostTests(unittest.TestCase):
         summary=with_failure_costs({'cost_micros':0,'cost_status':'unproved'},report)
         self.assertEqual(summary['cost_status'],'partially_known')
         self.assertTrue(summary['unknown_failure_cost'])
+
+    def test_new_run_free_failed_replay_preserves_history_without_new_cost(self):
+        exc,kw=self.fail('PROVIDER_ERROR');old=self.ledger();calls=len(self.adapter.served)
+        report=MemoFailureCostReporter(self.model)
+        with self.assertRaises(CockpitModelError):report.call(**kw)
+        summary=with_failure_costs({'cost_micros':0},report)
+        self.assertEqual(summary['cost_micros'],0)
+        self.assertEqual(summary['new_settled_failure_cost_micros'],0)
+        self.assertGreater(summary['historical_settled_failure_cost_micros'],0)
+        self.assertEqual(self.ledger(),old);self.assertEqual(len(self.adapter.served),calls)
+
+    def test_new_run_success_and_failure_replays_never_mix_historical_bills(self):
+        first=self.model.call(**self.kw(n=0))
+        self.fail('PROVIDER_ERROR',self.kw(n=1));old=self.ledger();calls=len(self.adapter.served)
+        report=MemoFailureCostReporter(self.model)
+        success=report.call(**self.kw(n=0))
+        self.assertEqual(success['cost_micros'],0)
+        with self.assertRaises(CockpitModelError):report.call(**self.kw(n=1))
+        summary=with_failure_costs({'cost_micros':success['cost_micros']},report)
+        self.assertEqual(summary['cost_micros'],0)
+        self.assertGreater(summary['historical_settled_failure_cost_micros'],0)
+        self.assertEqual(self.ledger(),old);self.assertEqual(len(self.adapter.served),calls)
+
+    def test_shared_ledger_watermark_read_once_and_success_adds_no_fee_query(self):
+        from dalton_core import investment_memo_failure_cost as costs
+        shared={}
+        with patch.object(costs,'budget_watermark',wraps=costs.budget_watermark) as read:
+            producer=MemoFailureCostReporter(self.model,watermarks=shared)
+            verifier=MemoFailureCostReporter(self.model,watermarks=shared)
+            self.assertEqual(read.call_count,1)
+            self.assertEqual(producer.watermark,verifier.watermark)
+        with patch.object(costs,'failure_cost',side_effect=AssertionError('unexpected success fee read')):
+            producer.call(**self.kw())
+
+    def test_missing_or_drifted_watermark_never_claims_known_new_zero(self):
+        for absent in (True,False):
+            report=MemoFailureCostReporter(self.model)
+            if absent:report.watermark=None
+            else:report.watermark={**report.watermark,'identity':[-1,-1]}
+            self.adapter.failure={'code':'PROVIDER_ERROR','message':'failed'}
+            with self.assertRaises(CockpitModelError):report.call(**self.kw(n=20+int(absent)))
+            summary=with_failure_costs({'cost_micros':0},report)
+            self.assertIsNone(summary['cost_micros'])
+            self.assertTrue(summary['new_failure_cost_unknown'])
+            self.assertGreater(summary['settled_failure_cost_micros'],0)
+
+    def test_old_uncertain_bill_does_not_turn_free_replay_into_new_payment(self):
+        exc,kw=self.fail('TIMEOUT');report=MemoFailureCostReporter(self.model)
+        with self.assertRaises(CockpitModelError):report.call(**kw)
+        summary=with_failure_costs({'cost_micros':0},report)
+        self.assertEqual(summary['cost_micros'],0)
+        self.assertFalse(summary['new_failure_cost_unknown'])
+        self.assertTrue(summary['historical_failure_cost_unknown'])
