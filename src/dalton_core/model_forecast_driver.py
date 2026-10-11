@@ -750,6 +750,9 @@ def build_structure_drivers(
     chooses a method or a base.
     """
 
+    from .company_financial_statement_structure import (
+        _units, _TYPED_NOTE_STRUCTURE_VERSIONS,
+    )
     filed = {str(item.get("concept")): item for item in (table.get("filed_lines") or [])}
     drivers: list[dict[str, Any]] = []
     concepts: set[str] = set()
@@ -766,8 +769,10 @@ def build_structure_drivers(
                 f"filed concept {concept} appears in more than one statement line")
         concepts.add(concept)
         cells = _cells_of(source, concept)
-        units = {str(cell.get("unit")).casefold()
-                 for cell in (source.get("cells") or {}).values() if cell.get("unit")}
+        # Typed source validation can prove a unit from held cumulative facts.
+        # Those facts are not quarters and must never enter this driver's history.
+        units = _units(source, include_duration=(
+            structure.get("schema_version") in _TYPED_NOTE_STRUCTURE_VERSIONS))
         unit = str(line.get("unit") or "").casefold()
         if units != {unit}:
             raise ForecastModelUnavailable(

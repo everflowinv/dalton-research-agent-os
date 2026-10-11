@@ -187,6 +187,11 @@ def model_digest(
         digest_body["filed_presentation_partition_rule"] = PRESENTATION_PARTITION_RULE
         from .forecast_consumed_source_groups import RULE_REF as CONSUMED_SOURCE_GROUPS_RULE
         digest_body["filed_consumed_source_groups_rule"] = CONSUMED_SOURCE_GROUPS_RULE
+        from .company_financial_statement_structure import (
+            CASH_LEAF_DURATION_UNIT_VALIDATION_REF, _TYPED_NOTE_STRUCTURE_VERSIONS,
+        )
+        if structure.get("schema_version") in _TYPED_NOTE_STRUCTURE_VERSIONS:
+            digest_body["typed_filed_leaf_unit_rule"] = CASH_LEAF_DURATION_UNIT_VALIDATION_REF
     if reporting_boundary is not None:
         digest_body["forecast_reporting_boundary"] = dict(reporting_boundary)
     # Legacy unstructured run identities remain byte-for-byte stable. Only a
