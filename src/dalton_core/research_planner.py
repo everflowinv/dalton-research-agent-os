@@ -327,6 +327,7 @@ OUTPUT_SCHEMA = {
                                 "required":["admission_ref","admission_hash","numeric_result_hash"],
                                 "properties":{k:{"type":"string"} for k in ("admission_ref","admission_hash","numeric_result_hash")}},
                             "replaces_numeric_rejection": {
+                                "description": "Required inside directed_document when continuing a matching numeric_reading_requirements entry; copy its entire four-field object exactly.",
                                 "type":"object","additionalProperties":False,
                                 "required":["admission_ref","admission_hash","rejection_ref","rejection_hash"],
                                 "properties":{k:{"type":"string"} for k in ("admission_ref","admission_hash","rejection_ref","rejection_hash")}},
@@ -1268,7 +1269,13 @@ def build_prompt(state: Mapping[str, Any]) -> str:
     numeric_notice = (
         "numeric_reading_requirements preserves verified rejections. Address the original question with numeric "
         "strategy, its exact replaces_numeric_rejection binding and preferably verbatim question; never make a "
-        "qualitative copy. Do not guess equivalence; other qualitative same-document questions remain valid.\n\n"
+        "qualitative copy. For a matching requirement, copy its four-field object into the inquiry's "
+        "directed_document.replaces_numeric_rejection (not inquiry top level or numeric_targets): "
+        '{"admission_ref":"<copy>","admission_hash":"<copy>","rejection_ref":"<copy>","rejection_hash":"<copy>"}. '
+        "Replace <copy> with the exact state value, never a placeholder. The schema permits omission only "
+        "for other inquiries; missing, null or guessed binding invalidates "
+        "the entire plan. Keep its exact company/document/version; never borrow another requirement's binding. "
+        "Do not guess equivalence; other qualitative same-document questions remain valid.\n\n"
     ) if any(company.get("numeric_reading_requirements") for company in state.get("companies", ())) else ""
     return (
         "\n".join(final_text_instructions()) + "\n\n" +
