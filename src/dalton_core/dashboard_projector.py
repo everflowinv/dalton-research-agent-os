@@ -830,28 +830,37 @@ class DashboardProjector:
             )
 
         def fill(state: dict) -> None:
-            # Only versions that became the latest since the last round are
-            # read, by primary key.
-            for artifact_ref, entry in state.items():
-                if entry[3] is not None:
-                    continue
-                table = (
-                    "observability_artifact_versions"
-                    if entry[2] == "0.1"
-                    else "observability_artifact_versions_v2"
-                )
-                record = core.execute(
-                    f"SELECT record_json FROM {table} WHERE version_id=?",
-                    (entry[1],),
-                ).fetchone()
-                if record is None:
-                    raise ProjectionSourceError(
-                        "artifact generation index points to a missing authority row"
+            # Keep the complete latest set and its original processing order.
+            # One cold snapshot can contain >100k artifacts. Read their exact
+            # immutable PKs in bounded batches instead of one query per row.
+            pending = [(ref, entry) for ref, entry in state.items() if entry[3] is None]
+            for offset in range(0, len(pending), 256):
+                batch = pending[offset:offset + 256]
+                records = {}
+                for schema, table in (
+                    (True, "observability_artifact_versions"),
+                    (False, "observability_artifact_versions_v2"),
+                ):
+                    refs = list(dict.fromkeys(entry[1] for _, entry in batch
+                                             if (entry[2] == "0.1") == schema))
+                    if not refs:
+                        continue
+                    placeholders = ",".join("?" for _ in refs)
+                    rows = core.execute(
+                        f"SELECT version_id,record_json FROM {table} "
+                        f"WHERE version_id IN ({placeholders})", refs,
+                    ).fetchall()
+                    records[schema] = {row["version_id"]: row for row in rows}
+                for artifact_ref, entry in batch:
+                    record = records.get(entry[2] == "0.1", {}).get(entry[1])
+                    if record is None:
+                        raise ProjectionSourceError(
+                            "artifact generation index points to a missing authority row"
+                        )
+                    wire = _json(record["record_json"], "artifact version")
+                    state[artifact_ref] = entry[:3] + (
+                        {name: wire[name] for name in _ARTIFACT_FIELDS if name in wire},
                     )
-                wire = _json(record["record_json"], "artifact version")
-                state[artifact_ref] = entry[:3] + (
-                    {name: wire[name] for name in _ARTIFACT_FIELDS if name in wire},
-                )
 
         read = _ARTIFACT_FOLD.read(core, identity, finish=fill)
         return [read.state[ref][3] for ref in sorted(read.state)]
