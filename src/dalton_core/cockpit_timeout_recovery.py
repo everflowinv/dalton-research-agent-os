@@ -10,7 +10,7 @@ from .provider_retry import validate_provider_retry
 VERSION = 'cockpit-timeout-maintenance:0.1'
 MARKER = ':timeout-maintenance:'
 TABLE = 'cockpit_timeout_maintenance_authorizations'
-PURPOSES = frozenset({'initial_screen', 'deep_insight_gate'})
+PURPOSES = frozenset({'initial_screen', 'deep_insight_gate', 'investment_memo'})
 MAINTENANCE_WINDOW_SECONDS = 86400
 MAINTENANCE_BACKOFF_SECONDS = 60
 
@@ -85,6 +85,8 @@ def failure_proof(connection, router, budget, *, work_ref, mission):
                 or admission.get('purpose') != meta['purpose']):
             raise ValueError('timeout fee authority drifted')
         selected |= row['attempt_number'] == formal['attempt_number']
+        if meta['purpose'] == 'investment_memo' and settlement is None:
+            return None  # Memo resumes only after its failed group is durably settled.
         # Unknown fees retain at least the full original reservation. This is
         # a conservative proof bound, never a rewrite/second ledger charge.
         costs.append({'admission_ref':admission['admission_id'],
@@ -121,10 +123,17 @@ def _row(connection, semantic_hash):
     return record
 
 
-def reserve(scheduler, router, budget, *, work, mission, config, now):
+def reserve(scheduler, router, budget, *, work, mission, config, now, memo_scope=None):
     proof = failure_proof(scheduler.connection, router, budget, work_ref=work.id, mission=mission)
     if proof is None or content_hash(work.to_dict()) != proof['parent_work_hash']:
         return None
+    if proof['purpose'] == 'investment_memo':
+        if memo_scope is None:
+            return None
+        from .investment_memo_timeout_recovery import verify_scope
+        verify_scope(scheduler.connection,router,budget,memo_scope,proof,mission=mission)
+    elif memo_scope is not None:
+        raise ValueError('memo macro scope cannot authorize another purpose')
     previous = _row(scheduler.connection, proof['semantic_hash'])
     if previous is not None:
         verify(scheduler.connection, router, budget, previous, mission=mission)
@@ -145,10 +154,16 @@ def reserve(scheduler, router, budget, *, work, mission, config, now):
               'maximum_successors':1, 'config_hash':content_hash(dict(config)),
               'created_at':now.isoformat(),
               'deadline':(start+timedelta(seconds=seconds)).isoformat()}
+    if memo_scope is not None:
+        record['memo_scope'] = memo_scope
     record['id'] = 'cockpit-timeout-authorization:'+content_hash(record)[:32]
     record['suffix'] = MARKER+content_hash({'version':VERSION,'semantic':proof['semantic_hash']})[:32]
     record['content_hash'] = content_hash(record)
     with scheduler._transaction() as cur:
+        if memo_scope is not None:
+            from .investment_memo_timeout_recovery import reserve_macro
+            if not reserve_macro(cur,record):
+                return None
         cur.execute('CREATE TABLE IF NOT EXISTS '+TABLE+' ('
                     'authorization_id TEXT PRIMARY KEY, semantic_hash TEXT UNIQUE NOT NULL, '
                     'record_json TEXT NOT NULL, content_hash TEXT NOT NULL)')
@@ -172,6 +187,10 @@ def verify(connection, router, budget, record, *, mission):
                             work_ref=record['proof']['parent_work_ref'], mission=mission)
     if current != record['proof']:
         raise ValueError('timeout maintenance parent/fee authority changed')
+    if current['purpose'] == 'investment_memo':
+        from .investment_memo_timeout_recovery import verify_scope,verify_macro
+        verify_scope(connection,router,budget,record.get('memo_scope') or {},current,mission=mission)
+        verify_macro(connection,record)
     return record
 
 

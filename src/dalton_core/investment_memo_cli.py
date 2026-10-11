@@ -511,6 +511,8 @@ def run_memo(*, store: DaltonStore, frozen: Mapping[str, Any], model: Any, verif
                       material=frozen["material"], company=company, mission=mission)
         if quiesce is not None:
             kwargs["quiesce"] = quiesce
+        if repair_budget is not None:
+            repair_budget.begin_stage(max_units=max_units, allow_technical=bool(repairs_left), quiesce=quiesce)
         outcome = draft_group(model, **kwargs)
         cost_micros += int(outcome.get("model", {}).get("cost_micros") or outcome.get("cost_micros") or 0)
         if (outcome["status"] != "drafted" and outcome.get("repairable") and repairs_left
@@ -519,6 +521,8 @@ def run_memo(*, store: DaltonStore, frozen: Mapping[str, Any], model: Any, verif
             # One paid redo, told exactly which refs were refused and why.
             repairs_left -= 1
             first = {"group": group, "reason": outcome["reason"], "refs": outcome.get("refs") or []}
+            if repair_budget is not None:
+                repair_budget.begin_stage(max_units=max_units, allow_technical=False, quiesce=quiesce)
             outcome = draft_group(model, **kwargs, repair=first)
             cost_micros += int(outcome.get("model", {}).get("cost_micros") or outcome.get("cost_micros") or 0)
             repaired.append(first)

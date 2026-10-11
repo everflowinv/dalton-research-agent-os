@@ -47,6 +47,7 @@ def company_signature(frozen: Mapping[str, Any], launcher: Any) -> str:
     from .cockpit_model import verifier_provider_contract_fingerprint
     from .investment_memo_cli import anchor_bindings
     from .investment_memo_draft import MEMO_PROMPT_CONTRACT_VERSION
+    from .investment_memo_timeout_recovery import CONTRACT_REF as TIMEOUT_CONTINUATION_REF
     from .store import content_hash
 
     mission = frozen["mission"]
@@ -65,6 +66,7 @@ def company_signature(frozen: Mapping[str, Any], launcher: Any) -> str:
         # must not stay held for a day after the contract that refused it is
         # fixed (same rule as the gate's GATE_DRAFTING_CONTRACT).
         "drafting_contract": MEMO_PROMPT_CONTRACT_VERSION,
+        "timeout_continuation_contract": TIMEOUT_CONTINUATION_REF,
     }
     parts = [content_hash(payload), verifier_provider_contract_fingerprint(
         "investment_memo_verifier")]

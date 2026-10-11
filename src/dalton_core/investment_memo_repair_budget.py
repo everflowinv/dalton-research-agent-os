@@ -12,6 +12,12 @@ class MemoRepairBudget:
         self.verifier_micros = verifier_micros
         self.accounted_micros = 0
         self.proofs = []
+        self.completed_calls = []
+        self.technical_slot_consumed = False
+        self.stage = None
+
+    def begin_stage(self, *, max_units, allow_technical, quiesce=None):
+        self.stage = {"max_units":max_units,"allow_technical":allow_technical,"quiesce":quiesce}
 
     def __getattr__(self, name):
         return getattr(self.model, name)
@@ -22,9 +28,16 @@ class MemoRepairBudget:
         reserved = self.producer_micros
         try:
             call = self.model.call(**kwargs)
-        except BaseException:
+        except BaseException as exc:
             self.accounted_micros += reserved
-            raise
+            from .cockpit_model import CockpitModelError
+            if not isinstance(exc, CockpitModelError):
+                raise
+            from .investment_memo_timeout_recovery import recover
+            call = recover(self, exc, kwargs)
+            if call is None:
+                raise
+
         reported = max(0, int(call.get('cost_micros') or 0))
         try:
             proof = settled_call(self.model, call, kwargs['mission'], purpose=kwargs['purpose'])
@@ -38,8 +51,12 @@ class MemoRepairBudget:
         else:
             self.accounted_micros += max(charged, reported)
             self.proofs.append(proof)
+        self.completed_calls.append({key:call.get(key) for key in (
+            'work_order_ref','result_envelope_ref','route_decision_ref','invocation_ref','cost_status')})
         return call
 
     def can_repair(self, *, remaining_groups):
+        if self.technical_slot_consumed:
+            return False
         needed = self.accounted_micros + (remaining_groups + 1) * self.producer_micros + self.verifier_micros
         return needed <= self.run_micros
