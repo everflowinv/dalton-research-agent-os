@@ -99,6 +99,19 @@ class CoordinatorTests(unittest.TestCase):
         self.now += IDLE_HOLD + timedelta(minutes=1)
         self.assertEqual(self.coordinator.dispatch_once()["status"], "launched")
 
+    def test_changed_storage_bound_wakes_old_idle_once_without_changed_research(self):
+        self.coordinator.dispatch_once()
+        self.launcher.finish({"status":"succeeded","plan_status":"input_too_large"})
+        path=self.root/"latest.json"
+        old=json.loads(path.read_text())
+        old["idle_signature"].pop("planner_work_order_prompt_bytes")
+        path.write_text(json.dumps(old))
+        self.assertEqual(self.coordinator.dispatch_once()["status"],"launched")
+        self.assertEqual(self.launcher.starts,2)
+        self.launcher.finish({"status":"succeeded","plan_status":"input_too_large"})
+        self.assertEqual(self.coordinator.dispatch_once()["status"],"held")
+        self.assertEqual(self.launcher.starts,2)
+
     def test_the_signature_counts_what_the_state_is_built_from(self):
         signature = self.coordinator._signature()
         self.assertEqual(
@@ -106,7 +119,7 @@ class CoordinatorTests(unittest.TestCase):
             {"documents", "reviews_open", "claims", "figures", "metrics",
              "mission_versions", "dossier_feedback", "document_versions", "document_research_feedback",
              "document_research_settlement", "reflection_requests", "followup_decisions",
-             "backlog_versions", "backlog_events"})
+             "backlog_versions", "backlog_events", "planner_work_order_prompt_bytes"})
         self.assertTrue(all(isinstance(v, int) for key, v in signature.items()
                             if key not in {"dossier_feedback", "document_versions", "document_research_feedback",
                                            "document_research_settlement", "reflection_requests", "followup_decisions",

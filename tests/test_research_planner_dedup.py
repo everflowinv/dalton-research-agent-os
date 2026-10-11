@@ -74,7 +74,8 @@ class AttemptLedgerTests(unittest.TestCase):
         ledger = {"abc": {"at": (NOW - timedelta(days=1)).isoformat(),
                           "status": "succeeded", "plan_status": "input_too_large",
                           "attempts": 35, "reason": "exceeds the bound by 5495",
-                          "projection_rule_ref": PROMPT_PROJECTION_REF}}
+                          "projection_rule_ref": PROMPT_PROJECTION_REF,
+                          "work_order_prompt_bound": MAX_WORK_ORDER_PROMPT_BYTES}}
         self.assertEqual(attempt_hold(ledger, "abc", now=NOW)["held_reason"],
                          "terminal_for_this_state")
 
@@ -286,11 +287,12 @@ class ProjectionLadderTests(unittest.TestCase):
 
 
 class WorkOrderSizeTests(unittest.TestCase):
-    def test_one_work_order_is_bounded_at_sixty_four_kilobytes(self):
+    def test_one_work_order_has_a_finite_serialized_storage_bound(self):
         # The prompt *is* the work order's question, and the state is inlined
         # into it: a 266KB prompt is a 266KB row in scheduler.sqlite on every
         # tick, which is how that database reached 76MB.
-        self.assertLessEqual(MAX_WORK_ORDER_PROMPT_BYTES, 64_000)
+        self.assertLessEqual(MAX_WORK_ORDER_PROMPT_BYTES, 128_000)
+        self.assertLess(MAX_WORK_ORDER_PROMPT_BYTES, 266_000)
 
 
 class DirectiveProjectionTests(unittest.TestCase):

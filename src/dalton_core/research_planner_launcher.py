@@ -380,7 +380,12 @@ class ResearchPlannerCoordinator:
             document_research_feedback_signature, document_research_settlement_signature,
         )
 
+        from .research_planner_cli import MAX_WORK_ORDER_PROMPT_BYTES
+
         return {
+            # A new finite storage contract can fit an unchanged state whose
+            # previous attempt stopped before creating a model Work.
+            "planner_work_order_prompt_bytes": MAX_WORK_ORDER_PROMPT_BYTES,
             # What is held, and what has been read out of it.
             "documents": count("SELECT COUNT(*) FROM coverage_mission_discovered_documents"),
             "document_versions": document_inventory_signature(self.store, Path(self.store.path).parent),
