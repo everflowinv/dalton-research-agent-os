@@ -902,6 +902,7 @@ def model_spec_validation_contract() -> dict[str, str]:
     from .forecast_coverage import PROPOSAL_METHOD_COMPLETION_REF, INCOME_DEPRECIATION_POLICY_REF
     from .filed_period_composition import CONTRACT_REF as FILED_PERIOD_COMPOSITION_REF
     from .sec_filing_units import DOCUMENT_SET_RULE_REF
+    from .statement_original_revenue_context import RULE_REF as ORIGINAL_REVENUE_REF
     from .company_model_series import DUPLICATE_FACT_POLICY_REF
     from .model_forecast_driver import (
         CASH_FLOW_COMPANION_VALIDATION_CONTRACT_HASH,
@@ -917,6 +918,7 @@ def model_spec_validation_contract() -> dict[str, str]:
         "net_income_source_carry": NET_INCOME_SOURCE_CARRY_VALIDATION_REF,
         "cash_leaf_duration_unit": CASH_LEAF_DURATION_UNIT_VALIDATION_REF,
         "exact_filing_unit_document_set": DOCUMENT_SET_RULE_REF,
+        "original_revenue_context": ORIGINAL_REVENUE_REF,
         "repairable_structure_rules": REPAIRABLE_STRUCTURE_RULES_REF,
         "series_duplicate_facts": DUPLICATE_FACT_POLICY_REF,
         "repair_replay": REPAIR_REPLAY_POLICY_REF,
@@ -1119,6 +1121,9 @@ def run_model_spec(
         )
         numeric_policy = model_spec_numeric_context_config(raw_model_config)
         prompt_byte_limit = model_spec_prompt_byte_limit(raw_model_config)
+        if company_ref is not None:
+            from .statement_original_revenue_context import prepare_model_revenue_inputs
+            summary["original_revenue_preflight"] = prepare_model_revenue_inputs(missions, state_dir, company_ref)
         try:
             chosen, state = choose_company(
                 missions, mission, company_ref=company_ref,

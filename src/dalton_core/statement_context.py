@@ -159,6 +159,13 @@ def prepare_context(connection: Any, state_dir: str | Path, ingest_id: str, *,
                         reason="independent complete snapshot includes exact held companyfacts share/common-income facts")
         if supplement is not None:
             validate_supplement(base, filing)
+        from .statement_original_revenue_context import supplemental_revenue_lines
+        complete_lines, revenue_proof = supplemental_revenue_lines(connection, state_dir, filing, complete_lines)
+        if revenue_proof is not None:
+            base.pop("mapping", None)
+            base.update(kind="complete_snapshot", lines=complete_lines, mapping_hash=content_hash(complete_lines),
+                        supplementary_original_revenue=revenue_proof,
+                        reason="independent snapshot includes exact original revenue concept/duration/dimensions")
         from .sec_filing_units import supplemental_unit_lines, validate_unit_supplement
         resolved, unit_proof = supplemental_unit_lines(connection, state_dir, filing, complete_lines)
         if unit_proof is not None:
@@ -215,6 +222,8 @@ def context_record(connection: Any, version_id: str) -> dict[str, Any]:
     validate_supplement(record, filing)
     from .sec_filing_units import validate_unit_supplement
     validate_unit_supplement(connection, record, filing)
+    from .statement_original_revenue_context import validate_revenue_supplement
+    validate_revenue_supplement(connection, record, filing)
     if "unresolved_unit_refs" in record:
         from .sec_filing_units import unresolved_unit_refs
         source_rows = record.get("lines") if record.get("kind") == "complete_snapshot" else base_statement_rows(connection, record["ingest_id"])
