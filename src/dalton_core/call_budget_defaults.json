@@ -27,7 +27,7 @@
     "conviction_call": {
       "max_cost_usd": 1.0,
       "max_input_tokens": 60000,
-      "max_output_tokens": 3000,
+      "max_output_tokens": 16384,
       "timeout_seconds": 240
     },
     "conviction_call_verifier": {
@@ -87,7 +87,7 @@
     "earnings_calibration": {
       "max_cost_usd": 1.0,
       "max_input_tokens": 60000,
-      "max_output_tokens": 2000,
+      "max_output_tokens": 16384,
       "timeout_seconds": 240
     },
     "earnings_calibration_verifier": {
@@ -99,7 +99,7 @@
     "earnings_preview": {
       "max_cost_usd": 1.0,
       "max_input_tokens": 60000,
-      "max_output_tokens": 4000,
+      "max_output_tokens": 16384,
       "timeout_seconds": 240
     },
     "earnings_preview_verifier": {
@@ -129,7 +129,7 @@
     "industry_framework": {
       "max_cost_usd": 1.0,
       "max_input_tokens": 120000,
-      "max_output_tokens": 3000,
+      "max_output_tokens": 32768,
       "timeout_seconds": 180
     },
     "industry_framework_verifier": {
@@ -183,7 +183,7 @@
     "model_spec": {
       "max_cost_usd": 1.0,
       "max_input_tokens": 120000,
-      "max_output_tokens": 6000,
+      "max_output_tokens": 32768,
       "timeout_seconds": 300
     },
     "plan": {
@@ -225,7 +225,7 @@
     "thesis_reflection": {
       "max_cost_usd": 1.0,
       "max_input_tokens": 60000,
-      "max_output_tokens": 1500,
+      "max_output_tokens": 16384,
       "timeout_seconds": 180
     },
     "thesis_reflection_verifier": {

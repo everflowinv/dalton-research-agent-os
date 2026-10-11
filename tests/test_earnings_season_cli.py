@@ -52,9 +52,9 @@ class EarningsSeasonBudgetTests(unittest.TestCase):
         # with "provider max_output_tokens telemetry exceeds WorkOrder budget"
         # after the providers had answered (and billed) 2,138-2,980 output
         # tokens against a 2,000 cap -- every link of the brain chain, so the
-        # chain was exhausted. The cap now matches the other long-form lanes.
+        # chain was exhausted. The cap leaves space for structured answers plus model reasoning.
         budget = default_call_budget(season.PREVIEW_PURPOSE)
-        self.assertEqual(budget["max_output_tokens"], 4_000)
+        self.assertEqual(budget["max_output_tokens"], 16_384)
         self.assertGreater(budget["max_output_tokens"], 2_980)
         self.assertEqual(budget["max_input_tokens"], 60_000)
         self.assertEqual(budget["max_cost_usd"], 1.0)

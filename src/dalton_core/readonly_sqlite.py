@@ -3,6 +3,7 @@ from contextlib import contextmanager
 from pathlib import Path
 import sqlite3
 from typing import Iterator
+from .sqlite_header import read_sqlite_header
 
 
 def connect_read_only(path: str | Path) -> sqlite3.Connection:
@@ -17,8 +18,7 @@ def connect_read_only(path: str | Path) -> sqlite3.Connection:
     if str(path) == ":memory:":
         raise ValueError("read_only requires an existing database file")
     target = Path(path).absolute()
-    with target.open("rb") as stream:
-        header = stream.read(100)
+    header = read_sqlite_header(target)
     if header[:16] == b"SQLite format 3\x00" and header[18:20] == b"\x02\x02":
         if not all(Path(str(target) + suffix).is_file() for suffix in ("-wal", "-shm")):
             raise sqlite3.OperationalError("read_only WAL requires existing WAL/SHM; no sidecars were created")
@@ -48,8 +48,7 @@ def connect_cold_wal_snapshot(path: str | Path) -> Iterator[sqlite3.Connection]:
         raise ValueError("cold WAL snapshot requires an existing database file")
     target = Path(path).absolute()
     sidecars = tuple(Path(str(target) + suffix) for suffix in ("-wal", "-shm"))
-    with target.open("rb") as stream:
-        header = stream.read(100)
+    header = read_sqlite_header(target)
     if header[:16] != b"SQLite format 3\x00" or header[18:20] != b"\x02\x02":
         raise sqlite3.OperationalError("cold WAL snapshot requires a WAL database")
     if any(item.exists() for item in sidecars):

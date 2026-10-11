@@ -102,6 +102,41 @@ class CallBudgetTests(unittest.TestCase):
                          + budget["max_output_tokens"] * 20.0) / 1_000_000
                 self.assertLessEqual(worst, budget["max_cost_usd"])
 
+    def test_structured_research_drafts_resolve_reasoning_headroom_without_changing_other_caps(self):
+        from dalton_core.cockpit_model import CockpitModel
+        purposes = {
+            "thesis_reflection": (60_000, 180, 1_500),
+            "earnings_calibration": (60_000, 240, 2_000),
+            "earnings_preview": (60_000, 240, 4_000),
+            "conviction_call": (60_000, 240, 3_000),
+        }
+        model = CockpitModel.__new__(CockpitModel)
+        model.config = {}
+        model.max_input_tokens = 60_000
+        model.max_output_tokens = 1_500  # Old caller fallbacks are not the catalogue.
+        model.max_cost_usd = 1.0
+        model.timeout_seconds = 180
+        for purpose, (input_cap, timeout, _) in purposes.items():
+            with self.subTest(purpose=purpose):
+                effective = model.budget_for(purpose)
+                self.assertEqual(effective, {
+                    "max_input_tokens": input_cap, "max_output_tokens": 16_384,
+                    "max_cost_usd": 1.0, "timeout_seconds": timeout,
+                })
+
+    def test_structured_draft_headroom_preserves_saved_override_and_verifier_limits(self):
+        verifier_caps = {
+            "thesis_reflection": 1_500, "earnings_calibration": 2_000,
+            "earnings_preview": 2_000, "conviction_call": 3_000,
+        }
+        for purpose, cap in verifier_caps.items():
+            with self.subTest(purpose=purpose):
+                self.assertEqual(default_call_budget(purpose + "_verifier")["max_output_tokens"], cap)
+                config = {"purpose_call_budgets": {purpose: {"max_output_tokens": 2_048}}}
+                budget = resolve_call_budget(config, purpose, defaults=DEFAULTS)
+                self.assertEqual(budget["max_output_tokens"], 2_048)
+                self.assertEqual(budget["max_cost_usd"], 1.0)
+
     def test_run_budget_resolves_general_then_purpose(self):
         config = {
             "run_budget": {"max_cost_usd": 4.0, "max_units": 3},

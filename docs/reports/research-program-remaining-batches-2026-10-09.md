@@ -154,7 +154,7 @@ D 已做实质门、占位符禁止、裸数字拦截、gate 回答标准、缺�
 2. **生命周期状态**（只追加表 `workspace_lifecycle_events` + `workspace.json` 的 `lifecycle` 字段）：`active` → `paused`（停用：launchd 服务 bootout，端口保留，状态目录原样，驾驶舱切换器标「已停用」仍可只读查看已发布研究）→ `archived`（归档：状态目录打包移到 `<host_root>/archive/<slug>-<date>/`，释放端口，launchd 配置删除，切换器隐藏但管理员页可见并可「恢复」）→ `deleted`（删除：归档包删除，不可恢复）。每一步只追加事件（谁、何时、理由）。
 3. **管理员删除流程**（管理员页「研究项目管理」）：删除按钮只对 `paused` 或 `archived` 的环境可用；`active` 环境必须先停用（危险确认 + 键入项目名）；删除再次键入项目名并勾选「我知道不可恢复」；有未处理的待办决策或未发布的 owner 草案时先列出来再允许；删除后 `manager.json` 与 workspace 注册表写 `deleted` 事件（不删历史行），`~/.dalton/workspace-logs/<slug>` 一并清理或归档。
 4. **空环境自动提示**：创建后 7 天仍无研究目标的环境，在待办里出一张「空环境 N 天未使用：停用 / 删除 / 保留」卡（替代现在 ws-e399 那张永远在的「还没有研究目标」）。
-5. **安全边界**：legacy（主环境）不可停用/删除（标为「主环境」）；停用的环境不参与模型选择「同步到所有环境」与周报；release_switch 跳过 `paused/archived` 环境（健康检查不再把它们算作「未运行」）；parity 检查对停用环境只检查归档完整性。
+5. **安全边界**：legacy（主环境）不可停用/删除（标为「主环境」）；停用的环境暂停执行与周报；管理员模型顺序和上限保存为全机默认，停用环境显示待同步并在恢复执行前应用；release_switch 跳过 `paused/archived` 环境（健康检查不再把它们算作「未运行」）；parity 检查对停用环境只检查归档完整性。
 6. **CLI 等价命令**保留在技术详情（`workspace_fleet pause|archive|restore|delete`），供无 UI 场景。
 
 **文件**：`workspace_manager.py`、`workspace_fleet.py`（新增 pause/archive/restore/delete）、`workspace_process.py`（bootout/uninstall）、`agenda_control.py` 与 `cockpit_v2/admin/*`（动作与危险确认）、`cockpit_v2/pages/settings.js` + `shell.js`（分析师新建入口与进度）、`needs_human.py`（空环境卡）、`scripts/release_switch.py`（跳过停用环境）、`workspace_health_parity.py`。
