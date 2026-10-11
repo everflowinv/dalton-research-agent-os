@@ -60,7 +60,7 @@ TradingAgents 将每次判断记录下来，在观察窗口结束后计算实际
 | 是否原地重复？ | 相同输入下的重复失败、无新增证据的重复检索、重复付费次数 |
 | 自动恢复是否有效？ | 失败原因是否消除，下游步骤是否消费恢复结果，原费用是否完整保留 |
 
-Dalton 已有[研究周期复盘](../../src/dalton_core/research_cycle_reflection.py)和[研究跟进](../../src/dalton_core/research_followup.py)。优先补充上述关联证据与验收指标，避免再建立一套独立的“完成状态”。后续自动化应直接读取同一份记录，决定继续执行、等待新证据或请求人的决定。
+Dalton 已有[研究周期复盘](../../src/dalton_core/research_cycle_reflection.py)和[研究跟进](../../src/dalton_core/research_followup.py)。优先补充上述关联证据与验收指标，避免再建立一套独立的“完成状态”。现场已确认初筛的具体核验失败尚未进入后续规划；下一批的接线与验收方法见[产品核验失败反馈设计](product-validation-feedback-design-2026-10-11.md)。后续自动化应直接读取同一份记录，决定继续执行、等待新证据或请求人的决定。
 
 投资判断的评估另设观察期限：短期股价表现、季度经营结果和长期投资逻辑分别核对。TradingAgents 的复盘提示也明确指出，数日回报可能不足以判断数月的投资逻辑。[复盘提示](https://github.com/TauricResearch/TradingAgents/blob/1394a3f72aa4393e1a98f51b382434c4b4c2d972/tradingagents/memory/reflection.py)
 
