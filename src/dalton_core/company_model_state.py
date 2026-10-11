@@ -342,7 +342,7 @@ def _numeric_context(
     body = {
         "schema_version": NUMERIC_CONTEXT_SCHEMA_VERSION,
         "identity_catalog_contract": IDENTITY_CATALOG_REF,
-        "selection_contract": "company-model-coherent-revenue-context:0.1",
+        "selection_contract": "company-model-coherent-income-context:0.2",
         "policy": dict(policy),
         "filing_authorities": filing_authorities,
         "available_cells": available_cells,

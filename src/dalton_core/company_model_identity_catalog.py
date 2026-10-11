@@ -63,27 +63,42 @@ def resolve_identity(state: Mapping[str, Any], concept: Any,
 
 def coherent_revenue_groups(groups: list[list[dict[str, Any]]]
                             ) -> list[list[dict[str, Any]]]:
-    """Keep each source's complete revenue disclosure together under both caps.
+    """Keep dimensional revenue and its consolidated income chain together.
 
-    Different filings, contexts, dated windows, concepts, and units never mix.
+    Different filings, contexts, dated windows, and units never mix.
     This protects disclosure membership; it does not assert a segment sum ties.
     Conflicting rows stay together as they did before this grouping.
     """
     from .model_forecast_driver import CONCEPT_ROLES, REVENUE
 
-    revenue: dict[tuple[str, ...], list[dict[str, Any]]] = {}
+    def source_period(cell):
+        return tuple(str(cell.get(k) or "") for k in (
+            "filing_content_hash", "accession", "statement_context_ref",
+            "period_start", "period_end", "unit",
+        ))
+
+    dimensional_periods = {source_period(group[0]) for group in groups
+        if group[0].get("statement") == "income"
+        and CONCEPT_ROLES.get(group[0].get("concept")) == REVENUE
+        and (group[0].get("dimensions") or group[0].get("dimension_axis"))}
+    protected: dict[tuple[str, ...], list[dict[str, Any]]] = {}
     other: list[list[dict[str, Any]]] = []
     for group in groups:
         first = group[0]
-        if first.get("statement") != "income" or CONCEPT_ROLES.get(first.get("concept")) != REVENUE:
+        key = source_period(first)
+        revenue = first.get("statement") == "income" and CONCEPT_ROLES.get(first.get("concept")) == REVENUE
+        income_chain = (key in dimensional_periods and first.get("statement") == "income"
+                        and not (first.get("dimensions") or first.get("dimension_axis")))
+        if not revenue and not income_chain:
             other.append(group)
             continue
-        key = tuple(str(first.get(k) or "") for k in (
-            "filing_content_hash", "accession", "statement_context_ref",
-            "statement", "concept", "period_start", "period_end", "unit",
-        ))
-        revenue.setdefault(key, []).extend(group)
-    ordered = sorted(revenue.values(), key=lambda group: (
+        # Standalone consolidated revenue still has its original small group;
+        # a dimensional disclosure shares an atomic package with every held
+        # consolidated income component/subtotal in that exact source window.
+        if key not in dimensional_periods:
+            key += (str(first.get("concept") or ""),)
+        protected.setdefault(key, []).extend(group)
+    ordered = sorted(protected.values(), key=lambda group: (
         str(group[0].get("period_end") or ""),
         str(group[0].get("period_start") or ""),
         str(group[0].get("accession") or ""),

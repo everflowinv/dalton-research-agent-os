@@ -102,7 +102,7 @@ class RevenueGroupTests(unittest.TestCase):
     def ingest_group(self):
         line = self.fixtures._line
         rows = [line("us-gaap:Revenues", value="100")]
-        rows.extend(line(f"example:Incidental{n:03d}") for n in range(110))
+        rows.extend(line(f"example:Incidental{n:03d}", statement="cash") for n in range(110))
         rows.extend(line("us-gaap:Revenues", value=str(n + 1), is_breakdown=True,
                          dimension_axis="segment:Axis", dimension_member=f"segment:Member{n}")
                     for n in range(4))
@@ -127,6 +127,25 @@ class RevenueGroupTests(unittest.TestCase):
         self.assertEqual(revenue, [])
         self.assertLessEqual(len(build_prompt(held).encode()), bound)
         self.assertEqual(held["numeric_context"]["prompt_bytes"], len(build_prompt(held).encode()))
+
+    def test_income_chain_is_not_starved_by_all_historical_revenue(self):
+        line = self.fixtures._line
+        rows = []
+        for start, end in (("2026-04-01", "2026-06-30"), ("2026-01-01", "2026-03-31")):
+            rows.extend([
+                line("us-gaap:Revenues", period_start=start, period_end=end, value="100"),
+                line("us-gaap:Revenues", period_start=start, period_end=end,
+                     is_breakdown=True, dimension_axis="segment:Axis", dimension_member="segment:Member", value="100"),
+                line("example:FiledExpenseTotal", period_start=start, period_end=end, value="80"),
+                line("us-gaap:OperatingIncomeLoss", period_start=start, period_end=end, value="20"),
+            ])
+        self.fixture.ingest("0001467373-26-000031", rows)
+        held = build_company_model_state(self.fixture.missions, self.fixtures.ACN,
+            numeric_context_policy={"max_periods_per_series": 2, "max_total_cells": 4})
+        cells = held["numeric_context"]["cells"]
+        self.assertEqual({c["period_end"] for c in cells}, {"2026-06-30"})
+        self.assertEqual({c["concept"] for c in cells},
+                         {"us-gaap:Revenues", "example:FiledExpenseTotal", "us-gaap:OperatingIncomeLoss"})
 
     def test_oversize_group_is_omitted_without_changing_values_or_cap(self):
         self.ingest_group()
