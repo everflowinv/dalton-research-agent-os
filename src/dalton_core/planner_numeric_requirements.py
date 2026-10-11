@@ -181,6 +181,16 @@ def numeric_completed_context(feedback: Sequence[Mapping[str, Any]], *,
                     or any(c not in '0123456789abcdef' for c in figure_hash)):
                 raise ValueError('numeric completed target lacks a Figure binding')
             row = {**target, 'figure_ref': figure_ref, 'figure_hash': figure_hash}
+            answers = {answer['target_ref']: answer for answer in observation.get('completed_answers', ())}
+            answer = answers.get(target['target_ref'])
+            if answer is not None:
+                if (answer['figure_ref'] != figure_ref or answer['figure_hash'] != figure_hash
+                        or answer['metric_definition_hash'] != target['metric_definition_hash']
+                        or any(answer[key] != target[key] for key in ('period', 'unit', 'currency', 'basis'))):
+                    raise ValueError('numeric completed answer scope differs')
+                row['verified_answer'] = {key: answer[key] for key in (
+                    'value', 'unit', 'currency', 'scale', 'period', 'basis', 'as_reported_label',
+                    'source_grade', 'quote_id', 'citation_excerpt', 'citation_excerpt_start', 'citation_excerpt_is_complete', 'citation_text_hash')}
             identity = (header['document_ref'], header['document_version_hash'], content_hash(row))
             if identity not in seen:
                 seen.add(identity)

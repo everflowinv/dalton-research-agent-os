@@ -552,6 +552,36 @@ def numeric_feedback(connection,mission_version_ref):
             result['resolved_numeric_rejections'] = [
                 {k: proof[k] for k in ('admission_ref','admission_hash','rejection_ref','rejection_hash')}
                 for proof in admission['numeric_authority'].get('capability_upgrade_proofs', ())]
+        # Values are read from the exact immutable Figure, never from a model's
+        # prose or an aggregate count.  This is planning context, not new admission.
+        from .claim_index_figures import MissionFigureAuthorityResolver
+        resolver = MissionFigureAuthorityResolver(connection)
+        targets = {t['target_ref']: t for t in value['numeric_authority']['targets']}
+        answers = []
+        for completed in value['completed_targets']:
+            target = targets.get(completed['target_ref'])
+            if target is None or completed['metric_definition_hash'] != target['metric_definition_hash']:
+                raise DirectedNumericError('numeric feedback completed target definition differs')
+            figure = resolver.figure(completed['figure_ref'])
+            resolver.verify_figure(figure)
+            if (figure['content_hash'] != completed['figure_hash']
+                    or figure['company_ref'] != admission['company_ref']
+                    or figure['document_ref'] != result['document_ref']
+                    or figure['source_manifest_hash'] != value['source_binding']['source_manifest_hash']
+                    or any(figure[k] != target[k] for k in ('metric_ref', 'period', 'unit', 'currency', 'basis'))):
+                raise DirectedNumericError('numeric feedback completed Figure scope differs')
+            citation = figure['citation_text']
+            import re
+            located = re.search(r'(?<![\d.])' + re.escape(str(figure['value'])) + r'(?![\d.])', citation)
+            excerpt_start = max(0, located.start() - 160) if located is not None else 0
+            # The full citation hash and exact quote ref retain the authority; a
+            # bounded excerpt is explicitly labelled and cannot authorize reuse.
+            answers.append({**completed, **{k: figure[k] for k in
+                ('value', 'unit', 'currency', 'scale', 'period', 'basis', 'as_reported_label', 'source_grade', 'quote_id')},
+                'citation_excerpt': citation[excerpt_start:excerpt_start + 512],
+                'citation_excerpt_start': excerpt_start, 'citation_excerpt_is_complete': len(citation) <= 512,
+                'citation_text_hash': content_hash(citation)})
+        result['completed_answers'] = answers
         from .numeric_target_revision import revision_source_candidate
         if not spoken and revision_source_candidate(connection, admission, value, digest):
             result['target_revision_candidate'] = True
