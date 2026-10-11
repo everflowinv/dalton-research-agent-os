@@ -85,7 +85,7 @@ MAX_OUTPUT_TOKENS = int(DEFAULT_MODEL_SPEC_CALL_BUDGET["max_output_tokens"])
 # structure rather than to look frugal.
 MAX_COST_USD = float(DEFAULT_MODEL_SPEC_CALL_BUDGET["max_cost_usd"])
 TIMEOUT_SECONDS = int(DEFAULT_MODEL_SPEC_CALL_BUDGET["timeout_seconds"])
-REPAIR_CONTRACT_REF = "contract:company-model-spec-structured-output-repair:0.6"
+REPAIR_CONTRACT_REF = "contract:company-model-spec-structured-output-repair:0.7"
 # One repair call, which is the number every other lane in this repository
 # uses for the same bargain (``draft_contract_repair.MAX_REPAIR_ATTEMPTS``).
 DEFAULT_REPAIR_ATTEMPTS = 1
@@ -122,6 +122,11 @@ REPAIR_CONTRACT = {
         "guidance": EPS_NUMERATOR_BRIDGE_GUIDANCE,
         "change": "one_derived_numerator_bridge_and_its_consuming_eps_formula_only",
         "accounting_line": "retain_or_restore_accounting_net_income_role_and_formula",
+    },
+    "filed_subtotal_placement": {
+        "ref": "model-spec-filed-subtotal-concept-placement:0.1",
+        "change": "same_line_concept_to_matching_formula_tie_only",
+        "source_identity": "exact_filed_concept_and_evidence_remain_unchanged",
     },
     "semantic_failure": "whole_refusal",
     # 0.5: a new contract is a new question only where nobody has answered it.
@@ -380,6 +385,25 @@ def _repair_prompt(original_text: str, error: CompanyModelSpecError) -> str:
             "inventing a line that would satisfy it. Return JSON matching "
             "OUTPUT_SCHEMA and nothing else.\n\n"
         )
+        if "a filed subtotal may only be actual/tie authority or unavailable" in str(error):
+            head = (
+                "Repair only the named filed-subtotal wiring rule. A filed subtotal "
+                "may remain filed with forecast_method unavailable: do not invent "
+                "a forecast for an unsupported total. To make this same subtotal "
+                "formula-derived, change only that line to kind derived, concept "
+                "null and forecast_method formula, and put its original exact "
+                "filed concept in the matching formula's tie_out_concept. This is "
+                "a field placement change, never removal or replacement of the "
+                "source authority. Preserve the exact filed concept and existing "
+                "source evidence in that tie. Use only already provided component "
+                "line refs with the company's proven statement bridge. Do not "
+                "change any figure, ref, period, source concept identity or "
+                "unrelated line. Do not add, remove or rename any line, invent "
+                "a component, delete an anchor, or use an untied subtotal. If "
+                "the provided source authorities cannot prove the bridge, keep "
+                "the subtotal unavailable. Return JSON matching OUTPUT_SCHEMA "
+                "and nothing else.\n\n"
+            )
         # The closed EPS rule needs a distinct derived bridge, not a retagged
         # accounting subtotal. Other wiring errors retain the original scope.
         if (
@@ -729,13 +753,15 @@ def model_spec_validation_contract() -> dict[str, str]:
     """
 
     from .company_financial_statement_structure import STRUCTURE_AUTHORITY_REF
+    from .forecast_coverage import PROPOSAL_METHOD_COMPLETION_REF
     from .company_model_series import DUPLICATE_FACT_POLICY_REF
     from .model_forecast_driver import (
         CASH_FLOW_COMPANION_VALIDATION_CONTRACT_HASH,
     )
 
     return {
-        "contract": "company-model-spec-pre-persistence-validation:0.1",
+        "contract": "company-model-spec-pre-persistence-validation:0.2",
+        "proposal_method_completion": PROPOSAL_METHOD_COMPLETION_REF,
         "cash_flow_companion": CASH_FLOW_COMPANION_VALIDATION_CONTRACT_HASH,
         "financial_statement_structure": STRUCTURE_AUTHORITY_REF,
         "repairable_structure_rules": REPAIRABLE_STRUCTURE_RULES_REF,
