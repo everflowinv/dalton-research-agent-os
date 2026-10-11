@@ -174,6 +174,22 @@ def _process_started_at(pid: int) -> float | None:
         return None
 
 
+def _process_start_bounds(pid: int, process_time: float) -> tuple[float, float] | None:
+    """Birth-time bounds from the precision of the OS representation."""
+    if not (Path("/proc") / str(pid) / "stat").is_file():
+        # Retain the existing whole-second BSD ps allowance.
+        return process_time - 1.0, process_time + 1.0
+    try:
+        ticks_per_second = float(os.sysconf("SC_CLK_TCK"))
+        if ticks_per_second <= 0:
+            return None
+    except (OSError, ValueError):
+        return None
+    # Linux btime truncates one second and start_ticks truncates one tick.
+    # Both round down: the real birth is in this interval, not +/- one second.
+    return process_time, process_time + 1.0 + 1.0 / ticks_per_second
+
+
 def _ticket_process_matches(
     record: dict[str, Any], ticket_mtime: float | None = None,
 ) -> bool | None:
@@ -205,10 +221,13 @@ def _ticket_process_matches(
         return command_match
     if ticket_mtime < ticket_time:
         return command_match
-    # Launchers capture started_at before filesystem preparation/Popen and
-    # write ticket.json after Popen. The child must have been born inside that
-    # interval. One second on either side covers whole-second BSD ps output.
-    return ticket_time - 1.0 <= process_time <= ticket_mtime + 1.0
+    # Launchers capture started_at before Popen and write the ticket after it.
+    # Compare the OS birth-time interval with that exact launch interval.
+    bounds = _process_start_bounds(pid, process_time)
+    if bounds is None:
+        return command_match
+    earliest, latest = bounds
+    return earliest <= ticket_mtime and latest >= ticket_time
 
 
 def _read_ticket_snapshot(ticket_path: Path) -> tuple[dict[str, Any], float | None]:
