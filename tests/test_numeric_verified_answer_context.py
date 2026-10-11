@@ -53,3 +53,20 @@ class NumericVerifiedAnswerContextTests(unittest.TestCase):
         rows=[context_fixture.requirement(),context_fixture.completed()]
         target=numeric_completed_context(rows,company_ref=context_fixture.COMPANY)['sources'][0]['targets'][0]
         self.assertNotIn('verified_answer',target)
+
+    def test_final_projected_prompt_keeps_actual_answers_without_unresolved_rejection(self):
+        from dalton_core.research_planner import project_state_for_prompt, build_prompt
+        from tests import test_research_planner as planner_fixture
+        f,a,e,_=self.setup_completed()
+        rows=numeric_feedback(e.connection,f.mission['id'])
+        state=planner_fixture.state(checklist=[planner_fixture.entry(a['company_ref'],'SYNTH',planner_fixture.item('quarterly_financials'))],document_research_feedback={'status':'available','by_company':{a['company_ref']:rows}})
+        projected=project_state_for_prompt(state,max_input_bytes=128000)
+        company=next(c for c in projected['companies'] if c['company_ref']==a['company_ref'])
+        context=company['numeric_completed_context'];self.assertEqual(sum(len(s['targets']) for s in context['sources']),3)
+        self.assertEqual(numeric_requirements(rows)['requirements'],[])
+        prompt=build_prompt(projected)
+        for source in context['sources']:
+            self.assertIn(source['document_version_hash'],prompt)
+            for t in source['targets']:
+                self.assertIn(t['figure_hash'],prompt);self.assertIn(t['verified_answer']['citation_text_hash'],prompt)
+        self.assertLessEqual(len(prompt.encode()),128000)

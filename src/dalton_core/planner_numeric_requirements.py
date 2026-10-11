@@ -131,7 +131,7 @@ def numeric_waiting_targets(feedback: Sequence[Mapping[str, Any]]) -> dict[str, 
 
 def numeric_completed_context(feedback: Sequence[Mapping[str, Any]], *,
                               company_ref: str) -> dict[str, Any]:
-    """Retain proved target scopes relevant to an exact pending source version.
+    """Retain recent proved target scopes with their exact original source versions.
 
     These are planning hints, not new Figures or answers to another question.
     The upstream reader has replayed the admission and final successful result.
@@ -140,16 +140,11 @@ def numeric_completed_context(feedback: Sequence[Mapping[str, Any]], *,
     from .directed_numeric_research import normalize_targets
     if not isinstance(company_ref, str) or not company_ref:
         return {'sources': [], 'omitted': 0}
-    requirements = numeric_requirements([row for row in feedback if row.get('company_ref') == company_ref],
-                                       limit=None)['requirements']
-    pending_sources = {(row['document_ref'], row.get('document_version_hash'))
-                       for row in requirements if row.get('document_version_hash')}
     candidates, seen = [], set()
     for observation in sorted(feedback, key=lambda x: (str(x.get('created_at') or ''), str(x.get('id') or '')), reverse=True):
         if observation.get('outcome') != 'numeric_targets_completed':
             continue
-        if observation.get('company_ref') != company_ref or (
-                observation.get('document_ref'), observation.get('document_version_hash')) not in pending_sources:
+        if observation.get('company_ref') != company_ref:
             continue
         body = dict(observation)
         digest = body.pop('content_hash', None)

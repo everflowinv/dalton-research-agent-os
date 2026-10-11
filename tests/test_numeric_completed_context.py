@@ -59,13 +59,16 @@ class NumericCompletedContextTests(unittest.TestCase):
         self.assertEqual(numeric_requirements(rows), old)
         self.assertEqual(len(old['requirements']), 1)
 
-    def test_no_pending_or_different_company_original_or_version_never_reuses_success(self):
+    def test_completed_answer_retained_without_pending_and_not_rebound_to_another_source(self):
         row = completed()
-        foreign = requirement(); foreign['company_ref'] = 'company:ticker:other'
-        for rows in ([foreign, row], [row], [requirement(doc='other:original'), row],
-                     [requirement(version='f'*64), row],
-                     [requirement(), completed(company_ref='company:ticker:other')]):
-            self.assertEqual(self.context(rows), {'sources': [], 'omitted': 0})
+        for pending in ([], [requirement(doc='other:original')], [requirement(version='f'*64)]):
+            before = numeric_requirements(pending)
+            result = self.context([*pending, row])
+            self.assertEqual(result['sources'][0]['document_ref'], DOC)
+            self.assertEqual(result['sources'][0]['document_version_hash'], VERSION)
+            self.assertEqual(numeric_requirements([*pending, row]), before)
+        foreign = completed(company_ref='company:ticker:other')
+        self.assertEqual(self.context([foreign]), {'sources': [], 'omitted': 0})
 
     def test_partial_or_unverified_outcome_does_not_assert_completed_scope(self):
         for outcome in ('candidate_staged', 'numeric_waiting_evidence', 'query_miss'):
