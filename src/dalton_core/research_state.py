@@ -101,6 +101,9 @@ def company_state(
     failed = compact_failures(document_research_feedback)
     if failed['failures']:
         extra['document_execution_failures'] = failed
+    for key in ("model_execution_failures", "model_execution_failure_summary"):
+        if key in (financial_model or {}):
+            extra[key] = (financial_model or {})[key]
     numeric = numeric_requirements(document_research_feedback)
     if numeric["requirements"]:
         extra["numeric_reading_requirements"] = numeric
@@ -452,6 +455,8 @@ def _material_subject(subject: Mapping[str, Any] | None) -> dict[str, Any] | Non
         "source_base_ready": bool(subject.get("source_base_ready")),
         **({'document_execution_failures': content_hash(subject['document_execution_failures'])}
            if 'document_execution_failures' in subject else {}),
+        **({key: content_hash(subject[key]) for key in (
+            "model_execution_failures", "model_execution_failure_summary") if key in subject}),
         **({"numeric_source_refusal_ids": subject["numeric_source_refusal_ids"]}
            if "numeric_source_refusal_ids" in subject else {}),
         **({"numeric_completed_context": content_hash(subject["numeric_completed_context"])}

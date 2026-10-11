@@ -286,7 +286,8 @@ def build_state(store: DaltonStore, missions: CoverageMissionAuthority,
     acquisition: dict[str, Any] = {}
     for entry in checklist:
         company_ref = entry["company_ref"]
-        financial_models[company_ref] = financial_state(store.connection, company_ref, mission)
+        financial_models[company_ref] = financial_state(
+            store.connection, company_ref, mission, state_dir=Path(store.path).parent)
         acquisition[company_ref] = missions.sec_dispatch_outcomes(company_ref)
         held = missions.document_figures(company_ref)
         figures[company_ref] = {
