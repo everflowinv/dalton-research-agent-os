@@ -604,7 +604,10 @@ def render_sensitivity(
         else:
             out.append("      当前假设：预测期内并非固定值")
         if impact.get("status") == "computed":
-            out.append(f"      该假设变动 1 个百分点时，"
+            move_label = ("首个预测季度的增速变动" if
+                          record.get("selection_rule_ref") == "rule:swing-rank:2"
+                          and driver.get("measure") == "quarterly_growth" else "该假设变动")
+            out.append(f"      {move_label} 1 个百分点时，"
                        f"{show(str(metric.get('label')))}变动 "
                        f"{_millions(impact['delta'])} 百万（基准值的 {impact.get('percent_of_base')}%）")
         else:
@@ -623,7 +626,9 @@ def render_sensitivity(
         out.append("      " + "".ljust(SENSITIVITY_LABEL_WIDTH)
                    + "".join(
                        (_percent(row["assumption_value"])
-                        if row.get("assumption_value") is not None else "--"
+                        if row.get("assumption_value") is not None else
+                        "逐季假设" if row.get("scenario_path") == "baseline"
+                        and row.get("status") == "computed" else "--"
                         ).rjust(SCENARIO_WIDTH) for row in rows))
         line_refs: list[tuple[str, str]] = []
         for row in rows:
