@@ -1072,7 +1072,8 @@ def build_work(*, purpose: str, request_id: str, prompt: str, mission_version_re
                provider_retry: Mapping[str, Any] | None = None,
                broker_frame_policy: Mapping[str, Any] | None = None,
                producer_route_decision_refs: Sequence[str] = (),
-               authority_binding: Mapping[str, Any] | None = None) -> WorkOrder:
+               authority_binding: Mapping[str, Any] | None = None,
+               timeout_recovery: Mapping[str, Any] | None = None) -> WorkOrder:
     if purpose not in _PURPOSES:
         raise CockpitModelError("unknown cockpit model purpose")
     if transport_retry is not None:
@@ -1124,6 +1125,8 @@ def build_work(*, purpose: str, request_id: str, prompt: str, mission_version_re
         if dict(broker_frame_policy) != expected_frame:
             raise CockpitModelError("broker frame policy is invalid")
         identity["broker_frame_policy"] = content_hash(expected_frame)
+    if timeout_recovery is not None:
+        identity["timeout_recovery"] = content_hash(timeout_recovery)
     digest = content_hash(identity)
     at = created_at or _now()
     capability = (
@@ -1158,6 +1161,8 @@ def build_work(*, purpose: str, request_id: str, prompt: str, mission_version_re
                                  **({} if structured_output_repair is None else {
                                      "structured_output_repair": dict(
                                          structured_output_repair)}),
+                                 **({} if timeout_recovery is None else {
+                                     "timeout_recovery": dict(timeout_recovery)}),
                                  **({} if provider_retry is None else {
                                      "provider_retry": dict(provider_retry)}),
                                  **({} if transport_retry is None else {
@@ -2179,6 +2184,7 @@ class CockpitModel:
              _dossier_recovery_parent: Mapping[str, Any] | None = None,
              _model_spec_request_identity: Mapping[str, Any] | None = None,
              _structured_output_repair: Mapping[str, Any] | None = None,
+             _timeout_recovery: Mapping[str, Any] | None = None,
              ) -> dict[str, Any]:
         """Run configured paid retries without retaining prior call contexts."""
 
@@ -2191,13 +2197,15 @@ class CockpitModel:
             producer_route_decision_refs=producer_route_decision_refs,
             _dossier_recovery_parent=_dossier_recovery_parent,
             _model_spec_request_identity=_model_spec_request_identity,
-            _structured_output_repair=_structured_output_repair)
+            _structured_output_repair=_structured_output_repair,
+            _timeout_recovery=_timeout_recovery)
 
     def _call_resolved(self, *, purpose: str, request_id: str, prompt: str,
                        mission: Mapping[str, Any], producer_route_decision_refs: Sequence[str] = (),
                        _dossier_recovery_parent: Mapping[str, Any] | None = None,
                        _model_spec_request_identity: Mapping[str, Any] | None = None,
-                       _structured_output_repair: Mapping[str, Any] | None = None) -> dict[str, Any]:
+                       _structured_output_repair: Mapping[str, Any] | None = None,
+                       _timeout_recovery: Mapping[str, Any] | None = None) -> dict[str, Any]:
         while True:
             outcome = self._call_once(
                 purpose=purpose,
@@ -2208,6 +2216,7 @@ class CockpitModel:
                 _dossier_recovery_parent=_dossier_recovery_parent,
                 _model_spec_request_identity=_model_spec_request_identity,
                 _structured_output_repair=_structured_output_repair,
+                _timeout_recovery=_timeout_recovery,
             )
             if outcome.get(_RECLAIMED_LEASE):
                 continue
@@ -2219,6 +2228,12 @@ class CockpitModel:
                     settled = self._settled_cost(str(outcome["work_order_ref"]))
                     if settled is not None:
                         outcome["settled_cost_micros"], outcome["settled_day"] = settled
+                if _timeout_recovery is not None:
+                    prior = _timeout_recovery['proof']['accounted_micros']
+                    outcome['timeout_recovery_authorization_ref'] = _timeout_recovery['id']
+                    outcome['prior_unknown_accounted_micros'] = prior
+                    outcome['task_accounted_micros'] = prior + int(
+                        outcome.get('settled_cost_micros', outcome.get('cost_micros', 0)))
                 return outcome
             backoff = outcome["_provider_retry_backoff_seconds"]
             if backoff:
@@ -2297,6 +2312,7 @@ class CockpitModel:
                    _dossier_recovery_parent: Mapping[str, Any] | None = None,
                    _model_spec_request_identity: Mapping[str, Any] | None = None,
                    _structured_output_repair: Mapping[str, Any] | None = None,
+                   _timeout_recovery: Mapping[str, Any] | None = None,
                    ) -> dict[str, Any]:
         """Run one Scheduler attempt and request another through a private marker."""
         capacity_retry = _capacity_retry(self.config)
@@ -2351,7 +2367,7 @@ class CockpitModel:
             base_request_id = request_id
         else:
             base_request_id = request_id
-            if "capacity_retry" in self.config:
+            if "capacity_retry" in self.config and _timeout_recovery is None:
                 policy_suffix = ":capacity-policy:" + content_hash(capacity_retry)[:16]
                 canonical = re.search(
                     re.escape(policy_suffix)
@@ -2364,7 +2380,7 @@ class CockpitModel:
                 if canonical is None:
                     base_request_id += policy_suffix
                 request_id = base_request_id
-            if "transport_retry" in self.config:
+            if "transport_retry" in self.config and _timeout_recovery is None:
                 retry_suffix = ":transport-policy:" + content_hash(
                     self.config["transport_retry"]
                 )[:16]
@@ -2433,6 +2449,7 @@ class CockpitModel:
             ),
             "producer_route_decision_refs": producer_refs,
             "provider_retry": self.config.get("provider_retry"),
+            "timeout_recovery": _timeout_recovery,
             "broker_frame_policy": broker_frame_execution_binding(self.config),
             "model_spec_request_identity": _model_spec_request_identity,
             "structured_output_repair": _structured_output_repair,
@@ -2517,9 +2534,59 @@ class CockpitModel:
                 _validate_structured_output_repair_authority(
                     scheduler, _structured_output_repair, work, self.config
                 )
+            from .cockpit_timeout_recovery import (
+                reserve as timeout_reserve, verify as timeout_verify, consume as timeout_consume,
+                prior_authorization as prior_timeout_authorization, saved_successor as timeout_saved_successor)
+            if _timeout_recovery is not None:
+                from .planner_paid_output_recovery import recovery_readers
+                with recovery_readers(self.config['model_router_db'], self.config['budget_db'],
+                                      now=self.clock()) as (timeout_router, timeout_budget):
+                    timeout_verify(scheduler.connection, timeout_router, timeout_budget,
+                                   _timeout_recovery, mission=mission)
+                parent = _timeout_recovery['proof']
+                if (purpose != parent['purpose'] or work.question != scheduler.work_order_authority(
+                        parent['parent_work_ref'])['work_order']['question']
+                        or base_request_id != parent['parent_request_id'] + _timeout_recovery['suffix']):
+                    raise CockpitModelError('timeout successor differs from its exact original task')
+                timeout_consume(scheduler, _timeout_recovery, work, now=self.clock())
+            if _timeout_recovery is None and purpose in {'initial_screen', 'deep_insight_gate'}:
+                prior_timeout = prior_timeout_authorization(scheduler.connection, work)
+                if prior_timeout is not None and prior_timeout['proof']['parent_work_ref'] != work.id:
+                    from .planner_paid_output_recovery import recovery_readers
+                    with recovery_readers(self.config['model_router_db'], self.config['budget_db'],
+                                          now=self.clock()) as (timeout_router, timeout_budget):
+                        timeout_verify(scheduler.connection, timeout_router, timeout_budget,
+                                       prior_timeout, mission=mission)
+                    answered = timeout_saved_successor(scheduler, prior_timeout)
+                    if answered is not None:
+                        child, completed = answered
+                        answer = self._answer(completed, child, True, 0, 'replayed')
+                        answer['prior_unknown_accounted_micros'] = prior_timeout['proof']['accounted_micros']
+                        answer['timeout_recovery_authorization_ref'] = prior_timeout['id']
+                        return answer
+                    raise CockpitModelError('timeout maintenance already consumed this exact task; new evidence is required')
             if scheduler.enqueue(work)["status"] == "conflict":
                 raise CockpitModelError("this request is bound to different content; ask again")
             formal = scheduler.formal_result(work.id)
+            if _timeout_recovery is not None:
+                if formal is not None:
+                    # This certificate has one child. Its failed/unknown result
+                    # cannot enter another maintenance/route/capacity generation.
+                    return self._answer(formal, work, True, 0, 'replayed',
+                                        failure_trace=_failed_work_trace(
+                                            scheduler, work, purpose=purpose, request_id=base_request_id))
+            elif (purpose in {'initial_screen', 'deep_insight_gate'}
+                    and formal is not None and formal.get('terminal_state') == 'failed'):
+                from .planner_paid_output_recovery import recovery_readers
+                with recovery_readers(self.config['model_router_db'], self.config['budget_db'],
+                                      now=self.clock()) as (timeout_router, timeout_budget):
+                    timeout_binding = timeout_reserve(scheduler, timeout_router, timeout_budget,
+                        work=work, mission=mission, config=self.config, now=self.clock())
+                if timeout_binding is not None:
+                    return self.call(purpose=purpose,
+                        request_id=base_request_id + timeout_binding['suffix'], prompt=prompt,
+                        mission=mission, producer_route_decision_refs=producer_refs,
+                        _timeout_recovery=timeout_binding)
             if (purpose == 'plan' and formal is not None and formal.get('terminal_state') == 'failed'
                     and ((formal.get('result_envelope') or {}).get('error') or {}).get('code') == 'PROVIDER_BUDGET_EXCEEDED'):
                 from .planner_paid_output_recovery import (
