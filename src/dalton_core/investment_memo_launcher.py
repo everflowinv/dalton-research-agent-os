@@ -42,7 +42,38 @@ class InvestmentMemoLauncher(LaneChildLauncher):
         digest = hashlib.sha256(
             f"memo|{company_ref or '-'}|{signature}|{provider_contract}".encode()
         ).hexdigest()[:24]
-        return self.spawn(digest=digest, record={"signature": signature, "company_ref": company_ref},
+        from .investment_memo_quiesce import quiesced_summary_matches
+        # A paused run's immutable request remains in its own directory. A
+        # successor gets a fresh directory; it replays the same formal calls.
+        # Do not delete the request or overwrite the parent's pause receipt.
+        resumed_from = None
+        for _ in range(64):
+            path = self.tickets_dir / digest
+            if not (path / "quiesce-request.json").exists():
+                break
+            ticket = self.status(f"{self.TICKET_PREFIX}:{digest}")
+            if ticket["status"] == "running":
+                return ticket
+            summary = ticket.get("summary")
+            if not quiesced_summary_matches(summary, ticket):
+                raise LaneChildRejected("memo pause is unproved; no automatic resume")
+            resumed_from = ticket["id"]
+            digest = hashlib.sha256((resumed_from + "|" + summary["quiesce"]["content_hash"]).encode()).hexdigest()[:24]
+        else:
+            raise LaneChildRejected("memo pause chain exceeds the bounded 64-run lookup")
+        try:
+            fingerprints = [hashlib.sha256(p.read_bytes()).hexdigest()
+                            for p in (self.model_config_path, self.verifier_model_config_path)]
+        except OSError as exc:
+            raise LaneChildRejected("memo configuration cannot be frozen") from exc
+        record = {"signature": signature, "company_ref": company_ref,
+                  "model_config_path": str(self.model_config_path),
+                  "model_config_fingerprint": fingerprints[0],
+                  "verifier_model_config_path": str(self.verifier_model_config_path),
+                  "verifier_model_config_fingerprint": fingerprints[1]}
+        if resumed_from is not None:
+            record["resumed_from"] = resumed_from
+        return self.spawn(digest=digest, record=record,
                           company_ref=company_ref)
 
 

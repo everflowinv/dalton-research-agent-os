@@ -489,7 +489,7 @@ def _checks(sections: Sequence[Mapping[str, Any]], questions: Sequence[Mapping[s
 
 
 def run_memo(*, store: DaltonStore, frozen: Mapping[str, Any], model: Any, verifier_model: Any,
-             max_units: int = 4, max_repairs: int = 0) -> dict[str, Any]:
+             max_units: int = 4, max_repairs: int = 0, quiesce: Any = None) -> dict[str, Any]:
     if frozen.get("status") != "ready":
         return dict(frozen)
     mission, playbook, company = frozen["mission"], frozen["playbook"], frozen["company"]
@@ -508,6 +508,8 @@ def run_memo(*, store: DaltonStore, frozen: Mapping[str, Any], model: Any, verif
         kwargs = dict(group=group, section_titles=[titles[i] for i in section_indexes],
                       questions=[questions[i] for i in question_indexes],
                       material=frozen["material"], company=company, mission=mission)
+        if quiesce is not None:
+            kwargs["quiesce"] = quiesce
         outcome = draft_group(model, **kwargs)
         cost_micros += int(outcome.get("model", {}).get("cost_micros") or outcome.get("cost_micros") or 0)
         if outcome["status"] != "drafted" and outcome.get("repairable") and repairs_left:
@@ -565,7 +567,7 @@ def run_memo(*, store: DaltonStore, frozen: Mapping[str, Any], model: Any, verif
         or list(frozen["material"])
     verdict = verify_memo(verifier_model, sections=sections, questions=answers,
         material=verifier_material, material_hash=digest, mission=mission,
-        producer_route_decision_refs=routes)
+        producer_route_decision_refs=routes, **({"quiesce": quiesce} if quiesce is not None else {}))
     cost_micros += int(verdict.get("model", {}).get("cost_micros") or verdict.get("cost_micros") or 0)
     if verdict.get("status") != "verified" or verdict.get("verdict") != "pass":
         return {"status": "refused", "memo_status": "verification_failed", "verification": verdict,
@@ -604,7 +606,8 @@ def run_memo(*, store: DaltonStore, frozen: Mapping[str, Any], model: Any, verif
 def run(*, state_dir: Path, model_config_path: Path | None, verifier_model_config_path: Path | None,
         scheduler_db: Path | None = None, company_ref: str | None = None,
         model_factory: Callable[[], Any] | None = None,
-        verifier_model_factory: Callable[[], Any] | None = None) -> dict[str, Any]:
+        verifier_model_factory: Callable[[], Any] | None = None,
+        summary_dir: Path | None = None) -> dict[str, Any]:
     store = DaltonStore(str(state_dir / "core.sqlite"))
     frozen = collect_frozen_input(store, company_ref=company_ref)
     if frozen.get("status") != "ready":
@@ -612,8 +615,9 @@ def run(*, state_dir: Path, model_config_path: Path | None, verifier_model_confi
     if model_config_path is None or verifier_model_config_path is None:
         return {"schema_version": SUMMARY_SCHEMA_VERSION, "status": "held", "memo_status": "no_model_pair",
                 "reason": "memo producer and independent verifier configurations are both required"}
-    config = freeze_shared_budget_policy(json.loads(model_config_path.read_text(encoding="utf-8")))
-    verifier_config = freeze_shared_budget_policy(json.loads(verifier_model_config_path.read_text(encoding="utf-8")))
+    producer_bytes, verifier_bytes = model_config_path.read_bytes(), verifier_model_config_path.read_bytes()
+    config = freeze_shared_budget_policy(json.loads(producer_bytes))
+    verifier_config = freeze_shared_budget_policy(json.loads(verifier_bytes))
     producer_budget = resolve_call_budget(config, "investment_memo", defaults={
         "max_input_tokens": MAX_INPUT_TOKENS, "max_output_tokens": MAX_OUTPUT_TOKENS,
         "max_cost_usd": MAX_COST_USD, "timeout_seconds": TIMEOUT_SECONDS})
@@ -633,9 +637,24 @@ def run(*, state_dir: Path, model_config_path: Path | None, verifier_model_confi
     headroom = float(run_budget["max_cost_usd"]) - (
         4 * float(producer_budget["max_cost_usd"]) + float(verifier_budget["max_cost_usd"]))
     repairs = min(MAX_REPAIRS, max(0, int(headroom // float(producer_budget["max_cost_usd"]))))
-    result = run_memo(store=store, frozen=frozen, model=(model_factory or (lambda: build(config)))(),
-                      verifier_model=(verifier_model_factory or (lambda: build(verifier_config)))(),
-                      max_units=int(run_budget["max_units"]), max_repairs=repairs)
+    from .investment_memo_quiesce import RunQuiesce, MemoQuiesced, MemoQuiesceUnproved
+    quiesce = (RunQuiesce(summary_dir, model_config_path, verifier_model_config_path,
+                         producer_bytes=producer_bytes, verifier_bytes=verifier_bytes)
+               if summary_dir is not None else None)
+    try:
+        result = run_memo(store=store, frozen=frozen, model=(model_factory or (lambda: build(config)))(),
+                          verifier_model=(verifier_model_factory or (lambda: build(verifier_config)))(),
+                          max_units=int(run_budget["max_units"]), max_repairs=repairs, quiesce=quiesce)
+    except MemoQuiesced as stopped:
+        result = {"status": "quiesced", "memo_status": "quiesced", "resumable": True,
+                  "stop_reason": "cooperative_quiesce", "quiesce": stopped.request,
+                  "completed_calls": stopped.completed, "frozen_input_hash": content_hash(frozen),
+                  "cost_micros": sum(int(call.get("cost_micros") or 0)
+                                     for _, call, _, _ in quiesce.calls)}
+    except MemoQuiesceUnproved as exc:
+        result = {"status": "held", "memo_status": "quiesce_boundary_unproved", "resumable": False,
+                  "reason": str(exc), "cost_status": "unproved",
+                  "completed_work_refs": [call.get("work_order_ref") for _, call, _, _ in quiesce.calls]}
     return {"schema_version": SUMMARY_SCHEMA_VERSION, **result,
             "budget": {"run": run_budget, "producer": producer_budget,
                        "verifier": verifier_budget, "max_repairs": repairs}}
@@ -653,11 +672,26 @@ def main(argv: Sequence[str] | None = None) -> int:
     args = parser.parse_args(argv)
     result = run(state_dir=args.state_dir, model_config_path=args.model_config,
                  verifier_model_config_path=args.verifier_model_config,
-                 scheduler_db=args.scheduler_db, company_ref=args.company_ref)
+                 scheduler_db=args.scheduler_db, company_ref=args.company_ref, summary_dir=args.summary_dir)
     text = json.dumps(result, ensure_ascii=False, sort_keys=True)
     if args.summary_dir:
+        # A deployment may close the writer as soon as it sees a paused child.
+        # Publish its receipt atomically and durably, not as a partial file.
+        import os
+        import tempfile
         args.summary_dir.mkdir(parents=True, exist_ok=True)
-        (args.summary_dir / "summary.json").write_text(text + "\n", encoding="utf-8")
+        fd, temporary = tempfile.mkstemp(prefix=".memo-summary-", dir=args.summary_dir)
+        try:
+            with os.fdopen(fd, "w", encoding="utf-8") as stream:
+                stream.write(text + "\n"); stream.flush(); os.fsync(stream.fileno())
+            os.replace(temporary, args.summary_dir / "summary.json")
+            fd = os.open(args.summary_dir, os.O_RDONLY)
+            try:
+                os.fsync(fd)
+            finally:
+                os.close(fd)
+        finally:
+            Path(temporary).unlink(missing_ok=True)
     if not args.quiet:
         print(text)
     return 0

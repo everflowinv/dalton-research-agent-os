@@ -122,6 +122,12 @@ class MissionInvestmentMemoLaneCoordinator:
             memo_status = settled.get("memo_status")
             if memo_status in QUIET:
                 self.quiet_signatures.add(signature)
+            elif memo_status == "quiesced":
+                from .investment_memo_quiesce import quiesced_summary_matches
+                if not quiesced_summary_matches(ticket.get("summary"), ticket):
+                    return {"status": "held", "reason": "memo pause proof is invalid", "settled": settled}
+                # A deployment pause is not a content/fee failure. The next
+                # normal tick resumes via the launcher's exact successor.
             elif memo_status in TERMINAL or _verification_is_content_refusal(settled):
                 self.budget.record(signature, status=f"content_refused:{memo_status}",
                                    reason=str(settled.get("reason") or memo_status))

@@ -367,7 +367,7 @@ def parse_group_output(value: Any, *, section_titles: Sequence[str],
 def draft_group(model: Any, *, group: str, section_titles: Sequence[str],
                 questions: Sequence[Mapping[str, str]], material: Sequence[Mapping[str, Any]],
                 company: Mapping[str, Any], mission: Mapping[str, Any],
-                repair: Mapping[str, Any] | None = None) -> dict[str, Any]:
+                repair: Mapping[str, Any] | None = None, quiesce: Any = None) -> dict[str, Any]:
     """One paid draft of one group, or -- with ``repair`` -- its one paid redo.
 
     ``repair`` carries the refused draft's reason and offending refs; the
@@ -380,7 +380,11 @@ def draft_group(model: Any, *, group: str, section_titles: Sequence[str],
     request_id = "memo-" + content_hash({"contract": MEMO_PROMPT_CONTRACT_VERSION, "group": group, "prompt": prompt})[:24]
     call: Mapping[str, Any] = {}
     try:
+        if quiesce is not None:
+            quiesce.checkpoint()
         call = model.call(purpose=DRAFT_PURPOSE, request_id=request_id, prompt=prompt, mission=mission)
+        if quiesce is not None:
+            quiesce.returned(model, call, mission, purpose=DRAFT_PURPOSE)
         parsed = parse_group_output(unwrap_json_object(call["text"]), section_titles=section_titles,
                                     questions=questions, allowed_refs={str(row["ref"]) for row in material},
                                     material=material)
@@ -436,13 +440,18 @@ def build_verifier_prompt(*, sections: Sequence[Mapping[str, Any]], questions: S
 
 def verify_memo(model: Any, *, sections: Sequence[Mapping[str, Any]], questions: Sequence[Mapping[str, Any]],
                 material: Sequence[Mapping[str, Any]], material_hash: str,
-                mission: Mapping[str, Any], producer_route_decision_refs: Sequence[str]) -> dict[str, Any]:
+                mission: Mapping[str, Any], producer_route_decision_refs: Sequence[str],
+                quiesce: Any = None) -> dict[str, Any]:
     prompt = build_verifier_prompt(sections=sections, questions=questions, material=material,
                                    material_hash=material_hash)
     call: Mapping[str, Any] = {}
     try:
+        if quiesce is not None:
+            quiesce.checkpoint()
         call = independent_model_call(model, producer_route_decision_refs=producer_route_decision_refs,
             purpose=VERIFIER_PURPOSE, request_id="memo-verify-" + material_hash[:24] + "-" + content_hash(MEMO_VERIFIER_PROMPT_CONTRACT_VERSION)[:8], prompt=prompt, mission=mission)
+        if quiesce is not None:
+            quiesce.returned(model, call, mission, purpose=VERIFIER_PURPOSE)
         value = unwrap_json_object(call["text"])
     except (CockpitModelError, KeyError, json.JSONDecodeError) as exc:
         return {"status": "refused", "reason": f"{type(exc).__name__}: {exc}",
