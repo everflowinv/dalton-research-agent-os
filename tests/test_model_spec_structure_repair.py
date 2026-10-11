@@ -126,7 +126,7 @@ class StructureCodeTests(unittest.TestCase):
 
     def test_the_contract_names_the_codes_and_the_rule_list(self):
         self.assertEqual(REPAIR_CONTRACT["eligible_error_codes"],
-                         ["format", "structure", "text_length", "cash_flow_operating_base_shape"])
+                         ["format", "structure", "text_length", "cash_flow_operating_base_shape", "signed_filed_income_sum_coefficient"])
         self.assertEqual(REPAIR_CONTRACT["eligible_structure_rules_ref"],
                          REPAIRABLE_STRUCTURE_RULES_REF)
         self.assertEqual(REPAIR_CONTRACT["eligible_structure_rules"],
