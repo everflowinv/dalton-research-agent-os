@@ -631,9 +631,12 @@ class BackupCadenceProbeTests(unittest.TestCase):
         hashed: list[str] = []
         original = backup._sha256
 
-        def spy(path):
+        self.manager.cancel_requested = lambda: False
+
+        def spy(path, *, cancel_requested=None):
+            self.assertIs(cancel_requested, self.manager.cancel_requested)
             hashed.append(Path(path).parent.name)
-            return original(path)
+            return original(path, cancel_requested=cancel_requested)
 
         with patch.object(backup, "_sha256", spy):
             manifest = self.manager.latest_verified_manifest()
