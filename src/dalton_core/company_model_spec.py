@@ -1083,10 +1083,13 @@ def _cash_flow_companion(
                 raise CompanyModelSpecError(
                     f"cash_flow_companion {role} base names no income structure line")
             base_line = structure_lines[base_ref]
-            if (base_line.get("kind") != "filed"
-                    or base_line.get("forecast_method") not in {
-                        "quarterly_growth", "year_over_year_growth", "seasonal_factor", "share_of_line",
-                    }):
+            from .cash_flow_derived_base import derived_base_is_forecastable
+            filed_base = (base_line.get("kind") == "filed"
+                          and base_line.get("forecast_method") in {
+                              "quarterly_growth", "year_over_year_growth",
+                              "seasonal_factor", "share_of_line",
+                          })
+            if not filed_base and not derived_base_is_forecastable(structure, base_ref):
                 raise CompanyModelSpecError(
                     f"cash_flow_companion {role} base is not a forecastable filed line",
                     code=(CASH_FLOW_OPERATING_BASE_SHAPE_CODE
@@ -1128,7 +1131,15 @@ def _cash_flow_companion(
     if formula != expected_formula:
         raise CompanyModelSpecError(
             "cash_flow_companion formula must define operating cash flow minus capex")
-    return {"schema_version": "0.1", "lines": lines, "formula": expected_formula}
+    derived_base = any(
+        item["forecast_method"] == "share_of_line"
+        and structure_lines[str(item["forecast_base_ref"])].get("kind") == "derived"
+        for item in lines)
+    # Raw model answers and task/prompt schema stay unchanged. The stored
+    # definition binds the new derived execution semantics; old definitions
+    # retain their exact historical behavior when read or replayed.
+    return {"schema_version": "0.2" if derived_base else "0.1",
+            "lines": lines, "formula": expected_formula}
 
 
 def spec_from_response(

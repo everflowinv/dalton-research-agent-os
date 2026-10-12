@@ -2355,7 +2355,7 @@ def build_cash_flow_companion(
     if spec.get("schema_version") != "0.4" or not isinstance(definition, Mapping):
         raise ForecastModelUnavailable(
             "cash-flow companion needs a versioned company specification")
-    if definition.get("schema_version") != "0.1":
+    if definition.get("schema_version") not in {"0.1", "0.2"}:
         raise ForecastModelUnavailable("cash-flow companion specification is unsupported")
     definition_lines = definition.get("lines")
     if not isinstance(definition_lines, list) or len(definition_lines) != 2:
@@ -2465,7 +2465,34 @@ def build_cash_flow_companion(
             ],
         },
     }
-    return validate_cash_flow_companion({**body, "content_hash": content_hash(body)})
+    wire = validate_cash_flow_companion({**body, "content_hash": content_hash(body)})
+    derived_lines = [item for item in wire["lines"]
+                     if item["forecast_method"] == "share_of_line"
+                     and (structure_lines.get(str(item["forecast_base_ref"])) or {}).get("kind") == "derived"]
+    if derived_lines and definition.get("schema_version") == "0.2":
+        from .cash_flow_derived_base import (
+            derived_base_is_forecastable, derived_trailing_share,
+        )
+        income_drivers = build_structure_drivers(table, structure)
+        historical, historical_refs = _structure_historical_values(income_drivers, structure)
+        cash_drivers = {str(item["role"]): item
+                        for item in build_cash_flow_companion_drivers(table, wire)}
+        for line in derived_lines:
+            base_ref = str(line["forecast_base_ref"])
+            if not derived_base_is_forecastable(structure, base_ref):
+                raise ForecastModelUnavailable(
+                    f"cash-flow companion {line['role']} derived income base is not executable")
+            if derived_trailing_share(
+                    quarterly_history(cash_drivers[str(line["role"])]),
+                    historical.get(base_ref, {}), historical_refs.get(base_ref, {}),
+                    income_drivers, quarters=TRAILING_QUARTERS, rate_quant=_RATE_QUANT) is None:
+                targets = sorted(str(cell["period_end"]) for cell in
+                                 quarterly_history(cash_drivers[str(line["role"])]))[-TRAILING_QUARTERS:]
+                raise ForecastModelUnavailable(
+                    f"cash-flow companion {line['role']} derived income base lacks "
+                    "a complete same-duration source-bound trailing window; "
+                    f"target_periods={targets}; no earlier window substituted")
+    return wire
 
 
 def validate_cash_flow_companion(value: Mapping[str, Any]) -> dict[str, Any]:
@@ -2496,7 +2523,7 @@ def validate_cash_flow_companion(value: Mapping[str, Any]) -> dict[str, Any]:
             "cash-flow companion specification hash differs")
     wire["specification"] = dict(wire["specification"])
     if set(wire["specification"]) != {"schema_version", "lines", "formula"} or (
-        wire["specification"].get("schema_version") != "0.1"
+        wire["specification"].get("schema_version") not in {"0.1", "0.2"}
     ):
         raise ForecastModelValidationError(
             "cash-flow companion specification has an invalid closed shape")
@@ -2705,6 +2732,7 @@ def default_cash_flow_companion_assumptions(
     cash_drivers: Sequence[Mapping[str, Any]],
     periods: Sequence[Mapping[str, str]], companion: Mapping[str, Any], *,
     decided_by: str = AUTOMATION_ACTOR,
+    income_structure: Mapping[str, Any] | None = None,
 ) -> list[dict[str, Any]]:
     wire = validate_cash_flow_companion(companion)
     by_role = {str(item["role"]): item for item in wire["lines"]}
@@ -2717,11 +2745,26 @@ def default_cash_flow_companion_assumptions(
         source = by_role[str(driver["role"])]
         base_driver = by_line.get(str(source["forecast_base_ref"]))
         if base_driver is None:
-            continue
-        base_cells = quarterly_history(base_driver)
-        trailing = trailing_share(quarterly_history(driver), base_cells)
+            # A derived subtotal is a result, never a fabricated filed driver.
+            # The exact validated structure is supplied by the builder/replayer.
+            structure = income_structure
+            if structure is None or wire["specification"].get("schema_version") != "0.2":
+                continue
+            from .cash_flow_derived_base import derived_base_is_forecastable, derived_trailing_share
+            if not derived_base_is_forecastable(structure, str(source["forecast_base_ref"])):
+                continue
+            historical, historical_refs = _structure_historical_values(income_drivers, structure)
+            base_ref = str(source["forecast_base_ref"])
+            trailing = derived_trailing_share(
+                quarterly_history(driver), historical.get(base_ref, {}),
+                historical_refs.get(base_ref, {}), income_drivers,
+                quarters=TRAILING_QUARTERS, rate_quant=_RATE_QUANT)
+        else:
+            base_cells = quarterly_history(base_driver)
+            trailing = trailing_share(quarterly_history(driver), base_cells)
         if trailing is None:
             continue
+        derived_base = base_driver is None
         because = (
             f"the average share of {source['forecast_base_ref']} over the "
             f"{trailing['count']} "
@@ -2729,11 +2772,23 @@ def default_cash_flow_companion_assumptions(
             f"{trailing['last_period']} ({_percent(trailing['value'])}%), carried "
             f"forward against {source['forecast_base_ref']} by the cash-flow companion"
         )
+        if derived_base:
+            because = (
+                f"the average share of formula-derived {source['forecast_base_ref']} "
+                f"over {trailing['count']} complete source-replayed quarters between "
+                f"{trailing['first_period']} and {trailing['last_period']} "
+                f"({_percent(trailing['value'])}%), carried forward against the "
+                "explicit income DAG result; the denominator is not a filed fact")
         for period in periods:
+            extra = {}
+            if derived_base:
+                from .cash_flow_derived_base import CONTRACT_REF
+                extra["rule_ref"] = CONTRACT_REF
             assumptions.append(_assumption(
                 driver_ref=str(driver["ref"]), period=period,
                 measure="share_of_line", value=trailing["value"], unit="ratio",
                 because=because, refs=trailing["refs"], decided_by=decided_by,
+                **extra,
             ))
     return sorted(assumptions, key=lambda item: (
         str(item["driver_ref"]), str(item["period"]["end"])))
@@ -3327,7 +3382,7 @@ def build_structured_forecast_model(
                   income_drivers, periods, structure, decided_by=actor_ref)),
             *default_cash_flow_companion_assumptions(
                 income_drivers, cash_drivers, periods, companion,
-                decided_by=actor_ref),
+                decided_by=actor_ref, income_structure=structure),
         ]
         assumptions = sorted(assumptions, key=lambda item: (
             str(item["driver_ref"]), str(item["period"]["end"])))
@@ -3518,7 +3573,7 @@ def _roll_actualized_forecast(body: dict[str, Any]) -> dict[str, Any]:
         if companion is not None:
             fresh.extend(default_cash_flow_companion_assumptions(
                 drivers, [d for d in drivers if d.get("kind") == "cash_flow"], periods,
-                companion, decided_by=actor))
+                companion, decided_by=actor, income_structure=structure))
     else:
         fresh = default_assumptions(drivers, periods, decided_by=actor)
     held = {(a["driver_ref"], a["period"]["end"]) for a in body["assumptions"]

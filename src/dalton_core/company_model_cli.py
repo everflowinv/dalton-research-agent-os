@@ -924,6 +924,7 @@ def model_spec_validation_contract() -> dict[str, str]:
     """
 
     from .company_model_spec import ASSESSMENT_COMPATIBILITY_REF
+    from .cash_flow_derived_base import CONTRACT_REF as DERIVED_CASH_BASE_REF
     from .model_spec_assessment_replay import SIGNED_COMPATIBLE_REPLAY_REF
     from .company_financial_statement_structure import (
         CASH_LEAF_DURATION_UNIT_VALIDATION_REF,
@@ -942,6 +943,7 @@ def model_spec_validation_contract() -> dict[str, str]:
         "contract": "company-model-spec-pre-persistence-validation:0.2",
         "proposal_method_completion": PROPOSAL_METHOD_COMPLETION_REF,
         "cash_flow_companion": CASH_FLOW_COMPANION_VALIDATION_CONTRACT_HASH,
+        "cash_flow_derived_income_base": DERIVED_CASH_BASE_REF,
         "financial_statement_structure": STRUCTURE_AUTHORITY_REF,
         "filed_period_income_composition": FILED_PERIOD_COMPOSITION_REF,
         "income_depreciation_forecast_policy": INCOME_DEPRECIATION_POLICY_REF,
