@@ -486,6 +486,19 @@ class MemoMacroAccounting:
             profile=profile_entry(self,connection,index)
             if profile is not None:
                 entry,proof=profile
+                # The fixed capability answer may itself need the ordinary
+                # semantic correction. Once that registered slot has a Work,
+                # replay it (including its failure), never repurchase the old
+                # answer or silently open another capability permission.
+                semantic=[e for e in entries.values() if e['role']=='semantic' and e['group_index']==index]
+                if len(semantic)>1:raise ValueError('memo profile later semantic registration is ambiguous')
+                works=[] if (proof['required_limits']['failure_code']!='PROFILE_LIMIT_EXCEEDED' or not semantic) else _works(connection,semantic[0])
+                if works:
+                    work,_=works[-1]
+                    if (work.metadata.get('mission_version_ref')!=self.mission['id']
+                            or work.metadata.get('mission_version_hash')!=self.mission['content_hash']):
+                        raise ValueError('memo profile later semantic mission differs')
+                    return {**kwargs,'request_id':semantic[0]['request_id'],'prompt':work.question},None
                 return {**kwargs,'request_id':entry['request_id'],'prompt':proof['prompt']}, None
             from .investment_memo_terminal_maintenance import persisted_entry
             terminal=persisted_entry(self,connection,index)

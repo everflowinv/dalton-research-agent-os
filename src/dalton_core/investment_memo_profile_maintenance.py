@@ -23,29 +23,69 @@ def qualify(macro, wrapper, connection):
     from .planner_paid_output_recovery import recovery_readers
     from .investment_memo_timeout_recovery import prompt_identity
     if not macro.complete:raise ValueError('profile memo original census incomplete')
+    issued=None
+    if connection.execute("SELECT 1 FROM sqlite_master WHERE type='table' AND name=?",(TABLE,)).fetchone():
+        row=connection.execute(f'SELECT * FROM {TABLE} WHERE permission_ref=?',(macro.ref+MARKER+'fixed',)).fetchone()
+        if row is not None:issued=_body(row)['proof']
+    issued_profile=issued is not None and issued['required_limits']['failure_code']=='PROFILE_LIMIT_EXCEEDED'
     extra_row=connection.execute(f'SELECT * FROM {EXTRA} WHERE macro_ref=?',(macro.ref,)).fetchone()
     extra=None if extra_row is None else _body(extra_row)
-    if extra is not None and extra.get('role')!='semantic':raise ValueError('capability memo has another consumed technical slot')
+    if extra is not None and extra.get('role')!='semantic' and not (issued_profile and extra.get('role')=='technical'):
+        raise ValueError('capability memo has another consumed technical slot')
     entries=list(macro.scope['normal_requests'])
-    if extra is not None:
+    if extra is not None and extra.get('role')=='semantic':
         rows=connection.execute(f'SELECT * FROM {REQUESTS} WHERE macro_binding=? AND request_key=?',(macro.ref,macro.ref+':'+extra['request_id'])).fetchall()
         if len(rows)!=1:raise ValueError('capability memo semantic registration absent')
         semantic=_body(rows[0])
-        if (semantic['role']!='semantic' or semantic['prompt_hash']!=extra['prompt_hash']):raise ValueError('capability memo semantic extra differs')
+        if (semantic['role']!='semantic' or semantic['prompt_hash']!=extra['prompt_hash']
+                or semantic['request_id']!=extra['request_id'] or semantic['purpose']!='investment_memo'
+                or type(semantic['group_index']) is not int or not 0<=semantic['group_index']<len(macro.prompts)):
+            raise ValueError('capability memo semantic extra differs')
         entries.append(semantic)
     reader=Scheduler.__new__(Scheduler);reader.connection=connection
     parents=[]
     with recovery_readers(macro.model.config['model_router_db'],macro.model.config['budget_db'],now=macro.model.clock()) as (router,budget):
         if budget is None:raise ValueError('profile memo original fee authority absent')
+        if issued_profile and extra is not None:
+            _successful_issued_parent(macro,connection,router,budget,reader,issued)
+            if extra['role']=='technical':
+                from .cockpit_timeout_recovery import failure_proof
+                parent=reader.work_order_authority(extra['parent_work_ref'])
+                if parent is None:raise ValueError('profile memo later technical parent absent')
+                held=parent['work_order']
+                technical=failure_proof(connection,router,budget,work_ref=extra['parent_work_ref'],mission=macro.mission)
+                if (held['question'] not in macro.prompts or extra['parent_work_ref']==issued['parent']['work_ref']
+                        or technical is None or content_hash(technical)!=extra['parent_failure_proof_hash']):
+                    raise ValueError('profile memo later technical slot differs')
         for entry in entries:
             for work,authority in _works(connection,entry):
                 if MARKER in work.metadata.get('request_id',''):continue
                 formal=reader.formal_result(work.id)
                 if formal is None:raise ValueError('profile memo original Work still in flight')
                 paid=bill(connection,router,budget,authority,formal)
+                if issued is not None and work.id!=issued['parent']['work_ref'] and entry['role']=='normal':
+                    if (work.question!=macro.prompts[entry['group_index']]
+                            or work.metadata.get('mission_version_ref')!=macro.mission['id']
+                            or work.metadata.get('mission_version_hash')!=macro.mission['content_hash']):
+                        raise ValueError('profile memo later normal Work differs')
+                    # Later independent failures remain fully accounted; they
+                    # cannot be selected as another historical grant parent.
+                    continue
+                if issued_profile and entry['role']=='semantic':
+                    from .investment_memo_macro_accounting import request_id
+                    from .investment_memo_draft import GROUPS
+                    index=entry['group_index']
+                    if (not work.question.startswith(macro.prompts[index]+'\nYour previous answer for this group was refused and was not used:\n')
+                            or entry['request_id']!=request_id(GROUPS[index][0],work.question)
+                            or work.metadata.get('mission_version_ref')!=macro.mission['id']
+                            or work.metadata.get('mission_version_hash')!=macro.mission['content_hash']):
+                        raise ValueError('capability memo later semantic Work differs')
+                    # This existing ordinary slot retains its own success/failure
+                    # and fees. It cannot replace the historical grant parent.
+                    continue
                 if formal['terminal_state']=='succeeded':continue
                 wire=formal['result_envelope'];md=wire.get('metadata') or {};failures=md.get('chain_failures')
-                expected_code='PROFILE_LIMIT_EXCEEDED' if extra is None and entry['role']=='normal' else 'TIMEOUT' if extra is not None and entry['role']=='semantic' else None
+                expected_code='PROFILE_LIMIT_EXCEEDED' if (extra is None or issued_profile) and entry['role']=='normal' else 'TIMEOUT' if extra is not None and entry['role']=='semantic' else None
                 if ((wire.get('error') or {}).get('code')!='MODEL_CHAIN_EXHAUSTED'
                         or md.get('control_plane_failure') is not True or md.get('dispatch_state')!='unknown'
                         or not isinstance(failures,list) or not failures
@@ -71,13 +111,44 @@ def qualify(macro, wrapper, connection):
         raise ValueError('profile memo original macro scope differs')
     # The immutable typed formal proves the historical refusal, not zero send.
     # No historical numeric limit is fabricated from the error's generic text.
-    return {'contract_ref':CONTRACT_REF,'permission_ref':macro.ref+MARKER+'fixed',
+    proof={'contract_ref':CONTRACT_REF,'permission_ref':macro.ref+MARKER+'fixed',
         'macro_ref':macro.ref,'company_ref':macro.scope['company_ref'],'material_hash':material,
         'group_index':index,'prompt':root.question,'parent':paid,'parent_request_id':parent_request,
         'required_limits':{'timeout_ms':root.budget['max_seconds']*1000,
                            'max_tokens':root.budget['max_output_tokens'],'profile_id':profile,
                            'model_ref':route['selected_model'],'failure_code':code},
         'current_authority':_current(macro,context)}
+    if issued is not None and proof!=issued:raise ValueError('profile memo original issued parent differs')
+    return proof
+
+
+def _successful_issued_parent(macro,connection,router,budget,reader,proof):
+    """A later ordinary semantic slot cannot manufacture a PROFILE grant."""
+    claims=connection.execute(f'SELECT * FROM {CLAIMS} WHERE permission_ref=? LIMIT ?',
+        (proof['permission_ref'],MAX_UNUSED_CLAIMS+1)).fetchall()
+    if not claims or len(claims)>MAX_UNUSED_CLAIMS:raise ValueError('profile memo prior maintenance success absent')
+    paid_success=[]
+    prefix=proof['parent_request_id']+MARKER+content_hash(proof)[:32]
+    for claim in claims:
+        if _no_send(connection,macro.model,claim):continue
+        authority=reader.work_order_authority(claim['work_ref'])
+        if authority is None or authority['work_order_hash']!=claim['work_hash']:
+            raise ValueError('profile memo prior maintenance Work differs')
+        from .contracts import WorkOrder
+        from .investment_memo_legacy_accounting import bill
+        work=WorkOrder.from_dict(authority['work_order']);formal=reader.formal_result(work.id)
+        if formal is None:raise ValueError('profile memo prior maintenance success has no terminal formal')
+        paid=bill(connection,router,budget,authority,formal)
+        if (formal['terminal_state']!='succeeded' or work.question!=proof['prompt']
+                or work.metadata.get('purpose')!='investment_memo'
+                or not work.metadata.get('request_id','').startswith(prefix)
+                or work.metadata.get('mission_version_ref')!=macro.mission['id']
+                or work.metadata.get('mission_version_hash')!=macro.mission['content_hash']
+                or paid['unknown_fee_retained'] or not paid['fees']
+                or any(f['settlement_ref'] is None for f in paid['fees'])):
+            raise ValueError('profile memo prior maintenance success unproved')
+        paid_success.append(work.id)
+    if len(paid_success)!=1:raise ValueError('profile memo prior maintenance success is not unique')
 
 
 def _policy(macro,wrapper,required):

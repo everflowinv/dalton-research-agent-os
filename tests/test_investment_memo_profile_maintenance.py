@@ -151,6 +151,53 @@ class ProfileMaintenanceTests(unittest.TestCase):
         self.assertGreaterEqual(again.accounted_micros,14_000_000);self.assertEqual(again.macro.extra,None)
 
 
+    def test_profile_success_then_semantic_and_remaining_groups_restart(self):
+        self.seed();self.adapter.script={}
+        from dataclasses import replace
+        from types import SimpleNamespace
+        from dalton_core.investment_memo_cli import run_memo
+        from tests import test_cockpit_model_fallback as runtime
+        execute=self.adapter.execute
+        def answer(work,route,profile):
+            invocation,result=execute(work,route,profile)
+            if work.metadata['purpose']=='investment_memo_verifier':
+                contract=json.loads(work.question.split('Return raw JSON only:\n',1)[1].split('\n',1)[0])
+                value={'verdict':'pass','verified_body_hash':contract['verified_body_hash'],'finding_codes':[]}
+            else:
+                from dalton_core.investment_memo_timeout_recovery import prompt_identity
+                index=prompt_identity(work.question)[2]
+                value=payloads.group_payload(self.contexts[index]['section_titles'],self.contexts[index]['questions'])
+                if ':memo-profile-maintenance:' in work.metadata['request_id']:
+                    value['key_questions']=[]
+            return invocation,replace(result,outputs={'text':json.dumps(value,ensure_ascii=False)})
+        self.adapter.execute=answer
+        verifier=runtime.CockpitChainTests._model(self,self.adapter,policy_version_ref=self.verifier_policy,
+            slots=self.verifier_slots,clock=self.clock)
+        verifier.config['budget_policy_ref']='memo-test-day-policy'
+        verifier.config['purpose_call_budgets']['investment_memo_verifier']={'max_input_tokens':120000,
+            'max_output_tokens':500,'max_cost_usd':14,'timeout_seconds':1800}
+        frozen={'status':'ready','mission':self.mission,'playbook':{'id':'playbook:test','content_hash':'a'*64,
+            'deliverable_templates':{'investment_memo':payloads.TITLES},'key_questions':payloads.QUESTIONS},
+            'company':self.contexts[0]['company'],'material':self.contexts[0]['material'],
+            'input_bindings':[{'ref':'claim-version:1','kind':'claim','hash':'b'*64}],'material_pack':{}}
+        def run():
+            w=self.wrapper(112_000_000)
+            with patch('dalton_core.investment_memo_cli.MissionDeliverableAuthority') as owner,patch(
+                    'dalton_core.research_product_quality.product_quality',return_value={'status':'test'}):
+                owner.return_value.publish.return_value={'id':'memo:test','content_hash':'c'*64,'status':'candidate'}
+                result=run_memo(store=SimpleNamespace(connection=None),frozen=frozen,model=w,
+                    verifier_model=verifier,max_repairs=1,repair_budget=w)
+            return result,w
+        self.cap_patch=patch.object(profile,'read_profile_limits',side_effect=self.capability);self.cap_patch.start();self.addCleanup(self.cap_patch.stop)
+        result,w=run();self.assertEqual(result['status'],'succeeded',result);self.assertEqual(len(self.adapter.served),self.calls+6)
+        before=self.fees();result,again=run();self.assertEqual(result['status'],'succeeded',result)
+        self.assertEqual(len(self.adapter.served),self.calls+6);self.assertEqual(self.fees(),before)
+        self.assertGreaterEqual(again.accounted_micros,14_000_000);self.assertEqual(again.macro.extra['role'],'semantic')
+        self.assertEqual(len(self.claims()),1)
+        with Scheduler(self.model.scheduler_db) as scheduler:
+            self.assertEqual(scheduler.connection.execute(f'SELECT count(*) FROM {profile.TABLE}').fetchone()[0],1)
+
+
     def test_strong_no_send_day_refusal_defers_same_fixed_permission(self):
         self.seed();self.adapter.script={}
         from dalton_core.thesis_impact_budget import ThesisImpactBudgetStore
@@ -198,3 +245,220 @@ class ProfileMaintenanceTests(unittest.TestCase):
             self.assertEqual(len(self.adapter.served),self.calls+1);self.assertEqual(len(self.claims()),2)
             before=self.fees();self.clock.advance(86400);self.wrapper(112_000_000).call(**self.kw())
             self.assertEqual(self.fees(),before);self.assertEqual(len(self.claims()),2)
+
+
+    def maintenance_then_semantic(self, outcome=None, index=0):
+        self.seed();self.adapter.script={}
+        with patch.object(profile,'read_profile_limits',side_effect=self.capability):
+            w=self.wrapper(112_000_000);w.call(**self.kw())
+        from dalton_core.investment_memo_macro_accounting import request_id
+        prompt=self.prompts[index]+'\nYour previous answer for this group was refused and was not used:\ncomplete diagnostics for the existing answer'
+        kwargs={**self.kw(index),'prompt':prompt,'request_id':request_id(GROUPS[index][0],prompt)}
+        w.begin_stage(max_units=4,allow_technical=False,repair=True)
+        self.adapter.script={} if outcome is None else {'profile:gpt-6-astra':outcome}
+        return w,kwargs
+
+    def test_later_semantic_unknown_restart_never_rebuys_or_replaces_grant(self):
+        w,kwargs=self.maintenance_then_semantic({'code':'TIMEOUT','message':'host completion exceeded request timeout'})
+        with self.assertRaises(CockpitModelError):w.call(**kwargs)
+        fees=self.fees();calls=len(self.adapter.served);self.clock.advance(86400);self.raise_policy(1800,140)
+        with patch.object(profile,'read_profile_limits',side_effect=self.capability):
+            for _ in range(2):
+                with self.assertRaises(CockpitModelError):self.wrapper(140_000_000).call(**self.kw())
+        self.assertEqual(self.fees(),fees);self.assertEqual(len(self.adapter.served),calls);self.assertEqual(len(self.claims()),1)
+
+    def test_later_semantic_inflight_restart_never_rebuys(self):
+        w,kwargs=self.maintenance_then_semantic(KeyboardInterrupt('isolated crash after semantic admission'))
+        with self.assertRaises(KeyboardInterrupt):w.call(**kwargs)
+        fees=self.fees();calls=len(self.adapter.served)
+        with patch.object(profile,'read_profile_limits',side_effect=self.capability):
+            with self.assertRaises(CockpitModelError):self.wrapper(112_000_000).call(**self.kw())
+        self.assertEqual(self.fees(),fees);self.assertEqual(len(self.adapter.served),calls)
+
+    def test_semantic_registration_without_issued_maintenance_does_not_restore_profile_parent(self):
+        w=self.seed()
+        from dalton_core.investment_memo_macro_accounting import request_id
+        prompt=self.prompts[0]+'\nYour previous answer for this group was refused and was not used:\nforged followup'
+        kw={**self.kw(),'prompt':prompt,'request_id':request_id(GROUPS[0][0],prompt)}
+        w.macro.register(role='semantic',kwargs=kw)
+        with Scheduler(self.model.scheduler_db) as scheduler:
+            with self.assertRaises(ValueError):profile.qualify(w.macro,w,scheduler.connection)
+        self.assertEqual(len(self.adapter.served),self.calls)
+
+    def test_semantic_registration_after_unsuccessful_maintenance_remains_unproved(self):
+        self.seed();self.adapter.script={'profile:gpt-6-astra':{'code':'TIMEOUT','message':'host completion exceeded request timeout'}}
+        with patch.object(profile,'read_profile_limits',side_effect=self.capability):
+            w=self.wrapper(112_000_000)
+            with self.assertRaises(CockpitModelError):w.call(**self.kw())
+        from dalton_core.investment_memo_macro_accounting import request_id
+        prompt=self.prompts[0]+'\nYour previous answer for this group was refused and was not used:\nforged followup'
+        kw={**self.kw(),'prompt':prompt,'request_id':request_id(GROUPS[0][0],prompt)}
+        w.macro.register(role='semantic',kwargs=kw);fees=self.fees();calls=len(self.adapter.served)
+        with Scheduler(self.model.scheduler_db) as scheduler:
+            with self.assertRaisesRegex(ValueError,'maintenance success'):profile.qualify(w.macro,w,scheduler.connection)
+        self.assertEqual(self.fees(),fees);self.assertEqual(len(self.adapter.served),calls)
+
+    def test_later_semantic_registration_group_or_hash_tamper_refuses(self):
+        w,kwargs=self.maintenance_then_semantic();w.call(**kwargs)
+        from dalton_core.investment_memo_macro_accounting import REQUESTS,_body
+        from dalton_core.store import canonical_json,content_hash
+        fees=self.fees();calls=len(self.adapter.served)
+        with Scheduler(self.model.scheduler_db) as scheduler:
+            for row in scheduler.connection.execute("SELECT name FROM sqlite_master WHERE type='trigger' AND tbl_name=?",(REQUESTS,)).fetchall():
+                scheduler.connection.execute('DROP TRIGGER '+row[0])
+            row=scheduler.connection.execute(f'SELECT * FROM {REQUESTS} WHERE request_key=?',(w.macro.ref+':'+kwargs['request_id'],)).fetchone()
+            original=_body(row)
+            for field,value in (('group_index',1),('prompt_hash','0'*64),('purpose','investment_memo_verifier')):
+                body={**original,field:value}
+                scheduler.connection.execute(f'UPDATE {REQUESTS} SET record_json=?,content_hash=? WHERE request_key=?',
+                    (canonical_json(body),content_hash(body),row['request_key']))
+                with self.assertRaises(ValueError):profile.qualify(w.macro,w,scheduler.connection)
+        self.assertEqual(self.fees(),fees);self.assertEqual(len(self.adapter.served),calls)
+
+    def test_maintenance_success_formal_tamper_after_semantic_refuses(self):
+        w,kwargs=self.maintenance_then_semantic();w.call(**kwargs)
+        fees=self.fees();calls=len(self.adapter.served)
+        with Scheduler(self.model.scheduler_db) as scheduler:
+            claim=self.claims()[0]
+            for row in scheduler.connection.execute("SELECT name FROM sqlite_master WHERE type='trigger' AND tbl_name='scheduler_formal_results'").fetchall():
+                scheduler.connection.execute('DROP TRIGGER '+row[0])
+            scheduler.connection.execute('UPDATE scheduler_formal_results SET content_hash=? WHERE work_order_id=?',('0'*64,claim['work_ref']))
+            with self.assertRaises(ValueError):profile.qualify(w.macro,w,scheduler.connection)
+        self.assertEqual(self.fees(),fees);self.assertEqual(len(self.adapter.served),calls)
+
+    def test_valid_later_other_group_semantic_keeps_original_profile_proof(self):
+        w,kwargs=self.maintenance_then_semantic(index=1)
+        with Scheduler(self.model.scheduler_db) as scheduler:before=profile.persisted_entry(w.macro,scheduler.connection)[1]
+        w.call(**kwargs)
+        with Scheduler(self.model.scheduler_db) as scheduler:after=profile.persisted_entry(w.macro,scheduler.connection)[1]
+        self.assertEqual(before,after);self.assertEqual(len(self.claims()),1)
+        fees=self.fees();calls=len(self.adapter.served)
+        with patch.object(profile,'read_profile_limits',side_effect=self.capability):
+            self.wrapper(112_000_000).call(**self.kw(1))
+        self.assertEqual(self.fees(),fees);self.assertEqual(len(self.adapter.served),calls)
+
+
+    def test_original_semantic_timeout_maintenance_four_groups_restart_free(self):
+        self.semantic_seed();self.raise_policy(1800,112);self.adapter.script={}
+        from dataclasses import replace
+        from types import SimpleNamespace
+        from dalton_core.investment_memo_cli import run_memo
+        from tests import test_cockpit_model_fallback as runtime
+        execute=self.adapter.execute
+        def answer(work,route,profile):
+            invocation,result=execute(work,route,profile)
+            if work.metadata['purpose']=='investment_memo_verifier':
+                contract=json.loads(work.question.split('Return raw JSON only:\n',1)[1].split('\n',1)[0])
+                value={'verdict':'pass','verified_body_hash':contract['verified_body_hash'],'finding_codes':[]}
+            else:
+                from dalton_core.investment_memo_timeout_recovery import prompt_identity
+                index=prompt_identity(work.question)[2]
+                value=payloads.group_payload(self.contexts[index]['section_titles'],self.contexts[index]['questions'])
+            return invocation,replace(result,outputs={'text':json.dumps(value,ensure_ascii=False)})
+        self.adapter.execute=answer
+        verifier=runtime.CockpitChainTests._model(self,self.adapter,policy_version_ref=self.verifier_policy,
+            slots=self.verifier_slots,clock=self.clock)
+        verifier.config['budget_policy_ref']='memo-test-day-policy'
+        verifier.config['purpose_call_budgets']['investment_memo_verifier']={'max_input_tokens':120000,
+            'max_output_tokens':500,'max_cost_usd':14,'timeout_seconds':1800}
+        frozen={'status':'ready','mission':self.mission,'playbook':{'id':'playbook:test','content_hash':'a'*64,
+            'deliverable_templates':{'investment_memo':payloads.TITLES},'key_questions':payloads.QUESTIONS},
+            'company':self.contexts[0]['company'],'material':self.contexts[0]['material'],
+            'input_bindings':[{'ref':'claim-version:1','kind':'claim','hash':'b'*64}],'material_pack':{}}
+        def run():
+            w=self.wrapper(112_000_000)
+            with patch('dalton_core.investment_memo_cli.MissionDeliverableAuthority') as owner,patch(
+                    'dalton_core.research_product_quality.product_quality',return_value={'status':'test'}):
+                owner.return_value.publish.return_value={'id':'memo:test','content_hash':'c'*64,'status':'candidate'}
+                result=run_memo(store=SimpleNamespace(connection=None),frozen=frozen,model=w,
+                    verifier_model=verifier,max_repairs=1,repair_budget=w)
+            return result,w
+        self.cap_patch=patch.object(profile,'read_profile_limits',side_effect=self.capability);self.cap_patch.start();self.addCleanup(self.cap_patch.stop)
+        result,w=run();self.assertEqual(result['status'],'succeeded',result);self.assertEqual(len(self.adapter.served),self.calls+5)
+        before=self.fees();result,again=run();self.assertEqual(result['status'],'succeeded',result)
+        self.assertEqual(len(self.adapter.served),self.calls+5);self.assertEqual(self.fees(),before)
+        self.assertGreaterEqual(again.accounted_micros,14_000_000);self.assertEqual(again.macro.extra['role'],'semantic')
+        self.assertEqual(len(self.claims()),1)
+
+
+    def test_later_normal_timeout_preserves_original_profile_grant_and_fees(self):
+        self.seed();self.adapter.script={}
+        with patch.object(profile,'read_profile_limits',side_effect=self.capability):
+            w=self.wrapper(112_000_000);w.call(**self.kw())
+        with Scheduler(self.model.scheduler_db) as scheduler:before=profile.persisted_entry(w.macro,scheduler.connection)[1]
+        self.adapter.script={'profile:gpt-6-astra':{'code':'TIMEOUT','message':'host completion exceeded request timeout'}}
+        w.begin_stage(max_units=4,allow_technical=False)
+        with self.assertRaises(CockpitModelError):w.call(**self.kw(1))
+        fees=self.fees();calls=len(self.adapter.served)
+        with Scheduler(self.model.scheduler_db) as scheduler:after=profile.persisted_entry(w.macro,scheduler.connection)[1]
+        self.assertEqual(before,after)
+        with patch.object(profile,'read_profile_limits',side_effect=self.capability):
+            self.wrapper(112_000_000).call(**self.kw())
+            retry=self.wrapper(112_000_000);retry.begin_stage(max_units=4,allow_technical=False)
+            with self.assertRaises(CockpitModelError):retry.call(**self.kw(1))
+        self.assertEqual(self.fees(),fees);self.assertEqual(len(self.adapter.served),calls);self.assertEqual(len(self.claims()),1)
+
+    def test_later_normal_timeout_after_semantic_keeps_original_parent(self):
+        w,kwargs=self.maintenance_then_semantic();w.call(**kwargs)
+        with Scheduler(self.model.scheduler_db) as scheduler:before=profile.persisted_entry(w.macro,scheduler.connection)[1]
+        self.adapter.script={'profile:gpt-6-astra':{'code':'TIMEOUT','message':'host completion exceeded request timeout'}}
+        w.begin_stage(max_units=4,allow_technical=False)
+        with self.assertRaises(CockpitModelError):w.call(**self.kw(1))
+        fees=self.fees();calls=len(self.adapter.served)
+        with Scheduler(self.model.scheduler_db) as scheduler:after=profile.persisted_entry(w.macro,scheduler.connection)[1]
+        self.assertEqual(before,after)
+        with patch.object(profile,'read_profile_limits',side_effect=self.capability):self.wrapper(112_000_000).call(**self.kw())
+        self.assertEqual(self.fees(),fees);self.assertEqual(len(self.adapter.served),calls);self.assertEqual(len(self.claims()),1)
+
+
+    def test_later_normal_profile_refusal_cannot_borrow_original_fixed_permission(self):
+        self.seed();self.adapter.script={}
+        with patch.object(profile,'read_profile_limits',side_effect=self.capability):
+            w=self.wrapper(112_000_000);w.call(**self.kw())
+        with Scheduler(self.model.scheduler_db) as scheduler:before=profile.persisted_entry(w.macro,scheduler.connection)[1]
+        self.adapter.script={'profile:gpt-6-astra':{'code':'PROFILE_LIMIT_EXCEEDED','message':'request exceeds profile limits'}}
+        with patch.object(profile,'read_profile_limits',side_effect=self.capability):
+            with self.assertRaises(CockpitModelError):w.call(**self.kw(1))
+        fees=self.fees();calls=len(self.adapter.served)
+        with Scheduler(self.model.scheduler_db) as scheduler:after=profile.persisted_entry(w.macro,scheduler.connection)[1]
+        self.assertEqual(before,after)
+        with patch.object(profile,'read_profile_limits',side_effect=self.capability):
+            for _ in range(2):
+                with self.assertRaises(CockpitModelError):self.wrapper(112_000_000).call(**self.kw(1))
+        self.assertEqual(self.fees(),fees);self.assertEqual(len(self.adapter.served),calls);self.assertEqual(len(self.claims()),1)
+
+    def test_existing_later_technical_slot_keeps_original_profile_proof(self):
+        self.seed();self.adapter.script={}
+        with patch.object(profile,'read_profile_limits',side_effect=self.capability):
+            w=self.wrapper(112_000_000);w.call(**self.kw())
+        with Scheduler(self.model.scheduler_db) as scheduler:before=profile.persisted_entry(w.macro,scheduler.connection)[1]
+        self.adapter.script={'profile:gpt-6-astra':{'code':'TIMEOUT','message':'host completion exceeded request timeout'}}
+        w.begin_stage(max_units=4,allow_technical=False)
+        with self.assertRaises(CockpitModelError):w.call(**self.kw(1))
+        from dalton_core.investment_memo_macro_accounting import _works
+        with Scheduler(self.model.scheduler_db) as scheduler:
+            work=_works(scheduler.connection,w.macro.scope['normal_requests'][1])[-1][0]
+        # Claim only the original existing technical slot using its actual
+        # terminal proof. This fix never authorizes a second capability call.
+        w.macro.claim_technical(work.id)
+        fees=self.fees();calls=len(self.adapter.served)
+        with Scheduler(self.model.scheduler_db) as scheduler:after=profile.persisted_entry(w.macro,scheduler.connection)[1]
+        self.assertEqual(before,after)
+        with patch.object(profile,'read_profile_limits',side_effect=self.capability):self.wrapper(112_000_000).call(**self.kw())
+        self.assertEqual(self.fees(),fees);self.assertEqual(len(self.adapter.served),calls);self.assertEqual(len(self.claims()),1)
+
+
+    def test_semantic_timeout_issued_grant_survives_later_normal_failure(self):
+        self.semantic_seed();self.raise_policy(1800,112);self.adapter.script={}
+        with patch.object(profile,'read_profile_limits',side_effect=self.capability):
+            w=self.wrapper(112_000_000);w.call(**self.kw())
+        with Scheduler(self.model.scheduler_db) as scheduler:before=profile.persisted_entry(w.macro,scheduler.connection)[1]
+        self.adapter.script={'profile:gpt-6-astra':{'code':'TIMEOUT','message':'host completion exceeded request timeout'}}
+        w.begin_stage(max_units=4,allow_technical=False)
+        with self.assertRaises(CockpitModelError):w.call(**self.kw(1))
+        fees=self.fees();calls=len(self.adapter.served)
+        with Scheduler(self.model.scheduler_db) as scheduler:after=profile.persisted_entry(w.macro,scheduler.connection)[1]
+        self.assertEqual(before,after)
+        with patch.object(profile,'read_profile_limits',side_effect=self.capability):
+            result=self.wrapper(112_000_000).call(**self.kw());self.assertTrue(result['text'])
+        self.assertEqual(self.fees(),fees);self.assertEqual(len(self.adapter.served),calls);self.assertEqual(len(self.claims()),1)
