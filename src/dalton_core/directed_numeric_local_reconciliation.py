@@ -209,6 +209,10 @@ def reconcile(executor, admission_ref, *, expected_admission_hash, requested_by)
     if existing_result is not None and any('measure_conflict_proof' in item for item in json.loads(existing_result[0]).get('pending_targets',[])):
         from .directed_numeric_measure_reconciliation import reconcile as reconcile_measure
         return reconcile_measure(executor,admission_ref,expected_admission_hash=expected_admission_hash,requested_by=requested_by)
+    from .directed_numeric_promotion_reconciliation import failure, reconcile as reconcile_promotion
+    admission = executor.authority.resolve_for_execution(admission_ref)
+    if failure(executor.connection, admission) is not None:
+        return reconcile_promotion(executor,admission_ref,expected_admission_hash=expected_admission_hash,requested_by=requested_by)
     admission, works, candidate = qualification(executor,admission_ref,expected_admission_hash)
     row = _row(executor.connection, admission_ref)
     if row is None:

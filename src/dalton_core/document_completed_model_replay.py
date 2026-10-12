@@ -14,7 +14,8 @@ CONTRACT = "document-completed-model-postprocessing:0.1"
 ERROR = "DirectedNumericError: existing Figure conflicts with exact verified numeric answer"
 CHAIN_CONTRACT = "document-completed-model-postprocessing:0.2"
 CHAIN_ERROR = "ResearchVerificationConflict: candidate version chain mismatch"
-CONTRACTS = frozenset({CONTRACT,CHAIN_CONTRACT})
+from .directed_numeric_promotion_reconciliation import REPLAY_CONTRACT as PROMOTION_CONTRACT
+CONTRACTS = frozenset({CONTRACT,CHAIN_CONTRACT,PROMOTION_CONTRACT})
 
 
 def candidate(coordinator, admission, ticket_ref):

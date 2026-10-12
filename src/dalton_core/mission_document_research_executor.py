@@ -1,6 +1,8 @@
 """Durable four-stage executor for one source-neutral directed-document admission."""
 from __future__ import annotations
 
+from types import SimpleNamespace
+
 import hashlib
 import json
 import os
@@ -3318,11 +3320,17 @@ def _ordinary_staging_work(
 
 
 
-def _effective_staging_work(admission, scheduler, registry, effective):
+def _effective_staging_work(admission, scheduler, registry, effective, *, executor=None):
     current = _ordinary_staging_work(admission, scheduler, registry, effective)
     if admission.get("numeric_authority") is not None:
         from .directed_numeric_local_reconciliation import effective_reconciliation_work
-        return effective_reconciliation_work(admission,scheduler,registry,effective,current)
+        current = effective_reconciliation_work(admission,scheduler,registry,effective,current)
+        from .directed_numeric_promotion_reconciliation import row, effective_work
+        if row(scheduler.connection,admission['id']) is not None:
+            if executor is None:
+                raise MissionDocumentResearchExecutorError('promotion reconciliation requires full reader authority')
+            return effective_work(executor,admission)
+        return current
     return current
 
 
@@ -3374,7 +3382,9 @@ def effective_mission_document_work_orders(
                 authority, scheduler, admission, index, worker=worker)
         else:
             work = _effective_staging_work(
-                admission, scheduler, authority.registry, effective)
+                admission, scheduler, authority.registry, effective,
+                executor=SimpleNamespace(authority=authority,scheduler=scheduler,registry=authority.registry,
+                    connection=scheduler.connection,draft_worker=draft_worker,verifier_worker=verifier_worker))
         stored = scheduler.work_order_authority(work["id"])
         if stored is not None and (stored["work_order_hash"] != content_hash(work)
                                    or canonical_json(stored["work_order"])
@@ -6144,7 +6154,7 @@ class MissionDocumentResearchExecutor:
                     self.authority, self.scheduler, admission, index, worker=stage_worker)
             else:
                 work = _effective_staging_work(
-                    admission, self.scheduler, self.registry, effective)
+                    admission, self.scheduler, self.registry, effective, executor=self)
             effective.append(work)
             stored = self.scheduler.work_order_authority(work["id"])
             if stored is None:

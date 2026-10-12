@@ -219,11 +219,15 @@ def _record_numeric(executor,admission,works,*,measure_repair=False):
                 from .directed_numeric_figure_support import stage_exact_figure
                 staged=stage_exact_figure(executor,figure=figure,
                     actor_ref=admission['actor_ref'],idempotency_key=f'directed-numeric-figure:{admission["id"]}:{ref}',resolver=resolver)
-                committed=executor.authority.store.commit_policy_candidate(
-                    evidence=staged['evidence'],claim=staged['claim'],material=staged['material'],
-                    source_verification=staged['source_verification'],numeric_spec=None,
-                    numeric_verification=staged['numeric_verification'],
-                    idempotency_key=f'policy-ledger:directed-numeric:{admission["id"]}:{ref}')
+                from .directed_numeric_promotion_replay import replay as promotion_replay
+                replayed=promotion_replay(executor.authority.store,bundle={**staged,'figure':figure})
+                canonical_bundle=staged if replayed is None else replayed['bundle']
+                committed=(replayed['result'] if replayed is not None else
+                    executor.authority.store.commit_policy_candidate(
+                        evidence=staged['evidence'],claim=staged['claim'],material=staged['material'],
+                        source_verification=staged['source_verification'],numeric_spec=None,
+                        numeric_verification=staged['numeric_verification'],
+                        idempotency_key=f'policy-ledger:directed-numeric:{admission["id"]}:{ref}'))
             except (ResearchAutoCommitRejected,GateRejected) as exc:
                 pending.append({'target_ref':ref,'reason':'numeric_policy_authority_unavailable','detail':str(exc)})
                 continue
@@ -240,10 +244,12 @@ def _record_numeric(executor,admission,works,*,measure_repair=False):
                            'claim_version_hash':claim_row['content_hash'],'evidence_version_hash':evidence_row['content_hash'],
                            'evidence_version_ref':committed['evidence_version_ref'],
                            'review_decision_ref':committed['review_decision_ref']}
+            if replayed is not None:
+                claim_binding['canonical_period_replay']=replayed['mapping']
             if support is not None:
                 from .directed_numeric_figure_support import canonical_commit_support
                 claim_binding['canonical_commit_support']=canonical_commit_support(
-                    executor.authority.store,bundle=staged,committed=committed)
+                    executor.authority.store,bundle=canonical_bundle,committed=committed)
             claims.append(claim_binding)
             if support is not None:supports.append(support)
             figures.append({**figure,'metric_definition_hash':target['metric_definition_hash']})
@@ -301,6 +307,9 @@ def _record_numeric(executor,admission,works,*,measure_repair=False):
     if 'numeric_local_reconciliation_ref' in works[3]['metadata']:
         body['local_reconciliation']={k:works[3]['metadata'][k] for k in (
             'numeric_local_reconciliation_ref','numeric_local_reconciliation_hash','numeric_local_reconciliation_contract')}
+    if 'numeric_promotion_reconciliation_ref' in works[3]['metadata']:
+        body['promotion_reconciliation']={k:works[3]['metadata'][k] for k in (
+            'numeric_promotion_reconciliation_ref','numeric_promotion_reconciliation_hash','numeric_promotion_reconciliation_contract')}
     if any('measure_conflict_proof' in item for item in result['pending_targets']):
         from .directed_numeric_figure_support import MEASURE_CONFLICT_CONTRACT
         body['measure_conflict_contract']=MEASURE_CONFLICT_CONTRACT
@@ -357,7 +366,7 @@ def complete_numeric_stage(executor,admission,works,*,failure_as_terminal=False)
                     id='result-envelope:numeric-local-reconciliation-failed:'+content_hash({'work':work['id'],'error':error})[:32],
                     created_at=now,work_order_ref=work['id'],invocation_ref='execution:'+work['id'],
                     status='failed',outputs={},actual_side_effects=(),usage_refs=(),artifact_refs=(),
-                    error=error,metadata={'authority_ref':admission['id'],'local_reconciliation_contract':CONTRACT}).to_dict()
+                    error=error,metadata={'authority_ref':admission['id'],'local_reconciliation_contract':work['metadata'].get('numeric_promotion_reconciliation_contract',CONTRACT)}).to_dict()
                 executor.scheduler.complete(work['id'],lease['attempt']['attempt_number'],executor.actor_ref,
                     lease['lease_token'],failed,idempotency_key=work['id']+':terminal-local-failure',
                     result_envelope_hash=content_hash(failed))
@@ -405,6 +414,9 @@ def read_numeric_result(executor,admission,works,formal,*,receipt_row=None,inclu
             'numeric_local_reconciliation_ref','numeric_local_reconciliation_hash','numeric_local_reconciliation_contract')}
         if receipt.get('local_reconciliation')!=expected_binding:
             raise DirectedNumericError('numeric local reconciliation receipt binding differs')
+    if 'numeric_promotion_reconciliation_ref' in works[3]['metadata'] or 'promotion_reconciliation' in receipt:
+        from .directed_numeric_promotion_reconciliation import verify_work
+        verify_work(executor,admission,works,receipt)
     from .directed_numeric_source_capabilities import spoken_answer
     spoken=spoken_answer(admission)
     resolver=MissionFigureAuthorityResolver(executor.connection)
@@ -469,6 +481,15 @@ def read_numeric_result(executor,admission,works,formal,*,receipt_row=None,inclu
             continue
         bundle=build_figure_candidate(executor.connection,figure=figure,actor_ref=admission['actor_ref'],resolver=resolver)
         committed=claims[ref]
+        period_replay=committed.get('canonical_period_replay')
+        if period_replay is not None:
+            from .directed_numeric_promotion_replay import replay as promotion_replay
+            rebuilt=promotion_replay(executor.authority.store,bundle=bundle)
+            if (rebuilt is None or canonical_json(rebuilt['mapping'])!=canonical_json(period_replay)
+                    or any(rebuilt['result'][k]!=committed[k] for k in
+                           ('claim_version_ref','evidence_version_ref','review_decision_ref'))):
+                raise DirectedNumericError('canonical period replay mapping differs')
+            bundle=rebuilt['bundle']
         for table,key,json_key,version_class,hash_key in (
             ('claim_versions','claim_version_id','claim_json',validate_claim_version_v0_2,'claim_version_hash'),
             ('evidence_versions','evidence_version_id','evidence_json',validate_evidence_version_v0_2,'evidence_version_hash')):
@@ -478,7 +499,8 @@ def read_numeric_result(executor,admission,works,formal,*,receipt_row=None,inclu
             value=json.loads(held[json_key]);version=version_class(value)
             if canonical_json(version)!=held[json_key] or version['content_hash']!=held['content_hash'] or held['content_hash']!=committed[hash_key]:
                 raise DirectedNumericError('numeric canonical authority bytes differ')
-        canonical_key=f'policy-ledger:directed-numeric:{admission["id"]}:{ref}'
+        canonical_key=(period_replay['original_idempotency_key'] if period_replay is not None else
+                       f'policy-ledger:directed-numeric:{admission["id"]}:{ref}')
         if 'canonical_commit_support' in committed:
             if ref not in supports:raise DirectedNumericError('numeric canonical support lacks source support contract')
             from .directed_numeric_figure_support import canonical_commit_support
