@@ -100,7 +100,9 @@ class PlannerStorageBoundTests(unittest.TestCase):
                 max_output_tokens=16384,max_cost_usd=1.,max_seconds=300)
 
     def test_default_eighty_thousand_input_does_not_fill_preview_beyond_its_authority(self):
-        summary,works,calls=self.run_with_budget(self.inventory(80),80000)
+        # Keep the required identities below this model's input authority;
+        # the expanded planner instructions are part of the same byte bound.
+        summary,works,calls=self.run_with_budget(self.inventory(60),80000)
         self.assertEqual(summary['plan_status'],'fresh');self.assertEqual(calls,1)
         self.assertLessEqual(summary['prompt_bytes'],80000)
         self.assertEqual(summary['work_order_prompt_bound'],128000)

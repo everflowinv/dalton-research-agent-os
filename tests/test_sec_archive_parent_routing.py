@@ -1,5 +1,6 @@
 """Configured raw roots and exact archive parents survive every ordinary boundary."""
 import json,unittest
+from pathlib import Path
 from datetime import date,datetime,timezone
 from types import SimpleNamespace
 from unittest.mock import Mock
@@ -112,7 +113,7 @@ class ArchiveParentRoutingTests(unittest.TestCase):
             ticket=launcher.start(authorization=auth,spec_ref='annual-report-10k',as_of=date(2026,9,8),
                 targeted_binding=b,cursor=self.first['next_cursor'])
         self.assertEqual(ticket['targeted_binding'],b)
-        args=spawn.call_args.args[0];self.assertEqual(args[args.index('--spool-dir')+1],str(self.configured))
+        args=spawn.call_args.args[0];self.assertEqual(Path(args[args.index('--spool-dir')+1]).resolve(),self.configured.resolve())
         self.assertEqual(json.loads(args[args.index('--targeted-binding')+1]),b)
 
     def test_same_index_name_owned_by_another_table_is_deferred_unchanged(self):
