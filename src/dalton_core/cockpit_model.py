@@ -18,6 +18,7 @@ Claim.  The control process owns no Core write handle and gets none.
 from __future__ import annotations
 
 import hashlib
+from contextlib import contextmanager
 import inspect
 import json
 import re
@@ -361,6 +362,28 @@ class CockpitModelRouteUnavailable(CockpitModelError):
     """No route was selected, so no model content was produced or refused."""
 
     lane_status = "model_unavailable"
+
+
+class CockpitModelProofUnavailable(CockpitModelError):
+    """A concurrent authority read changed; no new call was admitted."""
+
+    lane_status = "model_unavailable"
+    retryable = True
+
+
+@contextmanager
+def _timeout_proof_readers(router_path, budget_path, *, now):
+    from .planner_paid_output_recovery import recovery_readers
+    try:
+        with recovery_readers(router_path, budget_path, now=now) as readers:
+            yield readers
+    except sqlite3.OperationalError as exc:
+        # The immutable cold reader validates again on context exit. A new
+        # WAL from another tick invalidates the whole proof, including a
+        # previously read successful certificate. Never consume/admit it.
+        raise CockpitModelProofUnavailable(
+            "timeout recovery authority is temporarily unavailable; retry after a fresh proof"
+        ) from exc
 
 
 def model_failure_trace(exc: BaseException) -> dict[str, Any] | None:
@@ -2567,7 +2590,7 @@ class CockpitModel:
                 prior_authorization as prior_timeout_authorization, saved_successor as timeout_saved_successor)
             if _timeout_recovery is not None:
                 from .planner_paid_output_recovery import recovery_readers
-                with recovery_readers(self.config['model_router_db'], self.config['budget_db'],
+                with _timeout_proof_readers(self.config['model_router_db'], self.config['budget_db'],
                                       now=self.clock()) as (timeout_router, timeout_budget):
                     timeout_verify(scheduler.connection, timeout_router, timeout_budget,
                                    _timeout_recovery, mission=mission)
@@ -2581,7 +2604,7 @@ class CockpitModel:
                 prior_timeout = prior_timeout_authorization(scheduler.connection, work)
                 if prior_timeout is not None and prior_timeout['proof']['parent_work_ref'] != work.id:
                     from .planner_paid_output_recovery import recovery_readers
-                    with recovery_readers(self.config['model_router_db'], self.config['budget_db'],
+                    with _timeout_proof_readers(self.config['model_router_db'], self.config['budget_db'],
                                           now=self.clock()) as (timeout_router, timeout_budget):
                         timeout_verify(scheduler.connection, timeout_router, timeout_budget,
                                        prior_timeout, mission=mission)
@@ -2606,7 +2629,7 @@ class CockpitModel:
             elif (purpose in {'initial_screen', 'deep_insight_gate'}
                     and formal is not None and formal.get('terminal_state') == 'failed'):
                 from .planner_paid_output_recovery import recovery_readers
-                with recovery_readers(self.config['model_router_db'], self.config['budget_db'],
+                with _timeout_proof_readers(self.config['model_router_db'], self.config['budget_db'],
                                       now=self.clock()) as (timeout_router, timeout_budget):
                     timeout_binding = timeout_reserve(scheduler, timeout_router, timeout_budget,
                         work=work, mission=mission, config=self.config, now=self.clock())
