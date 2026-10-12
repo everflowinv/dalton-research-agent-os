@@ -77,7 +77,7 @@ from .public_web_core_fetch import (
     url_authority_from_discovery,
     count_recent_public_web_fetch_calls,
 )
-from .raw_spool import RawSpool, RawSpoolReader
+from .raw_spool import RawSpool, RawSpoolReader, RawSpoolError
 from .public_web_core_search import (
     OPERATION as WEB_SEARCH_OPERATION,
     WebSearchConnectorGovernance,
@@ -946,6 +946,7 @@ class _SearchLauncherBase:
         variant_index: int | None = None,
         missing_periods: Sequence[str] = (),
         targeted_binding: Mapping[str, Any] | None = None,
+        reporting_profile: Mapping[str, Any] | None = None,
     ) -> list[str]:
         command = [
             self.python_executable, "-m", self.CHILD_MODULE,
@@ -971,6 +972,8 @@ class _SearchLauncherBase:
             command += ["--missing-period", period]
         if targeted_binding is not None:
             command += ["--targeted-binding", canonical_json(dict(targeted_binding))]
+        if reporting_profile is not None:
+            command += ["--reporting-profile", canonical_json(dict(reporting_profile))]
         command += self._extra_command_args()
         command += list(self.mode_args)
         return command
@@ -985,6 +988,7 @@ class _SearchLauncherBase:
         variant_index: int | None = None,
         missing_periods: Sequence[str] = (),
         targeted_binding: Mapping[str, Any] | None = None,
+        reporting_profile: Mapping[str, Any] | None = None,
     ) -> dict[str, Any]:
         """Spawn one discovery child bound to an exact mission authorization."""
 
@@ -1022,6 +1026,26 @@ class _SearchLauncherBase:
         as_of_date = as_of or self.clock().date()
         if not isinstance(as_of_date, date) or isinstance(as_of_date, datetime):
             raise DiscoveryLaunchRejected("as_of must be a calendar date")
+        from .sec_issuer_reporting_profile import FOREIGN_SPECS
+        if (self.SOURCE_REF == SEC_SOURCE_REF and spec_ref in FOREIGN_SPECS) or reporting_profile is not None:
+            if self.SOURCE_REF != SEC_SOURCE_REF or spec_ref not in FOREIGN_SPECS:
+                raise DiscoveryLaunchRejected("reporting profile is only for a foreign SEC query")
+            try:
+                from contextlib import closing
+                from .readonly_sqlite import connect_read_only
+                from .raw_spool import RawSpoolReader
+                from .sec_issuer_reporting_profile import verify_profile, current_profile, allows_form
+                with closing(connect_read_only(self.state_dir / 'core.sqlite')) as reader:
+                    reader.row_factory = sqlite3.Row
+                    spool = RawSpoolReader(self.spool_dir or self.state_dir / 'connector-spool')
+                    reporting_profile = verify_profile(reader, spool, reporting_profile,
+                        company_ref=authorization['company_ref'], issuer=plan['companies'][authorization['company_ref']]['cik'], as_of=as_of_date)
+                    latest = current_profile(reader, spool, mission_version_ref=authorization['mission_version_ref'],
+                        company_ref=authorization['company_ref'], issuer=reporting_profile['issuer'], as_of=as_of_date)
+                    if latest != reporting_profile or not allows_form(reporting_profile, plan_spec(plan, spec_ref)['form']):
+                        raise ValueError('foreign reporting profile is no longer current or form is not applicable')
+            except (ValueError, OSError, sqlite3.Error, RawSpoolError) as exc:
+                raise DiscoveryLaunchRejected(str(exc)) from exc
         if targeted_binding is not None:
             try:
                 _, targeted_binding = _targeted_parameters(self.state_dir, plan=plan,
@@ -1035,6 +1059,18 @@ class _SearchLauncherBase:
             if self._current is not None and self._current[1].poll() is None:
                 raise DiscoveryLaunchConflict(f"discovery {self._current[0]} is still running")
             started_at = _wire_time(self.clock())
+            routing_identity = None
+            if reporting_profile is not None:
+                from .sec_issuer_reporting_profile import routing_query_hash
+                routing_parameters = build_discovery_parameters(plan,
+                    spec_ref=spec_ref, company_ref=authorization['company_ref'], as_of=as_of_date)
+                if targeted_binding is not None:
+                    routing_parameters, _ = _targeted_parameters(self.state_dir, plan=plan,
+                        company_ref=authorization['company_ref'], spec_ref=spec_ref, as_of=as_of_date,
+                        mission_version_ref=authorization['mission_version_ref'],
+                        mission_version_hash=authorization['mission_version_hash'], binding=targeted_binding,
+                        **({'cursor': cursor} if self.SOURCE_REF == SEC_SOURCE_REF else {}))
+                routing_identity = routing_query_hash(routing_parameters, reporting_profile)
             digest = hashlib.sha256(
                 canonical_json({
                     "authorization": dict(authorization), "spec_ref": spec_ref,
@@ -1044,6 +1080,8 @@ class _SearchLauncherBase:
                     "governance_hash": governance.content_hash,
                     "plan_hash": plan["content_hash"],
                     **({"targeted_binding":dict(targeted_binding)} if targeted_binding else {}),
+                    **({"reporting_profile":dict(reporting_profile)} if reporting_profile else {}),
+                    **({"reporting_query_hash":routing_identity} if reporting_profile else {}),
                 }).encode("utf-8")
             ).hexdigest()[:24]
             ticket_id = f"{self.TICKET_PREFIX}:{digest}"
@@ -1056,6 +1094,7 @@ class _SearchLauncherBase:
                 as_of=as_of_date.isoformat(), ticket_dir=ticket_dir, cursor=cursor,
                 variant_index=variant_index, missing_periods=missing_periods,
                 **({"targeted_binding":targeted_binding} if targeted_binding else {}),
+                **({"reporting_profile":reporting_profile} if reporting_profile else {}),
             )
             log_path = ticket_dir / "run.log"
             log_fd = os.open(str(log_path), os.O_WRONLY | os.O_CREAT | os.O_TRUNC, 0o600)
@@ -1106,6 +1145,8 @@ class _SearchLauncherBase:
                 "exit_code": None,
                 "completed_at": None,
                 **({"targeted_binding":dict(targeted_binding)} if targeted_binding else {}),
+                **({"reporting_profile":dict(reporting_profile)} if reporting_profile else {}),
+                **({"reporting_query_hash":routing_identity} if reporting_profile else {}),
             }
             _write_owner_only(self._ticket_path(ticket_id), record)
             self._current = (ticket_id, process)
@@ -1836,6 +1877,35 @@ class MissionSourceDiscoveryCoordinator:
             if ticket["status"] == "running":
                 continue
             summary = ticket.get("summary") or {}
+            if ticket.get('reporting_profile') is not None and ticket['status'] == 'succeeded':
+                try:
+                    from .sec_issuer_reporting_profile import verify_profile, routing_query_hash, allows_form
+                    from .raw_spool import RawSpoolReader
+                    params = build_discovery_parameters(self.plan, spec_ref=dispatch['spec_ref'],
+                        company_ref=dispatch['company_ref'], as_of=date.fromisoformat(ticket['as_of']))
+                    if ticket.get('targeted_binding') is not None:
+                        params, _ = _targeted_parameters(self.search_launcher.state_dir,
+                            plan=self.plan, company_ref=dispatch['company_ref'], spec_ref=dispatch['spec_ref'],
+                            as_of=date.fromisoformat(ticket['as_of']), mission_version_ref=dispatch['mission_version_ref'],
+                            mission_version_hash=dispatch['mission_version_hash'], binding=ticket['targeted_binding'],
+                            allow_closed=True, cursor=ticket.get('cursor'))
+                    profile = verify_profile(self.store.connection, RawSpoolReader(self.spool_dir),
+                        ticket['reporting_profile'], company_ref=dispatch['company_ref'],
+                        issuer=params['issuer'], as_of=date.fromisoformat(ticket['as_of']))
+                    stamp = routing_query_hash(params, profile)
+                    if (not allows_form(profile, params['form']) or summary.get('parameters') != params
+                            or summary.get('reporting_profile') != profile
+                            or summary.get('reporting_query_hash') != stamp
+                            or ticket.get('reporting_query_hash') != stamp
+                            or summary.get('query_hash') != discovery_query_hash(self.plan, params)
+                            or dispatch['query_hash'] != discovery_query_hash(self.plan, params)):
+                        raise ValueError('foreign child routing identity differs')
+                except (ValueError, KeyError, TypeError, OSError, sqlite3.Error, RawSpoolError) as exc:
+                    result = self.missions.settle_discovery_dispatch(dispatch['dispatch_id'], status='failed',
+                        reason='foreign routing binding refused: '+str(exc)[:400])
+                    settled.append({'dispatch_ref': dispatch['dispatch_id'], 'status': result['status'],
+                                    'reason': result.get('failure_reason')})
+                    continue
             if ticket.get("targeted_binding") is not None and ticket["status"] == "succeeded":
                 try:
                     parameters, bound = _targeted_parameters(self.search_launcher.state_dir,
@@ -2996,10 +3066,38 @@ class MissionSourceDiscoveryCoordinator:
             if company_ref not in self.plan["companies"]:
                 skipped.append({"company_ref": company_ref, "reason": "not in discovery plan"})
                 continue
+            reporting_profile = None
+            if self.source_ref == SEC_SOURCE_REF and self.spool_dir is not None:
+                try:
+                    from .sec_issuer_reporting_profile import current_profile, SecReportingProfileUnavailable
+                    from .raw_spool import RawSpoolReader
+                    from .source_discovery_read_budget import bounded_read_view
+                    with bounded_read_view(self.store.connection,
+                            deadline=getattr(self, '_tick_read_deadline', None)) as reader:
+                        reporting_profile = current_profile(reader, lambda: RawSpoolReader(self.spool_dir),
+                            mission_version_ref=mission['id'], company_ref=company_ref,
+                            issuer=self.plan['companies'][company_ref]['cik'], as_of=self.clock().date(),
+                            deadline=getattr(self, '_tick_read_deadline', None))
+                except SourceReadDeadline:
+                    raise
+                except SecReportingProfileUnavailable as exc:
+                    # Missing/pruned/stale evidence never authorizes a foreign
+                    # form, but must not prevent the existing index bootstrap
+                    # from obtaining a new root under unchanged gates.
+                    skipped.append({'company_ref': company_ref, 'reason': 'reporting_profile_missing: '+str(exc)[:200]})
+                except (ValueError, OSError, sqlite3.Error) as exc:
+                    skipped.append({'company_ref': company_ref, 'reason': 'reporting_profile_unavailable: '+str(exc)[:200]})
+                    continue
             for spec in self.plan["specs"]:
                 deadline = getattr(self, '_tick_read_deadline', None)
                 if deadline is not None and _monotonic() >= deadline:
                     raise SourceReadDeadline('source discovery decision deadline exhausted')
+                if self.source_ref == SEC_SOURCE_REF:
+                    from .sec_issuer_reporting_profile import allows_form, FOREIGN_SPECS
+                    if (spec['spec_ref'] in FOREIGN_SPECS or spec['spec_ref'] in {'annual-report-10k', 'current-report-8k'}) and not allows_form(reporting_profile, spec['form']):
+                        skipped.append({'company_ref': company_ref, 'spec_ref': spec['spec_ref'],
+                            'reason': 'reporting_profile_missing' if reporting_profile is None else 'form_not_in_current_reporting_family'})
+                        continue
                 if (self.plan.get("schema_version") == DISCOVERY_PLAN_SCHEMA_VERSION_V6
                         and self.source_ref == ALPHAENGINE_SOURCE_REF
                         and spec.get("document_type") in SELECTED_DOCUMENT_TYPES
@@ -3058,6 +3156,8 @@ class MissionSourceDiscoveryCoordinator:
                     if self.plan['schema_version'] == DISCOVERY_PLAN_SCHEMA_VERSION_V6:
                         page_options.update(variant_index=0 if continuation is None else continuation.get('variant_index',0),
                                             missing_periods=missing_periods)
+                    if self.source_ref == SEC_SOURCE_REF and spec['spec_ref'] in FOREIGN_SPECS:
+                        page_options['reporting_profile'] = reporting_profile
                     ticket = self.search_launcher.start(
                         authorization=authorization, spec_ref=spec["spec_ref"],
                         as_of=request_date,

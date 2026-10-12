@@ -72,6 +72,7 @@ def run_discovery(
     spool_dir: Path | None = None,
     adapter: Any | None = None,
     targeted_binding: dict[str, Any] | None = None,
+    reporting_profile: dict[str, Any] | None = None,
     cursor: str | None = None,
 ) -> dict[str, Any]:
     """Authorize, read the index, and append the discovery record."""
@@ -145,6 +146,18 @@ def run_discovery(
         parameters = build_discovery_parameters(
             plan, spec_ref=spec_ref, company_ref=company_ref, as_of=as_of
         )
+        from .sec_issuer_reporting_profile import FOREIGN_SPECS
+        if spec_ref in FOREIGN_SPECS or reporting_profile is not None:
+            from .sec_issuer_reporting_profile import verify_profile, current_profile, allows_form
+            if spec_ref not in FOREIGN_SPECS:
+                raise ValueError('reporting profile is only for a foreign SEC query')
+            bound = verify_profile(core.connection, spool, reporting_profile, company_ref=company_ref,
+                issuer=parameters['issuer'], as_of=as_of)
+            latest = current_profile(core.connection, spool, mission_version_ref=mission_version_ref,
+                company_ref=company_ref, issuer=parameters['issuer'], as_of=as_of)
+            if latest != bound or not allows_form(bound, parameters['form']):
+                raise ValueError('foreign reporting profile is no longer current or form is not applicable')
+            summary['reporting_profile'] = bound
         if targeted_binding is not None:
             from .material_targeted_sec import targeted_sec_parameters
             parameters, bound = targeted_sec_parameters(state,plan=plan,company_ref=company_ref,
@@ -153,6 +166,11 @@ def run_discovery(
             summary["targeted_binding"] = bound
         elif cursor is not None:
             raise ValueError("SEC continuation requires an exact targeted material binding")
+        if reporting_profile is not None:
+            from .sec_issuer_reporting_profile import routing_query_hash, allows_form
+            if not allows_form(reporting_profile, parameters['form']):
+                raise ValueError('foreign final query form differs from the reporting profile')
+            summary['reporting_query_hash'] = routing_query_hash(parameters, reporting_profile)
         summary["parameters"] = parameters
         summary["query_hash"] = discovery_query_hash(plan, parameters)
 
@@ -247,6 +265,7 @@ def build_parser() -> argparse.ArgumentParser:
     parser.add_argument("--allow-network", action="store_true")
     parser.add_argument("--cursor", default=None)
     parser.add_argument("--targeted-binding", type=json.loads, default=None)
+    parser.add_argument("--reporting-profile", type=json.loads, default=None)
     parser.add_argument("--quiet", action="store_true")
     return parser
 
@@ -281,6 +300,7 @@ def main(argv: list[str] | None = None) -> int:
         catalog_db=args.catalog_db,
         spool_dir=args.spool_dir,
         targeted_binding=args.targeted_binding,
+        reporting_profile=args.reporting_profile,
         cursor=args.cursor,
     )
     if not args.quiet:
