@@ -1074,7 +1074,7 @@ class _SearchLauncherBase:
                         company_ref=authorization['company_ref'], spec_ref=spec_ref, as_of=as_of_date,
                         mission_version_ref=authorization['mission_version_ref'],
                         mission_version_hash=authorization['mission_version_hash'], binding=targeted_binding,
-                        **({'cursor': cursor} if self.SOURCE_REF == SEC_SOURCE_REF else {}))
+                        **({'cursor': cursor,'spool_dir':self.spool_dir} if self.SOURCE_REF == SEC_SOURCE_REF else {}))
                 routing_identity = routing_query_hash(routing_parameters, reporting_profile)
             digest = hashlib.sha256(
                 canonical_json({
@@ -1893,7 +1893,8 @@ class MissionSourceDiscoveryCoordinator:
                             plan=self.plan, company_ref=dispatch['company_ref'], spec_ref=dispatch['spec_ref'],
                             as_of=date.fromisoformat(ticket['as_of']), mission_version_ref=dispatch['mission_version_ref'],
                             mission_version_hash=dispatch['mission_version_hash'], binding=ticket['targeted_binding'],
-                            allow_closed=True, cursor=ticket.get('cursor'))
+                            allow_closed=True, cursor=ticket.get('cursor'),
+                            spool_dir=_configured_search_spool(self.search_launcher))
                     profile = verify_profile(self.store.connection, RawSpoolReader(self.spool_dir),
                         ticket['reporting_profile'], company_ref=dispatch['company_ref'],
                         issuer=params['issuer'], as_of=date.fromisoformat(ticket['as_of']))

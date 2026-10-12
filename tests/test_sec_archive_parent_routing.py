@@ -115,6 +115,18 @@ class ArchiveParentRoutingTests(unittest.TestCase):
         args=spawn.call_args.args[0];self.assertEqual(args[args.index('--spool-dir')+1],str(self.configured))
         self.assertEqual(json.loads(args[args.index('--targeted-binding')+1]),b)
 
+    def test_same_index_name_owned_by_another_table_is_deferred_unchanged(self):
+        self.root();c=self.core.connection
+        c.execute('DROP INDEX IF EXISTS idx_connector_call_query_hash')
+        c.execute('CREATE TABLE index_owner_counterexample(value TEXT)')
+        c.execute('CREATE INDEX idx_connector_call_query_hash ON index_owner_counterexample(value)')
+        before=c.execute("SELECT tbl_name,sql FROM sqlite_master WHERE name='idx_connector_call_query_hash'").fetchone()
+        report=apply_projection_indexes(core_db=self.state/'core.sqlite')
+        self.assertIn('wrong shape',report['core']['deferred']['idx_connector_call_query_hash'])
+        self.assertNotIn('idx_connector_call_query_hash',report['core']['present'])
+        after=c.execute("SELECT tbl_name,sql FROM sqlite_master WHERE name='idx_connector_call_query_hash'").fetchone()
+        self.assertEqual(tuple(before),tuple(after))
+
     def test_legacy_limit_and_lazy_parent_validation_preserve_first_match(self):
         self.root();params,b=self.archive_params();c=self.core.connection
         columns=[row[1] for row in c.execute('PRAGMA table_info(connector_source_envelopes)')]

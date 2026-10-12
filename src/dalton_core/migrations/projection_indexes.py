@@ -450,8 +450,8 @@ def _build_indexes(
                 if spec.name == "idx_connector_call_query_hash":
                     owner = connection.execute("SELECT tbl_name,sql FROM sqlite_master WHERE type='index' AND name=?", (spec.name,)).fetchone()
                     columns = tuple((row[2],row[3],row[4]) for row in connection.execute("PRAGMA index_xinfo(idx_connector_call_query_hash)") if row[5])
-                    flags = next(row for row in connection.execute("PRAGMA index_list(connector_call_specs)") if row[1] == spec.name)
-                    if owner[0] != spec.table or columns != (("query_hash",0,"BINARY"),) or flags[2] or flags[4]:
+                    flags = next((row for row in connection.execute("PRAGMA index_list(connector_call_specs)") if row[1] == spec.name), None)
+                    if flags is None or owner[0] != spec.table or columns != (("query_hash",0,"BINARY"),) or flags[2] or flags[4]:
                         report["deferred"][spec.name] = "existing index has wrong shape; owner review required"
                         continue
                 report["present"].append(spec.name)
