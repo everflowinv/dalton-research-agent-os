@@ -1141,7 +1141,8 @@
       if (host.material_acquisition_effective && host.material_acquisition_effective.explicit_override) extra.push(h("p", { class: "adm-explain" }, `本项目使用单独设置的额度：每天 ${count(host.material_acquisition_effective.calls_per_day)} 次、${usd(host.material_acquisition_effective.usd_micros_per_day / 1000000)}。此处保存的共用额度适用于其余项目和新项目。`));
     }
     const pools = h("input", { type: "checkbox", checked: b.pools_enforcement === "off" || null });
-    extra.push(h("label", { class: "adm-field" }, h("span", null, "分项预算池（按流程分配的额度）"), h("span", null, pools, " 只统计、不拦截")));
+    extra.push(h("label", { class: "adm-field" }, h("span", null, "模型调用的流程费用额度"), h("span", null, pools, " 仅统计模型流程费用、不按流程额度拦截")));
+    extra.push(h("p", { class: "adm-explain" }, "此选项仅影响模型调用按研究流程分配的费用额度。材料获取额度、每天总费用及其他次数上限仍然执行。"));
     const check = () => {
       if (host && (!materialCalls.value.trim() || !materialUsd.value.trim() || !Number.isInteger(Number(materialCalls.value)) || Number(materialCalls.value) < 0 || !isFinite(Number(materialUsd.value)) || Number(materialUsd.value) < 0)) return "材料获取次数需为零或正整数，美元额度需为零或正数";
       for (const [key, label, , kind] of fields) {
