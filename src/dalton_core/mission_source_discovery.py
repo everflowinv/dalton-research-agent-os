@@ -46,6 +46,8 @@ from datetime import date, datetime, timedelta, timezone
 from pathlib import Path
 from typing import Any, Sequence
 
+from .source_discovery_read_budget import SourceReadDeadline, bounded_rows
+
 from .alphaengine_core_search import (
     SEARCH_DOCUMENT_TYPES,
     SearchConnectorGovernance,
@@ -1722,6 +1724,8 @@ class MissionSourceDiscoveryCoordinator:
             return self.missions.carry_forward_superseded_documents(
                 self.plan["mission_ref"], source_ref=self.source_ref, deadline=deadline,
             )
+        except SourceReadDeadline:
+            raise
         except Exception as exc:  # maintenance must never take the tick down
             return [{"status": "error", "reason": f"{type(exc).__name__}: {exc}"}]
 
@@ -1737,14 +1741,13 @@ class MissionSourceDiscoveryCoordinator:
         settled: list[dict[str, Any]] = []
         if deadline is not None and _monotonic() >= deadline:
             return settled
-        documents = self.missions.already_held_documents(source_ref=self.source_ref)
+        documents = self.missions.already_held_documents(source_ref=self.source_ref, deadline=deadline)
         if self.source_ref == ALPHAENGINE_SOURCE_REF:
             # Select the authority-backed rows in SQL.  Taking the first N
             # generic candidates and testing them one by one permanently
             # starves a completed fetch sitting behind a large search result.
-            documents = [dict(row) for row in self.store.connection.execute(
-                ALPHAENGINE_ALREADY_HELD_SQL, (self.source_ref,),
-            ).fetchall()]
+            documents = [dict(row) for row in bounded_rows(self.store.connection,
+                ALPHAENGINE_ALREADY_HELD_SQL, (self.source_ref,), deadline=deadline)]
         for document in documents:
             if deadline is not None and _monotonic() >= deadline:
                 break
@@ -1783,7 +1786,7 @@ class MissionSourceDiscoveryCoordinator:
             return {"status": "not_applicable"}
         if deadline is not None and _monotonic() >= deadline:
             return {"status": "deferred", "filled": 0, "failures": []}
-        rows = self.missions.documents_without_host(source_ref=self.source_ref, limit=limit)
+        rows = self.missions.documents_without_host(source_ref=self.source_ref, limit=limit, deadline=deadline)
         if not rows:
             return {"status": "complete", "filled": 0}
         if self.spool_dir is None:
@@ -1819,7 +1822,7 @@ class MissionSourceDiscoveryCoordinator:
             return settled
         if deadline is not None and _monotonic() >= deadline:
             return settled
-        for dispatch in self.missions.open_discovery_dispatches(source_ref=self.source_ref):
+        for dispatch in self.missions.open_discovery_dispatches(source_ref=self.source_ref, deadline=deadline):
             if deadline is not None and _monotonic() >= deadline:
                 break
             try:
@@ -2218,7 +2221,7 @@ class MissionSourceDiscoveryCoordinator:
             return settled
         if deadline is not None and _monotonic() >= deadline:
             return settled
-        for document in self.missions.launched_discovered_documents(source_ref=self.source_ref):
+        for document in self.missions.launched_discovered_documents(source_ref=self.source_ref, deadline=deadline):
             if deadline is not None and _monotonic() >= deadline:
                 break
             try:
@@ -3059,7 +3062,7 @@ class MissionSourceDiscoveryCoordinator:
         return {"status": "idle", "skipped": skipped}
 
     # -- batch E: a targeted query on behalf of a MaterialRequest -------------
-    def launch_targeted_discovery(self) -> dict[str, Any] | None:
+    def launch_targeted_discovery(self, deadline: float | None = None) -> dict[str, Any] | None:
         """Run the oldest targeted query the material acquisition service queued.
 
         The service asks "search this company on this spec now" for a request
@@ -3079,11 +3082,13 @@ class MissionSourceDiscoveryCoordinator:
             return None
         try:
             from .material_acquisition import pending_targeted_queries, record_targeted_event
-            pending = pending_targeted_queries(state_dir, self.source_ref, limit=1)
+            pending = pending_targeted_queries(state_dir, self.source_ref, limit=1, deadline=deadline)
             if self.source_ref==SEC_SOURCE_REF and getattr(self,"store",None) is not None:
                 from .material_targeted_sec import pending_archive_query
-                archive=pending_archive_query(state_dir,self.store.connection,self.plan,self.search_launcher)
+                archive=pending_archive_query(state_dir,self.store.connection,self.plan,self.search_launcher,deadline=deadline)
                 if archive is not None:pending=[archive]
+        except SourceReadDeadline:
+            raise
         except Exception:  # noqa: BLE001 - a missing or locked ledger is nothing queued
             return None
         if not pending:
@@ -3821,18 +3826,26 @@ class MissionSourceDiscoveryCoordinator:
         # ws-7d starvation had to be reconstructed from sampled timings.
         steps = {"settle": 0.0, "carry": 0.0, "held": 0.0, "acquire": 0.0, "search": 0.0}
 
+        active_step = None
+
         def timed(step: str, call: Callable[[], Any]) -> Any:
+            nonlocal active_step
+            active_step = step
             started = _monotonic()
             try:
                 return call()
             finally:
                 steps[step] += max(0.0, _monotonic() - started)
 
+        targeted_checked = False
+
         def search() -> dict[str, Any]:
+            nonlocal targeted_checked
             if deadline is not None and _monotonic() >= deadline:
                 return {"status": "deferred", "reason": DISCOVERY_DEFERRED_REASON}
             # Batch E: a MaterialRequest's targeted query takes the slot first.
-            targeted = timed("search", self.launch_targeted_discovery)
+            targeted = None if targeted_checked else timed("search", lambda: self.launch_targeted_discovery(deadline))
+            targeted_checked = True
             if targeted is not None and targeted.get("status") in ("launched", "health_hold"):
                 return targeted
             return timed("search", self.launch_discovery)
@@ -3842,13 +3855,26 @@ class MissionSourceDiscoveryCoordinator:
         # open dispatch is what tells it a search is still running).
         search_first = self._search_deferred_ticks >= SEARCH_STARVATION_TICKS
         self._tick_shared_view = _TICK_CACHE_UNREAD
+        settled_dispatches, recovered_dispatches, settled_documents = [], [], []
+        carried_forward, already_held, review_backfill, acquisitions = [], [], [], []
+        host_backfill, discovery, out_of_time = {}, None, False
+        deferred_read_step = None
         try:
             settled_dispatches = timed("settle", lambda: self.settle_dispatches(deadline))
-            discovery = search() if search_first else None
+            discovery = search() if search_first and self.source_ref != SEC_SOURCE_REF else None
             recovered_dispatches = timed(
                 "settle", lambda: self.recover_local_web_discoveries(deadline=deadline))
             settled_documents = timed("settle", lambda: self.settle_documents(deadline))
-            # P9d-12/13 maintenance, all before any new spend: documents stranded
+            if self.source_ref == SEC_SOURCE_REF and discovery is None and _monotonic() < deadline:
+                # Exact governed MaterialRequests must not wait behind an
+                # unbounded historical carry/backfill. Own children settle
+                # first; the ordinary authorization, quota and strong binding
+                # in launch_targeted_discovery are unchanged.
+                targeted = timed("search", lambda: self.launch_targeted_discovery(deadline))
+                targeted_checked = True
+                if targeted is not None and targeted.get("status") in ("launched", "health_hold"):
+                    discovery = targeted
+            # P9d-12/13 maintenance, all before ordinary acquisition spend: documents stranded
             # by a mission version change come back under the current grant,
             # pre-ledger rows learn their host, and documents already held owe a
             # review rather than a fetch.
@@ -3876,6 +3902,11 @@ class MissionSourceDiscoveryCoordinator:
                 "acquire", lambda: self._acquire_within_budget(settled_documents, deadline))
             if discovery is None:
                 discovery = search()
+        except SourceReadDeadline as exc:
+            out_of_time = True
+            deferred_read_step = {"step": active_step, "reason": str(exc)}
+            if discovery is None:
+                discovery = {"status": "deferred", "reason": DISCOVERY_DEFERRED_REASON}
         finally:
             self._tick_shared_view = _NO_TICK_CACHE
         if discovery.get("status") == "deferred":
@@ -3927,6 +3958,7 @@ class MissionSourceDiscoveryCoordinator:
             # real work and stopped early, which is a different thing from a
             # tick that found nothing to do.
             "tick_budget_exhausted": out_of_time,
+            **({"candidate_read_deferred": deferred_read_step} if deferred_read_step else {}),
             "retried_after_restart": retried_after_restart,
             # Nested, so the lane's own bounded counts (capped at twelve keys)
             # keep what they kept; the coordinator state flattens it.

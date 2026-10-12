@@ -270,11 +270,12 @@ def _reader(state_dir: str | Path) -> Iterator[sqlite3.Connection | None]:
         connection.close()
 
 
-def _rows(connection: sqlite3.Connection | None, sql: str, params: Sequence[Any] = ()) -> list[sqlite3.Row]:
+def _rows(connection: sqlite3.Connection | None, sql: str, params: Sequence[Any] = (), *, deadline: float | None = None) -> list[sqlite3.Row]:
     if connection is None:
         return []
     try:
-        return connection.execute(sql, tuple(params)).fetchall()
+        from .source_discovery_read_budget import bounded_rows
+        return bounded_rows(connection, sql, tuple(params), deadline=deadline)
     except sqlite3.OperationalError as exc:
         if "no such table" in str(exc) or "no such column" in str(exc):
             return []
@@ -1160,7 +1161,7 @@ def enqueue_targeted_query(state_dir: str | Path, *, request_id: str, source: st
     return {"query_id": query_id, **record, "write_status": "fresh"}
 
 
-def pending_targeted_queries(state_dir: str | Path, source_ref: str, *, limit: int = 5) -> list[dict[str, Any]]:
+def pending_targeted_queries(state_dir: str | Path, source_ref: str, *, limit: int = 5, deadline: float | None = None) -> list[dict[str, Any]]:
     """What a coordinator of ``source_ref`` still owes: queries with no launch/refusal yet, oldest first.
 
     A ``deferred`` query (busy slot, call window full, held source) stays
@@ -1172,7 +1173,7 @@ def pending_targeted_queries(state_dir: str | Path, source_ref: str, *, limit: i
                      "SELECT q.query_id, q.record_json FROM material_targeted_queries q WHERE q.source_ref=? "
                      "AND NOT EXISTS (SELECT 1 FROM material_targeted_query_events e WHERE e.query_id=q.query_id "
                      "AND e.status IN ('launched','refused','failed')) ORDER BY q.created_at, q.query_id LIMIT ?",
-                     (source_ref, max(1, int(limit))))
+                     (source_ref, max(1, int(limit))), deadline=deadline)
     return [{"query_id": row["query_id"], **json.loads(row["record_json"])} for row in rows]
 
 

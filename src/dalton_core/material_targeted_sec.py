@@ -130,7 +130,7 @@ def targeted_sec_parameters(state_dir, **kwargs):
         raise TargetedSecError(f"targeted material authority is unreadable: {type(exc).__name__}") from exc
 
 
-def pending_archive_query(state_dir,connection,plan,launcher,*,query_ref=None):
+def pending_archive_query(state_dir,connection,plan,launcher,*,query_ref=None,deadline=None):
     """One continuation of an exact targeted query, after its root is durable.
 
     The latest targeted event must still name the successful root ticket.
@@ -142,11 +142,12 @@ def pending_archive_query(state_dir,connection,plan,launcher,*,query_ref=None):
     if not path.is_file():return None
     c=connect_read_only(path);c.row_factory=sqlite3.Row
     try:
-        rows=c.execute("SELECT q.query_id,q.record_json,json_extract(e.record_json,'$.ticket_ref') AS ticket_ref,json_extract(e.record_json,'$.dispatch_ref') AS dispatch_ref FROM material_targeted_queries q "
+        from .source_discovery_read_budget import bounded_rows
+        rows=bounded_rows(c,"SELECT q.query_id,q.record_json,json_extract(e.record_json,'$.ticket_ref') AS ticket_ref,json_extract(e.record_json,'$.dispatch_ref') AS dispatch_ref FROM material_targeted_queries q "
             "JOIN material_targeted_query_events e ON e.event_id=(SELECT MAX(x.event_id) FROM material_targeted_query_events x WHERE x.query_id=q.query_id AND x.status IN ('launched','failed','refused')) "
             "WHERE q.source_ref='source:sec-edgar' AND e.status='launched' AND json_extract(e.record_json,'$.kind')='archive_ready' "
             +('AND q.query_id=? ' if query_ref is not None else '')
-            +'ORDER BY e.event_id DESC LIMIT 32', (() if query_ref is None else (query_ref,))).fetchall()
+            +'ORDER BY e.event_id DESC LIMIT 32', (() if query_ref is None else (query_ref,)),deadline=deadline)
     finally:c.close()
     from datetime import date
     from .sec_submissions_pages import ROOT_CURSOR,_record

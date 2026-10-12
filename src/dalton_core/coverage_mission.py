@@ -1945,10 +1945,11 @@ class CoverageMissionAuthority:
         return int(row[0])
 
     def open_discovery_dispatches(
-        self, *, limit: int = 20, source_ref: str | None = None
+        self, *, limit: int = 20, source_ref: str | None = None, deadline: float | None = None
     ) -> list[dict[str, Any]]:
         if isinstance(limit, bool) or not isinstance(limit, int) or not 1 <= limit <= 100:
             raise CoverageMissionValidationError("discovery dispatch limit must be 1..100")
+        from .source_discovery_read_budget import bounded_rows
         query = "SELECT * FROM coverage_mission_discovery_dispatches WHERE status='launched'"
         params: list[Any] = []
         if source_ref is not None:
@@ -1956,7 +1957,7 @@ class CoverageMissionAuthority:
             params.append(_text(source_ref, "source_ref"))
         query += " ORDER BY created_at,dispatch_id LIMIT ?"
         params.append(limit)
-        rows = self.connection.execute(query, params).fetchall()
+        rows = bounded_rows(self.connection, query, params, deadline=deadline)
         return [self._dispatch_row(row) for row in rows]
 
     def _version_scope(self, column: str, mission_version_ref: str, across_versions: bool) -> str:
@@ -3045,7 +3046,7 @@ class CoverageMissionAuthority:
         return int(self.connection.execute(query, params).fetchone()[0])
 
     def already_held_documents(
-        self, *, source_ref: str | None = None, limit: int = 100
+        self, *, source_ref: str | None = None, limit: int = 100, deadline: float | None = None
     ) -> list[dict[str, Any]]:
         """Unsettled active-mission documents that may now be held in authority.
 
@@ -3061,6 +3062,7 @@ class CoverageMissionAuthority:
 
         if isinstance(limit, bool) or not isinstance(limit, int) or not 1 <= limit <= 100:
             raise CoverageMissionValidationError("discovered document limit must be 1..100")
+        from .source_discovery_read_budget import bounded_rows
         query = (
             "SELECT d.* FROM coverage_mission_discovered_documents d "
             "JOIN coverage_mission_pointer p ON p.mission_version_id=d.mission_version_ref "
@@ -3078,21 +3080,22 @@ class CoverageMissionAuthority:
             "d.updated_at DESC,d.record_id LIMIT ?"
         )
         params.append(limit)
-        return [self._document_row(row) for row in self.connection.execute(query, params).fetchall()]
+        return [self._document_row(row) for row in bounded_rows(self.connection, query, params, deadline=deadline)]
 
     def documents_without_host(
-        self, *, source_ref: str, limit: int = 25
+        self, *, source_ref: str, limit: int = 25, deadline: float | None = None
     ) -> list[dict[str, Any]]:
         """Rows recorded before P9d-13 whose host is still unknown, oldest first."""
 
         if isinstance(limit, bool) or not isinstance(limit, int) or not 1 <= limit <= 100:
             raise CoverageMissionValidationError("discovered document limit must be 1..100")
-        rows = self.connection.execute(
+        from .source_discovery_read_budget import bounded_rows
+        rows = bounded_rows(self.connection,
             "SELECT d.* FROM coverage_mission_discovered_documents d "
             "JOIN coverage_mission_pointer p ON p.mission_version_id=d.mission_version_ref "
             "WHERE d.host IS NULL AND d.source_ref=? ORDER BY d.created_at,d.record_id LIMIT ?",
-            (_text(source_ref, "source_ref"), limit),
-        ).fetchall()
+            (_text(source_ref, "source_ref"), limit), deadline=deadline,
+        )
         return [self._document_row(row) for row in rows]
 
     def set_document_host(self, record_id: str, host: str) -> dict[str, Any]:
@@ -3229,10 +3232,11 @@ class CoverageMissionAuthority:
         return capped_fetch_failures(rows, as_of=as_of, cap=cap, cooldown=cooldown)
 
     def launched_discovered_documents(
-        self, *, limit: int = 20, source_ref: str | None = None
+        self, *, limit: int = 20, source_ref: str | None = None, deadline: float | None = None
     ) -> list[dict[str, Any]]:
         if isinstance(limit, bool) or not isinstance(limit, int) or not 1 <= limit <= 100:
             raise CoverageMissionValidationError("discovered document limit must be 1..100")
+        from .source_discovery_read_budget import bounded_rows
         query = "SELECT * FROM coverage_mission_discovered_documents WHERE status='acquisition_launched'"
         params: list[Any] = []
         if source_ref is not None:
@@ -3240,7 +3244,7 @@ class CoverageMissionAuthority:
             params.append(_text(source_ref, "source_ref"))
         query += " ORDER BY updated_at,record_id LIMIT ?"
         params.append(limit)
-        rows = self.connection.execute(query, params).fetchall()
+        rows = bounded_rows(self.connection, query, params, deadline=deadline)
         return [self._document_row(row) for row in rows]
 
     def mark_discovered_document_launched(self, record_id: str, ticket_ref: str) -> dict[str, Any]:
@@ -3576,7 +3580,8 @@ class CoverageMissionAuthority:
         # discovery tick down with it.
         query += " ORDER BY v.version_number DESC,d.created_at,d.record_id LIMIT ?"
         params.append(limit)
-        rows = self.connection.execute(query, params).fetchall()
+        from .source_discovery_read_budget import bounded_rows
+        rows = bounded_rows(self.connection, query, params, deadline=deadline)
         if not rows:
             return []
         grants: dict[tuple[str, str], dict[str, Any] | str] = {}
@@ -3803,14 +3808,15 @@ class CoverageMissionAuthority:
         mission_ref = _text(mission_ref, "mission_ref")
         if isinstance(limit, bool) or not isinstance(limit, int) or not 1 <= limit <= 100:
             raise CoverageMissionValidationError("backfill limit must be 1..100")
-        rows = self.connection.execute(
+        from .source_discovery_read_budget import bounded_rows
+        rows = bounded_rows(self.connection,
             "SELECT d.record_id,d.mission_version_ref FROM coverage_mission_discovered_documents d "
             "JOIN coverage_mission_pointer p ON p.mission_version_id=d.mission_version_ref "
             "LEFT JOIN coverage_mission_document_reviews r "
             "ON r.mission_version_ref=d.mission_version_ref AND r.document_ref=d.document_ref "
             "WHERE p.mission_ref=? AND d.status='acquired' AND r.review_id IS NULL "
-            "ORDER BY d.created_at,d.record_id LIMIT ?", (mission_ref, limit),
-        ).fetchall()
+            "ORDER BY d.created_at,d.record_id LIMIT ?", (mission_ref, limit), deadline=deadline,
+        )
         result = []
         for row in rows:
             if deadline is not None and time.monotonic() >= deadline:
