@@ -131,7 +131,22 @@ WORK_ORDER_FOLD_COVER_INDEX = IndexSpec(
     columns="work_order_id, created_at, json_extract(work_order_json,'$.requested_capabilities')",
     reason="dashboard cold WorkOrder fold reads complete lightweight history without reading prompt bodies",
 )
-SCHEDULER_FOLD_COVER_INDEXES = (WORK_ORDER_FOLD_COVER_INDEX,)
+FORMAL_RESULT_FOLD_COVER_INDEX = IndexSpec(
+    name="scheduler_formal_results_projection_fold_cover",
+    table="scheduler_formal_results",
+    columns="work_order_id, result_record_id, attempt_number, result_envelope_id, terminal_state, created_at",
+    reason="dashboard cold formal fold reads complete terminal metadata without response JSON pages",
+)
+RESULT_ENVELOPE_FOLD_COVER_INDEX = IndexSpec(
+    name="scheduler_result_envelopes_projection_fold_cover",
+    table="scheduler_result_envelopes",
+    columns="result_envelope_id, work_order_id, attempt_number, created_at",
+    reason="dashboard cold receipt fold reads complete receipt metadata without response JSON pages",
+)
+SCHEDULER_FOLD_COVER_INDEXES = (
+    WORK_ORDER_FOLD_COVER_INDEX, FORMAL_RESULT_FOLD_COVER_INDEX,
+    RESULT_ENVELOPE_FOLD_COVER_INDEX,
+)
 # Deliberately separate from SCHEDULER_PROJECTION_INDEXES used by worker opens.
 # apply_projection_indexes (also used by service startup) installs this index.
 # Its first CREATE reads every old JSON body and holds a write lock: large

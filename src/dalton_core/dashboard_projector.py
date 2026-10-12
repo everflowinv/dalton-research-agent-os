@@ -23,7 +23,10 @@ from typing import Any, Callable, Mapping, Sequence
 from urllib.parse import quote
 
 from .dashboard import ProjectionWriter, SCHEMA_VERSION
-from .migrations.projection_indexes import WORK_ORDER_FOLD_COVER_INDEX
+from .migrations.projection_indexes import (
+    WORK_ORDER_FOLD_COVER_INDEX, FORMAL_RESULT_FOLD_COVER_INDEX,
+    RESULT_ENVELOPE_FOLD_COVER_INDEX,
+)
 from .projection_cancellation import check_cancelled, install_cancel_handler
 from .projection_folds import (
     _REGISTRY as _FOLD_REGISTRY,
@@ -302,6 +305,7 @@ _FORMAL_RESULT_FOLD = AppendOnlyFold(
     "work_order_id, result_record_id, attempt_number, result_envelope_id,"
     " terminal_state, created_at",
     key="result_record_id", init=dict, reduce=_keyed(lambda row: row["work_order_id"]),
+    cold_cover_index=FORMAL_RESULT_FOLD_COVER_INDEX.name,
 )
 _RESULT_ENVELOPE_FOLD = AppendOnlyFold(
     "scheduler.latest_receipts", "scheduler_result_envelopes",
@@ -309,6 +313,7 @@ _RESULT_ENVELOPE_FOLD = AppendOnlyFold(
     key="result_envelope_id", init=dict,
     reduce=_keyed_max(lambda row: row["work_order_id"],
                       lambda row: (row["attempt_number"], row["created_at"])),
+    cold_cover_index=RESULT_ENVELOPE_FOLD_COVER_INDEX.name,
 )
 _LEASE_FOLD = AppendOnlyFold(
     "scheduler.latest_leases", "scheduler_leases",
