@@ -1430,7 +1430,9 @@ class ConnectorGovernance:
     """Static generic approval and policy authority for a connector record."""
 
     def __init__(self, value: Mapping[str, Any]) -> None:
-        if not isinstance(value, Mapping) or set(value) != set(GOVERNANCE_FIELDS):
+        migration = isinstance(value, Mapping) and "compatibility_migration" in value
+        expected_fields = set(GOVERNANCE_FIELDS) | ({"compatibility_migration"} if migration else set())
+        if not isinstance(value, Mapping) or set(value) != expected_fields:
             raise ConnectorGovernanceError(
                 "connector governance record has an invalid closed shape"
             )
@@ -1442,9 +1444,15 @@ class ConnectorGovernance:
         kind = governance_kind_for_capability(wire["capability_id"])
         spec = GOVERNANCE_KIND_REGISTRY[kind]
         approved_by = wire["approved_by"]
+        if migration:
+            from .sec_statement_form_migration import validate_migration
+            try:
+                validate_migration(wire)
+            except (ValueError, ConnectorGovernanceError) as exc:
+                raise ConnectorGovernanceError(str(exc)) from exc
         if (
             not isinstance(approved_by, str)
-            or not approved_by.startswith("human:")
+            or (not migration and not approved_by.startswith("human:"))
             or len(approved_by) <= 6
         ):
             raise ConnectorGovernanceError("governance approved_by must be a human actor")

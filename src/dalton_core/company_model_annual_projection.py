@@ -73,7 +73,7 @@ def calendar_binding_from_annual_filing(
 ) -> dict[str, Any]:
     """Freeze the fiscal calendar declared by one exact annual filing row."""
 
-    if (filing.get("company_ref") != company_ref or filing.get("form") != "10-K"
+    if (filing.get("company_ref") != company_ref or filing.get("form") not in {"10-K", "10-K/A"}
             or not isinstance(filing.get("ingest_id"), str)
             or not isinstance(filing.get("content_hash"), str)):
         raise AnnualProjectionError("annual filing does not bind this company calendar")
@@ -210,7 +210,7 @@ def validate_stored_calendar_binding(
     if row is None:
         raise AnnualProjectionError("fiscal calendar annual filing is unavailable")
     filing = dict(row)
-    if (filing.get("company_ref") != company_ref or filing.get("form") != "10-K"):
+    if (filing.get("company_ref") != company_ref or filing.get("form") not in {"10-K", "10-K/A"}):
         raise AnnualProjectionError(
             "fiscal calendar is not this company's stored annual filing")
     if (filing.get("content_hash") != binding["source_hash"]

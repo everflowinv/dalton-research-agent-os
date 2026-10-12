@@ -688,7 +688,7 @@ CREATE TABLE IF NOT EXISTS coverage_mission_statement_filings (
     cik TEXT NOT NULL,
     entity_name TEXT NOT NULL,
     accession TEXT NOT NULL,
-    form TEXT NOT NULL CHECK(form IN ('10-Q','10-K')),
+    form TEXT NOT NULL CHECK(form IN ('10-Q','10-K','10-Q/A','10-K/A')),
     filed TEXT NOT NULL,
     report_date TEXT NOT NULL,
     line_count INTEGER NOT NULL,
@@ -803,3 +803,20 @@ BEFORE UPDATE ON coverage_mission_company_model_specs BEGIN
 CREATE TRIGGER IF NOT EXISTS coverage_mission_company_model_specs_no_delete
 BEFORE DELETE ON coverage_mission_company_model_specs BEGIN
     SELECT RAISE(ABORT, 'company model specs are append-only'); END;
+
+-- A local reparse dispatch cannot become a network dispatch if its companion
+-- file is lost. This immutable kind marker is created before the queue row.
+CREATE TABLE IF NOT EXISTS sec_statement_cached_reparse_dispatches (
+    dispatch_ref TEXT PRIMARY KEY,
+    record_json TEXT NOT NULL,
+    content_hash TEXT NOT NULL
+);
+CREATE TRIGGER IF NOT EXISTS sec_statement_cached_reparse_authorized_insert
+BEFORE INSERT ON sec_statement_cached_reparse_dispatches WHEN dalton_coverage_mission_authorized() = 0 BEGIN
+    SELECT RAISE(ABORT, 'SEC reparse marker requires CoverageMissionAuthority'); END;
+CREATE TRIGGER IF NOT EXISTS sec_statement_cached_reparse_no_update
+BEFORE UPDATE ON sec_statement_cached_reparse_dispatches BEGIN
+    SELECT RAISE(ABORT, 'SEC reparse markers are append-only'); END;
+CREATE TRIGGER IF NOT EXISTS sec_statement_cached_reparse_no_delete
+BEFORE DELETE ON sec_statement_cached_reparse_dispatches BEGIN
+    SELECT RAISE(ABORT, 'SEC reparse markers are append-only'); END;

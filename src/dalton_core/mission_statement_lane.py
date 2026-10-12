@@ -313,6 +313,9 @@ class MissionStatementLaneCoordinator:
                     dispatch_id=dispatch["dispatch_id"], observation=observation,
                     governance_ref=str(summary.get("governance_ref") or ""),
                     governance_hash=str(summary.get("governance_hash") or ""),
+                    **({"governance_proof": self.launcher.load_governance().wire}
+                       if any(f.get("form") in {"10-Q/A", "10-K/A"}
+                              for f in observation.get("filings", []) if isinstance(f, Mapping)) else {}),
                 )
             except CoverageMissionError as exc:
                 settled.append(self._settle(
@@ -476,6 +479,16 @@ class MissionStatementLaneCoordinator:
         # Only failures for this company and form spend its attempt budget.
         charged = [item for item in failures
                    if not _is_configuration_failure(item.get("reason"))]
+        if phase == "backfill" and failures and hasattr(self.launcher, "start_reparse"):
+            from .sec_statement_cached_reparse import prepare
+            try:
+                recovery = prepare(self.missions, self.launcher, company_ref=company_ref, form=form)
+            except (ValueError, OSError, CoverageMissionError) as exc:
+                return {"company_ref": company_ref, "form": form, "status": "held",
+                        "reason": "cached SEC source replay is unproved: " + str(exc)[:200]}
+            if recovery is not None and recovery["status_marker"] == "fresh":
+                return {"company_ref": company_ref, "form": form, "status": "queued",
+                        "dispatch_ref": recovery["dispatch_id"], "local_replay": True}
         if len(charged) >= MAX_FAILURES_PER_COMPANY:
             return None
         if len(failures) >= MAX_ATTEMPTS_PER_COMPANY:
@@ -545,11 +558,17 @@ class MissionStatementLaneCoordinator:
             return {"status": "idle"}
         dispatch = pending[0]
         try:
-            ticket = self.launcher.start(
-                ticker=dispatch["ticker"], form=dispatch["form"],
-                limit=int(dispatch["filing_limit"]),
-                actor_ref=dispatch["actor_ref"],
-            )
+            from .sec_statement_cached_reparse import request_path, is_reparse_dispatch
+            path = request_path(self.launcher.state_dir, dispatch["dispatch_id"]) if hasattr(self.launcher, "start_reparse") else None
+            if path is not None and (path.exists() or path.is_symlink() or is_reparse_dispatch(self.missions, dispatch)):
+                ticket = self.launcher.start_reparse(replay_request_path=path, missions=self.missions,
+                                                    actor_ref=dispatch["actor_ref"])
+            else:
+                ticket = self.launcher.start(
+                    ticker=dispatch["ticker"], form=dispatch["form"],
+                    limit=int(dispatch["filing_limit"]),
+                    actor_ref=dispatch["actor_ref"],
+                )
         except LaneChildConflict as exc:
             return {"status": "deferred", "dispatch_ref": dispatch["dispatch_id"],
                     "reason": f"{type(exc).__name__}: {exc}"}
@@ -586,6 +605,7 @@ STATEMENT_LANE_USER_AGENT = "Dalton Research Agent OS SEC financial-statements l
 # projected wires remain readable but cannot stand in for complete identities.
 STATEMENT_LANE_GOVERNANCE = "sec-financial-statements-v2.json"
 STATEMENT_LANE_GOVERNANCE_CANDIDATES = (
+    "sec-financial-statements-v5.json",
     "sec-financial-statements-v4.json",
     "sec-financial-statements-v3.json",
     STATEMENT_LANE_GOVERNANCE,
@@ -693,7 +713,7 @@ def argv_fragment(context: Any) -> list[str]:
     from .sec_financials_core import sec_financials_identity
 
     governance = None
-    for version, filename in zip((4, 3, 2), STATEMENT_LANE_GOVERNANCE_CANDIDATES):
+    for version, filename in zip((5, 4, 3, 2), STATEMENT_LANE_GOVERNANCE_CANDIDATES):
         candidate = context.state / "connector-governance" / filename
         if not candidate.is_file():
             continue

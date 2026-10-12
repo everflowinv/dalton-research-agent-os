@@ -509,8 +509,8 @@ def build_company_model_state(
     if not filings:
         raise CompanyModelStateError(
             "this company has no filed statements to model against")
-    filings = sorted(filings, key=lambda item: (item["report_date"],
-                                                item["accession"]))[-MAX_FILINGS:]
+    from .sec_statement_periodic_filings import model_window
+    filings = model_window(filings, MAX_FILINGS)
 
     policy = validate_numeric_context_policy(numeric_context_policy)
     statements: dict[str, list[dict[str, Any]]] = {}

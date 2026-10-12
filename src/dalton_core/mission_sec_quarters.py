@@ -719,7 +719,7 @@ class MissionSecQuartersCoordinator:
             rows = self.connection.execute(
                 "SELECT ingest_id, accession, form, filed, report_date "
                 "FROM coverage_mission_statement_filings "
-                "WHERE company_ref=? AND form IN ('10-Q','10-K')", (company_ref,),
+                "WHERE company_ref=? AND form IN ('10-Q','10-K','10-Q/A','10-K/A')", (company_ref,),
             ).fetchall()
         except Exception:  # noqa: BLE001 - an older Core has no statement lane
             return []
@@ -756,8 +756,20 @@ class MissionSecQuartersCoordinator:
             return (item.get("start") is not None,
                     item.get("form") != ANNUAL_FORM or item.get("fourth_quarter") is not None)
 
+        # A newer amended disclosure cannot be replaced by an older regular
+        # filing merely because the latter has a companyfacts frame. The
+        # independent companyfacts contract still refuses amended forms below.
+        amended_heads = {}
+        for filing in filings:
+            if filing.get("form") in {"10-Q/A", "10-K/A"}:
+                key = (filing["end"], filing["form"].removesuffix("/A"))
+                rank = (str(filing.get("filed") or ""), filing["accession"])
+                amended_heads[key] = max(amended_heads.get(key, rank), rank)
         by_end: dict[str, dict[str, Any]] = {}
         for filing in filings:
+            head = amended_heads.get((filing["end"], str(filing.get("form")).removesuffix("/A")))
+            if head is not None and (str(filing.get("filed") or ""), filing["accession"]) < head:
+                continue
             current = by_end.get(filing["end"])
             if current is None or known(filing) > known(current):
                 by_end[filing["end"]] = dict(filing)
@@ -912,7 +924,8 @@ class MissionSecQuartersCoordinator:
                     skipped.append({"ticker": entry.get("ticker"),
                                     "reason": "原始件读不到、哈希不符或里面没有 10-Q/10-K，不据此排队"})
                     continue
-            missing = [filing for filing in newest if filing["end"] not in held_ends]
+            missing = [filing for filing in newest if filing["end"] not in held_ends
+                       or filing.get("form") in {"10-Q/A", "10-K/A"}]
             if not missing:
                 skipped.append({"ticker": entry.get("ticker"),
                                 "reason": "最近四个季度的同比增速都已入账"})
@@ -929,6 +942,11 @@ class MissionSecQuartersCoordinator:
             # weekly report current, and walking further back is how the lane
             # once spent itself on 2023 filings whose concepts no longer resolve.
             for filing in newest:
+                if filing.get("form") in {"10-Q/A", "10-K/A"}:
+                    skipped.append({"ticker": entry.get("ticker"), "accession": filing["accession"],
+                        "form": filing["form"], "period_end": filing["end"],
+                        "reason": "修订财报已保存；独立 companyfacts 同比契约尚不支持该表单，等待兼容治理，不复用旧普通版作为最新修订"})
+                    continue
                 tried = attempts.get(filing["accession"], 0)
                 if filing["end"] in held_ends or filing["accession"] in seen_accessions:
                     continue

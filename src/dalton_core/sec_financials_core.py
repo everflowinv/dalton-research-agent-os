@@ -76,17 +76,20 @@ def sec_financials_source_hash() -> str:
 def sec_financials_output_schema(*, version: int = 4) -> dict[str, Any]:
     """Closed output schema; v2 and v3 remain byte-compatible."""
 
-    if version not in {2, 3, 4}:
-        raise SecFinancialsError("financial statements contract version must be 2, 3 or 4")
+    if version not in {2, 3, 4, 5}:
+        raise SecFinancialsError("financial statements contract version must be 2, 3, 4 or 5")
     template, contract = sec_financials_contract()
     document = next(item["document"] for item in template["schema_documents"]
                     if item["schema_ref"] == contract["output_schema_ref"])
     result = copy.deepcopy(document)
     line = result["properties"]["filings"]["items"]["properties"]["lines"]["items"]
-    if version == 4:
+    if version >= 4:
         line["properties"]["dimensions"] = {"type": ["object", "null"],
                                               "additionalProperties": {"type": "string"}}
         line["required"].append("dimensions")
+    if version == 5:
+        result["properties"]["filings"]["items"]["properties"]["form"]["enum"] = [
+            "10-Q", "10-K", "10-Q/A", "10-K/A"]
     if version == 2:
         line["properties"].pop("dimension_count")
         line["required"].remove("dimension_count")

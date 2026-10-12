@@ -59,7 +59,7 @@ def _write_owner_only(path: Path, value: Any) -> None:
 
 def _contract_version(governance: ConnectorGovernance) -> int:
     suffix = governance.id.rsplit(":v", 1)
-    if len(suffix) != 2 or suffix[1] not in {"2", "3", "4"}:
+    if len(suffix) != 2 or suffix[1] not in {"2", "3", "4", "5"}:
         raise SecFinancialsRunError("unsupported SEC financial-statements governance version")
     return int(suffix[1])
 
@@ -206,7 +206,7 @@ def run(args: argparse.Namespace) -> dict[str, Any]:
         "schema_version": SUMMARY_SCHEMA_VERSION,
         "created_at": datetime.now(timezone.utc).isoformat(timespec="microseconds"),
         "operation": OPERATION,
-        "transport": "fixture" if args.fixture_file else "public-https",
+        "transport": "local-original-replay" if getattr(args, "replay_request", None) else ("fixture" if args.fixture_file else "public-https"),
         "ticker": args.ticker,
         "cik": args.cik,
         "form": args.form,
@@ -226,7 +226,27 @@ def run(args: argparse.Namespace) -> dict[str, Any]:
         summary["governance_ref"] = governance.id
         summary["governance_hash"] = governance.content_hash
 
-        if args.fixture_file:
+        if getattr(args, "replay_request", None):
+            if args.fixture_file or args.allow_network or contract_version != 5:
+                raise SecFinancialsRunError("cached SEC replay forbids network/fixture mode and requires v5")
+            from contextlib import closing
+            from .readonly_sqlite import connect_read_only
+            from .coverage_mission import CoverageMissionAuthority
+            from .store import DaltonStore
+            from .sec_statement_cached_reparse import validate_request
+            import sqlite3
+            with closing(connect_read_only(state / "core.sqlite")) as connection:
+                connection.row_factory = sqlite3.Row
+                store = DaltonStore.__new__(DaltonStore); store.connection = connection
+                missions = CoverageMissionAuthority.__new__(CoverageMissionAuthority)
+                missions.store, missions.connection = store, connection
+                replay, raw = validate_request(args.replay_request, state, missions, governance)
+                if (args.ticker != replay["original"]["ticker"] or args.form != replay["original"]["form"]
+                        or args.limit != replay["original"]["limit"]):
+                    raise SecFinancialsRunError("cached SEC replay CLI request differs")
+                summary["cached_reparse_proof"] = {"request_hash": replay["content_hash"],
+                    "original": replay["original"], "dispatch_ref": replay["dispatch_ref"]}
+        elif args.fixture_file:
             raw = json.loads(Path(args.fixture_file).expanduser().read_text(encoding="utf-8"))
         else:
             raw = parse_live(args.ticker, args.cik, form=args.form,
@@ -305,6 +325,7 @@ def build_parser() -> argparse.ArgumentParser:
     parser.add_argument("--allow-network", action="store_true")
     parser.add_argument("--fixture-file", default=None,
                         help="replay a captured parse instead of reaching SEC")
+    parser.add_argument("--replay-request", default=None, help="exact authorized local original reparse request")
     parser.add_argument("--quiet", action="store_true")
     return parser
 
@@ -312,8 +333,8 @@ def build_parser() -> argparse.ArgumentParser:
 def main(argv: list[str] | None = None) -> int:
     parser = build_parser()
     args = parser.parse_args(list(argv) if argv is not None else None)
-    if bool(args.fixture_file) == bool(args.allow_network):
-        parser.error("choose --fixture-file or --allow-network")
+    if sum(bool(v) for v in (args.fixture_file, args.allow_network, args.replay_request)) != 1:
+        parser.error("choose exactly one of --fixture-file, --allow-network or --replay-request")
     if not args.ticker and not args.cik:
         parser.error("one of --ticker or --cik is required")
     if not 1 <= args.limit <= MAX_FILINGS:

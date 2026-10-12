@@ -1021,6 +1021,8 @@ class CoverageMissionAuthority:
         self._migrate_plan_json()
         self._migrate_statement_dimension_count()
         self._migrate_statement_dimensions()
+        from .sec_statement_form_schema import migrate
+        migrate(self.connection)
 
     def _migrate_statement_dimensions(self) -> None:
         """Legacy projected contexts remain unknown; new complete identities persist."""
@@ -4103,7 +4105,7 @@ class CoverageMissionAuthority:
                     "WHERE company_ref=? AND accession=?",
                     (row["company_ref"], accession),
                 ).fetchone()
-                if filing is None or filing["form"] != "10-K":
+                if filing is None or filing["form"] not in {"10-K", "10-K/A"}:
                     raise CoverageMissionConflict(
                         "supplemental annual reread lacks exact issuer 10-K authority")
             pointer = cur.execute(
@@ -5251,6 +5253,7 @@ class CoverageMissionAuthority:
     def record_statement_observation(
         self, *, dispatch_id: str, observation: Mapping[str, Any],
         governance_ref: str, governance_hash: str,
+        governance_proof: Mapping[str, Any] | None = None,
     ) -> dict[str, Any]:
         """Store one validated statements observation: its filings and lines.
 
@@ -5282,6 +5285,21 @@ class CoverageMissionAuthority:
         company_ref = row["company_ref"]
         governance_ref = _text(governance_ref, "governance_ref")
         governance_hash = _sha256(governance_hash, "governance_hash")
+        amendments = any(isinstance(f, Mapping) and f.get("form") in {"10-Q/A", "10-K/A"}
+                         for f in filings)
+        if amendments:
+            from .connector_governance import ConnectorGovernance, ConnectorGovernanceError
+            from .sec_financials_core import sec_financials_identity
+            try:
+                approved = ConnectorGovernance(governance_proof or {})
+            except ConnectorGovernanceError as exc:
+                raise CoverageMissionConflict("amended statements require valid v5 approval proof") from exc
+            expected = sec_financials_identity(version=5)
+            if (not approved.approved or approved.id != "connector-governance:sec-financial-statements:v5"
+                    or approved.id != governance_ref or approved.content_hash != governance_hash
+                    or approved.wire["expected_source_hash"] != expected["source_hash"]
+                    or approved.wire["expected_schema_hash"] != expected["schema_hash"]):
+                raise CoverageMissionConflict("amended statements require exact approved v5 contract")
         now = _now()
         prepared: list[dict[str, Any]] = []
         for filing in filings:
@@ -5290,8 +5308,8 @@ class CoverageMissionAuthority:
             accession = _text(filing.get("accession"), "accession")
             if _ACCESSION_RE.fullmatch(accession) is None:
                 raise CoverageMissionValidationError("statement accession is invalid")
-            form = _vocabulary(filing.get("form"), ("10-Q", "10-K"), "form")
-            if form != row["form"]:
+            form = _vocabulary(filing.get("form"), ("10-Q", "10-K", "10-Q/A", "10-K/A"), "form")
+            if form.removesuffix("/A") != row["form"]:
                 raise CoverageMissionValidationError(
                     "statement filing form differs from its dispatch"
                 )
@@ -5499,15 +5517,15 @@ class CoverageMissionAuthority:
             # and answered per form. A company holding four 10-Qs and no 10-K
             # is short of neither if only quarters were wanted.
             "held_by_form": {
-                form: sum(1 for item in held if item["form"] == form)
-                for form in sorted({item["form"] for item in held})
+                form: len({item["report_date"] for item in held if item["form"].removesuffix("/A") == form})
+                for form in sorted({item["form"].removesuffix("/A") for item in held})
             },
             "latest_report_date": max((item["report_date"] for item in held), default=None),
             # Which period each form last reported, so the dispatcher can tell
             # when the next 10-Q or 10-K is due and go and look for it.
             "latest_report_date_by_form": {
-                form: max(item["report_date"] for item in held if item["form"] == form)
-                for form in sorted({item["form"] for item in held})
+                form: max(item["report_date"] for item in held if item["form"].removesuffix("/A") == form)
+                for form in sorted({item["form"].removesuffix("/A") for item in held})
             },
             "last_success_by_form": last_success_by_form,
             "line_count": sum(int(item["line_count"]) for item in held),

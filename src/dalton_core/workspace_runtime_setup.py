@@ -240,7 +240,7 @@ def _connector_records(workspace: Any, actor_ref: str) -> tuple[list[str], list[
     for kind in sorted(kinds):
         # Current consumers require the corrected contracts for these two
         # capabilities.  Every other registered connector remains v1.
-        version = 4 if kind == "sec-financial-statements" else (3 if kind == "sec-company-facts" else 1)
+        version = 5 if kind == "sec-financial-statements" else (3 if kind == "sec-company-facts" else 1)
         identity = (kind, version)
         if identity in seen:
             continue

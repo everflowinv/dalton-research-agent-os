@@ -42,6 +42,13 @@ class StatementContextError(ValueError):
     pass
 
 
+# Exact material-request-only compatibility: no numeric parsing code changes.
+# A future/unknown source SHA uses itself and cannot inherit this old identity.
+_UNIT_MATERIAL_ONLY_SOURCE_ALIAS = {
+    "0e77fa7a3518ff1f77221495dd92b1cc8e65b4fed23d4d75debe58bb42575073": "f45625e3e5fe70f2fc6451224fbef90727d58eac4c5cb937736b721680dd14ff",
+}
+
+
 def normalizer_hash() -> str:
     from .sec_financials_core import sec_financials_schema_hash
     from . import sec_financials_normalise, statement_companyfacts_context, sec_filing_units
@@ -49,7 +56,9 @@ def normalizer_hash() -> str:
                          "source_sha256": hashlib.sha256(Path(sec_financials_normalise.__file__).read_bytes()).hexdigest(),
                          "schema_hash": sec_financials_schema_hash(version=4),
                          "unit_rule_ref": sec_filing_units.RULE_REF,
-                         "unit_source_sha256": hashlib.sha256(Path(sec_filing_units.__file__).read_bytes()).hexdigest(),
+                         "unit_source_sha256": _UNIT_MATERIAL_ONLY_SOURCE_ALIAS.get(
+                             hashlib.sha256(Path(sec_filing_units.__file__).read_bytes()).hexdigest(),
+                             hashlib.sha256(Path(sec_filing_units.__file__).read_bytes()).hexdigest()),
                          "supplementary_source_sha256": hashlib.sha256(Path(statement_companyfacts_context.__file__).read_bytes()).hexdigest()})
 
 

@@ -4323,7 +4323,7 @@ def _normalize_driver(value: Any, name: str, *, schema_version: str) -> dict[str
                 raise ForecastModelValidationError(
                     f"{name}.history[{index}].source_forms must contain 10-Q/10-K")
             normalized_forms = [
-                _one_of(form, ("10-Q", "10-K"),
+                _one_of(form, ("10-Q", "10-K", "10-Q/A", "10-K/A"),
                         f"{name}.history[{index}].source_forms[{form_index}]")
                 for form_index, form in enumerate(forms)
             ]
@@ -4356,7 +4356,7 @@ def _normalize_driver(value: Any, name: str, *, schema_version: str) -> dict[str
                     ),
                     "accession": _text(operand.get("accession"),
                                        f"{operand_name}.accession"),
-                    "form": _one_of(operand.get("form"), ("10-Q", "10-K"),
+                    "form": _one_of(operand.get("form"), ("10-Q", "10-K", "10-Q/A", "10-K/A"),
                                     f"{operand_name}.form"),
                 })
             item["derived_from"] = normalized_operands
@@ -4939,7 +4939,7 @@ class ForecastModelAuthority:
         if isinstance(policy, Mapping) and policy.get("fiscal_year_end") is None and self.connection.execute(
             "SELECT 1 FROM sqlite_master WHERE type='table' AND name='coverage_mission_statement_filings'").fetchone():
             annual_end = self.connection.execute(
-                "SELECT MAX(report_date) FROM coverage_mission_statement_filings WHERE company_ref=? AND form='10-K'", (company_ref,)).fetchone()[0]
+                "SELECT MAX(report_date) FROM coverage_mission_statement_filings WHERE company_ref=? AND form IN ('10-K','10-K/A')", (company_ref,)).fetchone()[0]
             if annual_end:
                 body["forecast_policy"] = {**policy, "fiscal_year_end": annual_end}
         digest = body_hash(body)
@@ -4995,11 +4995,11 @@ class ForecastModelAuthority:
             known_actual = max(wire["history_periods"] + [str(c["period_end"]) for d in wire["drivers"] for c in quarterly_history(d)])
             if self.connection.execute("SELECT 1 FROM sqlite_master WHERE type='table' AND name='coverage_mission_statement_filings'").fetchone():
                 latest_filed = self.connection.execute(
-                    "SELECT MAX(report_date) FROM coverage_mission_statement_filings WHERE company_ref=? AND form IN ('10-Q','10-K')", (company_ref,)).fetchone()[0]
+                    "SELECT MAX(report_date) FROM coverage_mission_statement_filings WHERE company_ref=? AND form IN ('10-Q','10-K','10-Q/A','10-K/A')", (company_ref,)).fetchone()[0]
                 if latest_filed:
                     known_actual = max(known_actual, latest_filed)
                 latest_annual = self.connection.execute(
-                    "SELECT MAX(report_date) FROM coverage_mission_statement_filings WHERE company_ref=? AND form='10-K'", (company_ref,)).fetchone()[0]
+                    "SELECT MAX(report_date) FROM coverage_mission_statement_filings WHERE company_ref=? AND form IN ('10-K','10-K/A')", (company_ref,)).fetchone()[0]
                 if policy.get("fiscal_year_end") != latest_annual:
                     raise ForecastModelValidationError("forecast fiscal year end must bind the latest annual filing")
             from .forecast_assumption_sources import preliminary_quarter

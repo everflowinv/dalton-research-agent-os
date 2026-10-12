@@ -14,6 +14,7 @@ doing identical work.
 from __future__ import annotations
 
 import hashlib
+import threading
 from pathlib import Path
 from typing import Any, Callable, Sequence
 
@@ -55,6 +56,7 @@ class SecFinancialsLauncher(LaneChildLauncher):
             {"10-K": 1} if scheduling_limits is None else scheduling_limits
         )
         self._governance_loader = governance_loader
+        self._reparse_lock = threading.Lock()
 
     @property
     def networked(self) -> bool:
@@ -67,7 +69,7 @@ class SecFinancialsLauncher(LaneChildLauncher):
         return loader(self.governance_path)
 
     def _command(self, *, ticket_dir: Path, ticker: str, form: str,
-                 limit: int) -> list[str]:
+                 limit: int, replay_request_path: str | None = None) -> list[str]:
         command = [
             self.python_executable, "-m", self.CHILD_MODULE,
             "--state-dir", str(self.state_dir),
@@ -77,7 +79,42 @@ class SecFinancialsLauncher(LaneChildLauncher):
         ]
         if self.user_agent:
             command += ["--user-agent", self.user_agent]
+        if replay_request_path is not None:
+            return command + ["--replay-request", replay_request_path]
         return command + list(self.mode_args)
+
+    def start_reparse(self, *, replay_request_path, missions, actor_ref):
+        from .sec_statement_cached_reparse import validate_request, CONTRACT
+        from .sec_financials_cli import _load_governance
+        governance, version = _load_governance(self.governance_path)
+        try:
+            replay, _ = validate_request(replay_request_path, self.state_dir, missions, governance)
+        except ValueError as exc:
+            raise LaneChildRejected(str(exc)) from exc
+        if version != 5 or actor_ref != replay["authorization"]["actor_ref"]:
+            raise LaneChildRejected("cached SEC reparse actor or contract differs")
+        proof = replay["original"]
+        digest = hashlib.sha256(f"{CONTRACT}|{proof['ticket_ref']}".encode()).hexdigest()[:24]
+        ticket_ref = self.TICKET_PREFIX + ":" + digest
+        with self._reparse_lock:
+            path = self._ticket_path(ticket_ref)
+            if path.exists() or path.is_symlink():
+                if path.is_symlink():
+                    raise LaneChildRejected("cached SEC reparse ticket must be regular")
+                prior = self.status(ticket_ref)
+                if (prior.get("transport") != "local-original-replay"
+                        or prior.get("original_artifact_hash") != proof["artifact_hash"]
+                        or prior.get("original_ticket_ref") != proof["ticket_ref"]
+                        or prior.get("governance_hash") != governance.content_hash):
+                    raise LaneChildRejected("cached SEC reparse ticket authority differs")
+                return prior  # Failed, unknown, orphaned or success: never a second child.
+            return self.spawn(digest=digest, record={
+                "ticker": proof["ticker"], "form": proof["form"], "limit": proof["limit"],
+                "actor_ref": actor_ref, "governance_ref": governance.id, "governance_hash": governance.content_hash,
+                "transport": "local-original-replay", "replay_request_hash": replay["content_hash"],
+                "original_ticket_ref": proof["ticket_ref"], "original_artifact_hash": proof["artifact_hash"]},
+                ticker=proof["ticker"], form=proof["form"], limit=proof["limit"],
+                replay_request_path=str(replay_request_path))
 
     def start(self, *, ticker: str, form: str = "10-Q", limit: int = 1,
               actor_ref: str) -> dict[str, Any]:
