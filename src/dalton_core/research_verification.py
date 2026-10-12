@@ -1761,16 +1761,39 @@ class CandidateStagingStore:
         stable_ref: str,
         version: int,
         prior_ref: str | None,
-    ) -> None:
+        exact_reusable: Mapping[str, Any] | None = None,
+    ) -> bool:
         previous = cur.execute(
             f"SELECT version_id,version_number FROM {table} WHERE {stable_column}=? "
             "ORDER BY version_number DESC LIMIT 1",
             (stable_ref,),
         ).fetchone()
+        if exact_reusable is not None:
+            held = cur.execute(
+                f"SELECT * FROM {table} WHERE version_id=?",
+                (exact_reusable["id"],),
+            ).fetchone()
+            if held is not None:
+                # A new verified Figure claim may name the same evidence.
+                # Reuse its current immutable version, never append a copy
+                # or resurrect a superseded historical version. This check
+                # runs under stage's transaction after source/numeric replay.
+                if (
+                    previous is None or previous["version_id"] != held["version_id"]
+                    or held[stable_column] != stable_ref
+                    or held["version_number"] != version
+                    or held["prior_version_id"] != prior_ref
+                    or held["created_at"] != exact_reusable["created_at"]
+                    or held["record_json"] != canonical_json(exact_reusable)
+                    or held["content_hash"] != exact_reusable["content_hash"]
+                ):
+                    raise ResearchVerificationConflict("candidate evidence reuse differs from latest exact version")
+                return True
         expected_version = 1 if previous is None else int(previous["version_number"]) + 1
         expected_prior = None if previous is None else previous["version_id"]
         if version != expected_version or prior_ref != expected_prior:
             raise ResearchVerificationConflict("candidate version chain mismatch")
+        return False
 
     def stage(
         self,
@@ -2272,11 +2295,12 @@ class CandidateStagingStore:
                 result = json.loads(prior["result_json"])
                 self.connection.execute("COMMIT")
                 return {**result, "write_status": "duplicate"}
-            self._check_candidate_chain(
+            reused_evidence = self._check_candidate_chain(
                 self.connection, table="candidate_evidence_versions",
                 stable_column="candidate_evidence_ref",
                 stable_ref=evidence_wire["candidate_evidence_ref"],
                 version=evidence_wire["version"], prior_ref=evidence_wire["prior_version_ref"],
+                exact_reusable=evidence_wire if figure_wire is not None else None,
             )
             self._check_candidate_chain(
                 self.connection, table="candidate_claim_versions",
@@ -2301,10 +2325,11 @@ class CandidateStagingStore:
             self._insert_immutable(self.connection, "candidate_verifications", "verification_id", source_wire["id"], source_wire)
             if numeric_wire is not None:
                 self._insert_immutable(self.connection, "candidate_verifications", "verification_id", numeric_wire["id"], numeric_wire)
-            self.connection.execute(
-                "INSERT INTO candidate_evidence_versions(version_id,candidate_evidence_ref,version_number,prior_version_id,record_json,content_hash,created_at) VALUES(?,?,?,?,?,?,?)",
-                (evidence_wire["id"], evidence_wire["candidate_evidence_ref"], evidence_wire["version"], evidence_wire["prior_version_ref"], canonical_json(evidence_wire), evidence_wire["content_hash"], evidence_wire["created_at"]),
-            )
+            if not reused_evidence:
+                self.connection.execute(
+                    "INSERT INTO candidate_evidence_versions(version_id,candidate_evidence_ref,version_number,prior_version_id,record_json,content_hash,created_at) VALUES(?,?,?,?,?,?,?)",
+                    (evidence_wire["id"], evidence_wire["candidate_evidence_ref"], evidence_wire["version"], evidence_wire["prior_version_ref"], canonical_json(evidence_wire), evidence_wire["content_hash"], evidence_wire["created_at"]),
+                )
             self.connection.execute(
                 "INSERT INTO candidate_claim_versions(version_id,candidate_claim_ref,version_number,prior_version_id,evidence_version_id,record_json,content_hash,created_at) VALUES(?,?,?,?,?,?,?,?)",
                 (claim_wire["id"], claim_wire["candidate_claim_ref"], claim_wire["version"], claim_wire["prior_version_ref"], evidence_wire["id"], canonical_json(claim_wire), claim_wire["content_hash"], claim_wire["created_at"]),
