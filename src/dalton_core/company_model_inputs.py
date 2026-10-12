@@ -84,6 +84,7 @@ NET_INCOME_CONCEPTS: tuple[str, ...] = (
 # cannot produce a table nobody can read.
 MAX_PERIODS = 24
 MIN_CASH_FLOW_QUARTERS = 4
+STATEMENT_IDENTITY_RULE_REF = "filed-input:declared-statement-source-identity:0.1"
 
 
 class ModelInputError(ValueError):
@@ -194,24 +195,59 @@ def _statement_structure_concepts(spec: Mapping[str, Any]) -> set[str]:
     return concepts
 
 
+def _declared_statement_hints(spec: Mapping[str, Any]) -> dict[str, str]:
+    """Only an exact, unambiguous statement already declared by the spec.
+
+    A financial concept may be separately disclosed on income and cash. Do
+    not choose by its label, value, source age or financial role. Conflicting
+    declarations retain the old ambiguity rather than silently select a table.
+    """
+    structure = spec.get("financial_statement_structure")
+    if not isinstance(structure, Mapping):
+        return {}
+    by_ref = {line.get("ref"): line for line in structure.get("lines") or []
+              if isinstance(line, Mapping)}
+    declarations: dict[str, set[str]] = {}
+    for line in by_ref.values():
+        concept, statement = line.get("concept"), line.get("statement")
+        if line.get("kind") == "filed" and concept and statement in {"income", "cash", "balance"}:
+            declarations.setdefault(str(concept), set()).add(statement)
+    for formula in structure.get("formulas") or []:
+        if not isinstance(formula, Mapping):
+            continue
+        concept = formula.get("tie_out_concept")
+        output = by_ref.get(formula.get("output_ref")) or {}
+        statement = output.get("statement")
+        if concept and statement in {"income", "cash", "balance"}:
+            declarations.setdefault(str(concept), set()).add(statement)
+    return {concept: next(iter(statements)) for concept, statements in declarations.items()
+            if len(statements) == 1}
+
+
 def _series_for(
     missions: Any, company_ref: str, concept: str, *, legacy_replay: bool = False,
     non_additive_duration_policy: bool = True,
+    statement_hint: str | None = None,
 ) -> dict[str, Any]:
     """The filed series for one concept, and which statement it came from.
 
-    No statement is passed to the query. Across every company held, a concept
-    appears in exactly one statement, so filtering by a guessed statement could
-    only ever exclude the right answer; and when that stops being true the
-    ambiguity is reported rather than resolved by preference.
+    Legacy callers retain cross-statement ambiguity. A new calculation may
+    use the exact unique statement declared by its already verified structure;
+    every original line/context/value/unit binding and series gate still runs.
     """
 
     lines = missions.statement_series_lines(company_ref, concept)
     if not lines:
         return {"status": NOT_FOUND, "statement": None, "series": None}
     statements = sorted({str(row["statement"]) for row in lines})
+    statement_scope = None
     if len(statements) > 1:
-        return {"status": AMBIGUOUS, "statement": statements, "series": None}
+        if statement_hint not in statements:
+            return {"status": AMBIGUOUS, "statement": statements, "series": None}
+        statement_scope = {"rule_ref": STATEMENT_IDENTITY_RULE_REF,
+                           "statement": statement_hint, "observed_statements": statements}
+        lines = [line for line in lines if line["statement"] == statement_hint]
+        statements = [statement_hint]
     # The label must come from a row that is not a breakdown. Taking the last
     # row of any kind put "EMEA" on Accenture's total revenue -- the figures
     # were the totals and the name was a geography, which is worse than an
@@ -239,6 +275,7 @@ def _series_for(
                            "content_hash": content_hash(evidence_rows)}
     return {
         **({"source_evidence": source_evidence} if source_evidence is not None else {}),
+        **({"statement_scope": statement_scope} if statement_scope is not None else {}),
         "status": FILED, "statement": statements[0],
         "label": (reported[-1]["label"] if reported else concept),
         "series": series,
@@ -526,6 +563,7 @@ def build_model_inputs(
         if structure_definition.get("schema_version") in UPGRADEABLE_STRUCTURE_VERSIONS:
             coverage_candidates = set(coverage_concepts()) - set(concepts)
 
+    statement_hints = _declared_statement_hints(spec)
     filed: dict[str, dict[str, Any]] = {}
     for concept in sorted(concepts):
         filed[concept] = _series_for(
@@ -535,6 +573,7 @@ def build_model_inputs(
             # Outer company specs already reached 0.4 while their structures
             # were still 0.3, so only inner 0.4 and later opt into this correction.
             non_additive_duration_policy=non_additive_duration_policy,
+            statement_hint=statement_hints.get(concept),
         )
     for concept in sorted(coverage_candidates):
         entry = _series_for(
@@ -589,6 +628,8 @@ def build_model_inputs(
             "cells": {},
             "gaps": [],
         }
+        if entry.get("statement_scope") is not None:
+            line["statement_scope"] = entry["statement_scope"]
         if statement_structure_bound:
             line.update({"duration_facts": [], "ambiguous_periods": []})
             if entry.get("source_evidence") is not None:
@@ -679,6 +720,8 @@ def build_model_inputs(
                 missions, company_ref, set(concepts)),
         },
     }
+    if any(line.get("statement_scope") for line in filed_lines):
+        result["statement_identity_rule_ref"] = STATEMENT_IDENTITY_RULE_REF
     if cost_template is not None:
         result["cost_driver_template"] = dict(cost_template)
     identities=identity_input_lines(missions,spec)
