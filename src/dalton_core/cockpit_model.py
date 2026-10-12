@@ -2618,6 +2618,16 @@ class CockpitModel:
                     authority.verify_child(scheduler, work)
                 except (ValueError, KeyError, TypeError, sqlite3.Error, CoverageMissionError) as exc:
                     raise CockpitModelError("terminal memo maintenance authority differs: " + str(exc)) from exc
+            from .openclaw_model_adapter import OpenClawModelAdapterError
+            from .investment_memo_profile_maintenance import MARKER as MEMO_PROFILE_MARKER, Authority as MemoProfileAuthority
+            if MEMO_PROFILE_MARKER in work.metadata.get("request_id", ""):
+                authority = getattr(self, "_memo_profile_maintenance_authority", None)
+                if not isinstance(authority, MemoProfileAuthority):
+                    raise CockpitModelError("profile memo maintenance requires the live owner authority")
+                try:
+                    authority.verify_child(scheduler, work)
+                except (ValueError, KeyError, TypeError, OSError, sqlite3.Error, CoverageMissionError, OpenClawModelAdapterError) as exc:
+                    raise CockpitModelError("profile memo maintenance authority differs: " + str(exc)) from exc
             if _structured_output_repair is not None:
                 _validate_structured_output_repair_authority(
                     scheduler, _structured_output_repair, work, self.config,

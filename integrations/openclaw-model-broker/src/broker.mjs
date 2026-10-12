@@ -328,6 +328,20 @@ export class ModelBroker {
 
   async handle(input) {
     const request = validateRequest(input, this.config.maxFrameBytes);
+    // Authenticator already checked the frame. This read has no journal claim,
+    // capacity reservation, provider call or model result, including on a miss.
+    if (request.readProfileLimits === true) {
+      const profile = this.config.profiles.get(request.profileId);
+      const selected = profile?.model === request.model ? profile : null;
+      const body = {
+        schemaVersion: "broker-profile-limits:0.1", brokerVersion: BROKER_VERSION,
+        runtimeVersion: this.runtime.version, agentId: this.config.dedicatedAgentId, invocationId: request.invocationId,
+        profileId: request.profileId, model: request.model, requestHash: contentHash(request),
+        available: selected !== null,
+        limits: selected === null ? null : { maxTokens: selected.maxTokens, timeoutMs: selected.timeoutMs },
+      };
+      return { ...body, contentHash: contentHash(body) };
+    }
     // replayOnly is an authenticated transport instruction, not part of the
     // provider request identity.  It can read a durable journal result but
     // can never create a journal claim or call the host model on a miss.

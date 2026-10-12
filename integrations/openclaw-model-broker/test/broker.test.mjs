@@ -1031,3 +1031,19 @@ test("plugin JSON timeout schema equals the request and runtime bound", async ()
   assert.equal(schema.minimum, 1);
   assert.equal(schema.maximum, MAX_COMPLETION_TIMEOUT_MS);
 });
+
+test("active profile limits read has no journal, capacity or provider side effect", async () => {
+  let calls = 0;
+  const journal = { get() { throw new Error("journal read forbidden"); }, claim() { throw new Error("journal claim forbidden"); } };
+  const broker = new ModelBroker({version:"test",llm:{complete(){calls++;throw new Error("provider forbidden");}}},config(),{journal});
+  const input=request({readProfileLimits:true});
+  const result=await broker.handle(input);
+  assert.equal(result.available,true);
+  assert.deepEqual(result.limits,{maxTokens:1000,timeoutMs:500});
+  assert.equal(result.requestHash,contentHash(validateRequest(input,4096)));
+  const {contentHash:hash,...body}=result;
+  assert.equal(hash,contentHash(body));
+  assert.equal(calls,0);assert.equal(broker.inFlight.size,0);
+  const absent=await broker.handle(request({readProfileLimits:true,model:"other/model"}));
+  assert.equal(absent.available,false);assert.equal(absent.limits,null);assert.equal(calls,0);
+});

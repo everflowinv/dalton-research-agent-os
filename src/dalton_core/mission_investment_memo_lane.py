@@ -83,6 +83,7 @@ def company_signature(frozen: Mapping[str, Any], launcher: Any) -> str:
         # and paid request identities do not depend on this scheduling marker.
         "group_maintenance_contract": GROUP_MAINTENANCE_REF,
         "terminal_maintenance_contract": TERMINAL_MAINTENANCE_REF,
+        "profile_maintenance_contract": "investment-memo-profile-capability-maintenance:0.1",
     }
     parts = [content_hash(payload), verifier_provider_contract_fingerprint(
         "investment_memo_verifier")]

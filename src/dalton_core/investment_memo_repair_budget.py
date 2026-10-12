@@ -104,7 +104,11 @@ class MemoRepairBudget:
                 call = cached
             else:
                 from .investment_memo_terminal_maintenance import MARKER,call_existing
-                call = call_existing(self,kwargs) if MARKER in kwargs.get('request_id','') else self.model.call(**kwargs)
+                from .investment_memo_profile_maintenance import MARKER as PROFILE_MARKER,call_existing as profile_call
+                if PROFILE_MARKER in kwargs.get('request_id',''):
+                    call=profile_call(self,kwargs)
+                else:
+                    call = call_existing(self,kwargs) if MARKER in kwargs.get('request_id','') else self.model.call(**kwargs)
         except BaseException as exc:
             self.accounted_micros += reserved
             from .cockpit_model import CockpitModelError
@@ -114,7 +118,9 @@ class MemoRepairBudget:
             if self.macro_error is not None:
                 raise
             from .investment_memo_timeout_recovery import recover
-            call = recover(self, exc, kwargs)
+            from .investment_memo_profile_maintenance import recover as profile_recover
+            call = profile_recover(self, exc, kwargs)
+            if call is None:call = recover(self, exc, kwargs)
             if call is None:
                 from .investment_memo_terminal_maintenance import recover as terminal_recover
                 call = terminal_recover(self, exc, kwargs)

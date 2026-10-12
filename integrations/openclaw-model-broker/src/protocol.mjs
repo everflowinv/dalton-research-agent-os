@@ -14,7 +14,7 @@ const REQUIRED_REQUEST_KEYS = new Set([
   "maxTokens",
   "timeoutMs",
 ]);
-const OPTIONAL_REQUEST_KEYS = new Set(["replayOnly", "requiredControls", "queueWaitMs", "controls"]);
+const OPTIONAL_REQUEST_KEYS = new Set(["replayOnly", "readProfileLimits", "requiredControls", "queueWaitMs", "controls"]);
 const REQUEST_KEYS = new Set([...REQUIRED_REQUEST_KEYS, ...OPTIONAL_REQUEST_KEYS]);
 const REQUIRED_CONTROL_KEYS = new Set([
   "maxInputTokens",
@@ -242,6 +242,12 @@ export function validateRequest(input, maxFrameBytes) {
   if ("replayOnly" in input && typeof input.replayOnly !== "boolean") {
     throw new ProtocolError("INVALID_REQUEST", "replayOnly must be boolean");
   }
+  if ("readProfileLimits" in input && typeof input.readProfileLimits !== "boolean") {
+    throw new ProtocolError("INVALID_REQUEST", "readProfileLimits must be boolean");
+  }
+  if (input.readProfileLimits === true && (input.replayOnly === true || input.requiredControls !== undefined)) {
+    throw new ProtocolError("INVALID_REQUEST", "profile limits read cannot request replay or provider controls");
+  }
   if ("queueWaitMs" in input && (!Number.isSafeInteger(input.queueWaitMs) || input.queueWaitMs < 0)) {
     throw new ProtocolError("INVALID_REQUEST", "queueWaitMs must be a non-negative safe integer");
   }
@@ -273,6 +279,7 @@ export function validateRequest(input, maxFrameBytes) {
       requiredControls: validateRequiredControls(input.requiredControls, maxTokens),
     }),
     ...(input.replayOnly === true ? { replayOnly: true } : {}),
+    ...(input.readProfileLimits === true ? { readProfileLimits: true } : {}),
     ...(input.queueWaitMs !== undefined ? { queueWaitMs: input.queueWaitMs } : {}),
   });
   if (Buffer.byteLength(canonicalJson(request), "utf8") > maxFrameBytes) {

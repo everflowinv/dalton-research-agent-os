@@ -482,6 +482,11 @@ class MemoMacroAccounting:
                     raise ValueError('memo group maintenance was consumed under another mission')
                 return {**kwargs,'request_id':permission['entry']['request_id'],
                         'prompt':permission['prompt']}, permission
+            from .investment_memo_profile_maintenance import persisted_entry as profile_entry
+            profile=profile_entry(self,connection,index)
+            if profile is not None:
+                entry,proof=profile
+                return {**kwargs,'request_id':entry['request_id'],'prompt':proof['prompt']}, None
             from .investment_memo_terminal_maintenance import persisted_entry
             terminal=persisted_entry(self,connection,index)
             if terminal is not None:
@@ -502,7 +507,10 @@ class MemoMacroAccounting:
                 if entry['role']=='semantic':
                     # Old authority is not borrowed into a different mission.
                     if not self._free_current(work,reader.formal_result(work.id)):
-                        raise ValueError('memo old semantic answer cannot authorize a new mission or failed call')
+                        from .investment_memo_profile_maintenance import qualify as capability_qualification
+                        proof=capability_qualification(self,None,connection)
+                        if proof['parent']['work_ref']!=work.id or proof['required_limits']['failure_code']!='TIMEOUT':
+                            raise ValueError('memo old semantic answer cannot authorize a new mission or failed call')
                     return {**kwargs,'request_id':entry['request_id'],'prompt':work.question}, None
         return kwargs, None
 
@@ -633,6 +641,9 @@ class MemoMacroAccounting:
                 from .investment_memo_terminal_maintenance import persisted_entry
                 terminal=persisted_entry(self,connection)
                 terminal_entries=[] if terminal is None else [terminal[0]]
+                from .investment_memo_profile_maintenance import persisted_entry as profile_entry
+                profile=profile_entry(self,connection)
+                if profile is not None:terminal_entries.append(profile[0])
                 entry=next((e for e in maintenance+terminal_entries+self._legacy_entries(connection,check_growth=False) if e['request_id']==kwargs['request_id']),None)
                 if entry is None:
                     return None
