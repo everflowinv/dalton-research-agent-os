@@ -395,8 +395,62 @@ class DeepGateAccounting:
             for grant in self.grants.values():self._verify_grant(connection,router,budget,grant,history)
         return min(int(round(g['limits']['run']['max_cost_usd']*1_000_000))for g in self.grants.values())
 
-    def _allowed_unknowns(self):
-        return {ref for g in self.grants.values()for ref in g['allowed_unknown_work_refs']}
+    def _allowed_unknowns(self, connection=None, router=None, budget=None, *, mission=None):
+        allowed = {ref for g in self.grants.values()for ref in g['allowed_unknown_work_refs']}
+        if mission is None or self.consumer is None:
+            return allowed
+        # A later, valid success closes a group without erasing its earlier
+        # TIMEOUT bill. This proof admits that retained bill, not another call
+        # or another grant for the successful group.
+        from .deep_insight_gate_budget_grant import policy_history, grant_proof
+        from .deep_insight_gate_draft import parse_group_output, group_contract, GateDraftRefused
+        from .draft_contract_repair import violations_of
+        row = connection.execute(f'SELECT * FROM {CONSUMERS} WHERE consumer_ref=?',
+                                 (self.consumer['ref'],)).fetchone()
+        if row is None or _body(row) != {k:v for k,v in self.consumer.items() if k!='ref'}:
+            raise ValueError('deep-gate completed group current consumer differs')
+        if not self._complete(connection, router, budget):
+            return allowed
+        history = None
+        proofs = []
+        for entry in self.entries:
+            matches = works(connection, entry)
+            if not matches or matches[-1][2] is None or matches[-1][2]['terminal_state'] != 'succeeded':
+                continue
+            work, authority, formal = matches[-1]
+            bill = billed_work(connection, router, budget, authority, formal)
+            if (bill['unknown_fee_retained'] or work.metadata.get('mission_version_ref') != mission['id']
+                    or bill['mission_hashes'] != [mission['content_hash']]):
+                continue
+            fields = self.consumer['group_inputs'][entry['group']]
+            raw = formal['result_envelope']['outputs'].get('text')
+            if violations_of(raw, group_contract(entry['group'], material=fields['material'])):
+                continue
+            try:
+                parse_group_output(raw, group=entry['group'], questions=fields['questions'], material=fields['material'])
+            except GateDraftRefused:
+                continue
+            for old_work, old_authority, old_formal in matches[:-1]:
+                old_bill = billed_work(connection, router, budget, old_authority, old_formal)
+                if not old_bill['unknown_fee_retained']:
+                    continue
+                if (old_work.metadata.get('mission_version_ref') != mission['id']
+                        or old_bill['mission_hashes'] != [mission['content_hash']]):
+                    continue
+                if history is None:
+                    history = policy_history(self.model)
+                try:
+                    proof = grant_proof(scope_ref=self.ref, entry=entry, parent=old_authority,
+                                        formal=old_formal, bill=old_bill, history=history)
+                except ValueError:
+                    continue
+                allowed.add(old_work.id)
+                proofs.append({'group':entry['group'], 'successful_work_ref':work.id,
+                    'successful_work_hash':authority['work_order_hash'], 'successful_formal_hash':formal['content_hash'],
+                    'retained_timeout_work_ref':old_work.id, 'timeout_proof_hash':proof['content_hash']})
+        if self.last is not None:
+            self.last['completed_group_retained_timeout_proofs'] = proofs
+        return allowed
 
     def register(self, *, role, group, kwargs):
         if role not in {'shape','numbers','rubric','verifier'}:
@@ -535,6 +589,7 @@ class DeepGateAccounting:
                                                (self.ref,MAX_REQUESTS+1)).fetchall()]
             if len(entries)>MAX_REQUESTS:raise ValueError('deep-gate request index exceeds bounded18')
             _active_attempt(c,work,attempt_number,self.model.clock())
+            allowed_unknowns = self._allowed_unknowns(c,router,budget,mission=mission)
             total=0;found=False;seen=set()
             for entry in entries:
                 for saved,authority,formal in works(c,entry):
@@ -542,7 +597,7 @@ class DeepGateAccounting:
                     seen.add(saved.id)
                     if saved.id!=work.id:
                         bill=billed_work(c,router,budget,authority,formal)
-                        if bill['unknown_fee_retained'] and saved.id not in self._allowed_unknowns():
+                        if bill['unknown_fee_retained'] and saved.id not in allowed_unknowns:
                             raise ValueError('deep-gate previous terminal unknown forbids a new paid attempt')
                         total+=bill['accounted_micros'];continue
                     found=True
@@ -588,9 +643,12 @@ class DeepGateAccounting:
                 raise ValueError('deep-gate original run budget refuses another paid attempt')
             return {'accounted_micros':total,'reserved_next_micros':reserved_micros,'run_ceiling_micros':cap}
 
-    def before_paid(self, *, run_micros, next_call_micros, retained_future_micros=0):
+    def before_paid(self, *, run_micros, next_call_micros, retained_future_micros=0, mission=None):
         _,_,proof=self.snapshot()
-        allowed=self._allowed_unknowns()
+        from .planner_paid_output_recovery import _authority_connection, recovery_readers
+        with _authority_connection(self.model.scheduler_db) as c, recovery_readers(
+                self.model.config['model_router_db'],self.model.config['budget_db'],now=self.model.clock()) as (router,budget):
+            allowed=self._allowed_unknowns(c,router,budget,mission=mission)
         if set(proof['unknown_work_refs'])-allowed:
             raise ValueError('deep-gate systemic unknown fee stops this round; no new request authorized')
         if not proof['cost_complete']:

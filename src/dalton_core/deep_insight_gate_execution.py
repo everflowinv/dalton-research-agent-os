@@ -84,7 +84,7 @@ class GateExecution:
         future=self.future_groups*int(round(local.budget_for('deep_insight_gate')['max_cost_usd']*1_000_000))
         if purpose!='deep_insight_gate_verifier':future+=self.verifier_micros
         try:self.accounting.before_paid(run_micros=self.run_micros,next_call_micros=ceiling,
-                                        retained_future_micros=future)
+                                        retained_future_micros=future,mission=mission)
         except ValueError as exc:self._stop(str(exc))
         if self.quiesce is not None:self.quiesce.checkpoint()
         def guard(*,work,attempt_number,reserved_micros,mission_binding):
