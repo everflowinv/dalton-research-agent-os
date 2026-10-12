@@ -82,3 +82,28 @@ class FailedInputTests(unittest.TestCase):
             guard.unchanged_failure(self.f.root,self.binding(execution={'owner_epoch':'new'}))
         self.assertEqual(len(self.f.adapter.served),before)
         self.assertIsNotNone(guard.unchanged_failure(self.f.root,self.binding(execution={'owner_epoch':0})))
+
+    def test_actual_consensus_staleness_clock_does_not_wake_but_source_date_does(self):
+        p=copy.deepcopy(self.f.pack)
+        p['json']['numbers']={'consensus':{'vendor_as_of':'2026-10-01','source_ref':'vendor:exact:1',
+            'staleness':{'reference_date':'2026-10-11','vendor_days_old':10,'report_days_old':12,'stale':False,'vendor_as_of':'2026-10-01'}}}
+        # Actual production N tag format resolves period/value, not runtime age.
+        p['tags']['N999']='pack-json:/numbers/consensus/eps'
+        p['json']['numbers']['consensus']['eps']='4.2'
+        p['json'].setdefault('number_tags',{})['N999']={'pointer':'/numbers/consensus/eps','value':'4.2','display':'4.2'}
+        one=self.binding(p)
+        p['json']['numbers']['consensus']['staleness'].update(reference_date='2026-10-12',vendor_days_old=11,report_days_old=13,stale=True)
+        self.assertEqual(one['content_hash'],self.binding(p)['content_hash'])
+        p['json']['numbers']['consensus']['staleness']['vendor_as_of']='2026-10-02'
+        self.assertNotEqual(one['content_hash'],self.binding(p)['content_hash'])
+
+    def test_supported_mapping_tags_ignore_declared_runtime_fields_but_bind_source_hash(self):
+        p=copy.deepcopy(self.f.pack)
+        p['tags']['P999']={'ref':'doc-passage:source:1:0-4:000000000000','text':'held',
+            'document_sha256':'1'*64,'as_of':'2026-10-01','generated_at':'first','numbers_hash':'first'}
+        one=self.binding(p);p['tags']['P999'].update(generated_at='second',numbers_hash='second')
+        self.assertEqual(one['content_hash'],self.binding(p)['content_hash'])
+        p['tags']['P999']['document_sha256']='2'*64
+        self.assertNotEqual(one['content_hash'],self.binding(p)['content_hash'])
+        p['tags']['P999']['document_sha256']='1'*64;p['tags']['P999']['as_of']='2026-10-02'
+        self.assertNotEqual(one['content_hash'],self.binding(p)['content_hash'])

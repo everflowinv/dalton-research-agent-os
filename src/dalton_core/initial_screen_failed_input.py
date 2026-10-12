@@ -45,18 +45,21 @@ def input_binding(mission,company,pack,prior,source_bindings,*,reopen=None,execu
         if not entry:continue
         ref=entry['ref']
         if ref.startswith(nonresearch):continue
-        semantic_entry={key:value for key,value in entry.items() if key!='tag'}
+        semantic_entry={key:value for key,value in entry.items()
+                        if key not in {'tag','generated_at','built_at','watermark','numbers_hash'}}
         rows.append({'ref':ref,'entry_hash':content_hash(semantic_entry)})
     rows=sorted(rows,key=lambda row:(row['ref'],row['entry_hash']))
-    def without_clock(value):
+    def without_clock(value, path=()):
         if isinstance(value,dict):
-            return {key:without_clock(item) for key,item in value.items()
-                    if key not in {'as_of','generated_at','built_at','watermark'}}
-        if isinstance(value,list):return [without_clock(item) for item in value]
+            return {key:without_clock(item,(*path,key)) for key,item in value.items()
+                    if key not in {'as_of','generated_at','built_at','watermark'}
+                    and not (path==('numbers','consensus','staleness') and
+                             key in {'reference_date','vendor_days_old','report_days_old','stale'})}
+        if isinstance(value,list):return [without_clock(item,path) for item in value]
         return value
     # Tag metadata is already covered by the actual resolved rows; numbers_hash
     # includes live prices and generation times and is not a research input.
-    structured={key:without_clock(value) for key,value in (pack.get('json') or {}).items()
+    structured={key:without_clock(value,(key,)) for key,value in (pack.get('json') or {}).items()
                 if key not in {'as_of','built_at','watermark','number_tags','passage_tags','numbers_hash'}}
     if isinstance(structured.get('numbers'),dict):
         structured['numbers']={key:value for key,value in structured['numbers'].items()
