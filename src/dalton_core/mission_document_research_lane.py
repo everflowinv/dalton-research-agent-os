@@ -2258,13 +2258,27 @@ class MissionDocumentResearchCoordinator:
             active = None if latest is None else self.launcher.status(latest['ticket_ref'])
             if active is None or active['status']!='running':
                 from .directed_numeric_measure_reconciliation import replay_candidate
+                from .directed_numeric_promotion_reconciliation import replay_candidate as promotion_candidate, failure as promotion_failure
                 # Older unrelated failed admissions must not permanently
                 # hide a settled numeric maintenance case behind the batch cap.
                 local_admissions=[a for a in admissions if a.get('numeric_authority') is not None and
                     self.store.connection.execute("SELECT 1 FROM mission_document_numeric_results WHERE admission_ref=? AND json_extract(record_json,'$.measure_conflict_contract')='directed-numeric-measure-conflict:0.1'",(a['id'],)).fetchone() is not None]
+                from .directed_numeric_local_reconciliation import TABLE as local_authorizations
+                promotion_admissions=[]
+                if self.store.connection.execute("SELECT 1 FROM sqlite_master WHERE type='table' AND name=?",(local_authorizations,)).fetchone():
+                    recent=self.store.connection.execute('SELECT admission_ref FROM '+local_authorizations+' ORDER BY created_at DESC LIMIT ?',
+                        (MAX_RECOVERY_EVALUATIONS_PER_TICK,)).fetchall()
+                    for held in recent:
+                        admission=by_ref.get(held['admission_ref'])
+                        if admission is None or admission.get('numeric_authority') is None:continue
+                        try:
+                            if promotion_failure(self.store.connection,admission) is not None:promotion_admissions.append(admission)
+                        except Exception as exc:
+                            self._isolate_admission_error(holds,admission,exc,errors)
+                local_admissions=list({a['id']:a for a in [*promotion_admissions,*local_admissions]}.values())
                 for admission in local_admissions[:MAX_RECOVERY_EVALUATIONS_PER_TICK]:
                     try:
-                        candidate=replay_candidate(self,admission)
+                        candidate=promotion_candidate(self,admission) or replay_candidate(self,admission)
                         if candidate is None:continue
                         ticket=self.launcher.replay_completed_models(admission_ref=admission['id'],
                             admission_hash=admission['content_hash'],proof=candidate)
@@ -2275,7 +2289,7 @@ class MissionDocumentResearchCoordinator:
                         continue
                     pointer={'ticket_ref':ticket['id'],'admission_ref':admission['id'],'admission_hash':admission['content_hash']}
                     write_owner_only(self.latest_path,{**pointer,'content_hash':content_hash(pointer)})
-                    return {'status':'resumed','reason':'source_measure_local_reconciliation',**pointer}
+                    return {'status':'resumed','reason':('canonical_promotion_local_reconciliation' if 'source_local_failure' in candidate else 'source_measure_local_reconciliation'),**pointer}
         if latest is not None and latest["admission_ref"] in by_ref:
             admission = by_ref[latest["admission_ref"]]
             if latest["admission_hash"] != admission["content_hash"]:
