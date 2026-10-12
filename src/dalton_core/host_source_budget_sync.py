@@ -121,7 +121,24 @@ def proposal(state, manager, desired, *, plan_path=None):
     config = _private_json(config_path)
     if Path(config['core_db']).resolve() != (Path(state) / 'core.sqlite').resolve():
         raise settings.HostSettingsError('来源预算配置属于另一项目')
-    path, plan = _selection(state) if plan_path is None else (Path(plan_path), load_discovery_plan(plan_path))
+    if plan_path is None:
+        path, plan = _selection(state)
+    else:
+        path = Path(plan_path)
+        # A blank writer receives this conventional path before a mission
+        # creates any plan. Only that absent default is an unconfigured source;
+        # explicit paths and existing/broken selectors remain strict.
+        from .macos_launchagent import ALPHAENGINE_PLAN_SELECTOR, _alphaengine_discovery_plan
+        default = (Path(state) / 'discovery-plans' / 'us-it-services-alphaengine-v1.json').resolve()
+        selector = Path(state) / 'discovery-plans' / ALPHAENGINE_PLAN_SELECTOR
+        missing_default = (not path.exists() and not path.is_symlink()
+                           and path.resolve() == default)
+        selected = _alphaengine_discovery_plan(Path(state)) if missing_default else None
+        if (missing_default and selected.resolve() == default
+                and not selector.exists() and not selector.is_symlink()):
+            path, plan = None, None
+        else:
+            plan = load_discovery_plan(path)
     owner = config.get('alphaengine_owner_call_cap')
     if owner is None and plan is None:
         return None  # An installation without this source gains no authority.

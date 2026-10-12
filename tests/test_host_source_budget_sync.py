@@ -104,3 +104,58 @@ class SourceBudgetSyncTests(unittest.TestCase):
         sync.apply(self.server,self.manager,self.change(260))
         with patch.object(sync,'_previous_cap',side_effect=AssertionError('history should not be read')):
             self.assertFalse(sync.pending(self.state,self.manager,self.desired))
+
+    def test_real_blank_writer_syncs_default_cap_without_creating_mission_or_plan(self):
+        from dalton_core.writer_server import WriterServer
+        from dalton_core.store import DaltonStore
+        from dalton_core.coverage_mission import CoverageMissionAuthority
+        self.planpath.unlink()
+        store=DaltonStore(self.state/'core.sqlite');self.addCleanup(store.close)
+        missions=CoverageMissionAuthority(store)
+        server=object.__new__(WriterServer);server.db_path=self.state/'core.sqlite'
+        server._store=store;server._coverage_mission=missions
+        server._discovery_plan_path=str(self.planpath);server._source_discovery=None
+        server._alphaengine_owner_call_cap=130
+        desired=self.change(260)
+        before=store.connection.total_changes
+        with patch.object(WriterServer,'_install_discovery_plans',side_effect=AssertionError('no source plan to install')):
+            sync.apply(server,self.manager,desired)
+            sync.apply(server,self.manager,desired)
+        self.assertEqual(server._alphaengine_owner_call_cap,260)
+        self.assertEqual(json.loads(self.service.read_text())['alphaengine_owner_call_cap'],260)
+        self.assertFalse(sync.pending(self.state,self.manager,desired))
+        self.assertFalse(self.planpath.exists());self.assertIsNone(server._source_discovery)
+        self.assertEqual(store.connection.total_changes,before)
+        self.assertEqual(store.connection.execute('SELECT COUNT(*) FROM coverage_mission_versions').fetchone()[0],0)
+        self.assertEqual(sync._receipt(self.state)['plan_hash'],None)
+
+    def test_explicit_missing_plan_refuses_before_cap_or_receipt_write(self):
+        self.planpath.unlink();self.server._discovery_plan_path=str(self.planpath.with_name('explicit-custom.json'))
+        old=self.service.read_bytes()
+        with self.assertRaises(FileNotFoundError):sync.apply(self.server,self.manager,self.change(260))
+        self.assertEqual(self.service.read_bytes(),old);self.assertFalse((self.state/sync.RECEIPT).exists())
+        self.assertEqual(self.server._alphaengine_owner_call_cap,130)
+
+    def test_damaged_selector_refuses_even_with_missing_default(self):
+        from dalton_core.macos_launchagent import ALPHAENGINE_PLAN_SELECTOR
+        self.planpath.unlink();selector=self.planpath.parent/ALPHAENGINE_PLAN_SELECTOR
+        selector.write_text('{invalid')
+        old=self.service.read_bytes()
+        with self.assertRaises(ValueError):sync.apply(self.server,self.manager,self.change(260))
+        self.assertEqual(self.service.read_bytes(),old);self.assertFalse((self.state/sync.RECEIPT).exists())
+
+    def test_approved_selector_missing_original_plan_refuses(self):
+        from dalton_core.macos_launchagent import ALPHAENGINE_PLAN_SELECTOR
+        body={'schema_version':'alphaengine-discovery-plan-selection-0.1','id':'discovery-plan-selection:fixture',
+              'status':'approved','source_ref':self.plan['source_ref'],'plan_ref':self.plan['id'],
+              'plan_hash':self.plan['content_hash'],'plan_path':self.planpath.name}
+        settings._write(self.planpath.parent/ALPHAENGINE_PLAN_SELECTOR,{**body,'content_hash':content_hash(body)})
+        self.planpath.unlink();old=self.service.read_bytes()
+        with self.assertRaises(FileNotFoundError):sync.apply(self.server,self.manager,self.change(260))
+        self.assertEqual(self.service.read_bytes(),old);self.assertFalse((self.state/sync.RECEIPT).exists())
+
+    def test_broken_default_symlink_is_not_an_unconfigured_source(self):
+        self.planpath.unlink();self.planpath.symlink_to(self.planpath.parent/'missing.json')
+        old=self.service.read_bytes()
+        with self.assertRaises(FileNotFoundError):sync.apply(self.server,self.manager,self.change(260))
+        self.assertEqual(self.service.read_bytes(),old);self.assertFalse((self.state/sync.RECEIPT).exists())
