@@ -2132,10 +2132,13 @@ def _retry_page(state_dir, *, deadline, recovery_lane=False):
         # Cheap indexed event preselection is not authority. Every selected
         # candidate is re-read and checked by the original strong recovery.
         clause = " AND latest_status IN ('exhausted','timeout')"
-        queue_shape = ("EXISTS (SELECT 1 FROM material_request_events e WHERE e.request_id=r.request_id "
+        queue_shape = ("(EXISTS (SELECT 1 FROM material_request_events e WHERE e.request_id=r.request_id "
                        "AND e.event_kind='attempt' AND json_extract(e.record_json,'$.source')='sec_edgar' "
                        "AND json_extract(e.record_json,'$.outcome')='not_connected' "
-                       "AND json_extract(e.record_json,'$.detail')=?)")
+                       "AND json_extract(e.record_json,'$.detail')=?) OR EXISTS ("
+                       "SELECT 1 FROM material_targeted_queries q JOIN material_targeted_query_events t ON t.query_id=q.query_id "
+                       "WHERE q.request_id=r.request_id AND q.source_ref='source:sec-edgar' "
+                       "AND t.status='refused' AND json_extract(t.record_json,'$.kind')='no_spec'))")
         # The same slow queue proof must not also occupy the normal-first
         # turn. Legacy-shaped requests still get ordinary retry_due checks in
         # their queue turn if strong special recovery does not qualify.

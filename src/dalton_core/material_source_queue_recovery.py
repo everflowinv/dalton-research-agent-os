@@ -145,6 +145,9 @@ def candidate(state, view, *, now):
 
 def recover(state, view, *, now):
     """Atomically append one opening. Old attempts and spend are never edited."""
+    from .material_sec_config_recovery import recover as recover_local_config
+    restored=recover_local_config(state,view,now=now)
+    if restored is not None:return restored
     from . import material_requests as mr
     proof=candidate(state,view,now=now)
     if proof is None:return None
@@ -169,13 +172,14 @@ def carried_attempts(events, latest_open_index, *, request_ref=None, request_has
     if latest_open_index < 0: return []
     marker=(events[latest_open_index].get('source_queue_recovery')or{})
     if not marker: return []
-    if (marker.get('rule_ref')!=RULE_REF or marker.get('source')!='sec_edgar'
+    from .material_sec_config_recovery import RULE_REF as CONFIG_RULE_REF
+    if (marker.get('rule_ref')not in (RULE_REF,CONFIG_RULE_REF) or marker.get('source')!='sec_edgar'
             or marker.get('content_hash')!=content_hash({k:v for k,v in marker.items()if k!='content_hash'})):
         raise ValueError('source queue recovery marker is invalid')
     if (request_ref is not None and marker.get('request_ref')!=request_ref
             or request_hash is not None and marker.get('request_hash')!=request_hash
             or latest_open_index==0
-            or events[latest_open_index-1].get('event_id')!=marker.get('closed_event_id')):
+            or events[latest_open_index-1].get('event_id')!=marker.get('closed_event_id'if marker.get('rule_ref')==RULE_REF else'parent_last_event_id')):
         raise ValueError('source queue recovery request/closed event binding changed')
     parent=next((i for i,e in enumerate(events[:latest_open_index])if e.get('event_id')==marker.get('parent_open_event_id')and e.get('event_kind')=='opened'),None)
     if parent is None:raise ValueError('source queue recovery parent is missing')
