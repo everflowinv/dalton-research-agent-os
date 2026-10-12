@@ -2027,6 +2027,23 @@ class CockpitModel:
             "timeout_seconds": self.timeout_seconds,
         })
 
+    def _run_cost_refusal(self, *, work: WorkOrder, attempt_number: int,
+                          reserved_micros: int, mission_binding: Mapping[str, Any]) -> str | None:
+        """Optional private, deny-only macro guard before an ordinary admission.
+
+        It never authorizes a call or replaces day/pool gates. Public models
+        have no guard; a run-private producer may install this read-only check.
+        """
+        guard = getattr(self, "_run_cost_admission_guard", None)
+        if guard is None:
+            return None
+        try:
+            guard(work=work, attempt_number=attempt_number,
+                  reserved_micros=reserved_micros, mission_binding=mission_binding)
+        except ValueError as exc:
+            return str(exc)
+        return None
+
     def _adapter(self, router: ModelRouter, *, timeout_seconds: int,
                  provider_cost_admission: Mapping[str, Any] | None = None) -> Any:
         if self.adapter_factory is not None:
@@ -3018,7 +3035,9 @@ class CockpitModel:
                                         request_id=base_request_id),
                                 )
                         reserved = int(Decimal(str(effective["max_cost_usd"])) * 1_000_000)
-                        decision = admit_day_ledger(
+                        run_refusal = self._run_cost_refusal(work=work,attempt_number=attempt,
+                            reserved_micros=reserved,mission_binding=scope)
+                        decision = ({"status":"refused","failure":run_refusal} if run_refusal else admit_day_ledger(
                             budget,
                             policy_version_id=self.config["budget_policy_ref"],
                             day=self.clock().astimezone(timezone.utc).date().isoformat(),
@@ -3026,7 +3045,7 @@ class CockpitModel:
                             route_decision_ref=route["id"], reserved_micros=reserved,
                             mission_binding=scope,
                             purpose=purpose, thinking_level=route.get("thinking_level"),
-                        )
+                        ))
                         admission = decision.get("admission")
                         if decision["status"] == "refused":
                             result = _failure(work, "BUDGET_REFUSED", route["id"])
@@ -3288,6 +3307,11 @@ class CockpitModel:
                 # One attempt, one reservation. The later links of a chain run
                 # under the reservation the first one took out.
                 return {"status": "admitted"}
+            run_refusal = self._run_cost_refusal(work=work,attempt_number=attempt,
+                reserved_micros=max(ceiling,micros),mission_binding=scope)
+            if run_refusal:
+                refusal.append(run_refusal)
+                return None
             try:
                 from .research_publication_limits import fee_binding
                 publication_binding=fee_binding()
