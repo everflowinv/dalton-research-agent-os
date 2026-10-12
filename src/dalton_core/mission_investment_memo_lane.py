@@ -172,6 +172,7 @@ class MissionInvestmentMemoLaneCoordinator:
                     continue
                 candidates.append((company_ref, company_signature(frozen, self.launcher), frozen))
         held_companies = {}
+        rejected_companies = {}
         for company_ref, signature, _frozen in candidates:
             if company_ref is not None:
                 for item in self.budget.permission_items():
@@ -187,13 +188,25 @@ class MissionInvestmentMemoLaneCoordinator:
             try:
                 ticket = self.launcher.start(signature=signature, company_ref=company_ref)
             except LaneChildConflict as exc:
-                return {"status": "busy", "reason": str(exc), "settled": settled}
+                return {"status": "busy", "reason": str(exc), "settled": settled,
+                        **({"rejected": rejected_companies} if rejected_companies else {})}
             except LaneChildRejected as exc:
-                return {"status": "rejected", "reason": str(exc), "settled": settled}
+                if company_ref is None:
+                    return {"status": "rejected", "reason": str(exc), "settled": settled}
+                # A company's unproved pause/configuration must remain refused,
+                # but does not occupy the shared child slot for other companies.
+                rejected_companies[company_ref] = str(exc)[:REASON_LIMIT]
+                continue
             self.open_ticket = ticket["id"]
             return {"status": "launched", "ticket_ref": ticket["id"],
                     "company_ref": company_ref, "signature": signature,
-                    "held": held_companies, "settled": settled}
+                    "held": held_companies, "settled": settled,
+                    **({"rejected": rejected_companies} if rejected_companies else {})}
+        if rejected_companies:
+            return {"status": "rejected", "rejected": rejected_companies,
+                    "held": held_companies, "settled": settled,
+                    "reason": "; ".join(f"{key}: {value}" for key, value
+                                        in rejected_companies.items())[:REASON_LIMIT]}
         if held_companies:
             return {"status": "held", "held": held_companies, "settled": settled,
                     "reason": "; ".join(f"{key}: {value}"
