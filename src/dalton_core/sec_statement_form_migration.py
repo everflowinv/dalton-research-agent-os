@@ -177,11 +177,25 @@ def main(argv=None):
     source.add_argument("--manager")
     parser.add_argument("--environment")
     parser.add_argument("--apply", action="store_true")
+    parser.add_argument("--sync-writer", action="store_true", help="Install only the approved writer governance flag; never restart")
+    parser.add_argument("--launch-agents-dir", default=str(Path.home() / "Library" / "LaunchAgents"))
+    parser.add_argument("--expected-plist-sha256")
     args = parser.parse_args(argv)
     if bool(args.manager) != bool(args.environment):
         parser.error("--manager requires an exact --environment")
     workspace = managed_workspace(args.manager, args.environment) if args.manager else load_workspace_manifest(args.workspace)
-    print(json.dumps(apply(workspace) if args.apply else preview(workspace), ensure_ascii=False))
+    if args.sync_writer:
+        from .sec_statement_writer_contract_sync import preview as writer_preview, apply as writer_apply
+        if args.apply and not args.expected_plist_sha256:
+            parser.error("writer sync apply requires --expected-plist-sha256")
+        result = (writer_apply(workspace, args.launch_agents_dir, expected_plist_sha256=args.expected_plist_sha256)
+                  if args.apply else writer_preview(workspace, args.launch_agents_dir))
+        result = {k:v for k,v in result.items() if k != "plist"}
+    else:
+        if args.expected_plist_sha256:
+            parser.error("--expected-plist-sha256 requires --sync-writer")
+        result = apply(workspace) if args.apply else preview(workspace)
+    print(json.dumps(result, ensure_ascii=False))
     return 0
 
 
