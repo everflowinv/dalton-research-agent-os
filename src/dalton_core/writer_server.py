@@ -471,6 +471,9 @@ class Principal:
 MAX_CONNECTIONS = 8
 CONNECTION_IDLE_TIMEOUT = 1.0
 STORE_REQUEST_TIMEOUT = 30.0
+# Opening all persisted authorities includes schema validation and cold reads.
+# Its lifetime is independent of the deadline for one ordinary client request.
+STORE_STARTUP_TIMEOUT = 300.0
 
 # B1-3: the writer gives up before the client does, on purpose.  Both ends
 # used to wait exactly 30 s, so they expired in the same instant: the client
@@ -2590,7 +2593,7 @@ class WriterServer:
         self._read_executor = concurrent.futures.ThreadPoolExecutor(
             max_workers=READ_EXECUTOR_WORKERS, thread_name_prefix="dalton-read")
         try:
-            self._store_executor.submit(self._open_store).result(timeout=STORE_REQUEST_TIMEOUT)
+            self._store_executor.submit(self._open_store).result(timeout=STORE_STARTUP_TIMEOUT)
         except BaseException:
             # `_open_store` is incremental.  If a later authority constructor
             # fails, close everything already opened on the same store thread
