@@ -9349,7 +9349,10 @@ class CockpitPlane:
     def _host_settings_view(self) -> dict[str, Any]:
         from .host_research_reconcile import status
         try:
-            return status(self.config.workspace_manager_config_path)
+            view = status(self.config.workspace_manager_config_path)
+            from .budget_pools import material_acquisition_caps
+            view["material_acquisition_effective"] = material_acquisition_caps(None, self.config.state_dir)
+            return view
         except (OSError, ValueError, RuntimeError):
             return {"scope": "all_workspaces", "status": "unavailable",
                     "desired_hash": None, "pending": [],
@@ -9386,7 +9389,7 @@ class CockpitPlane:
             raise CockpitError("研究预算必须是一个对象")
         budget = value.get("budget")
         required = {"max_daily_paid_calls", "max_daily_cost_usd", "max_alphaengine_calls_24h"}
-        optional = {"pools_enforcement", "max_daily_document_reads"}
+        optional = {"pools_enforcement", "max_daily_document_reads", "material_acquisition"}
         if not isinstance(budget, Mapping) or not required <= set(budget) or not set(budget) <= required | optional:
             raise CockpitError("研究预算字段不完整")
         if "pools_enforcement" in budget and budget["pools_enforcement"] not in ("on", "off"):
@@ -9398,6 +9401,8 @@ class CockpitPlane:
                     or mission["content_hash"] != value.get("expected_mission_hash")):
                 raise CockpitConflict("研究目标已更新，请刷新后再保存预算")
             return self._save_host_settings(login, value, budget=budget)
+        if "material_acquisition" in budget:
+            raise CockpitError("材料获取共用上限需要研究主机配置")
         result = self._governance(login, "set_research_budget_authority_chain", {
             "mission_ref": _text(value.get("mission_ref"), "mission_ref", maximum=160),
             "budget": dict(budget),

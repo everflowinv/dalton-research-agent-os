@@ -17,7 +17,8 @@ from typing import Any, Mapping
 
 from .store import content_hash
 
-SCHEMA_VERSION = "dalton-host-research-settings-0.1"
+LEGACY_SCHEMA_VERSION = "dalton-host-research-settings-0.1"
+SCHEMA_VERSION = "dalton-host-research-settings-0.2"
 FILENAME = "shared-research-settings.json"
 HEX64 = re.compile(r"[0-9a-f]{64}")
 
@@ -38,10 +39,10 @@ def location(manager_config: str | Path) -> Path:
 
 def validate_budget(value: Any) -> dict[str, Any]:
     required = {"max_daily_paid_calls", "max_daily_cost_usd", "max_alphaengine_calls_24h"}
-    optional = {"pools_enforcement", "max_daily_document_reads"}
+    optional = {"pools_enforcement", "max_daily_document_reads", "material_acquisition"}
     if not isinstance(value, Mapping) or not required <= value.keys() or set(value) - required - optional:
         raise HostSettingsError("研究预算字段不完整")
-    for name in required - {"max_daily_cost_usd"} | (optional & set(value) - {"pools_enforcement"}):
+    for name in required - {"max_daily_cost_usd"} | (optional & set(value) - {"pools_enforcement", "material_acquisition"}):
         number = value[name]
         if type(number) is not int or number < 0:
             raise HostSettingsError("研究次数上限必须是零或正整数")
@@ -52,7 +53,18 @@ def validate_budget(value: Any) -> dict[str, Any]:
         raise HostSettingsError("每天总费用上限必须大于零")
     if value.get("pools_enforcement", "on") not in {"on", "off"}:
         raise HostSettingsError("分项预算池只接受 on 或 off")
+    if "material_acquisition" in value:
+        from .budget_pools import validate_material_acquisition_caps, BudgetPoolError
+        try:
+            validate_material_acquisition_caps(value["material_acquisition"])
+        except BudgetPoolError as exc:
+            raise HostSettingsError("材料获取上限必须是完整、有效的次数和美元额度") from exc
     return dict(value)
+
+
+def mission_budget(value):
+    """Connector-pool settings do not rewrite a mission or its paid identity."""
+    return {k: v for k, v in value.items() if k != "material_acquisition"}
 
 
 def validate_selection(params: Mapping[str, Any]) -> dict[str, Any]:
@@ -90,7 +102,7 @@ def validate(raw: Any) -> dict[str, Any]:
     if not isinstance(raw, dict) or set(raw) != fields:
         raise HostSettingsError("共用设置记录格式无效")
     body = {k: v for k, v in raw.items() if k != "content_hash"}
-    if raw["schema_version"] != SCHEMA_VERSION or raw["content_hash"] != content_hash(body):
+    if raw["schema_version"] not in {LEGACY_SCHEMA_VERSION, SCHEMA_VERSION} or raw["content_hash"] != content_hash(body):
         raise HostSettingsError("共用设置记录校验失败")
     if type(raw["revision"]) is not int or raw["revision"] < 1 or (raw["prior_hash"] is not None and not HEX64.fullmatch(str(raw["prior_hash"]))):
         raise HostSettingsError("共用设置版本无效")
@@ -131,6 +143,10 @@ def validate(raw: Any) -> dict[str, Any]:
             raise HostSettingsError("新项目预算默认值来源无效")
     if raw["research_budget"] is not None:
         validate_budget(raw["research_budget"])
+    if raw["schema_version"] == LEGACY_SCHEMA_VERSION and any(
+            b is not None and "material_acquisition" in b
+            for b in (raw["research_budget"], defaults["budget"])):
+        raise HostSettingsError("材料获取设置需要新版共用预算合同")
     return dict(raw)
 
 
@@ -216,7 +232,7 @@ def defaults_for_workspace(state_dir: str | Path) -> tuple[dict[str, Any], str |
     if desired is None:
         return {}, None
     defaults = desired["creation_budget_defaults"]["budget"]
-    return ({} if defaults is None else dict(defaults)), desired["content_hash"]
+    return ({} if defaults is None else mission_budget(defaults)), desired["content_hash"]
 
 
 def _write(path: Path, wire: Mapping[str, Any]) -> None:
@@ -287,6 +303,8 @@ def save(manager_config: str | Path, *, actor_ref: str, expected_hash: str | Non
             else:
                 kind = "tiers" if "tier" in selected else "purposes"; name = selected.get("tier", selected.get("purpose"))
                 selections[kind][name] = {k: v for k, v in selected.items() if k not in {"tier", "purpose"}}
+        if budget is not None and "material_acquisition" not in budget and old_budget is not None and "material_acquisition" in old_budget:
+            budget = {**budget, "material_acquisition": old_budget["material_acquisition"]}
         desired_budget = old_budget if budget is None else budget
         if budget is not None:
             defaults = {"budget": dict(budget), "basis": "explicit_global_save", "source_bindings": []}

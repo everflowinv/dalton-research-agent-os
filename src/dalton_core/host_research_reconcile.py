@@ -107,7 +107,7 @@ def selection_landed(environment, params, bindings=None):
 
 
 def budget_landed(mission, budget):
-    return mission is not None and all(mission['budget'].get(k) == v for k, v in budget.items())
+    return mission is not None and all(mission['budget'].get(k) == v for k, v in settings.mission_budget(budget).items())
 
 
 def _shared_landed(manager, desired):
@@ -179,6 +179,7 @@ def status(manager):
                          'lifecycle': lifecycle, 'reasons': reasons})
     return {'scope': 'all_workspaces', 'desired_hash': desired['content_hash'], 'revision': desired['revision'],
             'status': 'pending' if rows else 'applied', 'pending': rows,
+            'material_acquisition': (desired['research_budget'] or desired['creation_budget_defaults']['budget'] or {}).get('material_acquisition'),
             'note': (f'已保存共用设置，{len(rows)}个项目将在恢复或下一次调度前应用。' if rows else '全部研究项目已采用共用设置，新建项目也将继承。')}
 
 
@@ -211,7 +212,7 @@ def reconcile_writer(server):
             mission = server.coverage_mission.active_mission(row['mission_ref'])
             if not budget_landed(mission, budget):
                 server._op_set_research_budget_authority_chain({'mission_ref': mission['mission_ref'],
-                    'expected_mission_hash': mission['content_hash'], 'budget': budget, 'actor_ref': desired['actor_ref']})
+                    'expected_mission_hash': mission['content_hash'], 'budget': settings.mission_budget(budget), 'actor_ref': desired['actor_ref']})
         from .host_source_budget_sync import apply as sync_source_budget
         sync_source_budget(server, manager, desired)
         from .shared_daily_budget import install_binding

@@ -1118,8 +1118,12 @@
 
   // ---------- 预算与费用 ---------------------------------------------------------------
   function budgetCapsForm(mission, poolsNote, host) {
-    if (!mission) return empty("还没有发布研究目标：发布后才有研究预算。");
+    if (!mission) {
+      const effective = host && host.material_acquisition_effective;
+      return h("div", null, empty("还没有发布研究目标：发布后才可编辑研究预算。"), effective ? h("p", { class: "adm-explain" }, `材料获取当前有效上限：每天 ${count(effective.calls_per_day)} 次、${usd(effective.usd_micros_per_day / 1000000)}。${effective.explicit_override ? "本项目使用单独设置的额度。" : "新建项目也采用共用设置；尚未保存时使用系统默认。"}`) : null);
+    }
     const b = mission.budget || {};
+    const material = (host && host.material_acquisition) || (host && host.material_acquisition_effective && { calls_per_day: host.material_acquisition_effective.calls_per_day, usd_per_day: host.material_acquisition_effective.usd_micros_per_day / 1000000 }) || { calls_per_day: 180, usd_per_day: 6 };
     /* Review M10: every field checked here by the server's rule -- money a
        positive amount, counts whole numbers, blank only where it means 不限. */
     const fields = [["max_daily_paid_calls", "模型调用上限（次 / 天，整数）", "1", "count"],
@@ -1129,9 +1133,17 @@
     const inputs = {};
     const extra = fields.map(([key, label, step]) => { inputs[key] = h("input", { type: "number", min: "0", step, value: b[key] ?? "", "aria-label": label });
       return h("label", { class: "adm-field" }, h("span", null, label), inputs[key]); });
+    const materialCalls = h("input", { type: "number", min: "0", step: "1", value: material.calls_per_day, "aria-label": "材料获取上限（次 / 天）" });
+    const materialUsd = h("input", { type: "number", min: "0", step: "0.01", value: material.usd_per_day, "aria-label": "材料获取上限（美元 / 天）" });
+    if (host) {
+      extra.push(h("label", { class: "adm-field" }, h("span", null, "材料获取上限（次 / 天，全部项目共用设置，各项目分别计数）"), materialCalls));
+      extra.push(h("label", { class: "adm-field" }, h("span", null, "材料获取上限（美元 / 天，各项目分别计数）"), materialUsd));
+      if (host.material_acquisition_effective && host.material_acquisition_effective.explicit_override) extra.push(h("p", { class: "adm-explain" }, `本项目使用单独设置的额度：每天 ${count(host.material_acquisition_effective.calls_per_day)} 次、${usd(host.material_acquisition_effective.usd_micros_per_day / 1000000)}。此处保存的共用额度适用于其余项目和新项目。`));
+    }
     const pools = h("input", { type: "checkbox", checked: b.pools_enforcement === "off" || null });
     extra.push(h("label", { class: "adm-field" }, h("span", null, "分项预算池（按流程分配的额度）"), h("span", null, pools, " 只统计、不拦截")));
     const check = () => {
+      if (host && (!materialCalls.value.trim() || !materialUsd.value.trim() || !Number.isInteger(Number(materialCalls.value)) || Number(materialCalls.value) < 0 || !isFinite(Number(materialUsd.value)) || Number(materialUsd.value) < 0)) return "材料获取次数需为零或正整数，美元额度需为零或正数";
       for (const [key, label, , kind] of fields) {
         const raw = (inputs[key].value || "").trim();
         if (kind === "optional" && raw === "") continue;
@@ -1148,6 +1160,7 @@
         validate: check,
         payload: () => { const budget = { max_daily_paid_calls: Number(inputs.max_daily_paid_calls.value), max_daily_cost_usd: Number(inputs.max_daily_cost_usd.value || 0),
           max_alphaengine_calls_24h: Number(inputs.max_alphaengine_calls_24h.value || "0"), pools_enforcement: pools.checked ? "off" : "on" };
+          if (host) budget.material_acquisition = { calls_per_day: Number(materialCalls.value), usd_per_day: materialUsd.value };
           const reads = inputs.max_daily_document_reads.value.trim(); if (reads !== "") budget.max_daily_document_reads = Number(reads);
           return { mission_ref: mission.mission_ref, budget, expected_mission_hash: mission.hash, ...(host ? { expected_host_settings_hash: host.desired_hash } : {}) }; },
         after: () => reload("budget") }));

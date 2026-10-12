@@ -243,17 +243,17 @@ DEFAULT_POOL = "coverage"
 # searches and fetches, Guidepoint searches, SEC index reads -- some metered
 # in dollars, all of them in calls.  So its pool is a fifth, separate pool
 # with its own day ledger (``material_acquisition_spend`` in
-# ``material-requests.sqlite``), a modest default and two caps: dollars and
+# ``material-requests.sqlite``), an explicit bounded default and two caps: dollars and
 # calls.  A request also carries its own cap (``request.budget``); whichever
 # is tighter stops the ladder, and only then does the owner see a card.  The
 # per-source call windows (``connector_rate_policy``) still bind at launch:
 # a coordinator that runs a targeted query on behalf of a request checks its
 # own window exactly as it does for its scheduled searches.
 MATERIAL_ACQUISITION_POOL = "material_acquisition"
-#: The day caps when nothing overrides them.  Modest on purpose: the ladder
-#: tries the free local rungs first, and a day that needs more than this is a
-#: day the owner should hear about (``material_budget_exceeded``).
-MATERIAL_ACQUISITION_DEFAULT_CAPS: dict[str, Any] = {"usd_per_day": "2.00", "calls_per_day": 60}
+#: Per-environment/day defaults (180 connector calls and USD 6). Local
+#: holdings are tried first; an administrator can save shared settings for
+#: existing and future projects. Explicit project overrides remain visible.
+MATERIAL_ACQUISITION_DEFAULT_CAPS: dict[str, Any] = {"usd_per_day": "6.00", "calls_per_day": 180}
 #: Per request, when the request names no cap of its own.
 MATERIAL_ACQUISITION_REQUEST_DEFAULTS: dict[str, Any] = {"max_usd": "0.50", "max_calls": 8}
 #: Where a mission (or an operator file) may override the day caps.  The
@@ -287,23 +287,50 @@ def material_acquisition_caps(budget: Mapping[str, Any] | None = None,
             except (OSError, ValueError) as exc:
                 raise BudgetPoolError(f"{MATERIAL_ACQUISITION_POOL_FILE} is unreadable") from exc
             source = MATERIAL_ACQUISITION_POOL_FILE
+    shared_hash = None
+    shared_caps = None
+    if state_dir is not None:
+        from .workspace_host_scheme import resolve_manager_config
+        from .host_research_settings import load
+        manager = resolve_manager_config(state_dir)
+        desired = None if manager is None else load(manager)
+        if desired is not None:
+            saved = desired['research_budget'] or desired['creation_budget_defaults']['budget']
+            if saved is not None and saved.get(MATERIAL_ACQUISITION_FIELD) is not None:
+                shared_caps = validate_material_acquisition_caps(saved[MATERIAL_ACQUISITION_FIELD])
+                shared_hash = desired['content_hash']
     caps = dict(MATERIAL_ACQUISITION_DEFAULT_CAPS)
+    if shared_caps is not None:
+        caps.update(shared_caps)
+        if declared is None:
+            source = 'shared_research_settings.material_acquisition'
+    # A deliberately declared environment/mission override remains explicit.
+    # Partial old override files inherit unspecified fields from the shared cap.
     if declared is not None:
         if not isinstance(declared, Mapping) or set(declared) - set(caps):
             raise BudgetPoolError("material acquisition caps name only usd_per_day and calls_per_day")
         caps.update(declared)
-    try:
-        usd = Decimal(str(caps["usd_per_day"]))
-        calls = caps["calls_per_day"]
-    except Exception as exc:  # noqa: BLE001 - Decimal raises several types
-        raise BudgetPoolError("material acquisition usd_per_day must be a number") from exc
-    if not usd.is_finite() or usd < 0:
-        raise BudgetPoolError("material acquisition usd_per_day must be a non-negative number")
-    if isinstance(calls, bool) or not isinstance(calls, int) or calls < 0:
-        raise BudgetPoolError("material acquisition calls_per_day must be a non-negative integer")
+    caps = validate_material_acquisition_caps(caps)
     return {"pool": MATERIAL_ACQUISITION_POOL,
-            "usd_micros_per_day": int((usd * 1_000_000).to_integral_value()),
-            "calls_per_day": calls, "defaulted": declared is None, "source": source}
+            "usd_micros_per_day": int(Decimal(str(caps['usd_per_day'])) * 1_000_000),
+            "calls_per_day": caps['calls_per_day'], "defaulted": declared is None and shared_caps is None,
+            "source": source, "shared_desired_hash": shared_hash,
+            "explicit_override": declared is not None, "shared_caps": shared_caps}
+
+
+def validate_material_acquisition_caps(value):
+    if not isinstance(value, Mapping) or set(value) != {'usd_per_day', 'calls_per_day'}:
+        raise BudgetPoolError('material acquisition requires usd_per_day and calls_per_day')
+    try:
+        usd = Decimal(str(value['usd_per_day']))
+    except Exception as exc:
+        raise BudgetPoolError('material acquisition usd_per_day must be numeric') from exc
+    calls = value['calls_per_day']
+    if isinstance(value['usd_per_day'], bool) or not usd.is_finite() or usd < 0 or usd * 1_000_000 != (usd * 1_000_000).to_integral_value():
+        raise BudgetPoolError('material acquisition USD must be non-negative exact microdollars')
+    if type(calls) is not int or calls < 0:
+        raise BudgetPoolError('material acquisition calls_per_day must be a non-negative integer')
+    return dict(value)
 
 
 def _pool_name(value: Any) -> str:
