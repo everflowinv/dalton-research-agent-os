@@ -149,6 +149,32 @@ class AmendmentTests(unittest.TestCase):
             result=run(self.args(self.newpath,replay=path))
         network.assert_not_called(); self.assertEqual(result['status'],'failed')
 
+    def test_cached_empty_amendment_replays_ingests_and_reconciles_without_http(self):
+        from dalton_core.company_model_annual_projection import verify_statement_filing
+        from dalton_core.model_cell_reconciliation import collect_actuals
+        captured = self.captured()
+        captured['filings'][0]['statements'] = {}
+        with patch.object(self, 'captured', return_value=captured):
+            self.failure()
+        self.mission()
+        d = prepare(self.missions, self.launcher, company_ref=COMPANY, form='10-Q')
+        path = request_path(self.state, d['dispatch_id'])
+        self.out = self.root / 'empty-local-output'; self.out.mkdir()
+        with patch('dalton_core.sec_financials_cli.parse_live') as network:
+            result = run(self.args(self.newpath, replay=path))
+        network.assert_not_called()
+        self.assertEqual(result['status'], 'succeeded', result['failure_reason'])
+        self.assertEqual(result['observation']['filings'][0]['lines'], [])
+        self.missions.mark_statement_dispatch_launched(d['dispatch_id'], 'sec-financials-run:'+'b'*24)
+        self.missions.record_statement_observation(dispatch_id=d['dispatch_id'],
+            observation=result['observation'], governance_ref=self.new['id'],
+            governance_hash=self.new['content_hash'], governance_proof=self.new)
+        filing = self.missions.statement_filings(COMPANY)[0]
+        self.assertEqual(verify_statement_filing(self.missions.connection, filing), 'line_bound')
+        actuals, events = collect_actuals(self.missions.connection, COMPANY)
+        self.assertEqual(actuals, [])
+        self.assertEqual(len(events), 1)
+
 
     def test_foreign_issuer_current_token_refuses_before_queue_or_child(self):
         raw=self.captured(); raw['cik']='1352010'; raw['entity_name']='Different Synthetic Issuer'

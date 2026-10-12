@@ -184,9 +184,11 @@ def verify_statement_filing(
         "governance_ref": filing["governance_ref"],
         "governance_hash": filing["governance_hash"],
     }
-    matches = [line_hash for line_hash in line_hashes
+    # The historical line shapes all serialize an empty filing as [].  Count
+    # distinct proofs, not repeated candidates for the same exact line hash.
+    matches = {line_hash for line_hash in line_hashes
                if content_hash({**body, "statement_lines_hash": line_hash})
-               == filing["content_hash"]]
+               == filing["content_hash"]}
     if len(matches) == 1:
         return "line_bound"
     if content_hash(body) == filing["content_hash"]:
