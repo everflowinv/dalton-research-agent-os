@@ -123,3 +123,10 @@ CREATE TABLE IF NOT EXISTS material_acquisition_priority_cursor (
     record_json TEXT NOT NULL,
     content_hash TEXT NOT NULL
 );
+
+-- Independent bounded continuation; never changes request/source authority.
+CREATE TABLE IF NOT EXISTS material_acquisition_retry_cursor (
+    cursor_id TEXT PRIMARY KEY CHECK (cursor_id IN ('retry-continuation','retry-continuation-queue','retry-class-rotation')),
+    record_json TEXT NOT NULL,
+    content_hash TEXT NOT NULL
+);

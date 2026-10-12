@@ -2078,28 +2078,197 @@ def priority_key(request: Mapping[str, Any], universe: Mapping[str, Mapping[str,
             str(request.get("id") or ""))
 
 
-def retry_sweep(state_dir: str | Path, *, now: str | None = None, limit: int = 3) -> list[dict[str, Any]]:
-    """Reopen exhausted requests that left the negative cache (bounded)."""
+_RETRY_CURSOR_ID = "retry-continuation"
+_RETRY_CURSOR_SCHEMA = "material-retry-continuation:0.1"
+_RETRY_PAGE_SIZE = 64
 
-    stamp = now or _now()
+
+def _decode_retry_cursor(row):
+    if row is None:
+        return 0, None
+    try:
+        body = json.loads(row["record_json"])
+        if (set(body) != {"schema_version", "cursor_id", "last_rowid", "request_ref", "revision", "updated_at"}
+                or body["schema_version"] != _RETRY_CURSOR_SCHEMA
+                or body["cursor_id"] not in (_RETRY_CURSOR_ID, _RETRY_CURSOR_ID+"-queue")
+                or type(body["last_rowid"]) is not int or body["last_rowid"] <= 0
+                or type(body["revision"]) is not int or body["revision"] <= 0
+                or not _REQUEST_ID_RE.fullmatch(body["request_ref"])
+                or _parse_ts(body["updated_at"]) is None
+                or _sha(body) != row["content_hash"]):
+            raise ValueError("cursor identity differs")
+    except (ValueError, TypeError, KeyError) as exc:
+        raise MaterialAcquisitionError("material retry cursor is invalid") from exc
+    return body["last_rowid"], row["content_hash"]
+
+
+def _retry_page(state_dir, *, deadline, recovery_lane=False):
+    from .material_source_queue_recovery import LEGACY_TIMEOUT_DETAIL
+    cursor_id = _RETRY_CURSOR_ID+("-queue" if recovery_lane else "")
+    # IDs only: never unfold all historical request JSON before starting the
+    # allowance. rowid is stable because the request ledger is append-only.
+    with _reader(state_dir) as connection:
+        if connection is None:
+            return [], None
+        try:
+            cursor = connection.execute(
+                "SELECT record_json,content_hash FROM material_acquisition_retry_cursor WHERE cursor_id=?",
+                (cursor_id,)).fetchone()
+        except sqlite3.OperationalError as exc:
+            if str(exc) != "no such table: material_acquisition_retry_cursor":
+                raise
+            cursor = None
+        last, digest = _decode_retry_cursor(cursor)
+        if cursor is not None:
+            if json.loads(cursor["record_json"])["cursor_id"] != cursor_id:
+                raise MaterialAcquisitionError("material retry cursor lane differs")
+            body = json.loads(cursor["record_json"])
+            held = connection.execute("SELECT request_id FROM material_requests WHERE rowid=?", (last,)).fetchone()
+            if held is None or held["request_id"] != body["request_ref"]:
+                raise MaterialAcquisitionError("material retry cursor request differs")
+        sql = ("SELECT r.rowid AS sweep_rowid,r.request_id,"
+               "(SELECT status FROM material_request_events e WHERE e.request_id=r.request_id "
+               "ORDER BY event_id DESC LIMIT 1) AS latest_status FROM material_requests r ")
+        # Cheap indexed event preselection is not authority. Every selected
+        # candidate is re-read and checked by the original strong recovery.
+        clause = " AND latest_status IN ('exhausted','timeout')"
+        queue_shape = ("EXISTS (SELECT 1 FROM material_request_events e WHERE e.request_id=r.request_id "
+                       "AND e.event_kind='attempt' AND json_extract(e.record_json,'$.source')='sec_edgar' "
+                       "AND json_extract(e.record_json,'$.outcome')='not_connected' "
+                       "AND json_extract(e.record_json,'$.detail')=?)")
+        # The same slow queue proof must not also occupy the normal-first
+        # turn. Legacy-shaped requests still get ordinary retry_due checks in
+        # their queue turn if strong special recovery does not qualify.
+        clause += " AND "+("" if recovery_lane else "NOT ")+queue_shape
+        extra = (LEGACY_TIMEOUT_DETAIL,)
+        rows = _rows(connection, sql + "WHERE r.rowid>?"+clause+" ORDER BY r.rowid LIMIT ?",
+                     (last, *extra, _RETRY_PAGE_SIZE), deadline=deadline)
+        if len(rows) < _RETRY_PAGE_SIZE and last:
+            rows += _rows(connection, sql + "WHERE r.rowid<=?"+clause+" ORDER BY r.rowid LIMIT ?",
+                          (last, *extra, _RETRY_PAGE_SIZE-len(rows)), deadline=deadline)
+        return rows, digest
+
+
+def _claim_retry_turn(state_dir, row, *, expected_hash, now, recovery_lane=False):
+    cursor_id = _RETRY_CURSOR_ID+("-queue" if recovery_lane else "")
+    # Claim before strong evaluation. A slow/unverified item gets another
+    # chance after a complete sweep; it cannot pin every future tick here.
+    with _writer(state_dir) as connection:
+        cursor = connection.execute(
+            "SELECT record_json,content_hash FROM material_acquisition_retry_cursor WHERE cursor_id=?",
+            (cursor_id,)).fetchone()
+        if cursor is not None and json.loads(cursor["record_json"]).get("cursor_id") != cursor_id:
+            raise MaterialAcquisitionError("material retry claim lane differs")
+        _, held_hash = _decode_retry_cursor(cursor)
+        if held_hash != expected_hash:
+            return None
+        held = connection.execute("SELECT request_id FROM material_requests WHERE rowid=?",
+                                  (row["sweep_rowid"],)).fetchone()
+        if held is None or held["request_id"] != row["request_id"]:
+            raise MaterialAcquisitionError("material retry turn request differs")
+        body = {"schema_version": _RETRY_CURSOR_SCHEMA, "cursor_id": cursor_id, "last_rowid": row["sweep_rowid"],
+                "request_ref": row["request_id"], "revision": 1 if cursor is None else
+                json.loads(cursor["record_json"])["revision"]+1, "updated_at": now}
+        digest = _sha(body)
+        connection.execute("INSERT INTO material_acquisition_retry_cursor VALUES(?,?,?) "
+                           "ON CONFLICT(cursor_id) DO UPDATE SET record_json=excluded.record_json,content_hash=excluded.content_hash",
+                           (cursor_id, _canonical(body), digest))
+        return digest
+
+
+def _retry_pass(state_dir, *, stamp, limit, deadline, recovery_lane=False, max_evaluations=None):
+    from .material_source_queue_recovery import recover
+    from .source_discovery_read_budget import SourceReadDeadline
     out = []
-    queue_recovery_deadline = time.monotonic() + 2.0
-    for view in mr.open_requests(state_dir, statuses=("exhausted", "timeout"), include_closed=True, limit=2000):
-        if len(out) >= limit:
+    if limit <= 0 or time.monotonic() >= deadline:
+        return out
+    try:
+        page, cursor_hash = _retry_page(state_dir, deadline=deadline, recovery_lane=recovery_lane)
+    except SourceReadDeadline:
+        return []
+    evaluations = 0
+    for row in page:
+        if (len(out) >= limit or time.monotonic() >= deadline
+                or (max_evaluations is not None and evaluations >= max_evaluations)):
             break
-        full = mr.request(state_dir, view["id"])
-        if full is None:
+        next_hash = _claim_retry_turn(state_dir, row, expected_hash=cursor_hash, now=stamp, recovery_lane=recovery_lane)
+        if next_hash is None:
+            break  # Another tick claimed this exact continuation.
+        cursor_hash = next_hash
+        if row["latest_status"] not in ("exhausted", "timeout"):
             continue
-        from .material_source_queue_recovery import recover
-        repaired = (recover(state_dir, full, now=stamp)
-                    if time.monotonic() < queue_recovery_deadline else None)
+        evaluations += 1
+        full = mr.request(state_dir, row["request_id"])
+        if full is None or full["status"] not in ("exhausted", "timeout"):
+            continue
+        if time.monotonic() >= deadline:
+            break
+        # Already started strong verification and append-only authority work
+        # finish normally. The deadline governs starting the next item.
+        repaired = recover(state_dir, full, now=stamp)
         if repaired is not None:
-            out.append({"request_id": view["id"], "reason": repaired["rule_ref"]})
+            out.append({"request_id": row["request_id"], "reason": repaired["rule_ref"]})
             continue
+        if time.monotonic() >= deadline:
+            break
         due, why = retry_due(state_dir, full, now=stamp)
         if due:
-            mr.reopen(state_dir, view["id"], reason=why, actor_ref=ACTOR_REF, now=stamp)
-            out.append({"request_id": view["id"], "reason": why})
+            result = mr.reopen(state_dir, row["request_id"], reason=why, actor_ref=ACTOR_REF, now=stamp)
+            if result["write_status"] == "fresh":
+                out.append({"request_id": row["request_id"], "reason": why})
+    return out
+
+
+
+def _claim_retry_first(state_dir, *, now):
+    """Persistently alternate the first class, including one-slot/slow ticks."""
+    cursor_id = "retry-class-rotation"
+    schema = "material-retry-class-rotation:0.1"
+    with _writer(state_dir) as connection:
+        row = connection.execute("SELECT record_json,content_hash FROM material_acquisition_retry_cursor WHERE cursor_id=?",
+                                 (cursor_id,)).fetchone()
+        prior = None
+        if row is not None:
+            try:
+                prior = json.loads(row["record_json"])
+                if (set(prior) != {"schema_version", "cursor_id", "next_queue_first", "revision", "updated_at"}
+                        or prior["schema_version"] != schema or prior["cursor_id"] != cursor_id
+                        or type(prior["next_queue_first"]) is not bool
+                        or type(prior["revision"]) is not int or prior["revision"] <= 0
+                        or _parse_ts(prior["updated_at"]) is None or _sha(prior) != row["content_hash"]):
+                    raise ValueError("rotation differs")
+            except (ValueError, TypeError, KeyError) as exc:
+                raise MaterialAcquisitionError("material retry class rotation is invalid") from exc
+        first = prior["next_queue_first"] if prior else False
+        body = {"schema_version": schema, "cursor_id": cursor_id, "next_queue_first": not first,
+                "revision": 1 if prior is None else prior["revision"]+1, "updated_at": now}
+        connection.execute("INSERT INTO material_acquisition_retry_cursor VALUES(?,?,?) "
+                           "ON CONFLICT(cursor_id) DO UPDATE SET record_json=excluded.record_json,content_hash=excluded.content_hash "
+                           "WHERE material_acquisition_retry_cursor.content_hash=?",
+                           (cursor_id, _canonical(body), _sha(body), None if row is None else row["content_hash"]))
+        return first
+
+def retry_sweep(state_dir: str | Path, *, now: str | None = None, limit: int = 3,
+                deadline: float | None = None) -> list[dict[str, Any]]:
+    """Bounded fair continuation; both classes share the original reopen cap.
+
+    The first class rotates durably, even with one slot or a slow strong read.
+    Unused opportunities return to the other class; independent persisted
+    positions stop either class being starved by earlier arrivals. No source/call quota is changed.
+    """
+    stamp = now or _now()
+    allowance = time.monotonic()+2.0
+    deadline = allowance if deadline is None else min(deadline, allowance)
+    if limit <= 0 or time.monotonic() >= deadline:
+        return []
+    queue_first = _claim_retry_first(state_dir,now=stamp)
+    if queue_first:
+        out = _retry_pass(state_dir,stamp=stamp,limit=limit,deadline=deadline,recovery_lane=True)
+        out += _retry_pass(state_dir,stamp=stamp,limit=limit-len(out),deadline=deadline)
+    else:
+        out = _retry_pass(state_dir,stamp=stamp,limit=1,deadline=deadline,max_evaluations=1)
+        out += _retry_pass(state_dir,stamp=stamp,limit=limit-len(out),deadline=deadline,recovery_lane=True)
+        out += _retry_pass(state_dir,stamp=stamp,limit=limit-len(out),deadline=deadline)
     return out
 
 
@@ -2301,7 +2470,7 @@ def tick(state_dir: str | Path, *, max_requests: int = 4, max_seconds: float = 1
                 summary.setdefault("conversion_errors", []).append(f"{sweep.__name__}: {type(exc).__name__}")
         summary["converted"] = sum(1 for item in converted if item.get("write_status") == "fresh")
     if mr.ledger_path(state).is_file():
-        summary["reopened"] = len(retry_sweep(state, now=stamp))
+        summary["reopened"] = len(retry_sweep(state, now=stamp, deadline=started+max_seconds))
     pending = mr.open_requests(state, limit=5000, now=stamp)
     summary["open"] = len(pending)
     if not pending:
