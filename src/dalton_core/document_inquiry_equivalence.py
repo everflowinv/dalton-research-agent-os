@@ -46,7 +46,10 @@ EQUIVALENT_INQUIRY_RULE_REF = "mission-document-research:equivalent-inquiry:v1"
 ANSWERED_COOLDOWN = timedelta(hours=72)
 
 _ACCESSION = re.compile(r"\b\d{10}-\d{2}-\d{6}\b")
-_FORM = re.compile(r"(?<![\w.])\d{1,2}-[A-Za-z]{1,2}\b")
+_LEGACY_FORM = re.compile(r"(?<![\w.])\d{1,2}-[A-Za-z]{1,2}\b")
+# SEC forms adjacent to Chinese prose are still forms. Unicode word boundaries
+# treat both K and 中 as word characters and left 10-K中's 10 as a figure.
+_FORM = re.compile(r"(?<![A-Za-z0-9_.])\d{1,2}-[A-Za-z]{1,2}(?![A-Za-z0-9_])")
 _PERIOD = re.compile(r"(?i)\b(?:fy|cy|q[1-4]|h[12])\s*'?\d{2,4}\b")
 _NUMBER = re.compile(r"(?<![\w.])(\d{1,3}(?:,\d{3})+|\d+)(?:\.(\d+))?")
 
@@ -75,8 +78,12 @@ def normalize_question(question: str) -> str:
 
 
 def question_figures(question: str) -> frozenset[str]:
+    return _question_figures(question, _FORM)
+
+
+def _question_figures(question: str, form: re.Pattern) -> frozenset[str]:
     text = unicodedata.normalize("NFKC", question)
-    for pattern in (_ACCESSION, _FORM, _PERIOD):
+    for pattern in (_ACCESSION, form, _PERIOD):
         text = pattern.sub(" ", text)
     figures = set()
     for match in _NUMBER.finditer(text):
@@ -193,6 +200,14 @@ def inquiry_signature_for(company_ref: str, inquiry: Mapping[str, Any]) -> Inqui
     strategy = inquiry.get("directed_document")
     target = strategy.get("evidence_target") if isinstance(strategy, Mapping) else None
     return inquiry_signature(company_ref, str(inquiry.get("question") or ""), target)
+
+
+def _legacy_inquiry_signature_for(company_ref: str, inquiry: Mapping[str, Any]) -> InquirySignature:
+    """Only for replay of an exact already-persisted revision authority."""
+    current = inquiry_signature_for(company_ref, inquiry)
+    return InquirySignature(company_ref=current.company_ref, text=current.text,
+        figures=_question_figures(str(inquiry.get("question") or ""), _LEGACY_FORM),
+        target=current.target)
 
 
 def signatures_equivalent(a: InquirySignature, b: InquirySignature) -> str | None:
