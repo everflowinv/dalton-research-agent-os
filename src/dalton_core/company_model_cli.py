@@ -1485,9 +1485,14 @@ def run_model_spec(
                     or getattr(exc, "code", None) == SIGNED_EXPENSE_REPAIR_CODE):
                 summary["pre_persistence_validation"] = "refused"
             summary["financial_line_gaps"] = gaps
+            from .model_history_failure_feedback import describe_failure
+            historical_detail, historical_hint = describe_failure(exc)
+            if historical_detail is not None:
+                summary["historical_formula_diagnostics"] = historical_detail
             summary.update({"status": "succeeded", "spec_status": "refused",
                             "failure_reason": (
                                 f"{type(exc).__name__}: {exc}"
+                                + historical_hint
                                 + ("" if not gaps else
                                    "；缺口：" + "；".join(
                                        item["detail"] for item in gaps[:3])))[:500]})

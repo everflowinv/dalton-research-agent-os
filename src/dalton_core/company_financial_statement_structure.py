@@ -1719,9 +1719,24 @@ def replay_historical_structure(
                 for period in tested if not matches(period)
             ]
             if mismatches:
-                raise FinancialStatementStructureError(
+                failure = FinancialStatementStructureError(
                     f"formula {output} does not tie to filed history"
                 )
+                # Keep the historical message stable for versioned repair
+                # matching, but retain the actual discrepancies for planning.
+                # These describe a refused calculation, not accepted figures.
+                detail = {
+                    "contract_ref": "model-history-tie-diagnostics:0.1",
+                    "output_ref": output, "tie_out_concept": tie,
+                    "operator": formula["operator"],
+                    "formula_hash": content_hash(formula),
+                    "mismatches": mismatches[:12],
+                    "omitted_mismatches": max(0, len(mismatches) - 12),
+                    "all_mismatches_hash": content_hash(mismatches),
+                    "financial_evidence": False, "retry_authority": False,
+                }
+                failure.diagnostics = {**detail, "content_hash": content_hash(detail)}
+                raise failure
             reports.append({
                 "output_ref": output,
                 **({"tie_mode": ("presentation_rounding" if rounded_periods & set(tested)
