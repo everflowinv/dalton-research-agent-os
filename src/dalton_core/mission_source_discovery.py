@@ -2447,6 +2447,8 @@ class MissionSourceDiscoveryCoordinator:
 
         try:
             item = self._period_item(mission, company_ref, spec)
+        except SourceReadDeadline:
+            raise
         except Exception:  # noqa: BLE001 - an unreadable checklist names no period
             return (), frozenset()
         if item is None:
@@ -2458,6 +2460,27 @@ class MissionSourceDiscoveryCoordinator:
                          spec: Mapping[str,Any]) -> tuple[str,...]:
         item = self._period_item(mission, company_ref, spec)
         return () if item is None else tuple(item.get('missing_periods') or ())
+
+    def _stage_snapshot(self, mission: Mapping[str, Any], *, industry: bool = False):
+        """Reuse validated stage inputs only within this operation's read epoch."""
+        from .mission_stage import evaluate_industry, evaluate_mission
+        from .source_discovery_read_budget import bounded_read_view
+        connection = self.store.connection
+        cache = getattr(self, '_tick_stage_cache', None)
+        deadline = getattr(self, '_tick_read_deadline', None)
+        if deadline is not None and _monotonic() >= deadline:
+            raise SourceReadDeadline('source stage decision deadline exhausted')
+        if cache is None and deadline is None:
+            return (evaluate_industry if industry else evaluate_mission)(connection, mission)
+        key = (content_hash(mission), industry, connection.total_changes,
+               connection.execute('PRAGMA data_version').fetchone()[0])
+        if cache is not None and key in cache:
+            return cache[key]
+        with bounded_read_view(connection, deadline=deadline) as reader:
+            value = (evaluate_industry if industry else evaluate_mission)(reader, mission)
+        if cache is not None:
+            cache[key] = value
+        return value
 
     def _period_item(self, mission: Mapping[str, Any], company_ref: str,
                      spec: Mapping[str, Any]) -> dict[str, Any] | None:
@@ -2473,14 +2496,14 @@ class MissionSourceDiscoveryCoordinator:
         if not any("{quarter" in str(variant.get("query_template") or "")
                    for variant in spec.get("query_variants") or ()):
             return None
-        from .mission_stage import SOURCE_BASE_ITEMS, evaluate_mission
+        from .mission_stage import SOURCE_BASE_ITEMS
 
         spec_ref = spec['spec_ref']
         declared = next((row for row in SOURCE_BASE_ITEMS
                          if spec_ref in row['spec_refs']), None)
         if declared is None:
             return None
-        stage = next((row for row in evaluate_mission(self.store.connection, mission)
+        stage = next((row for row in self._stage_snapshot(mission)
                       if row['company_ref'] == company_ref), None)
         if stage is None:
             return None
@@ -2515,15 +2538,14 @@ class MissionSourceDiscoveryCoordinator:
         if item is None:
             return False
         try:
-            from .mission_stage import evaluate_industry, evaluate_mission
-
             if item in INDUSTRY_BASE_ITEMS:
-                items = evaluate_industry(self.store.connection, mission)["items"]
+                items = self._stage_snapshot(mission, industry=True)["items"]
             else:
-                company = next((row for row in evaluate_mission(
-                    self.store.connection, mission)
+                company = next((row for row in self._stage_snapshot(mission)
                     if row["company_ref"] == company_ref), None)
                 items = [] if company is None else company["items"]
+        except SourceReadDeadline:
+            raise
         except Exception:
             return False
         held = next((row for row in items if row["item_ref"] == item["item_ref"]), None)
@@ -2648,15 +2670,15 @@ class MissionSourceDiscoveryCoordinator:
             # the cadence remains its only bound.
             return None
         try:
-            from .mission_stage import evaluate_industry, evaluate_mission
-
             if item in INDUSTRY_BASE_ITEMS:
-                entry = evaluate_industry(self.store.connection, mission)
+                entry = self._stage_snapshot(mission, industry=True)
                 items = entry["items"]
             else:
-                rows = evaluate_mission(self.store.connection, mission)
+                rows = self._stage_snapshot(mission)
                 row = next((r for r in rows if r["company_ref"] == company_ref), None)
                 items = row["items"] if row else []
+        except SourceReadDeadline:
+            raise
         except Exception:  # noqa: BLE001 - an unreadable checklist is not a block
             return None
         held = next((i for i in items if i["item_ref"] == item["item_ref"]), None)
@@ -2975,6 +2997,9 @@ class MissionSourceDiscoveryCoordinator:
                 skipped.append({"company_ref": company_ref, "reason": "not in discovery plan"})
                 continue
             for spec in self.plan["specs"]:
+                deadline = getattr(self, '_tick_read_deadline', None)
+                if deadline is not None and _monotonic() >= deadline:
+                    raise SourceReadDeadline('source discovery decision deadline exhausted')
                 if (self.plan.get("schema_version") == DISCOVERY_PLAN_SCHEMA_VERSION_V6
                         and self.source_ref == ALPHAENGINE_SOURCE_REF
                         and spec.get("document_type") in SELECTED_DOCUMENT_TYPES
@@ -2988,6 +3013,8 @@ class MissionSourceDiscoveryCoordinator:
                         "company_ref": company_ref, "spec_ref": spec["spec_ref"], "reason": block,
                     })
                     continue
+                if deadline is not None and _monotonic() >= deadline:
+                    raise SourceReadDeadline('source discovery decision deadline exhausted')
                 try:
                     authorization = self.missions.authorize_source_discovery(
                         company_ref=company_ref,
@@ -3022,6 +3049,8 @@ class MissionSourceDiscoveryCoordinator:
                     variant_index=0 if continuation is None else continuation.get('variant_index',0),
                     missing_periods=missing_periods,
                 )
+                if deadline is not None and _monotonic() >= deadline:
+                    raise SourceReadDeadline('source discovery decision deadline exhausted')
                 try:
                     # Only AlphaEngine continuation adds a cursor. Initial
                     # pages and other search launchers keep their contract.
@@ -3169,6 +3198,8 @@ class MissionSourceDiscoveryCoordinator:
             except ValueError as exc:
                 answer("refused", "request_binding", str(exc))
                 return {**base, "status":"targeted_refused", "reason":"request_binding"}
+        if deadline is not None and _monotonic() >= deadline:
+            raise SourceReadDeadline('source targeted decision deadline exhausted')
         try:
             ticket = self.search_launcher.start(
                 authorization=authorization, spec_ref=spec["spec_ref"], as_of=request_date,
@@ -3206,13 +3237,21 @@ class MissionSourceDiscoveryCoordinator:
         try:
             from .mission_stage import MissionStageDriver, planned_spec_refs
 
-            driver = MissionStageDriver(
-                self.missions, planned_specs=planned_spec_refs([self.plan])
-            )
+            from copy import copy
+            from .source_discovery_read_budget import bounded_read_view
+            with bounded_read_view(self.store.connection,
+                    deadline=getattr(self, '_tick_read_deadline', None)) as reader:
+                missions = copy(self.missions)
+                missions.connection = reader
+                driver = MissionStageDriver(
+                    missions, planned_specs=planned_spec_refs([self.plan]))
+                needs = driver.needs(source_ref=self.source_ref)
             return ([
                 {"company_ref": need["company_ref"], "spec_ref": need["spec_ref"]}
-                for need in driver.needs(source_ref=self.source_ref)
+                for need in needs
             ], None)
+        except SourceReadDeadline:
+            raise
         except Exception as exc:  # noqa: BLE001 - ordering is an optimisation, not a gate
             return ([], f"{type(exc).__name__}: {exc}")
 
@@ -3403,8 +3442,11 @@ class MissionSourceDiscoveryCoordinator:
         return result
 
     def _launch_acquisition(self) -> dict[str, Any]:
+        deadline = getattr(self, '_tick_read_deadline', None)
+        if deadline is not None and _monotonic() >= deadline:
+            raise SourceReadDeadline('source acquisition decision deadline exhausted')
         if self.acquisition_launcher is None:
-            queued = self.missions.next_discovered_document(source_ref=self.source_ref)
+            queued = self.missions.next_discovered_document(deadline=deadline, source_ref=self.source_ref)
             return {
                 "status": "unconfigured",
                 "reason": (
@@ -3414,7 +3456,7 @@ class MissionSourceDiscoveryCoordinator:
                 ),
                 "queued": queued is not None,
             }
-        if self.missions.launched_discovered_documents(limit=1, source_ref=self.source_ref):
+        if self.missions.launched_discovered_documents(deadline=deadline, limit=1, source_ref=self.source_ref):
             return {"status": "busy", "reason": "a discovered-document acquisition is still open"}
         hold = self._health_hold()
         if hold is not None:
@@ -3455,12 +3497,11 @@ class MissionSourceDiscoveryCoordinator:
         if selection_required:
             current_selection_refs = ()
         if self.selection_launcher is not None and self.source_ref == ALPHAENGINE_SOURCE_REF:
-            from .mission_stage import evaluate_mission
             periods_by_company={}
             if mission is not None:
                 # Read once: the selection step below needs the same rows, and
                 # the checklist is the slowest read of the acquire step.
-                stage_rows = evaluate_mission(self.store.connection, mission)
+                stage_rows = self._stage_snapshot(mission)
                 for company_stage in stage_rows:
                     calls=next((item for item in company_stage['items']
                                 if item['item_ref']=='earnings_calls'),None)
@@ -3491,7 +3532,7 @@ class MissionSourceDiscoveryCoordinator:
             abandoned = ()
         if abandoned:
             ineligible_refs = tuple(dict.fromkeys((*ineligible_refs, *abandoned)))
-        document = self.missions.next_discovered_document(
+        document = self.missions.next_discovered_document(deadline=deadline,
             source_ref=self.source_ref,
             preferred_hosts=self.preferred_hosts,
             skip_hosts=tuple(dict.fromkeys((*self.skip_hosts, *cooldown_hosts))),
@@ -3529,9 +3570,8 @@ class MissionSourceDiscoveryCoordinator:
                     member=next(x for x in mission["universe"] if x["company_ref"]==document["company_ref"])
                     company_plan=self.plan["companies"][document["company_ref"]]
                     terms=company_plan.get("name",company_plan.get("search_terms"))
-                    from .mission_stage import evaluate_mission
                     if stage_rows is None:
-                        stage_rows = evaluate_mission(self.store.connection, mission)
+                        stage_rows = self._stage_snapshot(mission)
                     stage=next(x for x in stage_rows if x["company_ref"]==document["company_ref"])
                     item=next(x for x in stage["items"] if x["item_ref"]=="earnings_calls")
                     ticket=self.selection_launcher.start(discovery_ref=document["discovery_ref"],view=view,
@@ -3560,7 +3600,7 @@ class MissionSourceDiscoveryCoordinator:
                 if not selected:
                     self.selection_launcher.mark_consumed(ticket)
                     return {"status":"completed_empty","ticket_ref":ticket["id"],"discovery_ref":document["discovery_ref"]}
-                document=self.missions.next_discovered_document(source_ref=self.source_ref,
+                document=self.missions.next_discovered_document(deadline=deadline, source_ref=self.source_ref,
                     preferred_hosts=self.preferred_hosts,skip_hosts=tuple(dict.fromkeys((*self.skip_hosts,*cooldown_hosts))),
                     preferred_needs=needs,excluded_needs=stopped_needs,excluded_mission_version_ref=mission["id"],
                     included_document_refs=selected,included_discovery_ref=document["discovery_ref"])
@@ -3576,9 +3616,9 @@ class MissionSourceDiscoveryCoordinator:
             # row -- they rest for FETCH_FAILURE_COOLDOWN instead of being
             # fetched again every hour.  The one immediate pass after a
             # restart still offers them: new code is the likeliest fix.
-            capped = self.missions.capped_failed_documents(
+            capped = self.missions.capped_failed_documents(deadline=deadline,
                 as_of=self.clock(), source_ref=self.source_ref)
-            document = self.missions.retryable_failed_document(
+            document = self.missions.retryable_failed_document(deadline=deadline,
                 older_than=(
                     _IMMEDIATE_RETRY if self._retry_failures_now
                     else ACQUISITION_RETRY_INTERVAL
@@ -3604,13 +3644,13 @@ class MissionSourceDiscoveryCoordinator:
             probe_hosts = [row["host"] for row in cooldowns
                            if row.get("state") == "probe_due" and row["host"] not in self.skip_hosts]
             if probe_hosts:
-                document = self.missions.next_discovered_document(
+                document = self.missions.next_discovered_document(deadline=deadline,
                     source_ref=self.source_ref, included_hosts=probe_hosts,
                     preferred_needs=needs, excluded_needs=stopped_needs,
                     excluded_mission_version_ref=None if mission is None else mission["id"],
                     excluded_document_refs=ineligible_refs)
                 if document is None:
-                    document = self.missions.retryable_failed_document(
+                    document = self.missions.retryable_failed_document(deadline=deadline,
                         older_than=_IMMEDIATE_RETRY, as_of=self.clock(),
                         source_ref=self.source_ref, recovery_probe_hosts=probe_hosts,
                         excluded_needs=stopped_needs,
@@ -3665,6 +3705,9 @@ class MissionSourceDiscoveryCoordinator:
             except CoverageMissionError as exc:
                 entry["review_status"] = f"not_registered:{type(exc).__name__}"
             return entry
+        deadline = getattr(self, '_tick_read_deadline', None)
+        if deadline is not None and _monotonic() >= deadline:
+            raise SourceReadDeadline('source acquisition decision deadline exhausted')
         try:
             authorization = self.missions.authorize_source_discovery(
                 company_ref=document["company_ref"],
@@ -3688,6 +3731,8 @@ class MissionSourceDiscoveryCoordinator:
                     budget["frees_at"] = frees_at
             return {"status": "budget_exhausted", "budget": budget,
                     "document_ref": document["document_ref"], "stage_order": stage_order}
+        if deadline is not None and _monotonic() >= deadline:
+            raise SourceReadDeadline('source acquisition decision deadline exhausted')
         try:
             ticket = self.acquisition_launcher.start_bounded_probe(
                 document_ref=document["document_ref"],
@@ -3855,6 +3900,8 @@ class MissionSourceDiscoveryCoordinator:
         # open dispatch is what tells it a search is still running).
         search_first = self._search_deferred_ticks >= SEARCH_STARVATION_TICKS
         self._tick_shared_view = _TICK_CACHE_UNREAD
+        self._tick_stage_cache = {}
+        self._tick_read_deadline = deadline
         settled_dispatches, recovered_dispatches, settled_documents = [], [], []
         carried_forward, already_held, review_backfill, acquisitions = [], [], [], []
         host_backfill, discovery, out_of_time = {}, None, False
@@ -3909,6 +3956,8 @@ class MissionSourceDiscoveryCoordinator:
                 discovery = {"status": "deferred", "reason": DISCOVERY_DEFERRED_REASON}
         finally:
             self._tick_shared_view = _NO_TICK_CACHE
+            self._tick_stage_cache = None
+            self._tick_read_deadline = None
         if discovery.get("status") == "deferred":
             self._search_deferred_ticks += 1
         else:

@@ -2409,6 +2409,7 @@ class CoverageMissionAuthority:
         excluded_discovery_refs: Sequence[str] = (),
         included_hosts: Sequence[str] | None = None,
         excluded_document_refs: Sequence[str] = (),
+        deadline: float | None = None,
     ) -> dict[str, Any] | None:
         """Next ``discovered`` document across active missions, or None.
 
@@ -2499,8 +2500,9 @@ class CoverageMissionAuthority:
             query += " CASE WHEN d.host IN (%s) THEN 0 ELSE 1 END," % ",".join("?" * len(preferred))
             params.extend(preferred)
         query += " d.created_at,d.record_id LIMIT 1"
-        row = self.connection.execute(query, params).fetchone()
-        return None if row is None else self._document_row(row)
+        from .source_discovery_read_budget import bounded_rows
+        rows = bounded_rows(self.connection, query, params, deadline=deadline)
+        return None if not rows else self._document_row(rows[0])
 
     def record_research_plan(
         self, plan: Mapping[str, Any], *, decided_by: str,
@@ -3141,6 +3143,7 @@ class CoverageMissionAuthority:
         restricted_spec_refs: Sequence[str] = (),
         recovery_probe_hosts: Sequence[str] = (),
         excluded_document_refs: Sequence[str] = (),
+        deadline: float | None = None,
     ) -> dict[str, Any] | None:
         """Oldest ``acquisition_failed`` document whose last update is older
         than the retry interval, or None.  Failures (provider errors, orphaned
@@ -3213,12 +3216,14 @@ class CoverageMissionAuthority:
                       % ",".join("?" * len(resting)))
             params.extend(resting)
         query += " ORDER BY d.updated_at,d.record_id LIMIT 1"
-        row = self.connection.execute(query, params).fetchone()
-        return None if row is None else self._document_row(row)
+        from .source_discovery_read_budget import bounded_rows
+        rows = bounded_rows(self.connection, query, params, deadline=deadline)
+        return None if not rows else self._document_row(rows[0])
 
     def capped_failed_documents(
         self, *, as_of: datetime, source_ref: str | None = None,
         cap: int = FETCH_FAILURE_CAP, cooldown: timedelta = FETCH_FAILURE_COOLDOWN,
+        deadline: float | None = None,
     ) -> list[dict[str, Any]]:
         """Documents whose retries are resting under the failure cap."""
 
@@ -3228,7 +3233,8 @@ class CoverageMissionAuthority:
         if source_ref is not None:
             query += " WHERE source_ref=?"
             params.append(_text(source_ref, "source_ref"))
-        rows = [dict(row) for row in self.connection.execute(query, params)]
+        from .source_discovery_read_budget import bounded_rows
+        rows = [dict(row) for row in bounded_rows(self.connection, query, params, deadline=deadline)]
         return capped_fetch_failures(rows, as_of=as_of, cap=cap, cooldown=cooldown)
 
     def launched_discovered_documents(
