@@ -232,9 +232,6 @@ def recover(wrapper, exc, kwargs):
     if (trace is None or kwargs['purpose'] != 'investment_memo' or not wrapper.stage
             or not wrapper.stage['allow_technical'] or wrapper.technical_slot_consumed):
         return None
-    macro = getattr(wrapper, 'macro', None)
-    if macro is not None and (not macro.complete or (getattr(macro, 'extra', None) or {}).get('role') == 'semantic'):
-        return None
     with Scheduler(wrapper.scheduler_db) as scheduler, recovery_readers(
             wrapper.config['model_router_db'],wrapper.config['budget_db'],now=wrapper.clock()) as (router,budget):
         proof = failure_proof(scheduler.connection,router,budget,
@@ -267,11 +264,6 @@ def recover(wrapper, exc, kwargs):
             mission=kwargs['mission'],config=wrapper.config,now=wrapper.clock(),memo_scope=scope)
         if record is None:
             return None
-        if getattr(wrapper, 'macro', None) is not None:
-            try:
-                wrapper.macro.claim_technical(proof['parent_work_ref'])
-            except ValueError:
-                return None
         original=record['memo_scope']
         if wrapper.accounted_micros+(len(GROUPS)-index)*wrapper.producer_micros+wrapper.verifier_micros > min(wrapper.run_micros,original['run_micros']):
             return None

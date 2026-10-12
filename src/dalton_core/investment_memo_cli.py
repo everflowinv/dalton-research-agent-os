@@ -535,16 +535,6 @@ def run_memo(*, store: DaltonStore, frozen: Mapping[str, Any], model: Any, verif
         return {"status": "held", "reason": "the bound Playbook does not have 12 memo sections and 12 key questions"}
     if max_units < len(GROUPS):
         return {"status": "held", "reason": "run max_units cannot cover the atomic four-group memo"}
-    from .investment_memo_repair_budget import MemoRepairBudget, MemoMacroVerifier
-    if isinstance(repair_budget, MemoRepairBudget):
-        from .investment_memo_draft import build_group_prompt
-        prompts = [build_group_prompt(group=group,
-            section_titles=[titles[i] for i in section_indexes],
-            questions=[questions[i] for i in question_indexes],
-            material=frozen['material'], company=company)
-            for group, section_indexes, question_indexes in GROUPS]
-        repair_budget.bind_macro(prompts, mission)
-        verifier_model = MemoMacroVerifier(verifier_model, repair_budget)
     sections, answers, calls = [], [], []
     cost_micros = 0
     repairs_left = max(0, int(max_repairs))
@@ -559,19 +549,14 @@ def run_memo(*, store: DaltonStore, frozen: Mapping[str, Any], model: Any, verif
             repair_budget.begin_stage(max_units=max_units, allow_technical=bool(repairs_left), quiesce=quiesce)
         outcome = _validated_group(store,draft_group(model, **kwargs),frozen['material'])
         cost_micros += int(outcome.get("model", {}).get("cost_micros") or outcome.get("cost_micros") or 0)
-        first = {"group": group, "reason": outcome.get("reason"), "refs": outcome.get("refs") or []}
-        if isinstance(repair_budget, MemoRepairBudget) and outcome['status'] != 'drafted' and outcome.get('repairable'):
-            from .investment_memo_macro_accounting import request_id
-            prompt = build_group_prompt(**{key: kwargs[key] for key in ('group','section_titles','questions','material','company')}, repair=first)
-            repair_budget.prepare_repair({'purpose': 'investment_memo', 'request_id': request_id(group,prompt),
-                                         'prompt': prompt, 'mission': mission})
         if (outcome["status"] != "drafted" and outcome.get("repairable") and repairs_left
                 and (repair_budget is None or repair_budget.can_repair(
                     remaining_groups=len(GROUPS) - group_index - 1))):
             # One paid redo, told exactly which refs were refused and why.
             repairs_left -= 1
+            first = {"group": group, "reason": outcome["reason"], "refs": outcome.get("refs") or []}
             if repair_budget is not None:
-                repair_budget.begin_stage(max_units=max_units, allow_technical=False, quiesce=quiesce, repair=True)
+                repair_budget.begin_stage(max_units=max_units, allow_technical=False, quiesce=quiesce)
             outcome = _validated_group(store,draft_group(model, **kwargs, repair=first),frozen['material'])
             cost_micros += int(outcome.get("model", {}).get("cost_micros") or outcome.get("cost_micros") or 0)
             repaired.append(first)
@@ -730,11 +715,7 @@ def run(*, state_dir: Path, model_config_path: Path | None, verifier_model_confi
     return {"schema_version": SUMMARY_SCHEMA_VERSION, **result,
             "budget": {"run": run_budget, "producer": producer_budget,
                        "verifier": verifier_budget, "max_repairs": repairs,
-                       "repair_accounted_micros": repair_budget.accounted_micros,
-                       **({} if repair_budget.macro is None and repair_budget.macro_error is None else {
-                           'macro_accounting': (repair_budget.macro.last if repair_budget.macro else None),
-                           'macro_fee_audit_reason': repair_budget.macro_error or
-                            ('legacy_fee_audit_required' if repair_budget.macro and not repair_budget.macro.complete else None)})}}
+                       "repair_accounted_micros": repair_budget.accounted_micros}}
 
 
 def main(argv: Sequence[str] | None = None) -> int:
