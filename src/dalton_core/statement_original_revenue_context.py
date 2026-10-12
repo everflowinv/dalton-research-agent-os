@@ -22,10 +22,13 @@ from .sec_filing_units import FilingUnitError, INLINE, MAX_BYTES, _expanded, par
 
 # Revenue-source rules are independently replayable. Rules 1/2 use the old
 # exact parser; rule 3 opts into the source-defined fixed-zero transformation.
+# Rule 4 audits complete elements, including their parser-defined tails. Old
+# proof versions retain their original audit and every existing fact hash.
 # No-addition preflight retains existing contexts and their paid identities.
 LEGACY_RULE_REF = "statement-original-revenue-context:exact-inline-facts:1"
 RECONCILIATION_RULE_REF = "statement-original-revenue-context:exact-inline-facts:2"
-RULE_REF = "statement-original-revenue-context:exact-inline-facts:3"
+FIXED_ZERO_RULE_REF = "statement-original-revenue-context:exact-inline-facts:3"
+RULE_REF = "statement-original-revenue-context:exact-inline-facts:4"
 # Independent statement components; never top-line aliases or REVENUE roles.
 RECONCILIATION_CONCEPTS = frozenset({"us-gaap:RevenueNotFromContractWithCustomer"})
 
@@ -34,7 +37,7 @@ def _concepts(parsed, rule_ref):
     from .model_forecast_driver import CONCEPT_ROLES, REVENUE
     ns = parsed['namespace_bindings']
     allowed = {concept for concept, role in CONCEPT_ROLES.items() if role == REVENUE}
-    if rule_ref in {RULE_REF, RECONCILIATION_RULE_REF}:
+    if rule_ref in {RULE_REF, FIXED_ZERO_RULE_REF, RECONCILIATION_RULE_REF}:
         allowed.update(RECONCILIATION_CONCEPTS)
     elif rule_ref != LEGACY_RULE_REF:
         raise FilingUnitError('original revenue source rule is unsupported')
@@ -51,7 +54,7 @@ def _qname(expanded, ns):
     return prefixes[0] + ':' + local
 
 
-def _audited_facts(raw, parsed, concepts):
+def _audited_facts(raw, parsed, concepts, *, complete_elements=False):
     """Every relevant numeric element must survive the strict shared parser."""
     body = gzip.decompress(raw) if raw.startswith(b'\x1f\x8b') else raw
     if len(body) > MAX_BYTES:
@@ -59,6 +62,16 @@ def _audited_facts(raw, parsed, concepts):
     parsed_hashes = {f['fact_sha256'] for f in parsed['facts']}
     pending, stack, excluded = [], [], []
     usable = set()
+    relevant = []
+    def audit(node):
+        digest = hashlib.sha256(ET.tostring(node, encoding='unicode').encode()).hexdigest()
+        # A nil fact has no reported amount. It is not a zero or a
+        # member available for arithmetic and is never appended.
+        nil = node.get('{http://www.w3.org/2001/XMLSchema-instance}nil')
+        if nil not in {'true', '1'}:
+            if digest not in parsed_hashes:
+                raise FilingUnitError('original revenue fact lacks exact numeric/context/unit parse')
+            usable.add(digest)
     for event, node in ET.iterparse(io.BytesIO(body), events=('start', 'end', 'start-ns')):
         if event == 'start-ns':
             pending.append(node)
@@ -76,15 +89,17 @@ def _audited_facts(raw, parsed, concepts):
                         raise FilingUnitError('original revenue fact has an unbound concept namespace')
                     name = None
                 if name in concepts:
-                    digest = hashlib.sha256(ET.tostring(node, encoding='unicode').encode()).hexdigest()
-                    # A nil fact has no reported amount. It is not a zero or a
-                    # member available for arithmetic and is never appended.
-                    nil = node.get('{http://www.w3.org/2001/XMLSchema-instance}nil')
-                    if nil not in {'true', '1'}:
-                        if digest not in parsed_hashes:
-                            raise FilingUnitError('original revenue fact lacks exact numeric/context/unit parse')
-                        usable.add(digest)
+                    if complete_elements:
+                        # ElementTree's end event guarantees children/text,
+                        # but its outside-element tail may arrive in the next
+                        # read chunk. The shared parser hashes after parsing;
+                        # wait for that same complete representation here.
+                        relevant.append(node)
+                    else:
+                        audit(node)
             stack.pop(); excluded.pop()
+    for node in relevant:
+        audit(node)
     return usable
 
 
@@ -96,7 +111,7 @@ def _identity(row, ns):
 
 def derive_lines(filing, lines, parsed, raw, *, rule_ref=RULE_REF):
     concepts = _concepts(parsed, rule_ref)
-    usable = _audited_facts(raw, parsed, concepts)
+    usable = _audited_facts(raw, parsed, concepts, complete_elements=rule_ref == RULE_REF)
     ns = parsed['namespace_bindings']
     known = {}
     for row in lines:
@@ -172,7 +187,7 @@ def supplemental_revenue_lines(connection, state_dir, filing, lines, *, source=N
     if not raw.startswith(b'\x1f\x8b') and b'nonFraction' not in raw:
         return [dict(row) for row in lines], None
     from .sec_filing_units import NUMERIC_RULE_REF as NUMERIC_RULE, LEGACY_RULE_REF as LEGACY_NUMERIC_RULE
-    parsed = parse_filing_units(raw, rule_ref=NUMERIC_RULE if rule_ref == RULE_REF else LEGACY_NUMERIC_RULE)
+    parsed = parse_filing_units(raw, rule_ref=NUMERIC_RULE if rule_ref in {RULE_REF, FIXED_ZERO_RULE_REF} else LEGACY_NUMERIC_RULE)
     result, evidence = derive_lines(filing, lines, parsed, raw, rule_ref=rule_ref)
     if not evidence:
         return result, None
@@ -187,7 +202,7 @@ def validate_revenue_supplement(connection, record, filing):
     proof = record.get('supplementary_original_revenue')
     if proof is None:
         return
-    if record.get('kind') != 'complete_snapshot' or proof.get('rule_ref') not in {RULE_REF, RECONCILIATION_RULE_REF, LEGACY_RULE_REF}:
+    if record.get('kind') != 'complete_snapshot' or proof.get('rule_ref') not in {RULE_REF, FIXED_ZERO_RULE_REF, RECONCILIATION_RULE_REF, LEGACY_RULE_REF}:
         raise FilingUnitError('original revenue supplement contract/kind differs')
     n = proof.get('base_line_count')
     original = [dict(row) for row in record['lines']]
