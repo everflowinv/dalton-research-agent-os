@@ -1233,7 +1233,7 @@ def _preserve_legacy_model_spec_transport_work(
 
 def _validate_structured_output_repair_authority(
     scheduler: Scheduler, binding: Mapping[str, Any], child_work: WorkOrder,
-    config: Mapping[str, Any],
+    config: Mapping[str, Any], *, maintenance_authority: Any | None = None,
 ) -> None:
     """Prove both named parent results before admitting a repair Work."""
 
@@ -1251,6 +1251,16 @@ def _validate_structured_output_repair_authority(
         or child_metadata.get("structured_output_repair") != binding
     ):
         raise CockpitModelError("structured output repair child binding is invalid")
+    if "maintenance_grant" in binding:
+        from .model_spec_maintenance_repair import MaintenanceAuthority
+        from .coverage_mission import CoverageMissionError
+        if not isinstance(maintenance_authority, MaintenanceAuthority):
+            raise CockpitModelError("maintenance correction requires the live owner authority")
+        try:
+            maintenance_authority.verify_child(scheduler.connection, binding, child_work)
+        except (ValueError, KeyError, TypeError, sqlite3.Error, CoverageMissionError) as exc:
+            raise CockpitModelError("maintenance correction authority differs: " + str(exc)) from exc
+        return
     proved: dict[str, tuple[dict[str, Any], str]] = {}
     for name in ("root_original", "repair_parent"):
         proof = binding.get(name)
@@ -2600,7 +2610,8 @@ class CockpitModel:
             work = _preserve_legacy_model_spec_transport_work(scheduler, work)
             if _structured_output_repair is not None:
                 _validate_structured_output_repair_authority(
-                    scheduler, _structured_output_repair, work, self.config
+                    scheduler, _structured_output_repair, work, self.config,
+                    maintenance_authority=getattr(self, "_model_spec_maintenance_authority", None)
                 )
             from .cockpit_timeout_recovery import (
                 reserve as timeout_reserve, verify as timeout_verify, consume as timeout_consume,

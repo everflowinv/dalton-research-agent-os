@@ -171,17 +171,17 @@ def _at(body, path):
     return copy.deepcopy(value)
 
 
-def validate_parent(body, proof):
+def validate_parent(body, proof, *, minimum_findings=2):
     from .company_model_spec import CompanyModelSpecError
     expected = diagnose(body)
-    if (expected["status"] != "complete" or len(expected["findings"]) < 2
+    if (expected["status"] != "complete" or len(expected["findings"]) < minimum_findings
             or canonical_json(expected) != canonical_json(proof)):
         raise CompanyModelSpecError("independent diagnostic bundle differs from its exact parent")
 
 
-def assert_only_allowed_changed(original, repaired, proof):
+def assert_only_allowed_changed(original, repaired, proof, *, minimum_findings=2):
     from .company_model_spec import CompanyModelSpecError
-    validate_parent(original, proof)
+    validate_parent(original, proof, minimum_findings=minimum_findings)
     frozen = copy.deepcopy(repaired)
     try:
         paths = []

@@ -360,7 +360,7 @@ def validate_structured_output_repair_binding(
         "repair_number",
     }
     binding = dict(value)
-    if set(binding) not in (expected, expected | {"typed_field_proof"}, expected | {"diagnostic_bundle"}) or binding.get("schema_version") != (
+    if set(binding) not in (expected, expected | {"typed_field_proof"}, expected | {"diagnostic_bundle"}, expected | {"diagnostic_bundle", "maintenance_grant"}) or binding.get("schema_version") != (
         "company-model-spec-repair-binding-0.1"
     ):
         raise CockpitModelError("structured output repair binding is invalid")
@@ -422,6 +422,18 @@ def validate_structured_output_repair_binding(
         raise CockpitModelError("diagnostic bundle is missing or unexpected")
     if bundled and not isinstance(binding["diagnostic_bundle"], Mapping):
         raise CockpitModelError("diagnostic bundle is invalid")
+    if "maintenance_grant" in binding:
+        from .model_spec_maintenance_repair import CONTRACT_REF as MAINTENANCE_REF
+        grant = binding["maintenance_grant"]
+        if (not bundled or number != 2 or config != {"max_attempts": 1}
+                or not isinstance(grant, Mapping)
+                or set(grant) != {"contract_ref", "root_ref", "content_hash"}
+                or grant["contract_ref"] != MAINTENANCE_REF
+                or grant["root_ref"] != binding["root_original"]["work_order_ref"]
+                or not isinstance(grant["content_hash"], str)
+                or len(grant["content_hash"]) != 64
+                or any(c not in "0123456789abcdef" for c in grant["content_hash"])):
+            raise CockpitModelError("maintenance repair grant binding is invalid")
     return binding
 
 
@@ -1049,6 +1061,7 @@ def model_spec_validation_contract() -> dict[str, str]:
 
     return {
         "contract": "company-model-spec-pre-persistence-validation:0.2",
+        "fixed_maintenance_correction": "model-spec-fixed-maintenance-correction:0.1",
         "proposal_method_completion": PROPOSAL_METHOD_COMPLETION_REF,
         "cash_flow_companion": CASH_FLOW_COMPANION_VALIDATION_CONTRACT_HASH,
         "cash_flow_derived_income_base": DERIVED_CASH_BASE_REF,
@@ -1391,8 +1404,20 @@ def run_model_spec(
             summary.update({"status": "succeeded", "spec_status": "refused",
                             "failure_reason": f"{type(exc).__name__}: {exc}"})
             return summary
+        from .model_spec_maintenance_repair import MaintenanceAuthority
+        from .planner_paid_output_recovery import _authority_connection
+        maintenance = MaintenanceAuthority(missions, model, state, mission)
+        maintenance_candidate = None
         try:
-            call = compatible_parent["call"] if compatible_parent is not None else model.call(
+            if getattr(model, "scheduler_db", None) is not None and Path(model.scheduler_db).is_file():
+                with _authority_connection(model.scheduler_db) as connection:
+                    maintenance_candidate = maintenance.find(connection)
+        except (ValueError, OSError, sqlite3.Error):
+            # Ineligible old tasks retain all ordinary repair/failure authority.
+            # This path neither recertifies history nor grants an extra slot.
+            pass
+        try:
+            call = maintenance_candidate[1] if maintenance_candidate is not None else compatible_parent["call"] if compatible_parent is not None else model.call(
                 purpose="model_spec",
                 # Keyed by the disclosure, so an unchanged company replays
                 # instead of being paid for again.
@@ -1438,7 +1463,18 @@ def run_model_spec(
         summary["cost_micros"] = int(call.get("cost_micros") or 0)
         repairs: list[dict[str, Any]] = []
         try:
-            if compatible_parent is not None:
+            if maintenance_candidate is not None:
+                from .model_spec_maintenance_repair import execute
+                spec, accepted_call = execute(maintenance, maintenance_candidate,
+                    decided_by=mission["autonomy"]["automation_principal"], repairs=repairs,
+                    note_evidence_resolver=note_resolver,
+                    financial_validator=lambda candidate: validate_financials_for_repair(
+                        missions, candidate, note_evidence_resolver=note_resolver))
+                summary["maintenance_repair_grant"] = {
+                    "contract_ref": maintenance_candidate[0]["contract_ref"],
+                    "root_ref": call["work_order_ref"],
+                    "content_hash": content_hash(maintenance_candidate[0])}
+            elif compatible_parent is not None:
                 spec, repairs, accepted_call, proof = validate_parent(
                     compatible_parent, state=state, mission=mission,
                     decided_by=mission["autonomy"]["automation_principal"],
