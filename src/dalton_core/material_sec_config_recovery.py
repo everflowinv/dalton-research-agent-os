@@ -46,7 +46,7 @@ def _unsent(state, query_ref, spec_ref, connection):
     # Also reject an extant exact child if its ticket was lost. Unavailable
     # process evidence is not evidence of no delivery. No signal is sent.
     try:
-        result=subprocess.run(['ps','-axo','command='],capture_output=True,text=True,timeout=1,check=True)
+        result=subprocess.run(['ps','-ww','-axo','command='],capture_output=True,text=True,timeout=1,check=True)
     except (OSError,subprocess.SubprocessError):raise QueueRecoveryIneligible('physical_query_scan_unavailable')
     if any(query_ref in line and '--targeted-binding' in line for line in result.stdout.splitlines()):
         raise QueueRecoveryIneligible('physical_targeted_child_exists')

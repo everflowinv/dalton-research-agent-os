@@ -78,8 +78,9 @@ class LocalConfigRecoveryTests(unittest.TestCase):
         (d/'ticket.json').write_text(json.dumps({'targeted_binding':{'query_ref':q['query_id']},'status':'succeeded'}))
         self.assertEqual(recovery.qualification(self.state,r,now=NOW)['reason'],'durable_targeted_ticket_exists')
         (d/'ticket.json').unlink()
-        with mock.patch.object(recovery.subprocess,'run',return_value=mock.Mock(stdout='python --targeted-binding '+q['query_id'])):
+        with mock.patch.object(recovery.subprocess,'run',return_value=mock.Mock(stdout='python --targeted-binding '+q['query_id']))as process_read:
             self.assertEqual(recovery.qualification(self.state,r,now=NOW)['reason'],'physical_targeted_child_exists')
+            self.assertEqual(process_read.call_args.args[0],['ps','-ww','-axo','command='])
     def test_configuration_or_mission_change_between_qualification_and_cas_does_not_append(self):
         r,q=self.setup_query();old=r['events'];proof=recovery.qualification(self.state,r,now=NOW)['proof']
         with mock.patch.object(recovery,'qualification',return_value={'status':'eligible','proof':proof}),mock.patch.object(recovery,'_current',return_value={**proof['configured'],'mission_version_hash':'0'*64}):
