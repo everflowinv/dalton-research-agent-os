@@ -1383,9 +1383,25 @@ def _validate_structured_output_repair_authority(
             raise CockpitModelError("typed structured output repair parent proof differs") from exc
     elif typed_proof is not None:
         raise CockpitModelError("unexpected typed structured output repair proof")
+    from .model_spec_complete_diagnostics import (
+        ERROR_CODE as BUNDLE_CODE, validate_parent as validate_bundle_parent, repair_slot_used, error_for)
+    bundle = binding.get("diagnostic_bundle")
+    if binding["validation_error"]["code"] == BUNDLE_CODE:
+        try:
+            parent_body = parse_response(parent_text)
+            validate_bundle_parent(parent_body, bundle)
+            diagnosed = error_for(parent_body)
+            if binding["validation_error"] != {"code": diagnosed.code, "message": str(diagnosed)}:
+                raise ValueError("diagnostic error message differs")
+            if repair_slot_used(scheduler.connection, root_proof, exclude_work=child_work.id, same_binding=binding, config=config):
+                raise ValueError("the original root already used its single repair slot")
+        except (ValueError, KeyError, TypeError, sqlite3.Error) as exc:
+            raise CockpitModelError("diagnostic repair parent proof or existing slot differs") from exc
+    elif bundle is not None:
+        raise CockpitModelError("unexpected diagnostic bundle")
     error = CompanyModelSpecError(
         binding["validation_error"]["message"],
-        code=binding["validation_error"]["code"], proof=typed_proof,
+        code=binding["validation_error"]["code"], proof=bundle if bundle is not None else typed_proof,
     )
     if child_work.question != _repair_prompt(parent_text, error):
         raise CockpitModelError("structured output repair prompt differs from its parent")

@@ -98,7 +98,13 @@ from .model_spec_typed_field_repair import (
     assert_only_typed_fields_changed, validate_parent as validate_typed_parent,
 )
 
-REPAIR_CONTRACT_REF = "contract:company-model-spec-structured-output-repair:0.12"
+from .model_spec_complete_diagnostics import (
+    CONTRACT_REF as COMPLETE_DIAGNOSTICS_REF, ERROR_CODE as COMPLETE_DIAGNOSTICS_CODE,
+    error_for as complete_diagnostics_error, validate_parent as validate_bundle_parent,
+    assert_only_allowed_changed, repair_slot_used, strong_result,
+)
+
+REPAIR_CONTRACT_REF = "contract:company-model-spec-structured-output-repair:0.13"
 # One repair call, which is the number every other lane in this repository
 # uses for the same bargain (``draft_contract_repair.MAX_REPAIR_ATTEMPTS``).
 DEFAULT_REPAIR_ATTEMPTS = 1
@@ -109,7 +115,7 @@ DEFAULT_REPAIR_ATTEMPTS = 1
 # unreachable and asked the same question again at full price.  Instead the
 # answer is found by what it answers -- disclosure, task, parent text and the
 # exact validation error -- and replayed; only a question nobody has answered
-# is sent, and at most ``max_attempts`` of those per contract version.
+# is sent, within the original root's ``max_attempts`` slots.
 REPAIR_REPLAY_POLICY_REF = "model-spec-repair-replay-by-parent-and-error:0.1"
 REPAIR_CONTRACT = {
     "ref": REPAIR_CONTRACT_REF,
@@ -125,7 +131,7 @@ REPAIR_CONTRACT = {
     # refusal, because a repair there is an invitation to make the numbers
     # agree.  12 live refusals between 2026-09-11 and 09-13 were wiring.
     "eligible_error_codes": ["format", "structure", "text_length",
-                             CASH_FLOW_OPERATING_BASE_SHAPE_CODE, SIGNED_EXPENSE_REPAIR_CODE, *TYPED_FIELD_ERROR_CODES],
+                             CASH_FLOW_OPERATING_BASE_SHAPE_CODE, SIGNED_EXPENSE_REPAIR_CODE, *TYPED_FIELD_ERROR_CODES, COMPLETE_DIAGNOSTICS_CODE],
     "eligible_structure_rules_ref": REPAIRABLE_STRUCTURE_RULES_REF,
     "eligible_structure_rules": list(REPAIRABLE_STRUCTURE_RULES),
     "validation": "full_spec_from_response_and_supplied_financial_validator_after_every_attempt",
@@ -161,6 +167,10 @@ REPAIR_CONTRACT = {
     "cost_slot_exclusive_pair": {"ref": COST_SLOT_PAIR_REF,
         "scope": "one_exact_expense_pair_only_original_slot_or_explicit_unbound",
         "preserve": "all_other_parent_fields_and_all_financial_source_authorities"},
+    "independent_settings_bundle": {"ref": COMPLETE_DIAGNOSTICS_REF,
+        "rules": ["shares_annual_semantics", "eps_annual_semantics", "operating_cash_base_reference"],
+        "scope": "exact_parent_allowed_paths_whole_body_guard",
+        "existing_root_slot": "any_recorded_repair_consumes_original_single_slot"},
     "semantic_failure": "whole_refusal",
     # 0.5: a new contract is a new question only where nobody has answered it.
     # A repair already made under an earlier contract for this disclosure,
@@ -350,7 +360,7 @@ def validate_structured_output_repair_binding(
         "repair_number",
     }
     binding = dict(value)
-    if set(binding) not in (expected, expected | {"typed_field_proof"}) or binding.get("schema_version") != (
+    if set(binding) not in (expected, expected | {"typed_field_proof"}, expected | {"diagnostic_bundle"}) or binding.get("schema_version") != (
         "company-model-spec-repair-binding-0.1"
     ):
         raise CockpitModelError("structured output repair binding is invalid")
@@ -407,6 +417,11 @@ def validate_structured_output_repair_binding(
     if typed and (not isinstance(binding["typed_field_proof"], Mapping)
                   or binding["typed_field_proof"].get("code") != error["code"]):
         raise CockpitModelError("typed structured output repair proof is invalid")
+    bundled = error["code"] == COMPLETE_DIAGNOSTICS_CODE
+    if bundled != ("diagnostic_bundle" in binding):
+        raise CockpitModelError("diagnostic bundle is missing or unexpected")
+    if bundled and not isinstance(binding["diagnostic_bundle"], Mapping):
+        raise CockpitModelError("diagnostic bundle is invalid")
     return binding
 
 
@@ -415,7 +430,18 @@ def _repair_prompt(original_text: str, error: CompanyModelSpecError, *,
                    output_schema: Mapping[str, Any] | None = None) -> str:
     contract = REPAIR_CONTRACT if contract is None else contract
     output_schema = OUTPUT_SCHEMA if output_schema is None else output_schema
-    if error.code in TYPED_FIELD_ERROR_CODES:
+    if error.code == COMPLETE_DIAGNOSTICS_CODE:
+        head = (
+            "Correct all independently diagnosed settings in DIAGNOSTIC_BUNDLE in this one response. "
+            "Change only its exact paths and choose only its allowed alternatives. Do not change any other "
+            "field, amount, source, concept, formula, coefficient, evidence, period, unit, array order or assessment. "
+            "If the named operating cash flow base is unsupported, explicitly choose unavailable with null base "
+            "and explain why; do not substitute revenue or another economic base. No automatic downgrade is made. Structural admissibility "
+            "does not prove financial/source/history validity. Return the entire original JSON with only these "
+            "settings corrected; full financial validation remains mandatory.\n\n"
+            f"DIAGNOSTIC_BUNDLE:\n{canonical_json(error.proof)}\n\n"
+        )
+    elif error.code in TYPED_FIELD_ERROR_CODES:
         head = (
             "Correct only the exact paths in TYPED_FIELD_PROOF. For periodicity choose quarterly or annual. "
             "For acquisitions select a permitted forecast method and its base, or unavailable with null base; never treat acquisitions as zero. "
@@ -534,10 +560,11 @@ def _repair_prompt(original_text: str, error: CompanyModelSpecError, *,
     from .draft_contract_repair import (
         FINDINGS_LIST_LABEL, Violation, findings_block)
 
-    listed = findings_block(
-        [Violation("financial_statement_structure" if error.code == "structure"
-                   else "(reply)", error.code, str(error))],
-        label=FINDINGS_LIST_LABEL)
+    findings = ([Violation(str(f["paths"]), f["rule"], canonical_json(f["choices"]))
+                 for f in error.proof["findings"]] if error.code == COMPLETE_DIAGNOSTICS_CODE else
+                [Violation("financial_statement_structure" if error.code == "structure"
+                           else "(reply)", error.code, str(error))])
+    listed = findings_block(findings, label=FINDINGS_LIST_LABEL)
     return (
         head +
         f"REPAIR_CONTRACT:\n{canonical_json(contract)}\n\n"
@@ -664,6 +691,7 @@ def _validated_spec_with_repair(
     replayed_refs: set[str] = set()
     cash_base_repair_applied = False
     typed_repair_applied = False
+    bundle_repair_applied = False
     while True:
         try:
             spec = spec_from_response(
@@ -676,7 +704,7 @@ def _validated_spec_with_repair(
         except CompanyModelSpecError as error:
             # This narrow gap declaration gets one reconsideration only, even
             # if the original response reveals another invalid field afterwards.
-            if cash_base_repair_applied or typed_repair_applied:
+            if cash_base_repair_applied or typed_repair_applied or bundle_repair_applied:
                 raise
             if error.code not in REPAIR_CONTRACT["eligible_error_codes"]:
                 raise
@@ -689,7 +717,8 @@ def _validated_spec_with_repair(
                 state_hash=str(state["state_hash"]),
                 parent_text=current_call["text"],
                 validation_error={"code": error.code, "message": str(error)},
-                exclude=replayed_refs,
+                exclude=replayed_refs, include_current=True,
+                exact_root={key: root_call.get(key) for key in _REPAIR_AUTHORITY_KEYS},
             )
             if prior is not None:
                 replayed_refs.add(prior["work_order_ref"])
@@ -731,6 +760,35 @@ def _validated_spec_with_repair(
                                    "repair_number"}
                 }
                 continue
+            try:
+                bundled_error = complete_diagnostics_error(parse_response(current_call["text"]))
+            except CompanyModelSpecError:
+                bundled_error = None  # The existing malformed-JSON rule remains unchanged.
+            if bundled_error is not None:
+                error = bundled_error
+                if error.code != COMPLETE_DIAGNOSTICS_CODE:
+                    raise error
+                validate_bundle_parent(parse_response(current_call["text"]), error.proof)
+                held_bundle = _prior_contract_repair(
+                    getattr(model, "scheduler_db", None), state_hash=str(state["state_hash"]),
+                    parent_text=current_call["text"],
+                    validation_error={"code": error.code, "message": str(error)},
+                    exclude=replayed_refs, include_current=True,
+                    exact_root={key: root_call.get(key) for key in _REPAIR_AUTHORITY_KEYS})
+                if held_bundle is not None:
+                    assert_only_allowed_changed(parse_response(current_call["text"]),
+                        parse_response(held_bundle["text"]), error.proof)
+                    repairs.append({"repair_number": held_bundle["repair_number"],
+                        "work_order_ref": held_bundle["work_order_ref"],
+                        "result_envelope_ref": held_bundle["result_envelope_ref"],
+                        "invocation_ref": held_bundle["invocation_ref"],
+                        "route_decision_ref": held_bundle["route_decision_ref"],
+                        "replayed": True, "cost_micros": 0,
+                        "binding_hash": held_bundle["binding_hash"],
+                        "repair_contract_hash": held_bundle["repair_contract_hash"]})
+                    current_call = held_bundle
+                    bundle_repair_applied = True
+                    continue
             if (contract_calls >= repair_config["max_attempts"]
                     or signed_repair_attempted
                     or (error.code in (SIGNED_EXPENSE_REPAIR_CODE, *TYPED_FIELD_ERROR_CODES) and contract_calls >= 1)):
@@ -767,6 +825,8 @@ def _validated_spec_with_repair(
             }
             if error.code in TYPED_FIELD_ERROR_CODES:
                 binding["typed_field_proof"] = copy.deepcopy(error.proof)
+            if error.code == COMPLETE_DIAGNOSTICS_CODE:
+                binding["diagnostic_bundle"] = copy.deepcopy(error.proof)
             if any(not isinstance(value, str) or not value
                    for value in binding["root_original"].values()):
                 raise CompanyModelSpecError(
@@ -777,6 +837,10 @@ def _validated_spec_with_repair(
                 raise CompanyModelSpecError(
                     "repair parent lacks immutable model authority"
                 ) from error
+            if _complete_bundle_slot_used(model, root_call, same_binding=binding):
+                # Different contract/error/proof is a new slot, not technical
+                # recovery of this exact immutable already-authorized question.
+                raise error
             repaired_call = model.call(
                 purpose="model_spec",
                 request_id="model-spec-repair:" + content_hash(binding)[:32],
@@ -816,12 +880,37 @@ def _validated_spec_with_repair(
                 assert_only_typed_fields_changed(parse_response(current_call["text"]),
                     parse_response(repaired_call["text"]), error.proof, state=state)
                 typed_repair_applied = True
+            if error.code == COMPLETE_DIAGNOSTICS_CODE:
+                assert_only_allowed_changed(parse_response(current_call["text"]),
+                    parse_response(repaired_call["text"]), error.proof)
+                bundle_repair_applied = True
             current_call = dict(repaired_call)
+
+
+def _complete_bundle_slot_used(model, root_call, *, same_binding=None):
+    db = getattr(model, "scheduler_db", None)
+    if db is None:  # Pure offline test adapters have no authority store.
+        return False
+    from .readonly_sqlite import connect_read_only, connect_cold_wal_snapshot
+    proof = {key: root_call.get(key) for key in _REPAIR_AUTHORITY_KEYS}
+    try:
+        try:
+            connection = connect_read_only(db)
+        except sqlite3.OperationalError:
+            with connect_cold_wal_snapshot(db) as connection:
+                return repair_slot_used(connection, proof, same_binding=same_binding, config=getattr(model, "config", None))
+        try:
+            return repair_slot_used(connection, proof, same_binding=same_binding, config=getattr(model, "config", None))
+        finally:
+            connection.close()
+    except (OSError, sqlite3.Error, ValueError, KeyError, TypeError):
+        return True  # Unproved history is never a new paid slot.
 
 
 def _prior_contract_repair(
     scheduler_db: Any, *, state_hash: str, parent_text: str,
-    validation_error: Mapping[str, str], exclude: set[str],
+    validation_error: Mapping[str, str], exclude: set[str], include_current: bool = False,
+    exact_root: Mapping[str, str] | None = None,
 ) -> dict[str, Any] | None:
     """A held repair answer, bought under an earlier contract, to this question.
 
@@ -879,11 +968,14 @@ def _prior_contract_repair(
         if (
             not isinstance(binding, Mapping)
             or metadata.get("purpose") != "model_spec"
+            or exact_root is not None and (binding.get("root_original") is not None
+                 or binding.get("repair_contract_hash") == REPAIR_CONTRACT_HASH
+                 or binding.get("diagnostic_bundle") is not None) and binding.get("root_original") != dict(exact_root)
             or binding.get("state_hash") != state_hash
             or binding.get("task_hash") != TASK_HASH
             or binding.get("parent_text_sha256") != parent_sha
             or binding.get("validation_error") != dict(validation_error)
-            or binding.get("repair_contract_hash") == REPAIR_CONTRACT_HASH
+            or not include_current and binding.get("repair_contract_hash") == REPAIR_CONTRACT_HASH
             or isinstance(binding.get("repair_number"), bool)
             or not isinstance(binding.get("repair_number"), int)
             or binding["repair_number"] < 1
@@ -896,6 +988,22 @@ def _prior_contract_repair(
         text = (envelope.get("outputs") or {}).get("text")
         if not isinstance(text, str):
             continue
+        if binding.get("diagnostic_bundle") is not None:
+            try:
+                try:
+                    checked_connection = connect_read_only(path)
+                except sqlite3.OperationalError:
+                    with connect_cold_wal_snapshot(path) as checked_connection:
+                        checked = strong_result(checked_connection, work_id)
+                else:
+                    try:
+                        checked = strong_result(checked_connection, work_id)
+                    finally:
+                        checked_connection.close()
+                if checked is None or checked["result_envelope_json"] != envelope_json:
+                    continue
+            except (OSError, sqlite3.Error, ValueError, KeyError, TypeError):
+                continue
         return {
             "text": text, "replayed": True, "cost_micros": 0,
             "cost_status": "replayed", "work_order_ref": work_id,
@@ -920,7 +1028,7 @@ def model_spec_validation_contract() -> dict[str, str]:
     key.  So a change to any of these -- not only to the repair contract --
     retires a refusal reached under the old rules on the next tick, and the
     child re-validates the held answers (free replays) before it may send the
-    one new repair per contract version described above.
+    original root's remaining repair slot, never a new slot from version drift.
     """
 
     from .company_model_spec import ASSESSMENT_COMPATIBILITY_REF
@@ -958,6 +1066,7 @@ def model_spec_validation_contract() -> dict[str, str]:
         "assessment_compatible_replay": ASSESSMENT_COMPATIBILITY_REF,
         "assessment_compatible_signed_repair": SIGNED_COMPATIBLE_REPLAY_REF,
         "joint_signed_filed_income_sum": JOINT_SIGNED_REPAIR_REF,
+        "independent_settings_diagnostics": COMPLETE_DIAGNOSTICS_REF,
     }
 
 
