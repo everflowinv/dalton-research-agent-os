@@ -156,7 +156,7 @@ _DAY_MONTH_RE = re.compile(
     r"Apr(?:il)?|May|Jun(?:e)?|Jul(?:y)?|Aug(?:ust)?|Sep(?:t|tember)?|Oct(?:ober)?|"
     r"Nov(?:ember)?|Dec(?:ember)?)(?![A-Za-z])(?:,?\s+((?:19|20)\d{2})(?!\d))?",
 )
-NUMBER_SOURCE_CONTRACT_VERSION = "number-source-contract:0.8"
+NUMBER_SOURCE_CONTRACT_VERSION = "number-source-contract:0.9"
 
 
 def number_source_contract_fingerprint() -> str:
@@ -178,6 +178,7 @@ def number_source_contract_fingerprint() -> str:
             "+read-from-period-and-text"),
         "print_equivalence": (
             "percent-word+english-number-words-exact+currency-symbol-as-word"),
+        "year_amount_disambiguation": "four-digit-year-with-explicit-money-or-percent-unit-is-a-value",
     })
 
 
@@ -233,7 +234,19 @@ def value_tokens(text: str, *, include_small: bool = False) -> list[str]:
     """Every figure the text asserts, with period labels and citation tags removed."""
 
     without_tags = _CITATION_TAG_RE.sub(" ", text or "")
-    without_periods = _PERIOD_TOKEN_RE.sub(" ", without_tags)
+    def period_or_amount(match: re.Match[str]) -> str:
+        # Only a standalone bare year is ambiguous. FY labels, full dates,
+        # quarters and explicit 年/财年 remain periods, even next to money.
+        if re.fullmatch(r"(?:19|20)\d{2}", match.group()):
+            before = without_tags[:match.start()]
+            after = without_tags[match.end():]
+            if (re.search(r"[\d.,]$", before) or re.match(r"(?:\d|[.,]\d)", after)
+                    or re.search(r"[$€£¥]\s*$", before)
+                    or re.match(r"\s*(?:(?:万亿|十亿|百万|千万|亿|万|千)\s*)?(?:美元|人民币|欧元|英镑|日元|港元|USD\b|EUR\b|GBP\b|JPY\b|dollars?\b|euros?\b|%)", after, re.I)
+                    or re.match(r"\s*(?:billion|million|trillion)\s+(?:USD\b|EUR\b|dollars?\b|euros?\b)", after, re.I)):
+                return match.group()
+        return " "
+    without_periods = _PERIOD_TOKEN_RE.sub(period_or_amount, without_tags)
     tokens = []
     for match in _VALUE_TOKEN_RE.finditer(without_periods):
         token = match.group(0).strip()

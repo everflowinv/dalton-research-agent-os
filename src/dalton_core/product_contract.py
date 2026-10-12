@@ -221,6 +221,21 @@ def should_redraft(**kwargs: Any) -> dict[str, Any]:
 # ---------------------------------------------------------------------------
 
 TAG_KINDS: Mapping[str, str] = {"P": "passage", "N": "number", "C": "claim", "O": "ours"}
+PASSAGE_QUOTE_PRINT_CONTRACT = "passage-quote-print:hyphen-line-wrap:1"
+
+
+def passage_quote_matches(quote: str, passage: str) -> bool:
+    """Compare words in one original span; never rewrite its bytes or identity.
+
+    A single layout newline inside a hyphenated token may be omitted in a
+    quotation. Keep the literal hyphen, both neighbouring characters, and
+    every digit/punctuation. Blank lines and a leading minus are not wraps.
+    """
+    def normal(text: str) -> str:
+        return re.sub(r"\s+", " ", text).strip()
+    wrapped = re.sub(r"(?<=\w)-\r?\n[ \t]*(?=\w)", "-", passage)
+    return bool(quote.strip()) and (
+        normal(quote) in normal(passage) or normal(quote) in normal(wrapped))
 TAG_RE = re.compile(r"(?<![A-Za-z0-9])([PNCO])(\d{1,4})(?![A-Za-z0-9])")
 BRACKET_TAG_RE = re.compile(r"\[([PNCO]\d{1,4})\]")
 
@@ -603,6 +618,7 @@ def contract_fingerprint() -> str:
         "stances": STANCES, "gap_kinds": GAP_KINDS,
         "material_missing": MATERIAL_MISSING_RE.pattern,
         "placeholders": [(code, pattern.pattern) for code, pattern in PLACEHOLDER_PATTERNS],
+        "passage_quote_print": PASSAGE_QUOTE_PRINT_CONTRACT,
     })
 
 

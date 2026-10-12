@@ -1392,7 +1392,8 @@ def parse_document_output(
             if entry["kind"] == "passage":
                 quote = str(number.get("quote") or "").strip()
                 passage = str(entry.get("text") or "")
-                if quote and _normalise_space(quote) not in _normalise_space(passage):
+                from .product_contract import passage_quote_matches
+                if quote and not passage_quote_matches(quote, passage):
                     findings.append({"code": "quote_not_in_passage", "section": title,
                                      "detail": f"{tag}: {quote[:60]}"})
                     continue
