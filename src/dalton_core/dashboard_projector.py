@@ -23,6 +23,7 @@ from typing import Any, Callable, Mapping, Sequence
 from urllib.parse import quote
 
 from .dashboard import ProjectionWriter, SCHEMA_VERSION
+from .projection_stage_diagnostics import stage_timing
 from .migrations.projection_indexes import (
     WORK_ORDER_FOLD_COVER_INDEX, FORMAL_RESULT_FOLD_COVER_INDEX,
     RESULT_ENVELOPE_FOLD_COVER_INDEX,
@@ -602,41 +603,43 @@ class DashboardProjector:
         # after the alias check.  Build a private sibling and atomically replace
         # the directory entry; this unlinks a hostile link instead of writing
         # through it.
-        destination.parent.mkdir(parents=True, exist_ok=True)
-        fd, temporary_name = tempfile.mkstemp(
-            prefix=f".{destination.name}.", suffix=".tmp", dir=destination.parent
-        )
-        os.close(fd)
-        temporary = Path(temporary_name)
-        try:
-            with ProjectionWriter(temporary, cancel_requested=self.cancel_requested) as writer:
-                writer.replace(snapshot)
-            sync_fd = os.open(temporary, os.O_RDONLY)
+        with stage_timing('projection_write'):
+            destination.parent.mkdir(parents=True, exist_ok=True)
+            fd, temporary_name = tempfile.mkstemp(
+                prefix=f".{destination.name}.", suffix=".tmp", dir=destination.parent
+            )
+            os.close(fd)
+            temporary = Path(temporary_name)
             try:
-                os.fsync(sync_fd)
+                with ProjectionWriter(temporary, cancel_requested=self.cancel_requested) as writer:
+                    writer.replace(snapshot)
+                sync_fd = os.open(temporary, os.O_RDONLY)
+                try:
+                    os.fsync(sync_fd)
+                finally:
+                    os.close(sync_fd)
+                check_cancelled(self.cancel_requested)
+                os.replace(temporary, destination)
+                directory_fd = os.open(destination.parent, os.O_RDONLY)
+                try:
+                    os.fsync(directory_fd)
+                finally:
+                    os.close(directory_fd)
             finally:
-                os.close(sync_fd)
-            check_cancelled(self.cancel_requested)
-            os.replace(temporary, destination)
-            directory_fd = os.open(destination.parent, os.O_RDONLY)
-            try:
-                os.fsync(directory_fd)
-            finally:
-                os.close(directory_fd)
-        finally:
-            if temporary.exists():
-                temporary.unlink()
-            for suffix in ("-journal", "-wal", "-shm"):
-                temporary.with_name(temporary.name + suffix).unlink(missing_ok=True)
+                if temporary.exists():
+                    temporary.unlink()
+                for suffix in ("-journal", "-wal", "-shm"):
+                    temporary.with_name(temporary.name + suffix).unlink(missing_ok=True)
         return snapshot
 
     def build_snapshot(self) -> dict[str, Any]:
-        check_cancelled(self.cancel_requested)
-        try:
-            return self._build_snapshot()
-        except sqlite3.Error:
+        with stage_timing('build_snapshot'):
             check_cancelled(self.cancel_requested)
-            raise
+            try:
+                return self._build_snapshot()
+            except sqlite3.Error:
+                check_cancelled(self.cancel_requested)
+                raise
 
     def _build_snapshot(self) -> dict[str, Any]:
         as_of_dt = self.clock()
