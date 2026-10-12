@@ -12,6 +12,9 @@ from .store import canonical_json, content_hash
 
 CONTRACT = "document-completed-model-postprocessing:0.1"
 ERROR = "DirectedNumericError: existing Figure conflicts with exact verified numeric answer"
+CHAIN_CONTRACT = "document-completed-model-postprocessing:0.2"
+CHAIN_ERROR = "ResearchVerificationConflict: candidate version chain mismatch"
+CONTRACTS = frozenset({CONTRACT,CHAIN_CONTRACT})
 
 
 def candidate(coordinator, admission, ticket_ref):
@@ -24,7 +27,7 @@ def candidate(coordinator, admission, ticket_ref):
     ticket = coordinator.launcher.status(ticket_ref)
     summary = ticket.get("summary")
     if (ticket.get("status") not in {"failed", "orphaned"} or not isinstance(summary, Mapping)
-            or summary.get("error") != ERROR or summary.get("status") != "failed"
+            or summary.get("error") not in {ERROR,CHAIN_ERROR} or summary.get("status") != "failed"
             or summary.get("admission_ref") != admission["id"]
             or summary.get("admission_hash") != admission["content_hash"]
             or ticket.get("admission_ref") != admission["id"]
@@ -62,7 +65,7 @@ def candidate(coordinator, admission, ticket_ref):
             "work_hash": stored["work_order_hash"], "formal_hash": _formal_hash(formal)})
     if len(proofs) != 3:
         return None
-    body = {"contract_ref": CONTRACT, "admission_ref": admission["id"],
+    body = {"contract_ref": CONTRACT if summary['error']==ERROR else CHAIN_CONTRACT, "admission_ref": admission["id"],
         "admission_hash": admission["content_hash"], "source_ticket_ref": ticket_ref,
         "source_summary_sha256": hashlib.sha256(raw).hexdigest(), "completed_stages": proofs,
         "model_calls_allowed": 0}
