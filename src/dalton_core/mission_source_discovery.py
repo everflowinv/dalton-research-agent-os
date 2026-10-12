@@ -3574,12 +3574,16 @@ class MissionSourceDiscoveryCoordinator:
                         stage_rows = self._stage_snapshot(mission)
                     stage=next(x for x in stage_rows if x["company_ref"]==document["company_ref"])
                     item=next(x for x in stage["items"] if x["item_ref"]=="earnings_calls")
+                    if deadline is not None and _monotonic() >= deadline:
+                        raise SourceReadDeadline('source selection decision deadline exhausted')
                     ticket=self.selection_launcher.start(discovery_ref=document["discovery_ref"],view=view,
                         mission_ref=mission["id"],company={"company_ref":document["company_ref"],"name":terms,
                         "ticker":member["ticker"],"aliases":list(company_plan.get("aliases") or [member["ticker"]])},
                         missing_periods=(list(item.get("missing_periods") or ())
                                          if spec["document_type"] == "meeting_minutes" else []),
                         selection_context=self._selection_context(mission, spec))
+                except SourceReadDeadline:
+                    raise
                 except CandidateSelectionError as exc:
                     # The same bytes, plan and mission refuse the same way on
                     # every tick: set this one discovery aside and let the
