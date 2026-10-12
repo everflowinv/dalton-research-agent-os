@@ -77,20 +77,38 @@ def envelope_parameters(connection,envelope):
         raise SecPageError('SEC source invocation/call identity differs')
     return call['parameters']
 
-def verify_archive_parent(connection,spool,parameters):
-    """A caller token alone is insufficient: replay an existing official root."""
+def verify_archive_parent(connection,spool,parameters,*,parent_binding=None):
+    """Replay the exact bound official root, or the unchanged legacy lookup."""
     bound=archive_cursor(parameters['cursor'])
-    # One exact query hash, bounded candidate receipts. Every candidate must
-    # retain full immutable authority and the original bytes to qualify.
-    rows=connection.execute('SELECT e.source_envelope_id FROM connector_source_envelopes e '
-        'JOIN connector_invocations i ON i.connector_invocation_id=e.connector_invocation_ref '
-        'JOIN connector_call_specs c ON c.call_spec_id=i.call_spec_ref '
-        'WHERE c.query_hash=? ORDER BY e.created_at DESC LIMIT 8',(bound['root_query_hash'],)).fetchall()
-    for row in rows:
-        e=_record(connection,'connector_source_envelopes','source_envelope_id',row['source_envelope_id'])
+    if parent_binding is not None:
+        fields={'discovery_ref','discovery_hash','envelope_ref','envelope_hash'}
+        if not isinstance(parent_binding,Mapping) or set(parent_binding)!=fields:
+            raise SecPageError('SEC archive exact parent closed identity differs')
+        d=_record(connection,'coverage_mission_source_discoveries','record_id',parent_binding['discovery_ref'])
+        e=_record(connection,'connector_source_envelopes','source_envelope_id',parent_binding['envelope_ref'])
+        inv=_record(connection,'connector_invocations','connector_invocation_id',d['connector_invocation_ref'])
+        if (d['source_ref']!='source:sec-edgar' or d['content_hash']!=parent_binding['discovery_hash']
+                or d['source_envelope_ref']!=e['id'] or d['source_envelope_hash']!=parent_binding['envelope_hash']
+                or e['content_hash']!=parent_binding['envelope_hash']
+                or d['connector_invocation_ref']!=e['connector_invocation_ref']
+                or d['connector_invocation_hash']!=inv['content_hash']
+                or d['query_hash']!=bound['root_query_hash']):
+            raise SecPageError('SEC archive exact parent source/query/hash differs')
+        candidates=[e]
+    else:
+        # Keep the legacy SQL, sorting and candidate limit unchanged. The
+        # owner-created query_hash index enables an exact call-spec seek.
+        rows=connection.execute('SELECT e.source_envelope_id FROM connector_source_envelopes e '
+            'JOIN connector_invocations i ON i.connector_invocation_id=e.connector_invocation_ref '
+            'JOIN connector_call_specs c ON c.call_spec_id=i.call_spec_ref '
+            'WHERE c.query_hash=? ORDER BY e.created_at DESC LIMIT 8',(bound['root_query_hash'],)).fetchall()
+        candidates=(_record(connection,'connector_source_envelopes','source_envelope_id',row['source_envelope_id']) for row in rows)
+    for e in candidates:
         if e['source']!='source:sec-edgar' or e['operation']!='list_filings' or e['status'] not in {'complete','partial','empty'}:continue
         p=envelope_parameters(connection,e)
         if (p.get('cursor')!=ROOT_CURSOR or {k:v for k,v in p.items() if k!='cursor'}!={k:v for k,v in parameters.items() if k!='cursor'}):continue
+        if parent_binding is not None and d['parameters']!=p:
+            raise SecPageError('SEC archive exact discovery parameters differ')
         raw=spool.read_object(e['raw_response_hash'])
         import hashlib
         if hashlib.sha256(raw).hexdigest()!=e['raw_response_hash']:raise SecPageError('SEC root original bytes differ')

@@ -724,6 +724,11 @@ def build_discovery_parameters(
     })
 
 
+def _configured_search_spool(launcher):
+    value=getattr(launcher,'spool_dir',None)
+    return value if isinstance(value,(str,Path)) else None
+
+
 def _targeted_parameters(state_dir, *, plan, **kwargs):
     if plan["source_ref"] == SEC_SOURCE_REF:
         from .material_targeted_sec import targeted_sec_parameters
@@ -1052,7 +1057,7 @@ class _SearchLauncherBase:
                     company_ref=authorization["company_ref"], spec_ref=spec_ref, as_of=as_of_date,
                     mission_version_ref=authorization["mission_version_ref"],
                     mission_version_hash=authorization["mission_version_hash"], binding=targeted_binding,
-                    **({"cursor":cursor} if plan["source_ref"]==SEC_SOURCE_REF else {}))
+                    **({"cursor":cursor,"spool_dir":self.spool_dir} if plan["source_ref"]==SEC_SOURCE_REF else {}))
             except ValueError as exc:
                 raise DiscoveryLaunchRejected(str(exc)) from exc
         with self._lock:
@@ -1914,7 +1919,7 @@ class MissionSourceDiscoveryCoordinator:
                         mission_version_ref=dispatch["mission_version_ref"],
                         mission_version_hash=dispatch["mission_version_hash"],
                         binding=ticket["targeted_binding"], allow_closed=True,
-                        **({"cursor":ticket.get("cursor")} if self.source_ref==SEC_SOURCE_REF else {}))
+                        **({"cursor":ticket.get("cursor"),"spool_dir":_configured_search_spool(self.search_launcher)} if self.source_ref==SEC_SOURCE_REF else {}))
                     if (summary.get("targeted_binding")!=bound or summary.get("parameters")!=parameters
                             or summary.get("query_hash")!=discovery_query_hash(self.plan,parameters)
                             or dispatch["query_hash"]!=discovery_query_hash(self.plan,parameters)):
@@ -3291,7 +3296,8 @@ class MissionSourceDiscoveryCoordinator:
                     company_ref=company_ref, spec_ref=spec["spec_ref"], as_of=request_date,
                     mission_version_ref=mission["id"], mission_version_hash=mission["content_hash"],
                     query_ref=query["query_id"],
-                    **({"cursor":query.get("archive_cursor")} if self.source_ref==SEC_SOURCE_REF else {}))
+                    **({"cursor":query.get("archive_cursor"),"archive_parent":query.get("archive_parent"),
+                       "spool_dir":_configured_search_spool(self.search_launcher)} if self.source_ref==SEC_SOURCE_REF else {}))
                 page_options["targeted_binding"] = bound
                 if self.source_ref==SEC_SOURCE_REF and query.get("archive_cursor") is not None:
                     page_options["cursor"]=query["archive_cursor"]

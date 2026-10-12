@@ -162,7 +162,7 @@ def run_discovery(
             from .material_targeted_sec import targeted_sec_parameters
             parameters, bound = targeted_sec_parameters(state,plan=plan,company_ref=company_ref,
                 spec_ref=spec_ref,as_of=as_of,mission_version_ref=mission_version_ref,
-                mission_version_hash=mission_version_hash,binding=targeted_binding,cursor=cursor)
+                mission_version_hash=mission_version_hash,binding=targeted_binding,cursor=cursor,spool_dir=spool_root)
             summary["targeted_binding"] = bound
         elif cursor is not None:
             raise ValueError("SEC continuation requires an exact targeted material binding")

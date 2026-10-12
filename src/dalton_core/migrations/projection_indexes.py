@@ -173,6 +173,8 @@ CONNECTOR_FOLD_COVER_INDEXES: tuple[IndexSpec, ...] = (
 
 #: ``core.sqlite``.
 CORE_PROJECTION_INDEXES: tuple[IndexSpec, ...] = (
+    IndexSpec(name="idx_connector_call_query_hash", table="connector_call_specs",
+        columns="query_hash", reason="Legacy SEC archive parents seek the exact original query before invocation/envelope joins"),
     IndexSpec(
         name="model_invocations_created_at_invocation",
         table="model_invocations",
@@ -445,6 +447,13 @@ def _build_indexes(
                 report["deferred"][spec.name] = "table is absent"
                 continue
             if _index_exists(connection, spec.name):
+                if spec.name == "idx_connector_call_query_hash":
+                    owner = connection.execute("SELECT tbl_name,sql FROM sqlite_master WHERE type='index' AND name=?", (spec.name,)).fetchone()
+                    columns = tuple((row[2],row[3],row[4]) for row in connection.execute("PRAGMA index_xinfo(idx_connector_call_query_hash)") if row[5])
+                    flags = next(row for row in connection.execute("PRAGMA index_list(connector_call_specs)") if row[1] == spec.name)
+                    if owner[0] != spec.table or columns != (("query_hash",0,"BINARY"),) or flags[2] or flags[4]:
+                        report["deferred"][spec.name] = "existing index has wrong shape; owner review required"
+                        continue
                 report["present"].append(spec.name)
                 continue
             if deadline is not None and time.monotonic() >= deadline:

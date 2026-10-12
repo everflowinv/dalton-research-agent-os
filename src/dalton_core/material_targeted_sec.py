@@ -6,13 +6,14 @@ from collections.abc import Mapping
 from pathlib import Path
 from . import material_requests as mr
 from . import material_acquisition as ma
+from .raw_spool import RawSpoolError
 
 class TargetedSecError(ValueError):
     pass
 
 def _targeted_sec_parameters(state_dir, *, plan, company_ref, spec_ref, as_of,
                             mission_version_ref, mission_version_hash,
-                            query_ref=None, binding=None, allow_closed=False, cursor=None):
+                            query_ref=None, binding=None, allow_closed=False, cursor=None, spool_dir=None, archive_parent=None):
     from .mission_source_discovery import build_discovery_parameters
     from .sec_filings_index_core import validate_filings_index_spec
     from datetime import date
@@ -23,10 +24,11 @@ def _targeted_sec_parameters(state_dir, *, plan, company_ref, spec_ref, as_of,
             "mission_version_hash", "plan_ref", "plan_hash", "company_ref", "spec_ref"}
     paged=binding is None or (isinstance(binding,Mapping) and binding.get("page_rule_ref")==RULE_REF)
     if binding is not None:
-        if (not isinstance(binding,Mapping) or set(binding) not in (binding_fields,binding_fields|{"page_rule_ref"})
+        if (not isinstance(binding,Mapping) or set(binding) not in (binding_fields,binding_fields|{"page_rule_ref"},binding_fields|{"page_rule_ref","archive_parent"})
                 or ("page_rule_ref" in binding and binding["page_rule_ref"]!=RULE_REF)):
             raise TargetedSecError("targeted binding has an invalid closed shape")
         query_ref = binding["query_ref"]
+        archive_parent = binding.get("archive_parent")
     if not isinstance(query_ref, str) or not query_ref.startswith("material-targeted-query:"):
         raise TargetedSecError("an exact targeted query reference is required")
     path=mr.ledger_path(state_dir)
@@ -86,6 +88,9 @@ def _targeted_sec_parameters(state_dir, *, plan, company_ref, spec_ref, as_of,
         "mission_version_hash":mission_version_hash,"plan_ref":plan["id"],"plan_hash":plan["content_hash"],
         "company_ref":company_ref,"spec_ref":spec_ref}
     if paged:actual["page_rule_ref"]=RULE_REF
+    if archive_parent is not None:
+        if not paged or cursor is None:raise TargetedSecError("archive parent requires a paged continuation")
+        actual["archive_parent"]=archive_parent
     if binding is not None and dict(binding)!=actual:
         raise TargetedSecError("exact targeted request/plan/mission binding drifted")
     parameters=build_discovery_parameters(plan,spec_ref=spec_ref,company_ref=company_ref,as_of=as_of)
@@ -114,7 +119,13 @@ def _targeted_sec_parameters(state_dir, *, plan, company_ref, spec_ref, as_of,
         from .sec_submissions_pages import verify_archive_parent
         from .raw_spool import RawSpoolReader
         c=connect_read_only(Path(state_dir)/"core.sqlite");c.row_factory=sqlite3.Row
-        try:verify_archive_parent(c,RawSpoolReader(Path(state_dir)/"connector-spool"),parameters)
+        try:
+            if archive_parent is not None:
+                from .sec_submissions_pages import _record
+                parent=_record(c,'coverage_mission_source_discoveries','record_id',archive_parent['discovery_ref'])
+                if parent['company_ref']!=company_ref or parent['mission_version_ref']!=mission_version_ref:
+                    raise TargetedSecError('SEC archive parent company/mission differs')
+            verify_archive_parent(c,RawSpoolReader(spool_dir or Path(state_dir)/"connector-spool"),parameters,parent_binding=archive_parent)
         finally:c.close()
     return parameters,actual
 
@@ -126,7 +137,7 @@ def targeted_sec_parameters(state_dir, **kwargs):
         return _targeted_sec_parameters(state_dir, **kwargs)
     except TargetedSecError:
         raise
-    except (ValueError, TypeError, KeyError, sqlite3.Error, OSError) as exc:
+    except (ValueError, TypeError, KeyError, sqlite3.Error, OSError, RawSpoolError) as exc:
         raise TargetedSecError(f"targeted material authority is unreadable: {type(exc).__name__}") from exc
 
 
@@ -167,7 +178,9 @@ def pending_archive_query(state_dir,connection,plan,launcher,*,query_ref=None,de
                     or discovery['query_hash']!=summary['query_hash'] or discovery['company_ref']!=query['company_ref']):continue
             envelope=_record(connection,'connector_source_envelopes','source_envelope_id',discovery['source_envelope_ref'])
             if envelope['content_hash']!=discovery['source_envelope_hash'] or envelope['cursor']!=summary['next_cursor']:continue
-            return {'query_id':row['query_id'],**query,'archive_cursor':envelope['cursor']}
+            return {'query_id':row['query_id'],**query,'archive_cursor':envelope['cursor'],
+                'archive_parent':{'discovery_ref':discovery['id'],'discovery_hash':discovery['content_hash'],
+                    'envelope_ref':envelope['id'],'envelope_hash':envelope['content_hash']}}
         except (ValueError,KeyError,TypeError,OSError):
             continue  # No unreadable or closed parent can authorize a page.
     return None
