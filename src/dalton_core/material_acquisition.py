@@ -974,6 +974,15 @@ class TargetedSourceRung:
         query_id = _targeted_query_id(ctx.previous)
         status = targeted_query_status(ctx.state_dir, query_id) if query_id else None
         age = _age_hours(ctx.previous, ctx.now)
+        queue_wait = None
+        if (self.name == "sec_edgar" and age >= RUNG_WAIT_HOURS
+                and (status is None or status.get("status") is None
+                     or (status.get("status") == "deferred" and status.get("kind") == "busy"))):
+            from .material_source_queue_recovery import configured_wait
+            queue_wait = configured_wait(ctx.state_dir, ctx.request, query_id, now=ctx.now)
+        if queue_wait is not None:
+            return RungResult("waiting", detail=("SEC 检索已获授权，仍在等待协调器执行"
+                if queue_wait["status"] == "configured" else "SEC 检索配置暂未核实，等待下一轮复核"))
         if status is None or status.get("status") is None:
             if age >= RUNG_WAIT_HOURS:
                 return RungResult("not_connected", query=ctx.queries,
@@ -1549,7 +1558,8 @@ def _round_attempts(view: Mapping[str, Any]) -> list[dict[str, Any]]:
     events = list(view.get("events") or ())
     start = max((i for i, e in enumerate(events) if e.get("event_kind") == "opened" and e.get("reopened")),
                 default=-1)
-    return [e for e in events[start + 1:] if e.get("event_kind") == "attempt"]
+    from .material_source_queue_recovery import carried_attempts
+    return carried_attempts(events, start, request_ref=view.get("id"), request_hash=view.get("content_hash")) + [e for e in events[start + 1:] if e.get("event_kind") == "attempt"]
 
 
 def _record(state_dir: Path, view: Mapping[str, Any], source: str, result: RungResult, *, now: str,
@@ -1635,6 +1645,9 @@ def serve(state_dir: str | Path, request_id: str, *, rungs: Mapping[str, Any] | 
         return {"request_id": request_id, "status": None, "outcome": "missing", "rungs": []}
     from .forecast_driver_retrieval import routing_view
     view = routing_view(view)
+    from .material_source_queue_recovery import recover
+    if recover(state, view, now=stamp) is not None:
+        view = routing_view(mr.request(state, request_id))
     rechecked = _free_retrieval_recheck(state, view, stamp=stamp)
     if rechecked is not None:
         return rechecked
@@ -1735,7 +1748,8 @@ def serve(state_dir: str | Path, request_id: str, *, rungs: Mapping[str, Any] | 
                 result = RungResult("error", query=queries, detail=f"{type(exc).__name__}: {exc}"[:500])
         if result.outcome == "waiting":
             trail.append({"source": source, "outcome": "waiting"})
-            return {"request_id": request_id, "status": view["status"], "outcome": "waiting", "rungs": trail}
+            return {"request_id": request_id, "status": view["status"], "outcome": "waiting", "rungs": trail,
+                    "reason": result.detail}
         for manifest in result.manifests:
             _register_manifest(state, manifest)
         if result.manifests and result.outcome in ("dispatched", "empty", "partial", "accepted"):
@@ -2069,11 +2083,18 @@ def retry_sweep(state_dir: str | Path, *, now: str | None = None, limit: int = 3
 
     stamp = now or _now()
     out = []
+    queue_recovery_deadline = time.monotonic() + 2.0
     for view in mr.open_requests(state_dir, statuses=("exhausted", "timeout"), include_closed=True, limit=2000):
         if len(out) >= limit:
             break
         full = mr.request(state_dir, view["id"])
         if full is None:
+            continue
+        from .material_source_queue_recovery import recover
+        repaired = (recover(state_dir, full, now=stamp)
+                    if time.monotonic() < queue_recovery_deadline else None)
+        if repaired is not None:
+            out.append({"request_id": view["id"], "reason": repaired["rule_ref"]})
             continue
         due, why = retry_due(state_dir, full, now=stamp)
         if due:
