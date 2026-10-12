@@ -19,7 +19,11 @@ def _norm(sql):
 def migrate(connection):
     schema = Path(__file__).with_name('coverage_mission_schema.sql').read_text()
     table_sql = re.search(r'CREATE TABLE IF NOT EXISTS coverage_mission_statement_filings \([\s\S]*?\n\);', schema).group()
-    new_sql = table_sql.replace("'10-Q','10-K'", FORMS)
+    # The frozen schema already declares the four-form contract. Replacing
+    # its two-form prefix would duplicate the amended forms on every open.
+    if table_sql.count("CHECK(form IN (" + FORMS + "))") != 1:
+        raise RuntimeError('statement form migration requires the exact four-form contract')
+    new_sql = table_sql
     old_sql = new_sql.replace(FORMS, "'10-Q','10-K'")
     actual = connection.execute('SELECT sql FROM sqlite_master WHERE type=? AND name=?', ('table',TABLE)).fetchone()
     if actual is None or _norm(actual[0]) not in {_norm(old_sql), _norm(new_sql)}:

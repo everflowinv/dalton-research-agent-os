@@ -20,6 +20,11 @@ from dalton_core.store import DaltonStore, content_hash
 from tests.p9a_fixtures import bootstrap_method_authorities, mission_params
 from tests.test_sec_financials_cli import fixture_parse
 
+# Exact pre-amendment DDL captured read-only from the deployed legacy Core.
+# Keep independent of migrate() and the new schema so prefix errors cannot
+# manufacture a falsely "legacy" fixture. SQL SHA256: b76f39ef45822789c236600e0e76510e0cb8f5d802d1062b25da7df21d1e1d63
+CAPTURED_LEGACY_FILINGS_DDL = "CREATE TABLE coverage_mission_statement_filings (\n    ingest_id TEXT PRIMARY KEY,\n    dispatch_id TEXT NOT NULL\n        REFERENCES coverage_mission_statement_dispatches(dispatch_id),\n    company_ref TEXT NOT NULL,\n    cik TEXT NOT NULL,\n    entity_name TEXT NOT NULL,\n    accession TEXT NOT NULL,\n    form TEXT NOT NULL CHECK(form IN ('10-Q','10-K')),\n    filed TEXT NOT NULL,\n    report_date TEXT NOT NULL,\n    line_count INTEGER NOT NULL,\n    source_record_refs_json TEXT NOT NULL,\n    governance_ref TEXT NOT NULL,\n    governance_hash TEXT NOT NULL,\n    recorded_at TEXT NOT NULL,\n    content_hash TEXT NOT NULL,\n    -- A filing is ingested once per company. A second run of the same 10-Q is\n    -- the same filing, not a second set of 495 lines.\n    UNIQUE(company_ref, accession)\n)"
+
 COMPANY = 'company:sec-cik:0001467373'
 
 class AmendmentTests(unittest.TestCase):
@@ -298,7 +303,7 @@ class ConsumerAndMigrationTests(unittest.TestCase):
         triggers=c.execute("SELECT sql FROM sqlite_master WHERE type='trigger' AND tbl_name=?",(TABLE,)).fetchall()
         columns=','.join(r[1] for r in c.execute(f'PRAGMA table_info({TABLE})'))
         c.execute('PRAGMA foreign_keys=OFF'); c.execute('PRAGMA legacy_alter_table=ON'); c.execute('BEGIN IMMEDIATE')
-        c.execute(ddl.replace(TABLE,TABLE+'_old_fixture',1).replace("'10-Q','10-K','10-Q/A','10-K/A'","'10-Q','10-K'"))
+        c.execute(CAPTURED_LEGACY_FILINGS_DDL.replace(TABLE,TABLE+'_old_fixture',1))
         c.execute(f'INSERT INTO {TABLE}_old_fixture(rowid,{columns}) SELECT rowid,{columns} FROM {TABLE}')
         c.execute(f'DROP TABLE {TABLE}'); c.execute(f'ALTER TABLE {TABLE}_old_fixture RENAME TO {TABLE}')
         for sql, in triggers:c.execute(sql)
@@ -317,6 +322,22 @@ class ConsumerAndMigrationTests(unittest.TestCase):
         self.assertEqual(c.execute('PRAGMA foreign_key_check(coverage_mission_statement_lines)').fetchall(),[])
         with self.assertRaises(Exception):c.execute(f'UPDATE {TABLE} SET content_hash=?',('0'*64,))
         c.rollback()
+
+    def test_real_old_ddl_and_repeated_authority_open_keep_exact_four_forms(self):
+        from dalton_core.sec_statement_form_schema import TABLE
+        c = self.legacy()
+        before = [tuple(r) for r in c.execute(f'SELECT rowid,* FROM {TABLE}')]
+        self.assertIn("CHECK(form IN ('10-Q','10-K'))", c.execute(
+            'SELECT sql FROM sqlite_master WHERE name=?', (TABLE,)).fetchone()[0])
+        CoverageMissionAuthority(self.store)
+        first = c.execute('SELECT sql FROM sqlite_master WHERE name=?', (TABLE,)).fetchone()[0]
+        self.assertIn("CHECK(form IN ('10-Q','10-K','10-Q/A','10-K/A'))", first)
+        self.assertEqual(first.count("'10-Q/A'"), 1)
+        self.assertEqual(first.count("'10-K/A'"), 1)
+        CoverageMissionAuthority(self.store)
+        self.assertEqual(c.execute('SELECT sql FROM sqlite_master WHERE name=?',
+                                  (TABLE,)).fetchone()[0], first)
+        self.assertEqual([tuple(r) for r in c.execute(f'SELECT rowid,* FROM {TABLE}')], before)
 
     def test_mid_migration_failure_rolls_back_and_unknown_shape_refuses(self):
         from dalton_core.sec_statement_form_schema import migrate,TABLE
