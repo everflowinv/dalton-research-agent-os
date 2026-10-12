@@ -9,7 +9,10 @@ from decimal import Decimal,InvalidOperation,localcontext
 from xml.etree import ElementTree as ET
 from typing import Any,Mapping,Sequence
 from .store import content_hash
-RULE_REF='sec-filing-units:exact-definition-and-fact:1'
+LEGACY_RULE_REF='sec-filing-units:exact-definition-and-fact:1'
+RULE_REF=LEGACY_RULE_REF
+NUMERIC_RULE_REF='sec-filing-units:exact-definition-and-fact:2'
+FIXED_ZERO_NAMESPACE='http://www.xbrl.org/inlineXBRL/transformation/2020-02-12'
 DOCUMENT_SET_RULE_REF='sec-filing-units:incorporated-annual-document-set:1'
 MAX_BYTES=32*1024*1024
 XBRLI='http://www.xbrl.org/2003/instance'
@@ -34,7 +37,10 @@ def _measure(node,scopes):
     if q.startswith('{'+ISO+'}') and re.fullmatch('[A-Z]{3}',q.split('}',1)[1]):return q.split('}',1)[1]
     raise FilingUnitError('unit measure is not a supported currency/share measure')
 
-def parse_filing_units(raw:bytes, *, resource_raw:bytes|None=None)->dict[str,Any]:
+def parse_filing_units(raw:bytes, *, resource_raw:bytes|None=None, rule_ref:str=LEGACY_RULE_REF)->dict[str,Any]:
+    # Unversioned historical consumers retain exactly the v1 parse. New source
+    # proofs opt into v2 and bind this choice for every future strong replay.
+    if rule_ref not in {LEGACY_RULE_REF,NUMERIC_RULE_REF}:raise FilingUnitError('unsupported filing numeric parse rule')
     if not isinstance(raw,bytes) or len(raw)>MAX_BYTES:raise FilingUnitError('filing unit source exceeds the byte limit')
     body=raw
     if raw.startswith(b'\x1f\x8b'):
@@ -103,7 +109,7 @@ def parse_filing_units(raw:bytes, *, resource_raw:bytes|None=None)->dict[str,Any
         contexts[ref]={'context_ref':ref,'cik':(identifier.text or '').strip().zfill(10),'period_start':start,'period_end':end,'dimensions':dict(sorted(dims.items())),'supported':supported,'context_sha256':hashlib.sha256(fragment.encode()).hexdigest()}
     resource = None
     if resource_raw is not None:
-        resource = parse_filing_units(resource_raw)
+        resource = parse_filing_units(resource_raw,rule_ref=rule_ref)
         for prefix, uri in resource['namespace_bindings'].items():
             if prefix in ns and ns[prefix] != uri:
                 raise FilingUnitError('inline document set has conflicting namespace identities')
@@ -118,14 +124,19 @@ def parse_filing_units(raw:bytes, *, resource_raw:bytes|None=None)->dict[str,Any
         try:
             fragment=ET.tostring(node,encoding='unicode')
             if node.tag.split('}')[0][1:] not in INLINE:continue
+            if rule_ref==NUMERIC_RULE_REF and node.get('{http://www.w3.org/2001/XMLSchema-instance}nil') in {'true','1'}:continue
             cref=node.get('contextRef');uref=node.get('unitRef');scope=scopes[id(node)];name=_expanded(node.get('name') or '',scope)
             if cref not in contexts or uref not in units:continue
             content=''.join(node.itertext()).strip();fmt=node.get('format');scale=node.get('scale','0');sign=node.get('sign')
             if not re.fullmatch(r'-?\d{1,3}',scale) or sign not in (None,'-'):continue
             if fmt:
                 expanded=_expanded(fmt,scope);uri,local=expanded[1:].split('}',1)
-                if not re.fullmatch(r'https?://www\.xbrl\.org/inlineXBRL/transformation/\d{4}-\d{2}-\d{2}',uri) or local not in {'num-dot-decimal','numdotdecimal','num-comma-decimal','numcommadecimal','zerodash','zero-dash'}:continue
-                if local in {'zerodash','zero-dash'}:
+                if rule_ref==NUMERIC_RULE_REF and uri==FIXED_ZERO_NAMESPACE and local=='fixed-zero':
+                    # Registry 4 section 4.93: any input text maps to numeric 0.
+                    # The raw fragment/hash, context and unit remain authoritative.
+                    content='0'
+                elif not re.fullmatch(r'https?://www\.xbrl\.org/inlineXBRL/transformation/\d{4}-\d{2}-\d{2}',uri) or local not in {'num-dot-decimal','numdotdecimal','num-comma-decimal','numcommadecimal','zerodash','zero-dash'}:continue
+                elif local in {'zerodash','zero-dash'}:
                     if content not in {'-','—','–'}:continue
                     content='0'
                 elif local in {'num-comma-decimal','numcommadecimal'}:content=content.replace('.','').replace(',','.')
@@ -139,7 +150,7 @@ def parse_filing_units(raw:bytes, *, resource_raw:bytes|None=None)->dict[str,Any
             if not value.is_finite() or (not value.is_zero() and abs(value.adjusted())>1000):continue
             facts.append({'concept':name,'context_ref':cref,'unit_ref':uref,'value':format(value,'f'),'fact_sha256':hashlib.sha256(fragment.encode()).hexdigest()})
         except (FilingUnitError,InvalidOperation,ValueError):continue
-    result = {'rule_ref':RULE_REF,'raw_sha256':hashlib.sha256(raw).hexdigest(),'namespace_bindings':ns,'units':units,'contexts':contexts,'facts':facts}
+    result = {'rule_ref':rule_ref,'raw_sha256':hashlib.sha256(raw).hexdigest(),'namespace_bindings':ns,'units':units,'contexts':contexts,'facts':facts}
     if resource is not None:
         local_hash = result['raw_sha256']
         parent_values = {}
@@ -286,11 +297,11 @@ def _annual_document_set(connection, state_dir, filing, *, primary=None, primary
     return identity,raw
 
 
-def _parse_source_units(connection, state_dir, filing, source, raw):
+def _parse_source_units(connection, state_dir, filing, source, raw, *, rule_ref=LEGACY_RULE_REF):
     if source.get('document_set_rule_ref') == DOCUMENT_SET_RULE_REF:
         _,resource=_source(connection,state_dir,filing,source=source['primary'])
-        return parse_filing_units(raw,resource_raw=resource)
-    return parse_filing_units(raw)
+        return parse_filing_units(raw,resource_raw=resource,rule_ref=rule_ref)
+    return parse_filing_units(raw,rule_ref=rule_ref)
 
 
 def supplemental_unit_lines(connection, state_dir, filing, rows):
@@ -301,12 +312,12 @@ def supplemental_unit_lines(connection, state_dir, filing, rows):
         # A missing source does not erase or canonically relabel a held old line.
         # Model-spec unit validation will retain the explicit unresolved gap.
         return [dict(row) for row in rows],None
-    parsed=parse_filing_units(raw)
+    parsed=parse_filing_units(raw,rule_ref=NUMERIC_RULE_REF)
     lines,evidence=match_row_units(parsed,rows,cik=filing['cik'])
     if unresolved_unit_refs(lines):
         try:
             annual_source,annual_raw=_annual_document_set(connection,state_dir,filing,primary=source,primary_raw=raw)
-            annual_parsed=_parse_source_units(connection,state_dir,filing,annual_source,annual_raw)
+            annual_parsed=_parse_source_units(connection,state_dir,filing,annual_source,annual_raw,rule_ref=NUMERIC_RULE_REF)
             annual_lines,annual_evidence=match_row_units(annual_parsed,rows,cik=filing['cik'])
             if len(annual_evidence)>len(evidence):
                 source,raw,parsed,lines,evidence=annual_source,annual_raw,annual_parsed,annual_lines,annual_evidence
@@ -315,7 +326,7 @@ def supplemental_unit_lines(connection, state_dir, filing, rows):
             # original. It never turns a partial source into numeric authority.
             pass
     if not evidence:return lines,None
-    proof={'rule_ref':RULE_REF,'source':source,'raw_sha256':parsed['raw_sha256'],'evidence':evidence,'evidence_hash':content_hash(evidence)}
+    proof={'rule_ref':RULE_REF,'numeric_parse_rule_ref':NUMERIC_RULE_REF,'source':source,'raw_sha256':parsed['raw_sha256'],'evidence':evidence,'evidence_hash':content_hash(evidence)}
     return lines,proof
 
 
@@ -337,7 +348,7 @@ def validate_unit_supplement(connection, record, filing):
         ordinals.add(ordinal);line=original[ordinal]
         if line.get('source_unit_ref')!=evidence['source_unit_ref'] or line.get('unit_definition_hash')!=evidence['content_hash'] or line.get('unit')!=evidence['unit']:raise FilingUnitError('unit XML proof line binding drifted')
         line['unit']=line.pop('source_unit_ref');line.pop('unit_definition_hash')
-    replay,evidence=match_row_units(_parse_source_units(connection,Path(paths[0]).parent,filing,proof['source'],raw),original,cik=filing['cik'])
+    replay,evidence=match_row_units(_parse_source_units(connection,Path(paths[0]).parent,filing,proof['source'],raw,rule_ref=proof.get('numeric_parse_rule_ref',LEGACY_RULE_REF)),original,cik=filing['cik'])
     if replay!=record['lines'] or evidence!=proof['evidence']:raise FilingUnitError('unit XML exact fact/context/definition replay differs')
 
 

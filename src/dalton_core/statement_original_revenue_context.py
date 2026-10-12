@@ -20,11 +20,12 @@ from xml.etree import ElementTree as ET
 from .store import content_hash
 from .sec_filing_units import FilingUnitError, INLINE, MAX_BYTES, _expanded, parse_filing_units
 
-# The additive source rule is independently versioned. It deliberately does
-# not change the base normalizer hash: no-addition contexts and their paid
-# request identities must not drift merely to attest another source check.
+# Revenue-source rules are independently replayable. Rules 1/2 use the old
+# exact parser; rule 3 opts into the source-defined fixed-zero transformation.
+# No-addition preflight retains existing contexts and their paid identities.
 LEGACY_RULE_REF = "statement-original-revenue-context:exact-inline-facts:1"
-RULE_REF = "statement-original-revenue-context:exact-inline-facts:2"
+RECONCILIATION_RULE_REF = "statement-original-revenue-context:exact-inline-facts:2"
+RULE_REF = "statement-original-revenue-context:exact-inline-facts:3"
 # Independent statement components; never top-line aliases or REVENUE roles.
 RECONCILIATION_CONCEPTS = frozenset({"us-gaap:RevenueNotFromContractWithCustomer"})
 
@@ -33,7 +34,7 @@ def _concepts(parsed, rule_ref):
     from .model_forecast_driver import CONCEPT_ROLES, REVENUE
     ns = parsed['namespace_bindings']
     allowed = {concept for concept, role in CONCEPT_ROLES.items() if role == REVENUE}
-    if rule_ref == RULE_REF:
+    if rule_ref in {RULE_REF, RECONCILIATION_RULE_REF}:
         allowed.update(RECONCILIATION_CONCEPTS)
     elif rule_ref != LEGACY_RULE_REF:
         raise FilingUnitError('original revenue source rule is unsupported')
@@ -170,7 +171,8 @@ def supplemental_revenue_lines(connection, state_dir, filing, lines, *, source=N
         binding, raw = _source(connection, state_dir, filing, source=source)
     if not raw.startswith(b'\x1f\x8b') and b'nonFraction' not in raw:
         return [dict(row) for row in lines], None
-    parsed = parse_filing_units(raw)
+    from .sec_filing_units import NUMERIC_RULE_REF as NUMERIC_RULE, LEGACY_RULE_REF as LEGACY_NUMERIC_RULE
+    parsed = parse_filing_units(raw, rule_ref=NUMERIC_RULE if rule_ref == RULE_REF else LEGACY_NUMERIC_RULE)
     result, evidence = derive_lines(filing, lines, parsed, raw, rule_ref=rule_ref)
     if not evidence:
         return result, None
@@ -185,7 +187,7 @@ def validate_revenue_supplement(connection, record, filing):
     proof = record.get('supplementary_original_revenue')
     if proof is None:
         return
-    if record.get('kind') != 'complete_snapshot' or proof.get('rule_ref') not in {RULE_REF, LEGACY_RULE_REF}:
+    if record.get('kind') != 'complete_snapshot' or proof.get('rule_ref') not in {RULE_REF, RECONCILIATION_RULE_REF, LEGACY_RULE_REF}:
         raise FilingUnitError('original revenue supplement contract/kind differs')
     n = proof.get('base_line_count')
     original = [dict(row) for row in record['lines']]

@@ -76,11 +76,12 @@ def _facts(raw, parsed, accession, concepts):
 
 def _document(connection, state_dir, filing, source, raw, names):
     from .sec_filing_units import _parse_source_units, _expanded
-    parsed = _parse_source_units(connection, state_dir, filing, source, raw)
+    from .sec_filing_units import NUMERIC_RULE_REF as NUMERIC_RULE
+    parsed = _parse_source_units(connection, state_dir, filing, source, raw, rule_ref=NUMERIC_RULE)
     concepts = {_expanded(name, parsed['namespace_bindings']) for name in names
                 if name.split(':')[0] in parsed['namespace_bindings']}
     return {'ingest_id': filing['ingest_id'], 'filing_hash': filing['content_hash'],
-            'issuer_cik': str(filing['cik']).zfill(10),
+            'issuer_cik': str(filing['cik']).zfill(10), 'numeric_parse_rule_ref': NUMERIC_RULE,
             'source': source, 'raw_sha256': hashlib.sha256(raw).hexdigest(),
             'namespace_bindings': parsed['namespace_bindings'], 'concepts': sorted(concepts),
             'facts': _facts(raw, parsed, filing['accession'], concepts)}
@@ -171,7 +172,9 @@ def validate_originals(connection, record):
             _refuse('original filing issuer identity drifted')
         source, raw = _source(connection, state_dir, filing, source=stored['source'])
         from .sec_filing_units import _parse_source_units
-        parsed = _parse_source_units(connection, state_dir, filing, source, raw)
+        from .sec_filing_units import LEGACY_RULE_REF as LEGACY_NUMERIC_RULE
+        parsed = _parse_source_units(connection, state_dir, filing, source, raw,
+                                     rule_ref=stored.get('numeric_parse_rule_ref', LEGACY_NUMERIC_RULE))
         expected = {**stored, 'source': source, 'raw_sha256': hashlib.sha256(raw).hexdigest(),
                     'namespace_bindings': parsed['namespace_bindings'],
                     'facts': _facts(raw, parsed, filing['accession'], set(stored['concepts']))}
