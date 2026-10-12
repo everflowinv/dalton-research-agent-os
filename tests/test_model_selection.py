@@ -1097,6 +1097,7 @@ class AllowPatchTests(unittest.TestCase):
         self.assertEqual(patch["status"], "planned")
         self.assertEqual(patch["allowed_models_add"], [self.held_back])
         self.assertEqual(patch["profiles_add"][0]["model"], self.held_back)
+        self.assertEqual(patch["profiles_add"][0]["timeoutMs"], 1800000)
         self.assertEqual(patch["profile_id"], "profile:gpt-6-astra")
 
     def test_applying_backs_up_first_and_changes_only_the_broker_subtree(self) -> None:

@@ -301,6 +301,27 @@ class FakeBroker:
 
 
 class OpenClawModelAdapterTests(unittest.TestCase):
+    def test_long_timeout_work_reaches_exact_broker_frame_without_changing_token_or_dollar_bounds(self):
+        work = WorkOrder.from_dict({**self.work.to_dict(), "id": "work:bounded-timeout",
+            "budget": {**self.work.budget, "max_seconds": 1800}})
+        routed = self.router.route(work, attempt_number=1, capability="research",
+            policy_version_ref="model-routing-policy-version:default:1",
+            credential_slot_refs=["credential-slot:openai:dalton"],
+            required_modalities=["text"], required_context_tokens=1_000,
+            estimated_input_tokens=500, estimated_output_tokens=250,
+            idempotency_key="route-bounded-timeout")["decision"]
+        def queued_success(request):
+            execution = {key:value for key,value in request.items() if key != "queueWaitMs"}
+            return success_response(execution)
+        (_, outcome), broker = self.run_with(queued_success, work=work, route=routed,
+                                              timeout=1800, queue_wait=600)
+        self.addCleanup(broker.close)
+        self.assertEqual(outcome.status,"succeeded")
+        self.assertEqual(broker.requests[0]["timeoutMs"],1800000)
+        self.assertEqual(broker.requests[0]["queueWaitMs"],600000)
+        self.assertEqual(broker.requests[0]["maxTokens"],self.work.budget['max_output_tokens'])
+        self.assertEqual(work.budget['max_cost_usd'],self.work.budget['max_cost_usd'])
+
     def test_every_general_level_is_explicit_and_medium_purposes_use_the_route(self):
         for level in ("off", "minimal", "low", "medium", "high"):
             with self.subTest(level=level):

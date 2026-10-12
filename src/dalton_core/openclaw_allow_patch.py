@@ -51,10 +51,11 @@ from .openclaw_model_discovery import (
 RELOAD_INSTRUCTION = (
     "已允许使用。重启模型网关后生效。"
 )
-# The two profile settings this does not read off the provider entry, because
-# the provider entry does not carry them.  Both match what every existing
-# broker profile in the live configuration uses.
-DEFAULT_TIMEOUT_MS = 900_000
+# The provider inventory does not declare this broker capability. A new
+# profile uses the packaged broker bound, independently of owner call limits.
+from .openclaw_broker_limits import DEFAULT_PROFILE_TIMEOUT_MS
+
+DEFAULT_TIMEOUT_MS = DEFAULT_PROFILE_TIMEOUT_MS
 BACKUP_SUFFIX = "bak-dalton-allow"
 
 _SLUG_RE = re.compile(r"[^a-z0-9]+")

@@ -1,5 +1,6 @@
 import {
   BROKER_VERSION,
+  MAX_COMPLETION_TIMEOUT_MS,
   PROTOCOL_VERSION,
   ProtocolError,
   contentHash,
@@ -209,7 +210,7 @@ function validateConfig(input) {
       id: profile.id,
       model: profile.model,
       maxTokens: integer(profile.maxTokens, "profile.maxTokens", undefined, 1, 1_000_000),
-      timeoutMs: integer(profile.timeoutMs, "profile.timeoutMs", undefined, 1, 900_000),
+      timeoutMs: integer(profile.timeoutMs, "profile.timeoutMs", undefined, 1, MAX_COMPLETION_TIMEOUT_MS),
       thinkingLevel: profile.thinkingLevel,
       providerControls: validateProviderControlProfile(profile.providerControls, profile.model),
     }));

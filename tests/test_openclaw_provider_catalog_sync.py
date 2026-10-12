@@ -89,7 +89,7 @@ class OpenClawProviderCatalogPlanTests(unittest.TestCase):
             "id": profile_id,
             "model": "openai/gpt-main",
             "maxTokens": 8_000,
-            "timeoutMs": 900_000,
+            "timeoutMs": 1_800_000,
         }])
         expected = copy.deepcopy(before)
         expected_broker = _broker(expected)
@@ -215,9 +215,21 @@ class OpenClawProviderCatalogPlanTests(unittest.TestCase):
         ]
         plan = plan_openclaw_provider_catalog_sync(source)
         profiles = _broker(plan.config)["config"]["profiles"]
-        self.assertEqual([p["timeoutMs"] for p in profiles], [900000, 12345])
+        self.assertEqual([p["timeoutMs"] for p in profiles], [1800000, 12345])
         self.assertIn("old-default", plan.receipt["updated_profile_ids"])
         self.assertFalse(plan_openclaw_provider_catalog_sync(plan.config).receipt["changed"])
+
+    def test_previous_900_second_default_upgrades_without_changing_controls(self):
+        source = _config()
+        profile = {"id":"profile:old-generated", "model":"openai/gpt-main",
+                   "maxTokens":1000, "timeoutMs":900000, "thinkingLevel":"high"}
+        _broker(source)["config"]["profiles"] = [profile]
+        before=copy.deepcopy(source)
+        planned=plan_openclaw_provider_catalog_sync(source)
+        self.assertEqual(_broker(planned.config)["config"]["profiles"],
+                         [{**profile,"timeoutMs":1800000}])
+        self.assertEqual(source,before)
+        self.assertFalse(plan_openclaw_provider_catalog_sync(planned.config).receipt['changed'])
 
 
 class OpenClawProviderCatalogApplyTests(unittest.TestCase):

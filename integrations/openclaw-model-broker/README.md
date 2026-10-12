@@ -27,6 +27,12 @@ steps.
   credential, or authentication profile.
 - Prompts are passed in memory to `api.runtime.llm.complete`; they are not put
   in process arguments or plugin logs.
+- Completion timeouts are bounded at 1,800,000 ms in both the request protocol
+  and profile schema. A shorter explicit profile remains binding. The request
+  timer forwards cancellation to the host; queue waiting has its own bound.
+  Upgrading this capability does not extend existing requests, raise token or
+  dollar limits, or authorize another attempt. Change a deployed plugin and
+  its profiles together through the reviewed stopped-window transition.
 - The plugin has no Dalton database path, writer credential, model credential,
   or credential resolver. The socket is an execution adapter, not a Dalton
   commit boundary.

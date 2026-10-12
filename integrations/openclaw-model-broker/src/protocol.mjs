@@ -2,6 +2,7 @@ import { createHash } from "node:crypto";
 
 export const PROTOCOL_VERSION = "0.1";
 export const BROKER_VERSION = "0.1.0-spike.5";
+export const MAX_COMPLETION_TIMEOUT_MS = 1_800_000;
 
 const REQUIRED_REQUEST_KEYS = new Set([
   "schemaVersion",
@@ -245,6 +246,10 @@ export function validateRequest(input, maxFrameBytes) {
     throw new ProtocolError("INVALID_REQUEST", "queueWaitMs must be a non-negative safe integer");
   }
   const maxTokens = positiveInteger(input.maxTokens, "maxTokens");
+  const timeoutMs = positiveInteger(input.timeoutMs, "timeoutMs");
+  if (timeoutMs > MAX_COMPLETION_TIMEOUT_MS) {
+    throw new ProtocolError("INVALID_REQUEST", "timeoutMs exceeds the broker completion maximum");
+  }
   if (input.controls !== undefined) {
     exactRequestObject(input.controls, new Set(["thinkingLevel"]), "controls");
     if (!GENERAL_THINKING_LEVELS.has(input.controls.thinkingLevel)) {
@@ -262,7 +267,7 @@ export function validateRequest(input, maxFrameBytes) {
     model: requiredString(input.model, "model", /^[A-Za-z0-9._-]+\/[A-Za-z0-9][A-Za-z0-9._:/-]*$/),
     prompt: requiredString(input.prompt, "prompt"),
     maxTokens,
-    timeoutMs: positiveInteger(input.timeoutMs, "timeoutMs"),
+    timeoutMs,
     ...(input.controls === undefined ? {} : { controls: Object.freeze({ ...input.controls }) }),
     ...(input.requiredControls === undefined ? {} : {
       requiredControls: validateRequiredControls(input.requiredControls, maxTokens),

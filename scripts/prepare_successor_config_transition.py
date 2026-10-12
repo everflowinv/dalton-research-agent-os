@@ -618,6 +618,7 @@ def _validated_openclaw_frame_transition(
     model_broker_plugin: Mapping[str, Any] | None = None,
     model_broker_host_patch: Mapping[str, Any] | None = None,
     historical_unresolved: Mapping[str, Any] | None = None,
+    model_broker_profile_timeout_ms: int | None = None,
 ) -> dict[str, Any]:
     packet_root = packet_root.resolve()
     before, before_bytes = _read_json(before_path, "OpenClaw config before")
@@ -675,12 +676,48 @@ def _validated_openclaw_frame_transition(
             "after_value": plugin["destination"],
         })
         managed_plugins.append(plugin)
+    if model_broker_profile_timeout_ms is not None:
+        from dalton_core.openclaw_broker_limits import (
+            MAX_COMPLETION_TIMEOUT_MS, RETIRED_DEFAULT_PROFILE_TIMEOUTS_MS,
+        )
+        _need(type(model_broker_profile_timeout_ms) is int
+              and model_broker_profile_timeout_ms == MAX_COMPLETION_TIMEOUT_MS
+              and model_broker_plugin is not None,
+              "profile timeout migration requires the reviewed new model broker")
+        definition, _ = _read_json(Path(model_broker_plugin["destination"]) / "openclaw.plugin.json",
+                                   "new model broker definition")
+        profile_schema = definition.get("configSchema", {}).get("properties", {}).get(
+            "profiles", {}).get("items", {}).get("properties", {}).get("timeoutMs", {})
+        _need(profile_schema == {"type": "integer", "minimum": 1,
+                                 "maximum": MAX_COMPLETION_TIMEOUT_MS},
+              "new model broker does not declare the reviewed timeout bound")
+        profiles = expected.get("plugins", {}).get("entries", {}).get(
+            OPENCLAW_MODEL_PLUGIN_ID, {}).get("config", {}).get("profiles")
+        _need(isinstance(profiles, list) and 0 < len(profiles) <= 128,
+              "profile timeout migration inventory differs")
+        seen = set()
+        for index, profile in enumerate(profiles):
+            _need(isinstance(profile, dict) and isinstance(profile.get("id"), str)
+                  and profile["id"] not in seen
+                  and type(profile.get("timeoutMs")) is int
+                  and 1 <= profile["timeoutMs"] <= MAX_COMPLETION_TIMEOUT_MS,
+                  "profile timeout migration baseline is invalid")
+            seen.add(profile["id"])
+            if profile["timeoutMs"] in RETIRED_DEFAULT_PROFILE_TIMEOUTS_MS:
+                semantic_mutations.append({
+                    "kind": "json_leaf_compare_and_patch",
+                    "json_path": ["plugins", "entries", OPENCLAW_MODEL_PLUGIN_ID,
+                                  "config", "profiles", index, "timeoutMs"],
+                    "before_value": profile["timeoutMs"],
+                    "after_value": MAX_COMPLETION_TIMEOUT_MS,
+                })
+                profile["timeoutMs"] = MAX_COMPLETION_TIMEOUT_MS
     _need(after == expected,
           "OpenClaw candidate changes more than reviewed broker fields")
     _need(_leaf_state(after, OPENCLAW_FRAME_PATH)
           == {"state": "present", "value": OPENCLAW_TARGET_MAX_FRAME_BYTES},
           "OpenClaw candidate maxFrameBytes differs")
-    return {
+    result = {
         "name": "openclaw_model_broker_max_frame",
         "kind": "compare_and_patch", "mutation_count": 1,
         "target": "~/.openclaw/openclaw.json",
@@ -699,6 +736,9 @@ def _validated_openclaw_frame_transition(
         "before_sha256": sha256_bytes(before_bytes),
         "after_sha256": sha256_bytes(after_bytes),
     }
+    if model_broker_profile_timeout_ms is not None:
+        result["model_broker_profile_timeout_ms"] = model_broker_profile_timeout_ms
+    return result
 
 
 def _json_bytes(value: Mapping[str, Any]) -> bytes:
@@ -720,6 +760,7 @@ def build_preserve_existing_transition(
     model_broker_plugin_destination_path: Path | None = None,
     model_broker_plugin_before_path: Path | None = None,
     model_broker_host_patch: Mapping[str, Any] | None = None,
+    model_broker_profile_timeout_ms: int | None = None,
     openclaw_broker_journal_path: Path | None = None,
     writer_token_before_path: Path | None = None,
     predecessor_source_root: Path | None = None,
@@ -844,6 +885,8 @@ def build_preserve_existing_transition(
     _need(not writer_append or pure_preserve,
           "writer operation append requires a pure-preserve transition")
     external_cas = service_delta_path is None and not pure_preserve and not cockpit_brain_binding
+    _need(model_broker_profile_timeout_ms is None or external_cas,
+          "profile timeout migration requires an external stopped-window CAS")
     if pure_preserve:
         openclaw_before, openclaw_before_bytes = _read_json(
             openclaw_config_before_path, "OpenClaw config before")
@@ -984,6 +1027,7 @@ def build_preserve_existing_transition(
             web_search_plugin=managed_plugin,
             model_broker_plugin=managed_model_plugin,
             model_broker_host_patch=model_broker_host_patch,
+            model_broker_profile_timeout_ms=model_broker_profile_timeout_ms,
             historical_unresolved=_reviewed_historical_unresolved(
                 openclaw_broker_journal_path),
         )
@@ -1311,8 +1355,9 @@ def expected_openclaw_frame_transition_state(
         "before_sha256", "after_sha256", "semantic_mutations",
         "managed_plugins", "historical_unresolved",
     }
-    _need(frozenset(row) in {frozenset(expected_keys),
-                             frozenset(expected_keys | {"managed_host_patch"})}
+    _need(frozenset(row) in {frozenset(expected_keys | optional) for optional in (
+              set(), {"managed_host_patch"}, {"model_broker_profile_timeout_ms"},
+              {"managed_host_patch", "model_broker_profile_timeout_ms"})}
           and row.get("name") == "openclaw_model_broker_max_frame"
           and row.get("kind") == "compare_and_patch"
           and row.get("mutation_count") == 1
@@ -1348,6 +1393,7 @@ def expected_openclaw_frame_transition_state(
         model_broker_plugin=next((p for p in managed_plugins if p.get("plugin_id")
                                   == OPENCLAW_MODEL_PLUGIN_ID), None),
         model_broker_host_patch=row.get("managed_host_patch"),
+        model_broker_profile_timeout_ms=row.get("model_broker_profile_timeout_ms"),
         historical_unresolved=unresolved)
     if "managed_host_patch" not in row:
         validated.pop("managed_host_patch")
