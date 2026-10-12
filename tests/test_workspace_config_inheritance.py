@@ -359,7 +359,7 @@ class HealthParityBeforeFirstMissionTests(unittest.TestCase):
         baseline = [row for row in rows if row["check"].startswith(
             ("policy.research_candidate_auto_commit", "policy.research_plan_auto_start",
              "policy.research_budget"))]
-        self.assertEqual(len(baseline), 9)
+        self.assertEqual(len(baseline), 10)
         self.assertEqual({row["status"] for row in baseline}, {"info"})
         self.assertTrue(all("fix" not in row for row in baseline))
         pending = [row["check"] for row in rows if row["status"] == "pending"]

@@ -199,7 +199,8 @@ class RehearsalResultTests(unittest.TestCase):
             rehearsal.confined = True
             with patch('dalton_core.service.ServiceConfig.from_file', return_value=SimpleNamespace(tick_seconds=5)), \
                  patch('dalton_core.bounded_planner_driver.BoundedPlannerDriverConfig.from_mapping'), \
-                 patch('dalton_core.bounded_planner_driver.BoundedPlannerDriver') as driver:
+                 patch('dalton_core.bounded_planner_driver.BoundedPlannerDriver') as driver, \
+                 patch('scripts.rehearse_deploy.check_rehearsal_space'):
                 driver.return_value.run_once.return_value = {'event_judgement': {'status': 'unavailable:RuntimeError'}}
                 result = rehearsal.step('one controller tick', rehearsal.run_tick)
             self.assertFalse(result.ok)

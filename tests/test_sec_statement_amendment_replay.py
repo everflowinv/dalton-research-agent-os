@@ -399,9 +399,13 @@ class ConsumerAndMigrationTests(unittest.TestCase):
     def test_material_only_unit_source_alias_exact_and_financial_changes_invalidate(self):
         from dalton_core import sec_filing_units,statement_context
         source=Path(sec_filing_units.__file__).read_bytes(); sha=hashlib.sha256(source).hexdigest()
-        self.assertIn(sha,statement_context._UNIT_MATERIAL_ONLY_SOURCE_ALIAS)
-        original_source=source.replace(b"filing['form'] in {'10-K', '10-K/A'} else 'sec_10q'",b"filing['form']=='10-K' else 'sec_10q'")
-        self.assertEqual(hashlib.sha256(original_source).hexdigest(),statement_context._UNIT_MATERIAL_ONLY_SOURCE_ALIAS[sha])
+        self.assertEqual(statement_context._UNIT_MATERIAL_ONLY_SOURCE_ALIAS, {
+            '0e77fa7a3518ff1f77221495dd92b1cc8e65b4fed23d4d75debe58bb42575073':
+            'f45625e3e5fe70f2fc6451224fbef90727d58eac4c5cb937736b721680dd14ff',
+        })
+        # Fixed-zero parsing changed financial interpretation after the
+        # material-only amendment. It must not inherit that older identity.
+        self.assertNotIn(sha,statement_context._UNIT_MATERIAL_ONLY_SOURCE_ALIAS)
         mutated=source.replace(b'RULE_REF=',b'RULE_REF =',1)
         self.assertNotEqual(source,mutated)
         self.assertNotIn(hashlib.sha256(mutated).hexdigest(),statement_context._UNIT_MATERIAL_ONLY_SOURCE_ALIAS)
