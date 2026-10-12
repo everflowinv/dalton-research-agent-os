@@ -51,6 +51,7 @@ def company_signature(frozen: Mapping[str, Any], launcher: Any) -> str:
     from .investment_memo_macro_accounting import CONTRACT_REF as MACRO_ACCOUNTING_REF
     from .investment_memo_legacy_accounting import CONTRACT_REF as LEGACY_ACCOUNTING_REF
     from .product_passage_validation import PRODUCT_VALIDATION_CONTRACT
+    from .mission_deliverable import SECTION_NUMBERS_VALIDATION_CONTRACT
     from .store import content_hash
 
     mission = frozen["mission"]
@@ -71,6 +72,9 @@ def company_signature(frozen: Mapping[str, Any], launcher: Any) -> str:
         "drafting_contract": MEMO_PROMPT_CONTRACT_VERSION,
         "timeout_continuation_contract": TIMEOUT_CONTINUATION_REF,
         "validation_contract": PRODUCT_VALIDATION_CONTRACT,
+        # Compatible validation change: wake the lane, while the draft prompt,
+        # Work identity, existing paid answers and one repair slot stay bound.
+        "section_numbers_validation_contract": SECTION_NUMBERS_VALIDATION_CONTRACT,
         "macro_accounting_contract": MACRO_ACCOUNTING_REF,
         "legacy_accounting_contract": LEGACY_ACCOUNTING_REF,
     }

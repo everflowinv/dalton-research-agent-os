@@ -94,6 +94,8 @@ def deliverable_change_reasons() -> tuple[str, ...]:
     return (*CHANGE_REASONS, IMPORT_CHANGE_REASON)
 MAX_SECTIONS = 24
 MAX_BODY_CHARS = 6000
+MAX_SECTION_NUMBERS = 128
+SECTION_NUMBERS_VALIDATION_CONTRACT = "section-numbers-capacity:128:v1"
 GAP_MARKER = "缺来源"
 
 # A year, quarter, half or fiscal-year label is a period, not a figure.  Same
@@ -125,7 +127,7 @@ _BARE_SMALL_INTEGER = 12
 # The longest rendering of one cited figure. A Claim's normalized_statement has
 # no ceiling in its own contract, so this is generous on purpose: it exists to
 # stop a single statement becoming a document, not to police wording. The
-# document's real bound is the 60-entry cap on a section's numbers.
+# document's real bound is MAX_SECTION_NUMBERS on a section's numbers.
 MAX_NUMBER_TEXT = 1000
 _VALUE_TOKEN_RE = re.compile(r"[$€£¥]\s?\d[\d,.]*|\d[\d,.]*\s?%|\d[\d,.]*")
 _ISO_DATE_RE = re.compile(r"(?<!\d)((?:19|20)\d{2}-\d{2}-\d{2})(?!\d)")
@@ -1105,8 +1107,9 @@ def validate_section(
     if not isinstance(body, str) or len(body) > MAX_BODY_CHARS:
         raise MissionDeliverableValidationError("section.body must be text under 6000 characters")
     numbers = section.get("numbers") or []
-    if not isinstance(numbers, list) or len(numbers) > 60:
-        raise MissionDeliverableValidationError("section.numbers must be a list of at most 60 entries")
+    if not isinstance(numbers, list) or len(numbers) > MAX_SECTION_NUMBERS:
+        raise MissionDeliverableValidationError(
+            f"section.numbers must be a list of at most {MAX_SECTION_NUMBERS} entries")
     checked: list[dict[str, Any]] = []
     derived: list[Mapping[str, Any]] = []
     for item in numbers:
