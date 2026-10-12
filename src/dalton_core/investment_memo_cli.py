@@ -545,6 +545,16 @@ def run_memo(*, store: DaltonStore, frozen: Mapping[str, Any], model: Any, verif
             for group, section_indexes, question_indexes in GROUPS]
         repair_budget.bind_macro(prompts, mission)
         verifier_model = MemoMacroVerifier(verifier_model, repair_budget)
+        # A complete fee census is a free accounting operation, not a
+        # refused answer and not a paid retry generation. Stop before drafting
+        # while its next bounded page is pending.
+        if repair_budget.macro is not None:
+            if repair_budget.macro.complete:
+                repair_budget._refresh_macro()
+            if repair_budget.macro.pending is not None:
+                return {"status":"held","memo_status":"macro_accounting_pending",
+                        "reason":"完整历史费用索引仍在核对，系统会继续处理。",
+                        "macro_progress":repair_budget.macro.pending,"cost_micros":0}
     sections, answers, calls = [], [], []
     cost_micros = 0
     repairs_left = max(0, int(max_repairs))
@@ -727,6 +737,11 @@ def run(*, state_dir: Path, model_config_path: Path | None, verifier_model_confi
                   "reason": str(exc), "cost_status": "unproved",
                   "completed_work_refs": [call.get("work_order_ref") for _, call, _, _ in quiesce.calls]}
     result = with_failure_costs(result, producer_report, verifier_report)
+    if result.get('memo_status')=='macro_accounting_pending':
+        from types import SimpleNamespace
+        from .mission_investment_memo_lane import company_signature
+        result['memo_input_signature']=company_signature(frozen,SimpleNamespace(
+            model_config_path=model_config_path,verifier_model_config_path=verifier_model_config_path))
     return {"schema_version": SUMMARY_SCHEMA_VERSION, **result,
             "budget": {"run": run_budget, "producer": producer_budget,
                        "verifier": verifier_budget, "max_repairs": repairs,

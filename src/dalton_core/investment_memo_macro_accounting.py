@@ -22,6 +22,10 @@ CONTRACT_REF = 'investment-memo-macro-accounting:0.1'
 SCOPES = 'investment_memo_accounting_scopes'
 REQUESTS = 'investment_memo_accounting_requests'
 EXTRA = 'investment_memo_accounting_extra_slots'
+IMPORTS = 'investment_memo_accounting_legacy_imports'
+SCANS = 'investment_memo_accounting_legacy_scans'
+PAGES = 'investment_memo_accounting_import_pages'
+SCAN_BATCH = 128
 MAX_REQUESTS = 6  # four producer groups, one optional redo, one verifier
 MAX_WORKS = 16
 
@@ -33,12 +37,14 @@ def request_id(group, prompt):
 
 
 def _schema(cur):
-    for table, key in ((SCOPES, 'macro_ref'), (REQUESTS, 'request_key'), (EXTRA, 'macro_ref')):
+    for table, key in ((SCOPES, 'macro_ref'), (REQUESTS, 'request_key'), (EXTRA, 'macro_ref'), (IMPORTS,'macro_ref'), (SCANS,'checkpoint_id'), (PAGES,'checkpoint_id')):
         cur.execute(f'CREATE TABLE IF NOT EXISTS {table} ('
                     f'{key} TEXT PRIMARY KEY, macro_binding TEXT NOT NULL, '
                     'record_json TEXT NOT NULL, content_hash TEXT NOT NULL)')
     cur.execute(f'CREATE INDEX IF NOT EXISTS {REQUESTS}_macro ON {REQUESTS}(macro_binding)')
-    for table in (SCOPES, REQUESTS, EXTRA):
+    cur.execute(f'CREATE INDEX IF NOT EXISTS {SCANS}_macro ON {SCANS}(macro_binding,checkpoint_id DESC)')
+    cur.execute(f'CREATE INDEX IF NOT EXISTS {PAGES}_macro ON {PAGES}(macro_binding,checkpoint_id)')
+    for table in (SCOPES, REQUESTS, EXTRA, IMPORTS, SCANS, PAGES):
         cur.execute(f'CREATE TRIGGER IF NOT EXISTS {table}_insert_owner BEFORE INSERT ON {table} '
                     'WHEN dalton_scheduler_authorized() != 1 BEGIN SELECT RAISE(ABORT, '
                     "'memo accounting insert requires the Scheduler owner'); END")
@@ -109,7 +115,8 @@ class MemoMacroAccounting:
         self.ref = 'memo-accounting-macro:' + content_hash(scope)
         self.model = model; self.mission = mission
         self.prompts = tuple(prompts)
-        # The scope excludes budgets, routing/config epochs, clocks and run ids.
+        # No budget, routing epoch or run clock is added to the scope. The
+        # complete prompts retain all actual source rows and their timestamps.
         # New true source material or Playbook prompts creates a different scope.
         with Scheduler(model.scheduler_db) as scheduler, scheduler._transaction() as cur:
             _schema(cur)
@@ -129,6 +136,232 @@ class MemoMacroAccounting:
             for entry in entries:
                 self._register(cur, entry)
         self.last = None
+        self.legacy = None
+        self.import_error = None
+        self.scan_error = None
+        self.pending = None
+        if not self.complete:
+            self._import_legacy()
+
+    def _import_legacy(self):
+        from .investment_memo_legacy_accounting import derive, census
+        # An owner transaction excludes new Scheduler Work during the census
+        # and commit. Original scope/Work/fees are never rewritten.
+        try:
+            with Scheduler(self.model.scheduler_db) as scheduler, scheduler._transaction() as cur:
+                _schema(cur)
+                row = cur.execute(f'SELECT * FROM {IMPORTS} WHERE macro_ref=?',(self.ref,)).fetchone()
+                if row is None:
+                    try:
+                        proof = derive(self.model,self.prompts)
+                    except ValueError as exc:
+                        if 'exceeds the complete bounded512 census' not in str(exc):
+                            raise
+                        paged=self._initial_page(scheduler,cur)
+                        if paged is None:
+                            # Commit this page before reporting pending. This
+                            # is progress, never authority for another call.
+                            self.import_error='legacy memo initial complete census is pending; next bounded128 page will resume'
+                            row=cur.execute(f'SELECT * FROM {PAGES} WHERE macro_binding=? ORDER BY checkpoint_id DESC LIMIT 1',(self.ref,)).fetchone()
+                            self._pending(PAGES,row)
+                            return
+                        proof=derive(self.model,self.prompts,_paged=paged)
+                    if 'paged_census_hash' not in proof and census(scheduler.connection) != proof['namespace']:
+                        raise ValueError('legacy memo namespace changed before owner import')
+                    _record(cur,IMPORTS,'macro_ref',self.ref,self.ref,proof)
+                else:
+                    proof = _body(row)
+                    if 'paged_census_hash' in proof:
+                        paged=self._pages(scheduler.connection)
+                        if paged is None or paged['content_hash']!=proof['paged_census_hash']:
+                            raise ValueError('legacy memo initial pages no longer bind its census')
+                        current=derive(self.model,self.prompts,_paged=paged)
+                    else:
+                        current = derive(self.model,self.prompts,
+                            through_rowid=max(r['rowid'] for r in proof['namespace']))
+                    static = ('contract_ref','company_ref','material_hash','normal_requests',
+                              'namespace','namespace_hash','historical_requests','extra')
+                    if any(current[k] != proof[k] for k in static) or [
+                            (w['work_ref'],w['work_hash'],w['append_rowid']) for w in current['historical_works']] != [
+                            (w['work_ref'],w['work_hash'],w['append_rowid']) for w in proof['historical_works']]:
+                        raise ValueError('legacy memo import no longer derives its complete original membership')
+                if (proof['normal_requests'] != self.scope['normal_requests']
+                        or proof['company_ref'] != self.scope['company_ref']
+                        or proof['material_hash'] != self.scope['material_hash']):
+                    raise ValueError('legacy memo imported frozen scope differs')
+                self.legacy = proof
+                self.complete = True
+        except AUDIT_ERRORS as exc:
+            # A previously successful group remains freely replayable. Only
+            # new paid work needs a complete census and fee authority.
+            self.import_error = str(exc)
+
+    def _pending(self, table, row):
+        body={'contract_ref':CONTRACT_REF,'macro_ref':self.ref,
+              'scope_hash':content_hash(self.scope),'company_ref':self.scope['company_ref'],
+              'table':table,'checkpoint_ref':row['checkpoint_id'],
+              'checkpoint_hash':row['content_hash']}
+        self.pending={**body,'content_hash':content_hash(body)}
+
+    def _initial_page(self, scheduler, cur):
+        from .investment_memo_legacy_accounting import page,classify
+        rows=cur.execute(f'SELECT * FROM {PAGES} WHERE macro_binding=? ORDER BY checkpoint_id',
+                         (self.ref,)).fetchall()
+        if rows and _body(rows[-1])['complete']:
+            return self._pages(scheduler.connection)
+        last=None if not rows else _body(rows[-1])
+        cursor=None if last is None else last['cursor']
+        target=self.scope['registered_work_rowid']
+        batch=page(scheduler.connection,through_rowid=target,cursor=cursor,limit=SCAN_BATCH)
+        source=[]
+        for item in batch[:SCAN_BATCH]:
+            authority=scheduler.work_order_authority(item['work_ref'])
+            work=WorkOrder.from_dict(authority['work_order'])
+            source.append({**item,'work_hash':authority['work_order_hash'],
+                           'candidate':classify(work,self.prompts)})
+        next_cursor=None if not source else {k:source[-1][k] for k in ('request_id','rowid')}
+        sequence=1 if last is None else last['sequence']+1
+        record={'scope_hash':content_hash(self.scope),'sequence':sequence,
+            'previous_hash':None if not rows else rows[-1]['content_hash'],
+            'through_rowid':target,'start_cursor':cursor,'cursor':next_cursor,
+            'complete':len(batch)<=SCAN_BATCH,'source':source}
+        _record(cur,PAGES,'checkpoint_id',f'{self.ref}:{sequence:020d}',self.ref,record)
+        return self._pages(scheduler.connection) if record['complete'] else None
+
+    def _pages(self, connection):
+        from .investment_memo_legacy_accounting import page,classify
+        rows=connection.execute(f'SELECT * FROM {PAGES} WHERE macro_binding=? ORDER BY checkpoint_id',
+                                (self.ref,)).fetchall()
+        namespace=[]; candidates=[]; prior=None; cursor=None
+        reader=Scheduler.__new__(Scheduler);reader.connection=connection
+        for sequence,row in enumerate(rows,1):
+            record=_body(row)
+            if (record['sequence']!=sequence or record['previous_hash']!=prior
+                    or record['scope_hash']!=content_hash(self.scope) or record['start_cursor']!=cursor
+                    or record['through_rowid']!=self.scope['registered_work_rowid']):
+                raise ValueError('legacy memo initial page chain differs')
+            actual=page(connection,through_rowid=record['through_rowid'],cursor=cursor,limit=SCAN_BATCH)
+            if [ {k:item[k] for k in ('rowid','work_ref','request_id')} for item in record['source']] != actual[:SCAN_BATCH]:
+                raise ValueError('legacy memo initial page omits source namespace rows')
+            if record['complete'] != (len(actual)<=SCAN_BATCH):
+                raise ValueError('legacy memo initial page falsely claims completion')
+            for item in record['source']:
+                # Re-read only the source candidates. Unrelated immutable
+                # Work remains covered by the owner-hashed complete page.
+                if item['candidate'] is not None:
+                    authority=reader.work_order_authority(item['work_ref'])
+                    work=WorkOrder.from_dict(authority['work_order'])
+                    if authority['work_order_hash']!=item['work_hash'] or classify(work,self.prompts)!=item['candidate']:
+                        raise ValueError('legacy memo page candidate source differs')
+                    candidates.append(item['work_ref'])
+                namespace.append({'rowid':item['rowid'],'work_ref':item['work_ref']})
+            expected_cursor=None if not record['source'] else {k:record['source'][-1][k] for k in ('request_id','rowid')}
+            if record['cursor']!=expected_cursor:
+                raise ValueError('legacy memo initial page cursor skips its exact source boundary')
+            prior=row['content_hash'];cursor=record['cursor']
+        if not rows or not _body(rows[-1])['complete']:
+            return None
+        body={'namespace':sorted(namespace,key=lambda r:r['rowid']),
+              'candidate_refs':candidates,'pages_hash':prior}
+        return {**body,'content_hash':content_hash(body)}
+
+    def _legacy_entries(self, connection, *, check_growth=True):
+        if self.legacy is None:
+            return []
+        from .investment_memo_legacy_accounting import census, REPAIR_SEPARATOR
+        row = connection.execute(f'SELECT * FROM {IMPORTS} WHERE macro_ref=?',(self.ref,)).fetchone()
+        if row is None or _body(row) != self.legacy:
+            raise ValueError('legacy memo import authority changed')
+        initial = self.legacy['namespace']
+        watermark = max((r['rowid'] for r in initial),default=0)
+        if 'paged_census_hash' in self.legacy:
+            paged=self._pages(connection)
+            if paged is None or paged['content_hash']!=self.legacy['paged_census_hash']:
+                raise ValueError('legacy memo initial paged census differs')
+        elif census(connection,through_rowid=watermark) != initial:
+            raise ValueError('legacy memo initial complete census differs')
+        if check_growth and self.scan_error is not None:
+            raise ValueError(self.scan_error)
+        return list(self.legacy['historical_requests'])
+
+    def _advance_legacy_scan(self):
+        if self.legacy is None:
+            return
+        self.scan_error=None
+        self.pending=None
+        try:
+            # Finish owner metadata writes before opening any immutable cold
+            # reader below. No write may occur inside its file-stability guard.
+            with Scheduler(self.model.scheduler_db) as scheduler:
+                rows=scheduler.connection.execute(f'SELECT * FROM {REQUESTS} WHERE macro_binding=? LIMIT ?',
+                                                   (self.ref,MAX_REQUESTS+1)).fetchall()
+            if len(rows)>MAX_REQUESTS:
+                raise ValueError('legacy memo registered requests exceed six')
+            entries={_body(r)['request_id']:_body(r) for r in rows}
+            entries.update({e['request_id']:e for e in self.legacy['historical_requests']})
+            routes=set()
+            with Scheduler(self.model.scheduler_db) as scheduler:
+                for entry in entries.values():
+                    if entry['purpose']!='investment_memo':
+                        continue
+                    for work,_ in _works(scheduler.connection,entry):
+                        formal=scheduler.formal_result(work.id)
+                        if formal is not None and formal['terminal_state']=='succeeded':
+                            routes.add(formal['result_envelope']['metadata'].get('route_decision_ref'))
+            self._scan_appended(max(r['rowid'] for r in self.legacy['namespace']),entries,routes)
+        except AUDIT_ERRORS as exc:
+            self.scan_error=str(exc)
+
+    def _scan_appended(self, initial_watermark, entries, producer_routes):
+        from .investment_memo_legacy_accounting import REPAIR_SEPARATOR
+        expression="json_extract(work_order_json,'$.metadata.request_id')"
+        with Scheduler(self.model.scheduler_db) as scheduler, scheduler._transaction() as cur:
+            _schema(cur)
+            row=cur.execute(f'SELECT * FROM {SCANS} WHERE macro_binding=? ORDER BY checkpoint_id DESC LIMIT 1',
+                            (self.ref,)).fetchone()
+            last=None if row is None else _body(row)
+            if last is not None and last['import_hash']!=self.legacy['content_hash']:
+                raise ValueError('legacy memo incremental cursor belongs to another import')
+            maximum=cur.execute('SELECT MAX(rowid) FROM scheduler_work_orders').fetchone()[0] or 0
+            if last is None:
+                start,target,cursor=initial_watermark,maximum,None
+            elif last['complete']:
+                start,target,cursor=last['target_rowid'],maximum,None
+            else:
+                start,target,cursor=last['from_rowid'],last['target_rowid'],last['cursor']
+            if start>=target:
+                return
+            sql=f'SELECT rowid,work_order_id,{expression} AS request_id FROM scheduler_work_orders WHERE '\
+                f'{expression}>=? AND {expression}<? AND rowid>? AND rowid<=? '
+            args=['memo-','memo.',start,target]
+            if cursor is not None:
+                sql+=f'AND ({expression}>? OR ({expression}=? AND rowid>?)) '
+                args.extend([cursor['request_id'],cursor['request_id'],cursor['rowid']])
+            sql+=f'ORDER BY {expression},rowid LIMIT ?'
+            page=cur.execute(sql,(*args,SCAN_BATCH+1)).fetchall()
+            reader=Scheduler.__new__(Scheduler);reader.connection=scheduler.connection
+            for item in page[:SCAN_BATCH]:
+                work=WorkOrder.from_dict(reader.work_order_authority(item['work_order_id'])['work_order'])
+                belongs=any(work.question==p or work.question.startswith(p+REPAIR_SEPARATOR) for p in self.prompts)
+                if work.metadata.get('purpose')=='investment_memo_verifier':
+                    belongs=bool(set(work.metadata.get('producer_route_decision_refs') or ()).intersection(producer_routes))
+                if belongs and not any(work.metadata.get('request_id','').startswith(e['request_id'])
+                       and content_hash(work.question)==e['prompt_hash'] for e in entries.values()):
+                    raise ValueError('legacy memo gained an unregistered matching request after import')
+            complete=len(page)<=SCAN_BATCH
+            next_cursor=None if not page else {'request_id':page[min(len(page),SCAN_BATCH)-1]['request_id'],
+                                             'rowid':page[min(len(page),SCAN_BATCH)-1]['rowid']}
+            sequence=1 if last is None else last['sequence']+1
+            checkpoint={'import_hash':self.legacy['content_hash'],'sequence':sequence,
+                'previous_hash':None if row is None else row['content_hash'],
+                'from_rowid':start,'target_rowid':target,'cursor':next_cursor,'complete':complete,
+                'page_work_refs':[r['work_order_id'] for r in page[:SCAN_BATCH]]}
+            _record(cur,SCANS,'checkpoint_id',f'{self.ref}:{sequence:020d}',self.ref,checkpoint)
+        if not complete or target<maximum:
+            with Scheduler(self.model.scheduler_db) as scheduler:
+                row=scheduler.connection.execute(f'SELECT * FROM {SCANS} WHERE checkpoint_id=?',(f'{self.ref}:{sequence:020d}',)).fetchone()
+                self._pending(SCANS,row)
+            raise ValueError('legacy memo incremental census is incomplete; next bounded128 page is pending')
 
     def _register(self, cur, entry):
         key = self.ref + ':' + entry['request_id']
@@ -150,6 +383,14 @@ class MemoMacroAccounting:
             raise ValueError('memo verifier request has another purpose')
         entry = {'role': role, 'group_index': group_index, 'purpose': kwargs['purpose'],
                  'request_id': kwargs['request_id'], 'prompt_hash': content_hash(kwargs['prompt'])}
+        if self.legacy is not None:
+            extra=self.legacy['extra']
+            if role=='semantic' and extra is not None and extra != {
+                    'role':'semantic','request_id':entry['request_id'],'prompt_hash':entry['prompt_hash']}:
+                raise ValueError('legacy memo optional slot was already consumed')
+            verifiers=[e['request_id'] for e in self.legacy['historical_requests'] if e['role']=='verifier']
+            if role=='verifier' and verifiers and entry['request_id'] not in verifiers:
+                raise ValueError('legacy memo already has its sole verifier request')
         with Scheduler(self.model.scheduler_db) as scheduler, scheduler._transaction() as cur:
             _schema(cur)
             if role == 'semantic':
@@ -166,6 +407,8 @@ class MemoMacroAccounting:
     def claim_technical(self, parent_work_ref):
         if not self.complete:
             raise ValueError('memo macro legacy fee audit is required before technical continuation')
+        if self.legacy is not None and self.legacy['extra'] is not None:
+            raise ValueError('legacy memo optional slot was already consumed')
         with Scheduler(self.model.scheduler_db) as scheduler, scheduler._transaction() as cur:
             _schema(cur)
             authority = scheduler.work_order_authority(parent_work_ref)
@@ -187,7 +430,8 @@ class MemoMacroAccounting:
 
     def snapshot(self):
         from .planner_paid_output_recovery import _authority_connection, recovery_readers
-        from .investment_memo_timeout_recovery import _historical_bill
+        from .investment_memo_legacy_accounting import bill as accounted_bill
+        self._advance_legacy_scan()
         with _authority_connection(self.model.scheduler_db) as connection, recovery_readers(
                 self.model.config['model_router_db'], self.model.config['budget_db'],
                 now=self.model.clock()) as (router, budget):
@@ -202,13 +446,24 @@ class MemoMacroAccounting:
                 raise ValueError('memo macro exceeds its six bounded logical requests')
             reader = Scheduler.__new__(Scheduler); reader.connection = connection
             bills = {}; latest = {}; entries = []
+            imported = self._legacy_entries(connection)
+            held_entries = {_body(row)['request_id']:_body(row) for row in rows}
+            for entry in imported:
+                existing=held_entries.get(entry['request_id'])
+                if existing is not None and existing != entry:
+                    raise ValueError('legacy memo registered request differs from imported authority')
+                held_entries[entry['request_id']]=entry
             for row in rows:
-                entry = _body(row); entries.append(entry)
+                entry = _body(row)
+                if entry['role'] == 'normal' and entry not in self.scope['normal_requests']:
+                    raise ValueError('memo macro normal request differs from its frozen scope')
+            for entry in held_entries.values():
+                entries.append(entry)
                 if entry['role'] == 'normal' and entry not in self.scope['normal_requests']:
                     raise ValueError('memo macro normal request differs from its frozen scope')
                 works = _works(connection, entry)
                 for work, authority in works:
-                    if self.complete and entry['role'] == 'normal':
+                    if self.scope['complete'] is True and entry['role'] == 'normal':
                         rowid = connection.execute('SELECT rowid FROM scheduler_work_orders WHERE work_order_id=?', (work.id,)).fetchone()[0]
                         if rowid <= self.scope['registered_work_rowid']:
                             raise ValueError('memo complete scope predates an unregistered normal Work')
@@ -221,7 +476,7 @@ class MemoMacroAccounting:
                             'known_indexed_micros':sum(item['accounted_micros'] for item in bills.values())}
                         raise ValueError('memo registered Work is in flight or lacks a formal result; reservation retained')
                     try:
-                        bill = _historical_bill(connection, budget, work.id)
+                        bill = accounted_bill(connection,router,budget,authority,formal)
                     except ValueError:
                         self.last = {'contract_ref': CONTRACT_REF, 'macro_ref': self.ref,
                             'status':'fee_authority_unproved','cost_complete':False,
@@ -241,10 +496,10 @@ class MemoMacroAccounting:
             semantic = [entry for entry in entries if entry['role']=='semantic']
             verifier = [entry for entry in entries if entry['role']=='verifier']
             extra = connection.execute(f'SELECT * FROM {EXTRA} WHERE macro_ref=?', (self.ref,)).fetchone()
-            self.extra = None if extra is None else _body(extra)
-            if len(semantic)>1 or len(verifier)>1:
+            self.extra = (None if self.legacy is None else self.legacy['extra']) if extra is None else _body(extra)
+            if self.legacy is None and (len(semantic)>1 or len(verifier)>1):
                 raise ValueError('memo macro has multiple correction or verifier generations')
-            if semantic and (self.extra is None or self.extra.get('role')!='semantic'
+            if self.legacy is None and semantic and (self.extra is None or self.extra.get('role')!='semantic'
                     or self.extra.get('request_id')!=semantic[0]['request_id']
                     or self.extra.get('prompt_hash')!=semantic[0]['prompt_hash']):
                 raise ValueError('memo macro correction is not bound to its unique extra slot')
@@ -254,7 +509,10 @@ class MemoMacroAccounting:
             self.last = {'contract_ref': CONTRACT_REF, 'macro_ref': self.ref,
                          'status': 'complete' if self.complete else 'legacy_fee_audit_required',
                          'cost_complete': self.complete,
+                         'unknown_fee_retained_work_refs':sorted(k for k,v in bills.items() if v.get('unknown_fee_retained')),
+                         'fee_certainty':'conservative_upper_bound' if any(v.get('unknown_fee_retained') for v in bills.values()) else 'settled',
                          'known_indexed_micros':total,
+                         'legacy_import_hash':None if self.legacy is None else self.legacy['content_hash'],
                          'accounted_micros': total, 'historical_work_count': len(bills),
                          'bills': list(bills.values())}
             return entries, latest, total
@@ -268,8 +526,11 @@ class MemoMacroAccounting:
             row = connection.execute(f'SELECT * FROM {REQUESTS} WHERE request_key=?',
                 (self.ref+':'+kwargs['request_id'],)).fetchone()
             if row is None:
-                return None
-            entry = _body(row)
+                entry=next((e for e in self._legacy_entries(connection,check_growth=False) if e['request_id']==kwargs['request_id']),None)
+                if entry is None:
+                    return None
+            else:
+                entry = _body(row)
             works = _works(connection, entry)
             if not works:
                 return None

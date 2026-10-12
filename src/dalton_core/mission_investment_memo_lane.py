@@ -48,6 +48,8 @@ def company_signature(frozen: Mapping[str, Any], launcher: Any) -> str:
     from .investment_memo_cli import anchor_bindings
     from .investment_memo_draft import MEMO_PROMPT_CONTRACT_VERSION
     from .investment_memo_timeout_recovery import CONTRACT_REF as TIMEOUT_CONTINUATION_REF
+    from .investment_memo_macro_accounting import CONTRACT_REF as MACRO_ACCOUNTING_REF
+    from .investment_memo_legacy_accounting import CONTRACT_REF as LEGACY_ACCOUNTING_REF
     from .product_passage_validation import PRODUCT_VALIDATION_CONTRACT
     from .store import content_hash
 
@@ -69,6 +71,8 @@ def company_signature(frozen: Mapping[str, Any], launcher: Any) -> str:
         "drafting_contract": MEMO_PROMPT_CONTRACT_VERSION,
         "timeout_continuation_contract": TIMEOUT_CONTINUATION_REF,
         "validation_contract": PRODUCT_VALIDATION_CONTRACT,
+        "macro_accounting_contract": MACRO_ACCOUNTING_REF,
+        "legacy_accounting_contract": LEGACY_ACCOUNTING_REF,
     }
     parts = [content_hash(payload), verifier_provider_contract_fingerprint(
         "investment_memo_verifier")]
@@ -126,6 +130,15 @@ class MissionInvestmentMemoLaneCoordinator:
             memo_status = settled.get("memo_status")
             if memo_status in QUIET:
                 self.quiet_signatures.add(signature)
+            elif memo_status == "macro_accounting_pending":
+                from .investment_memo_accounting_progress import resume_checkpoint
+                try:
+                    resume_checkpoint(ticket.get("summary"), ticket,
+                                      self.launcher.scheduler_db or self.launcher.state_dir / "scheduler.sqlite")
+                except (ValueError, OSError) as exc:
+                    return {"status":"held","reason":"memo accounting progress is unproved: "+str(exc),"settled":settled}
+                # Free persistent paging must remain eligible on the next
+                # normal tick, including after a writer restart.
             elif memo_status == "quiesced":
                 from .investment_memo_quiesce import quiesced_summary_matches
                 if not quiesced_summary_matches(ticket.get("summary"), ticket):

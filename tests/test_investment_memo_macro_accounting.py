@@ -69,13 +69,13 @@ class MemoMacroAccountingTests(unittest.TestCase):
         with self.assertRaises(CockpitModelError):next_run.call(**self.repair('different reason'))
         self.assertEqual(self.fees(),old);self.assertEqual(len(self.adapter.served),count)
 
-    def test_legacy_paid_group_free_reuses_but_unknown_old_repair_set_does_not_authorize_new_fee(self):
+    def test_complete_bounded_legacy_import_reuses_paid_group_and_keeps_the_old_scope_unchanged(self):
         self.model.call(**self.kw(0));old=self.fees();count=len(self.adapter.served)
-        wrapper=self.wrapper();self.assertFalse(wrapper.macro.complete)
+        wrapper=self.wrapper();self.assertTrue(wrapper.macro.complete)
+        self.assertFalse(wrapper.macro.scope['complete'])
         self.assertEqual(wrapper.call(**self.kw(0))['cost_micros'],0)
-        wrapper.prepare_repair(self.repair());self.assertFalse(wrapper.can_repair(remaining_groups=3))
-        with self.assertRaises(CockpitModelError):wrapper.call(**self.kw(1))
-        wrapper=self.wrapper();self.assertFalse(wrapper.macro.complete)
+        wrapper.prepare_repair(self.repair());self.assertTrue(wrapper.can_repair(remaining_groups=3))
+        wrapper=self.wrapper();self.assertTrue(wrapper.macro.complete)
         self.assertEqual(self.fees(),old);self.assertEqual(len(self.adapter.served),count)
 
     def test_registered_dispatch_gap_is_not_misclassified_as_legacy_on_restart(self):
@@ -138,7 +138,9 @@ class MemoMacroAccountingTests(unittest.TestCase):
         old=self.fees();count=len(self.adapter.served)
         resumed=self.wrapper();resumed.call(**self.kw(0));resumed.prepare_repair(self.repair())
         self.assertFalse(resumed.can_repair(remaining_groups=3))
-        self.assertIn('unsettled',resumed.macro_error)
+        self.assertIsNone(resumed.macro_error)
+        self.assertEqual(resumed.macro.last['fee_certainty'],'conservative_upper_bound')
+        self.assertGreaterEqual(resumed.accounted_micros,14_000_000)
         self.assertEqual(self.fees(),old);self.assertEqual(len(self.adapter.served),count)
 
     def test_extra_slot_is_atomic_and_immutable_across_independent_readers(self):

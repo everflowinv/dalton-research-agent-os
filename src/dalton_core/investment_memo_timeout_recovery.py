@@ -233,7 +233,7 @@ def recover(wrapper, exc, kwargs):
             or not wrapper.stage['allow_technical'] or wrapper.technical_slot_consumed):
         return None
     macro = getattr(wrapper, 'macro', None)
-    if macro is not None and (not macro.complete or (getattr(macro, 'extra', None) or {}).get('role') == 'semantic'):
+    if macro is not None and (not macro.complete or (getattr(macro, 'extra', None) or {}).get('role') in {'semantic','legacy_exhausted'}):
         return None
     with Scheduler(wrapper.scheduler_db) as scheduler, recovery_readers(
             wrapper.config['model_router_db'],wrapper.config['budget_db'],now=wrapper.clock()) as (router,budget):

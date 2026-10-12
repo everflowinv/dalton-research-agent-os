@@ -50,6 +50,21 @@ class InvestmentMemoLauncher(LaneChildLauncher):
         for _ in range(64):
             path = self.tickets_dir / digest
             if not (path / "quiesce-request.json").exists():
+                if (path / 'ticket.json').exists():
+                    ticket=self.status(f"{self.TICKET_PREFIX}:{digest}")
+                    if ticket['status']=='running':
+                        return ticket
+                    if (ticket.get('summary') or {}).get('memo_status')=='macro_accounting_pending':
+                        from .investment_memo_accounting_progress import resume_checkpoint
+                        try:
+                            checkpoint=resume_checkpoint(ticket['summary'],ticket,
+                                self.scheduler_db or self.state_dir / 'scheduler.sqlite')
+                        except (ValueError,OSError) as exc:
+                            raise LaneChildRejected('memo accounting progress is unproved: '+str(exc)) from exc
+                        resumed_from=ticket['id']
+                        # Read current owner progress directly rather than
+                        # walking an unbounded chain of free paging children.
+                        digest=hashlib.sha256((resumed_from+'|accounting|'+checkpoint).encode()).hexdigest()[:24]
                 break
             ticket = self.status(f"{self.TICKET_PREFIX}:{digest}")
             if ticket["status"] == "running":
