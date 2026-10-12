@@ -2231,6 +2231,18 @@ class MissionDocumentResearchCoordinator:
                 self.store.connection
             )
         }
+        # Numeric completion has its own formal result rather than a generic
+        # research observation. It already removes the admission from the
+        # dispatch queue, and must also retire the older advisory hold.
+        from .document_numeric_completion import completed_numeric_admission
+        numeric_completion_errors = []
+        for admission_ref in holds:
+            try:
+                if completed_numeric_admission(self.store.connection, admission_ref):
+                    completed_refs.add(admission_ref)
+            except (ValueError, KeyError, TypeError) as exc:
+                numeric_completion_errors.append({"admission_ref":admission_ref,
+                    "error":"numeric_completion_unproved:"+str(exc)})
         admissions = [
             admission for admission in admissions
             if admission["id"] not in completed_refs
@@ -2251,7 +2263,7 @@ class MissionDocumentResearchCoordinator:
         by_ref = {item["id"]: item for item in admissions}
         latest = self._latest()
         settled = None
-        errors: list[dict[str, Any]] = []
+        errors: list[dict[str, Any]] = numeric_completion_errors
         if hasattr(self.launcher,'replay_completed_models'):
             # Respect the existing physical child first; a local maintenance
             # hint does not create a concurrent child slot.
