@@ -953,7 +953,8 @@ def _run_strl_body(
             except InitialScreenContractError as exc:
                 sections, parse_findings = [], [{"code": "document_shape", "detail": str(exc)}]
             verdict = (verify_document(sections, worksheet=worksheet, pack=pack, live_claim_refs=live,
-                                       resolve_cell=resolve_cell, resolve_passage=resolve_passage)
+                                       resolve_cell=resolve_cell, resolve_passage=resolve_passage,
+                                       resolve_request=deliverable_authority.request_resolver(company['company_ref']))
                        if sections else {"verdict": "reject", "findings": []})
             findings = parse_findings + verdict["findings"]
             deterministic_findings = list(findings)

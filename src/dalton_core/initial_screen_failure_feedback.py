@@ -241,8 +241,14 @@ def _replay(model, mission, context, calls, authority):
     except InitialScreenContractError as exc:sections,findings=[],[{'code':'document_shape','detail':str(exc)}]
     if sections:
         live,cell,passage,source_proofs=_source_resolvers(authority,sections,pack,context['source_bindings'])
+        request_reader=authority.request_resolver(company['company_ref'])
+        def request(ref):
+            record=request_reader(ref) if request_reader else None
+            if record:source_proofs[ref]={'record_hash':record['content_hash']}
+            return record
         findings += verify_document(sections,worksheet=worksheet,pack=pack,
-            live_claim_refs=live,resolve_cell=cell,resolve_passage=passage)['findings']
+            live_claim_refs=live,resolve_cell=cell,resolve_passage=passage,
+            resolve_request=request)['findings']
         proofs['sources']=source_proofs
     return findings,proofs
 

@@ -1528,7 +1528,7 @@ def source_kinds_of(section: Mapping[str, Any]) -> set[str]:
 def verify_document(
     sections: Sequence[Mapping[str, Any]], *, worksheet: Mapping[str, Any] | None,
     pack: Mapping[str, Any], live_claim_refs: set[str] | None = None,
-    resolve_cell: Any = None, resolve_passage: Any = None,
+    resolve_cell: Any = None, resolve_passage: Any = None, resolve_request: Any = None,
 ) -> dict[str, Any]:
     """The deterministic verifier: citations, arithmetic, presence, lint.
 
@@ -1558,7 +1558,7 @@ def verify_document(
                                               "gap_items") if key in section}
         try:
             validate_section(wire, live_claim_refs=live_claim_refs, resolve_cell=resolve_cell,
-                             resolve_passage=resolver, resolve_number=numbers_by_ref.get,
+                             resolve_passage=resolver, resolve_number=numbers_by_ref.get, resolve_request=resolve_request,
                              strict=True)
         except MissionDeliverableError as exc:
             findings.append({"code": "citation_or_contract", "section": title, "detail": str(exc)[:300]})

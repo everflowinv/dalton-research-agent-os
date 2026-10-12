@@ -1082,6 +1082,7 @@ def validate_section(
     imported: bool = False,
     resolve_passage: Callable[[str], str | None] | None = None,
     resolve_number: Callable[[str], str | None] | None = None,
+    resolve_request: Callable[[str], Mapping[str, Any] | None] | None = None,
     strict: bool = False,
 ) -> dict[str, Any]:
     """One closed section: a title, a body or a gap, and traceable numbers.
@@ -1252,7 +1253,9 @@ def validate_section(
                      for index, item in enumerate(raw_items)]
     except ProductContractError as exc:
         raise MissionDeliverableValidationError(str(exc)) from exc
-    stray = unsourced_numbers(body, checked)
+    from .material_request_citation import without_verified_request_tokens
+    checked_body = without_verified_request_tokens(body, gap_items, resolve_request)
+    stray = unsourced_numbers(checked_body, checked)
     if stray and not imported:
         raise MissionDeliverableConflict(
             f"section「{title}」carries figures with no source behind them: {stray[:5]}；"
@@ -1594,6 +1597,12 @@ class MissionDeliverableAuthority:
 
         return passage_resolver(Path(self.store.path).parent)
 
+    def request_resolver(self, subject_ref: str):
+        if self.store.path == ":memory:":
+            return None
+        from .material_request_citation import request_citation_resolver
+        return request_citation_resolver(Path(self.store.path).parent, subject_ref)
+
     def latest(self, deliverable_ref: str) -> dict[str, Any] | None:
         row = self.connection.execute(
             "SELECT v.record_json AS record_json, v.content_hash AS content_hash "
@@ -1699,11 +1708,12 @@ class MissionDeliverableAuthority:
         strict = contract is not None and kind in CONTRACT_STRICT_KINDS and not as_version_zero
         numbers_by_ref = {str(key): str(value) for key, value in (pack_numbers or {}).items()}
         resolve_number = (numbers_by_ref.get if pack_numbers is not None else None)
+        resolve_request = self.request_resolver(subject_ref)
         checked = [
             validate_section(section, live_claim_refs=live,
                              resolve_cell=resolve_cell, imported=as_version_zero,
                              resolve_passage=resolve_passage,
-                             resolve_number=resolve_number, strict=strict)
+                             resolve_number=resolve_number, resolve_request=resolve_request, strict=strict)
             for section in sections
         ]
         if not any(section["body"] for section in checked):

@@ -222,6 +222,7 @@ def should_redraft(**kwargs: Any) -> dict[str, Any]:
 
 TAG_KINDS: Mapping[str, str] = {"P": "passage", "N": "number", "C": "claim", "O": "ours"}
 PASSAGE_QUOTE_PRINT_CONTRACT = "passage-quote-print:hyphen-line-wrap:1"
+NUMBER_PROVENANCE_CONTRACT = "pack-number-provenance:exact-valuation-parent:1"
 
 
 def passage_quote_matches(quote: str, passage: str) -> bool:
@@ -428,6 +429,21 @@ def _number_entry(pack: Mapping[str, Any], tag: str, ref: str) -> dict[str, Any]
                        "fcf_bridge": "valuation"}.get(parts[1], parts[1])
     else:
         source_kind = parts[0] if parts else "number"
+    # A valuation pointer is a derived vendor consensus multiple only when
+    # its exact held parent and leaf bind that same value. Display wording,
+    # labels or another vendor row cannot confer this capability.
+    if (len(parts) == 5 and parts[:3] == ["numbers", "valuation", "forward_pe"]
+            and parts[3].isdigit() and parts[4] in {"value", "forward_pe"}
+            and ref == "pack-json:" + pointer):
+        rows = ((pack.get("json") or {}).get("numbers") or {}).get("valuation", {}).get("forward_pe", [])
+        index = int(parts[3])
+        if isinstance(rows, list) and index < len(rows):
+            parent = rows[index]
+            if (isinstance(parent, Mapping) and parent.get("source") == "consensus_vendor"
+                    and parent.get("status") == "available" and value is not None
+                    and parent.get(parts[4]) == value and display == str(value)
+                    and not info.get("transform")):
+                source_kind = "consensus"
     out: dict[str, Any] = {"text": text, "value": value, "display": display, "pointer": pointer,
                            "source_kind": source_kind,
                            "metric": ".".join(part for part in parts[1:] if not part.isdigit())[:120]}
@@ -612,6 +628,7 @@ def placeholder_findings(text: str) -> list[dict[str, Any]]:
 def contract_fingerprint() -> str:
     """Hash of the rules a product drafted under, so a changed rule is a changed hash."""
 
+    from .material_request_citation import CONTRACT as request_citation_contract
     return content_hash({
         "version": PRODUCT_CONTRACT_VERSION,
         "number_rules": NUMBER_SOURCE_RULES, "view_rules": VIEW_RULES, "gap_rules": GAP_RULES,
@@ -619,6 +636,8 @@ def contract_fingerprint() -> str:
         "material_missing": MATERIAL_MISSING_RE.pattern,
         "placeholders": [(code, pattern.pattern) for code, pattern in PLACEHOLDER_PATTERNS],
         "passage_quote_print": PASSAGE_QUOTE_PRINT_CONTRACT,
+        "number_provenance": NUMBER_PROVENANCE_CONTRACT,
+        "material_request_prose_citation": request_citation_contract,
     })
 
 
