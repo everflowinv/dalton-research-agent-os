@@ -149,7 +149,8 @@ def _sources(authority, context, results):
             if entry.get('cell'): cells.append(entry['cell'])
     section = {'claim_refs': sorted(ref for ref in direct_refs if ref.startswith('claim-version:')),
                'source_refs': sorted(ref for ref in direct_refs if ref.startswith('doc-passage:'))}
-    _, cell, _, proofs = _source_resolvers(authority, [section], pack, context['source_bindings'])
+    _, cell, _, proofs = _source_resolvers(authority, [section], pack, context['source_bindings'],
+        original_proof_scope='initial_screen_checkpoint')
     for value in cells:
         if not cell(value): raise ValueError('initial-screen computed citation is unavailable')
     return proofs
@@ -170,6 +171,25 @@ class RunQuiesce:
         self.budgets = {purpose: model.budget_for(purpose) for purpose in purposes}
         self.configurations = self._configuration()
         self.scope = _scope(authority, mission, context)
+        # This is a frozen input hint, not a resume certificate. A future
+        # checkpoint must still prove exact formal results, all settlement and
+        # every used original. Persist before paying, so a bounded proof failure
+        # cannot discard the context needed to revalidate already-paid answers.
+        self.frozen_context = {
+            'schema_version': 'initial-screen-frozen-context:0.1',
+            'ticket_binding': self.binding, 'scope': self.scope,
+            'budgets': self.budgets, 'configurations': self.configurations,
+            'model_config_fingerprint': self.binding['model_config_fingerprint'],
+            'context': self.context,
+        }
+        self.frozen_context['content_hash'] = content_hash(self.frozen_context)
+        from .initial_screen_failure_feedback import MAX_BYTES
+        if len(canonical_json(self.frozen_context).encode()) > MAX_BYTES:
+            raise ScreenQuiesceUnproved('initial-screen frozen context exceeds byte bound')
+        try:
+            _write(self.directory / 'frozen-context.json', self.frozen_context, immutable=True)
+        except PROOF_ERRORS as exc:
+            raise ScreenQuiesceUnproved(str(exc)) from exc
         self.records, self.saved = [], []
         if resume_directory is not None:
             parent = Path(resume_directory)
@@ -244,6 +264,12 @@ class RunQuiesce:
         raise ScreenQuiesced(request, proof)
 
     def call(self, *, producer_route_decision_refs=(), **kwargs):
+        try:
+            held = _read(self.directory / 'frozen-context.json'); _body(held)
+            if held != self.frozen_context:
+                raise ValueError('initial-screen frozen context changed before a paid step')
+        except PROOF_ERRORS as exc:
+            raise ScreenQuiesceUnproved(str(exc)) from exc
         self.checkpoint()  # Previous response's deterministic validation has now completed.
         if kwargs['mission']['id'] != self.mission['id'] or kwargs['mission']['content_hash'] != self.mission['content_hash']:
             raise ScreenQuiesceUnproved('initial-screen call belongs to another mission')

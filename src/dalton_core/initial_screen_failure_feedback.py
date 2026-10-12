@@ -258,7 +258,7 @@ def _retired_refs(connection, refs):
     reinstated={row[0] for row in connection.execute('SELECT r.claim_version_ref FROM claim_retirement_reinstatements r WHERE r.claim_version_ref IN ('+marks+')'+clause,args)}
     return retired-reinstated
 
-def _source_resolvers(authority, sections, pack, frozen_bindings):
+def _source_resolvers(authority, sections, pack, frozen_bindings, *, original_proof_scope='diagnostic'):
     """Resolve immutable cited versions, never current replacement pointers."""
     from .product_contract import tag_entry
     from .contracts import ClaimVersion
@@ -301,7 +301,8 @@ def _source_resolvers(authority, sections, pack, frozen_bindings):
         elif isinstance(value,str) and value.startswith('doc-passage:'):used.add(value)
     visit(sections)
     if any(ref not in frozen_bindings for ref in used):raise ValueError('initial-screen source version was not frozen before the call')
-    originals=_checked_originals(Path(authority.store.path).parent,used,include_render_metadata=True) if used else {}
+    originals=_checked_originals(Path(authority.store.path).parent,used,include_render_metadata=True,
+        **({} if original_proof_scope=='diagnostic' else {'proof_scope':original_proof_scope})) if used else {}
     for ref,found in originals.items():
         if {k:found[k] for k in ('document_ref','document_sha256','start','end')}!=frozen_bindings[ref]:
             raise ValueError('initial-screen original version differs from the frozen call')
@@ -324,16 +325,30 @@ MAX_PASSAGES = 64
 MAX_ORIGINALS = 16
 MAX_SOURCE_BYTES = 64_000_000
 SOURCE_TIMEOUT_SECONDS = 4
+CHECKPOINT_MAX_PASSAGES = 128
+CHECKPOINT_MAX_ORIGINALS = 128
+CHECKPOINT_SOURCE_TIMEOUT_SECONDS = 12
 
-def _checked_originals(state, refs, *, include_render_metadata=False):
+def _original_limits(proof_scope):
+    # Pause authority proves the union of several paid steps, unlike one small
+    # diagnostic. Keep a fixed ceiling equal to the frozen binding contract;
+    # the raw-byte budget and exact source-version checks remain unchanged.
+    if proof_scope == 'diagnostic':
+        return MAX_PASSAGES, MAX_ORIGINALS, SOURCE_TIMEOUT_SECONDS
+    if proof_scope == 'initial_screen_checkpoint':
+        return CHECKPOINT_MAX_PASSAGES, CHECKPOINT_MAX_ORIGINALS, CHECKPOINT_SOURCE_TIMEOUT_SECONDS
+    raise ValueError('unknown original proof scope')
+
+def _checked_originals(state, refs, *, include_render_metadata=False, proof_scope='diagnostic'):
     """One bounded pure-reader process; it has no model or writable authority."""
     import subprocess
     import sys
-    if len(refs)>MAX_PASSAGES:raise DiagnosticUnavailable('original_passage_limit')
+    max_passages, _, timeout = _original_limits(proof_scope)
+    if len(refs)>max_passages:raise DiagnosticUnavailable('original_passage_limit')
     code='from dalton_core.initial_screen_failure_feedback import _original_check_main;_original_check_main()'
     try:
-        result=subprocess.run([sys.executable,'-c',code],input=canonical_json({'state_dir':str(state),'refs':sorted(refs),'include_render_metadata':include_render_metadata}),
-            text=True,stdout=subprocess.PIPE,stderr=subprocess.DEVNULL,timeout=SOURCE_TIMEOUT_SECONDS,check=False)
+        result=subprocess.run([sys.executable,'-c',code],input=canonical_json({'state_dir':str(state),'refs':sorted(refs),'include_render_metadata':include_render_metadata,'proof_scope':proof_scope}),
+            text=True,stdout=subprocess.PIPE,stderr=subprocess.DEVNULL,timeout=timeout,check=False)
     except subprocess.TimeoutExpired as exc:
         raise DiagnosticUnavailable('original_verification_timeout') from exc
     if result.returncode!=0 or len(result.stdout.encode())>MAX_BYTES:
@@ -392,22 +407,23 @@ class _BoundedOriginalSpool:
 def _original_check_main():
     import sys
     request=json.loads(sys.stdin.read(MAX_BYTES+1))
-    try:result=_original_passages(request['state_dir'],request['refs'],include_render_metadata=request.get('include_render_metadata',False))
+    try:result=_original_passages(request['state_dir'],request['refs'],include_render_metadata=request.get('include_render_metadata',False),proof_scope=request.get('proof_scope','diagnostic'))
     except DiagnosticUnavailable as exc:result={'failure_code':exc.code}
     print(canonical_json(result))
 
-def _original_passages(state_dir, refs, *, include_render_metadata=False):
+def _original_passages(state_dir, refs, *, include_render_metadata=False, proof_scope='diagnostic'):
     """Strong local originals, once per document, and exact frozen spans."""
     from .planner_paid_output_recovery import _authority_connection
     from .evidence_index import _resolve
     from .evidence_corpus import CorpusContext,Candidate,load_document
     state=Path(state_dir)
-    if len(refs)>MAX_PASSAGES:raise DiagnosticUnavailable('original_passage_limit')
+    max_passages, max_originals, _ = _original_limits(proof_scope)
+    if len(refs)>max_passages:raise DiagnosticUnavailable('original_passage_limit')
     with _authority_connection(state/'document-index.sqlite') as index:
         spans={ref:_resolve(index,ref) for ref in refs}
         if any(not found for found in spans.values()):raise ValueError('missing initial-screen original span')
         identities={(found['document_ref'],found['document_sha256']) for found in spans.values()}
-        if len(identities)>MAX_ORIGINALS:raise DiagnosticUnavailable('original_document_limit')
+        if len(identities)>max_originals:raise DiagnosticUnavailable('original_document_limit')
         if sum(len(found['text'].encode()) for found in spans.values())>1_000_000:
             raise DiagnosticUnavailable('original_passage_byte_limit')
         candidates={}
