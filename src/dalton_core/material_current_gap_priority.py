@@ -116,6 +116,8 @@ def priority_gaps(state_dir: str | Path, pending: Sequence[Mapping[str, Any]], *
             members = {v["company_ref"] for v in mission.get("universe") or ()}
             cached = {}
             unit_cache = {}
+            failure_cache = {}
+            failure_candidates = []
             for candidate in candidates:
                 if time.monotonic() >= deadline:
                     return {}, {**info, "status": "unavailable", "reason_code": "priority_read_budget"}
@@ -172,6 +174,18 @@ def priority_gaps(state_dir: str | Path, pending: Sequence[Mapping[str, Any]], *
                     continue
                 request = {**raw, "requesters": view["requesters"]}
                 proof = _proof(request, mission, spec, forecast)
+                if proof is None and forecast is None:
+                    failure_candidates.append((request, spec))
+                if proof:
+                    qualified[request["id"]] = proof
+            # Establish all cheap current proofs before bounded failure replay.
+            # Its timeout must not erase already qualified unit/intrinsic gaps.
+            for request, spec in failure_candidates:
+                if time.monotonic() >= deadline:
+                    break
+                from .material_failed_forecast_priority import failure_priority
+                proof = failure_priority(state, request, mission, spec, contract_ref=CONTRACT_REF,
+                    deadline=deadline, cache=failure_cache)
                 if proof:
                     qualified[request["id"]] = proof
     except (OSError, sqlite3.Error, ValueError, KeyError, TypeError, CoverageMissionError, ForecastModelError):
@@ -195,6 +209,9 @@ def still_current(state_dir: str | Path, proof: Mapping[str, Any], *, deadline: 
                 "ORDER BY p.mission_ref LIMIT 1").fetchone()
             if mission is None or tuple(mission) != (proof["mission_version_ref"], proof["mission_hash"]):
                 return False
+            from .material_failed_forecast_priority import BASIS as FAILED_BASIS, failure_still_current
+            if proof["basis"] == FAILED_BASIS:
+                return failure_still_current(state_dir, proof, deadline=deadline)
             from .material_model_unit_priority import BASIS, unit_input_still_current
             if proof["basis"] == BASIS:
                 return (unit_input_still_current(core,proof) and time.monotonic()<deadline)
