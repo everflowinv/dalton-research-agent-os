@@ -3133,7 +3133,10 @@ class CockpitJournal:
         self._lock = threading.Lock()
 
     def close(self) -> None:
-        self.connection.close()
+        # Native connection teardown must not overlap a journal operation
+        # running in one of the background job threads.
+        with self._lock:
+            self.connection.close()
 
     def write(self, sql: str, params: tuple = ()) -> None:
         with self._lock:
@@ -9710,10 +9713,12 @@ class CockpitPlane:
             except Exception as exc:  # noqa: BLE001 - surfaced to the owner, never swallowed
                 result, status, error = None, "failed", f"{type(exc).__name__}: {exc}"
             at = _iso(self.clock())
-            with self._jobs_lock:
-                job.update({"status": status, "result": result, "error": error, "updated_at": at})
             self.journal.write("UPDATE cockpit_jobs SET status=?, result_json=?, error=?, updated_at=? WHERE job_id=?",
                                (status, None if result is None else json.dumps(result, ensure_ascii=False), error, at, job_id))
+            # A caller may close the plane as soon as it observes a terminal
+            # job. Publish that state only after its final journal access.
+            with self._jobs_lock:
+                job.update({"status": status, "result": result, "error": error, "updated_at": at})
 
         threading.Thread(target=run, name=f"dalton-cockpit-{kind}", daemon=True).start()
         return self._public_job(job)
