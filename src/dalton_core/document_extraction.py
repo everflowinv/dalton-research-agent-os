@@ -1828,7 +1828,29 @@ class DocumentExtractionService:
                 raise ResearchVerificationConflict(str(exc)) from exc
             if historical is not None:
                 return historical
+            historical = self._successful_policy_context(current, config, replay_builder or build_work)
+            if historical is not None:
+                return historical
         return current
+
+    def _successful_policy_context(self, current, config, builder):
+        from .document_numeric_extraction import TASK_REF as NUMERIC_TASK_REF
+        from .metric_discovery_extraction import TASK_REF as DISCOVERY_TASK_REF
+        from .extraction_successful_policy_replay import reusable_successful_context
+        from .model_router import ModelRouter
+        from .thesis_impact_budget import ThesisImpactBudgetStore
+        work = builder(current, model_config=config)
+        if self.writer._scheduler is None or self.writer._scheduler.work_order_authority(work.id) is not None:
+            return None
+        purpose = {TASK_REF: "document_extraction", NUMERIC_TASK_REF: "document_numeric_extraction",
+                   DISCOVERY_TASK_REF: "metric_discovery_extraction"}[work.metadata["task_ref"]]
+        try:
+            with ModelRouter(config["model_router_db"], read_only=True) as router, ThesisImpactBudgetStore(config["budget_db"], read_only=True) as budget:
+                policy = self.model_policy(router, config["routing_policy_ref"])
+                return reusable_successful_context(current, config, self.writer, router, budget,
+                                                    policy, purpose=purpose, builder=builder)
+        except ValueError as exc:
+            raise ResearchVerificationConflict(str(exc)) from exc
 
     def source_context(self, review_id, expected_review_hash, offset, actor_ref,
                        require_open=True, allow_superseded=False):
@@ -1932,19 +1954,28 @@ class DocumentExtractionService:
 
     def _task_context(self, context, config, builder):
         """Find only this task's exact legacy Work, never another pass's Work."""
-        if config is None:
+        if config is None or not context.get("model_binding"):
             return context
         from .extraction_execution_identity import (
             CONTRACT_REF, current_context, execution_config_binding, reusable_legacy_context)
+        # A prose replay can retain an older routing revision. Numeric and
+        # discovery must start again from their own current policy before
+        # considering their own exact historical Work.
+        from .extraction_successful_policy_replay import current_policy_context
+        from .model_router import ModelRouter
+        with ModelRouter(config["model_router_db"], read_only=True) as router:
+            policy = self.model_policy(router, config["routing_policy_ref"])
+        if context["model_binding"]["routing_policy_ref"] != policy["policy_version_ref"]:
+            context = current_policy_context(context, config, policy)
         if execution_config_binding(config).get("config_hash_contract_ref") != CONTRACT_REF:
-            return context  # Unshared and old-schema hosts retain their old path.
+            return self._successful_policy_context(context, config, builder) or context
         current = current_context(context, config)
         try:
             historical = reusable_legacy_context(
                 current, config, self.writer._scheduler, builder)
         except ValueError as exc:
             raise ResearchVerificationConflict(str(exc)) from exc
-        return historical or current
+        return historical or self._successful_policy_context(current, config, builder) or current
 
     def _suggestions(self, context):
         work = build_work(context, model_config=getattr(self.writer, "_document_extraction_model_config", None))
