@@ -115,20 +115,23 @@ def _shared_landed(manager, desired):
         return True
     from .workspace_manager import _config
     from .shared_daily_budget import load_shared_daily_budget_policy
-    path = _config(Path(manager)).get('shared_daily_budget_policy_path')
-    if not path:
-        raise settings.HostSettingsError('本机尚未配置共用每日预算策略')
+    from .host_source_budget_sync import shared_policy_path
+    path = shared_policy_path(manager)
     policy = load_shared_daily_budget_policy(path)
     return all(policy[k] == desired['research_budget'][k] for k in
                ('max_daily_cost_usd', 'max_daily_paid_calls', 'max_alphaengine_calls_24h'))
 
 
 def _sync_shared(manager, desired):
+    if desired['research_budget'] is not None:
+        from .host_source_budget_sync import shared_policy_path
+        shared_policy_path(manager, persist=True)
     if _shared_landed(manager, desired):
         return
     from .workspace_manager import _config
     from .shared_daily_budget import load_shared_daily_budget_policy, policy_wire, ZERO_COUNTS_SCHEMA_VERSION
-    path = Path(_config(Path(manager))['shared_daily_budget_policy_path'])
+    from .host_source_budget_sync import shared_policy_path
+    path = shared_policy_path(manager, persist=True)
     prior = load_shared_daily_budget_policy(path)
     budget = desired['research_budget']
     wire = policy_wire(**{k: budget[k] for k in ('max_daily_cost_usd','max_daily_paid_calls','max_alphaengine_calls_24h')},
@@ -154,6 +157,9 @@ def pending(environment, manager, desired):
         problems.append('research_budget')
     if not _shared_landed(manager, desired):
         problems.append('shared_daily_budget')
+    from .host_source_budget_sync import pending as source_pending
+    if desired['research_budget'] is not None and source_pending(environment.state_dir, manager, desired):
+        problems.append('source_budget')
     return problems
 
 
@@ -206,6 +212,8 @@ def reconcile_writer(server):
             if not budget_landed(mission, budget):
                 server._op_set_research_budget_authority_chain({'mission_ref': mission['mission_ref'],
                     'expected_mission_hash': mission['content_hash'], 'budget': budget, 'actor_ref': desired['actor_ref']})
+        from .host_source_budget_sync import apply as sync_source_budget
+        sync_source_budget(server, manager, desired)
         from .shared_daily_budget import install_binding
         from .workspace_manager import _config
         policy_path = _config(Path(manager)).get('shared_daily_budget_policy_path')

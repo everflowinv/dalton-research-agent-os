@@ -45,6 +45,8 @@ def validate_budget(value: Any) -> dict[str, Any]:
         number = value[name]
         if type(number) is not int or number < 0:
             raise HostSettingsError("研究次数上限必须是零或正整数")
+    if value["max_alphaengine_calls_24h"] > 2000:
+        raise HostSettingsError("来源调用上限必须在 0–2000 之间")
     cost = value["max_daily_cost_usd"]
     if isinstance(cost, bool) or not isinstance(cost, (int, float)) or not math.isfinite(cost) or cost <= 0 or round(cost * 1_000_000) <= 0:
         raise HostSettingsError("每天总费用上限必须大于零")
@@ -252,12 +254,8 @@ def save(manager_config: str | Path, *, actor_ref: str, expected_hash: str | Non
             validate_model_selection(router, purpose=purpose, mode=selected['mode'], chain=selected.get('chain', []))
     budget = None if research_budget is None else validate_budget(research_budget)
     if budget is not None:
-        from .workspace_manager import _config
-        from .shared_daily_budget import load_shared_daily_budget_policy
-        shared_path = _config(Path(manager_config)).get('shared_daily_budget_policy_path')
-        if not shared_path:
-            raise HostSettingsError('本机尚未配置共用每日预算策略')
-        load_shared_daily_budget_policy(shared_path)
+        from .host_source_budget_sync import shared_policy_path
+        shared_policy_path(manager_config)
     path = location(manager_config); path.parent.mkdir(mode=0o700, parents=True, exist_ok=True)
     lock = path.with_suffix(".lock")
     if lock.is_symlink():
