@@ -41,17 +41,14 @@ def selections(desired):
 
 
 def _consumer_policy_bindings(environment):
-    from .model_selection import model_configs, _runtime_policy_config, ModelSelectionError, RETIRED_PURPOSES
+    from .model_selection import model_configs, _runtime_policy_config, RETIRED_PURPOSES
     from .model_router import ModelRouter
     from .store import content_hash
     pins = [(pin, None) for pin in model_configs(environment.state_dir)]
     for purpose in ('plan', 'human_intent', 'agenda_planning', 'thesis_impact_assessment', 'thesis_impact_verifier'):
         if purpose in RETIRED_PURPOSES:
             continue
-        try:
-            runtime = _runtime_policy_config(environment.state_dir, purpose)
-        except ModelSelectionError:
-            runtime = None
+        runtime = _runtime_policy_config(environment.state_dir, purpose)
         if runtime is not None:
             pins.append((runtime, purpose))
     policies = {}

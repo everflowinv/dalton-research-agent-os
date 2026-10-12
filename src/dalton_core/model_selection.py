@@ -419,15 +419,29 @@ def _runtime_policy_config(state_dir: str | Path, purpose: str) -> dict[str, Any
     path = service_config_path(state_dir)
     if not path.is_file():
         return None
-    service = json.loads(path.read_text(encoding="utf-8"))
+    service = _load_model_json(path)
+    if not isinstance(service, Mapping):
+        raise ModelSelectionError("service.json must be an object")
     if purpose == "human_intent":
         control = service.get("control")
+        if control is None:
+            return None
+        if (isinstance(control, Mapping) and control.get("enabled") is False
+                and control.get("config") in (None, {})):
+            return None
         control_config = control.get("config") if isinstance(control, Mapping) else None
+        if not isinstance(control_config, Mapping):
+            raise ModelSelectionError("service.json control config must be an object")
         config = (
             control_config.get("intent_composer")
             if isinstance(control_config, Mapping)
             else None
         )
+        # AgendaControlConfig treats an absent/null composer as uninstalled.
+        # Its owner selection still belongs in registered lane policies; no
+        # resident consumer or routing pin may be invented for it.
+        if config is None:
+            return None
         if not isinstance(config, Mapping) or not isinstance(
             config.get("routing_policy_ref"), str
         ):
@@ -460,6 +474,10 @@ def _runtime_policy_config(state_dir: str | Path, purpose: str) -> dict[str, Any
         return None
     section, field, slots_field, router_field = location
     block = service.get(section)
+    if block is None:
+        return None
+    if isinstance(block, Mapping) and block.get("enabled") is False and block.get("config") in (None, {}):
+        return None
     config = block.get("config") if isinstance(block, Mapping) else None
     if not isinstance(config, Mapping) or not isinstance(config.get(field), str):
         raise ModelSelectionError(
@@ -757,16 +775,7 @@ def set_tier_selection(
     configs = model_configs(state_dir)
     runtimes: list[dict[str, Any]] = []
     for purpose in members:
-        try:
-            runtime = _runtime_policy_config(state_dir, purpose)
-        except ModelSelectionError:
-            # A tier spans every stage of its kind, and not every installation
-            # pins every runtime stage in service.json -- human_intent runs
-            # file-based where no intent_composer block exists.  A missing pin
-            # is a stage this save simply does not touch; refusing the whole
-            # tier because one member is configured elsewhere would make the
-            # tier editor unusable on exactly the hosts it exists for.
-            runtime = None
+        runtime = _runtime_policy_config(state_dir, purpose)
         if runtime is not None:
             # Keep every section: one service.json usually pins several stages
             # (bounded_planner, agenda, thesis_impact) in different sections,
