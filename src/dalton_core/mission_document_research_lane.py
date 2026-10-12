@@ -2271,6 +2271,7 @@ class MissionDocumentResearchCoordinator:
             if active is None or active['status']!='running':
                 from .directed_numeric_measure_reconciliation import replay_candidate
                 from .directed_numeric_promotion_reconciliation import replay_candidate as promotion_candidate, failure as promotion_failure
+                from .document_completed_model_replay import candidate as completed_candidate, UNIT_CONTRACT
                 # Older unrelated failed admissions must not permanently
                 # hide a settled numeric maintenance case behind the batch cap.
                 local_admissions=[a for a in admissions if a.get('numeric_authority') is not None and
@@ -2287,10 +2288,17 @@ class MissionDocumentResearchCoordinator:
                             if promotion_failure(self.store.connection,admission) is not None:promotion_admissions.append(admission)
                         except Exception as exc:
                             self._isolate_admission_error(holds,admission,exc,errors)
-                local_admissions=list({a['id']:a for a in [*promotion_admissions,*local_admissions]}.values())
+                # A prior controlled-reentry hold cannot hide this new,
+                # strictly local unit contract. Paid retry rights stay closed.
+                unit_admissions=[a for a in admissions if a.get('numeric_authority') is not None
+                    and holds.get(a['id'],{}).get('ticket_ref')]
+                local_admissions=list({a['id']:a for a in [*promotion_admissions,*local_admissions,*unit_admissions]}.values())
                 for admission in local_admissions[:MAX_RECOVERY_EVALUATIONS_PER_TICK]:
                     try:
                         candidate=promotion_candidate(self,admission) or replay_candidate(self,admission)
+                        if candidate is None and admission in unit_admissions:
+                            unit=completed_candidate(self,admission,holds[admission['id']]['ticket_ref'])
+                            if unit is not None and unit['contract_ref']==UNIT_CONTRACT:candidate=unit
                         if candidate is None:continue
                         ticket=self.launcher.replay_completed_models(admission_ref=admission['id'],
                             admission_hash=admission['content_hash'],proof=candidate)
@@ -2301,7 +2309,8 @@ class MissionDocumentResearchCoordinator:
                         continue
                     pointer={'ticket_ref':ticket['id'],'admission_ref':admission['id'],'admission_hash':admission['content_hash']}
                     write_owner_only(self.latest_path,{**pointer,'content_hash':content_hash(pointer)})
-                    return {'status':'resumed','reason':('canonical_promotion_local_reconciliation' if 'source_local_failure' in candidate else 'source_measure_local_reconciliation'),**pointer}
+                    return {'status':'resumed','reason':('source_unit_local_reconciliation' if candidate['contract_ref']==UNIT_CONTRACT else
+                        'canonical_promotion_local_reconciliation' if 'source_local_failure' in candidate else 'source_measure_local_reconciliation'),**pointer}
         if latest is not None and latest["admission_ref"] in by_ref:
             admission = by_ref[latest["admission_ref"]]
             if latest["admission_hash"] != admission["content_hash"]:

@@ -140,9 +140,9 @@ def _repair_evidence(executor, admission, works):
             continue
         target = targets[item['target_ref']]
         rows = executor.connection.execute('SELECT figure_id FROM coverage_mission_document_figures '
-            'WHERE company_ref=? AND document_ref=? AND metric_ref=? AND period=? AND source_manifest_hash=? AND figure_id NOT LIKE ?',
+            'WHERE company_ref=? AND document_ref=? AND metric_ref=? AND period=? AND source_manifest_hash=? AND figure_id NOT LIKE ? AND figure_id NOT LIKE ?',
             (admission['company_ref'], admission['request']['registration']['document_ref'], target['metric_ref'],
-             target['period'], admission['request']['registration']['manifest_hash'],'mission-document-figure:source-measure:%')).fetchall()
+             target['period'], admission['request']['registration']['manifest_hash'],'mission-document-figure:source-measure:%','mission-document-figure:source-unit:%')).fetchall()
         if not rows:
             continue
         if len(rows) != 1:
@@ -154,6 +154,12 @@ def _repair_evidence(executor, admission, works):
             evidence.append({'kind':'exact_figure_support','proof':mapping})
         except NumericMeasureIdentityConflict as exc:
             evidence.append({'kind':'numeric_measure_identity_conflict','proof':exc.proof})
+            if exc.proof['differing_fields'] == ['scale'] and exc.proof['held_fact']['scale'] is None:
+                from .directed_numeric_source_unit import support
+                mapping = support(connection=executor.connection, registry=executor.registry,
+                    admission=admission, target=target, figure=figure, search_proof=proof,
+                    draft=draft, verifier=verifier)
+                evidence.append({'kind':'source_unit_clarification','proof':mapping})
     if not evidence:
         raise DirectedNumericError('no proved Figure-support/measure defect qualifies for local reconciliation')
     return proof, draft, verifier, accounting, evidence

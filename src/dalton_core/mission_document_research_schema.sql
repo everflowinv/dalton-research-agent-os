@@ -95,6 +95,23 @@ CREATE TABLE IF NOT EXISTS mission_document_numeric_measure_reconciliations (
  authorization_ref TEXT NOT NULL UNIQUE,
  admission_hash TEXT NOT NULL, record_json TEXT NOT NULL, content_hash TEXT NOT NULL, created_at TEXT NOT NULL
 );
+
+-- Typed scale clarification of an immutable legacy Figure. Keeping this
+-- separate preserves the old Figure's citation-only UNIQUE key and bytes.
+CREATE TABLE IF NOT EXISTS mission_document_numeric_source_units (
+ figure_ref TEXT PRIMARY KEY,
+ authorization_ref TEXT NOT NULL REFERENCES mission_document_numeric_local_reconciliations(authorization_ref),
+ record_json TEXT NOT NULL, content_hash TEXT NOT NULL,
+ proof_json TEXT NOT NULL, proof_hash TEXT NOT NULL
+);
+CREATE TRIGGER IF NOT EXISTS numeric_source_units_authorized_insert
+BEFORE INSERT ON mission_document_numeric_source_units
+WHEN dalton_mission_document_research_authorized()=0
+BEGIN SELECT RAISE(ABORT,'source unit clarification requires local authority'); END;
+CREATE TRIGGER IF NOT EXISTS numeric_source_units_no_update BEFORE UPDATE ON mission_document_numeric_source_units
+BEGIN SELECT RAISE(ABORT,'source unit clarifications are append-only'); END;
+CREATE TRIGGER IF NOT EXISTS numeric_source_units_no_delete BEFORE DELETE ON mission_document_numeric_source_units
+BEGIN SELECT RAISE(ABORT,'source unit clarifications are append-only'); END;
 CREATE TRIGGER IF NOT EXISTS mission_document_numeric_measure_reconciliations_authorized_insert
 BEFORE INSERT ON mission_document_numeric_measure_reconciliations WHEN dalton_mission_document_research_authorized()=0
 BEGIN SELECT RAISE(ABORT,'numeric measure reconciliation requires authority'); END;

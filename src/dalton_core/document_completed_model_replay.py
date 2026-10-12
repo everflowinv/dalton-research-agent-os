@@ -14,8 +14,10 @@ CONTRACT = "document-completed-model-postprocessing:0.1"
 ERROR = "DirectedNumericError: existing Figure conflicts with exact verified numeric answer"
 CHAIN_CONTRACT = "document-completed-model-postprocessing:0.2"
 CHAIN_ERROR = "ResearchVerificationConflict: candidate version chain mismatch"
+UNIT_CONTRACT = "document-completed-model-source-unit:0.1"
+UNIT_ERROR = "CoverageMissionValidationError: existing figure uses different units; it cannot satisfy this directed numeric target"
 from .directed_numeric_promotion_reconciliation import REPLAY_CONTRACT as PROMOTION_CONTRACT
-CONTRACTS = frozenset({CONTRACT,CHAIN_CONTRACT,PROMOTION_CONTRACT})
+CONTRACTS = frozenset({CONTRACT,CHAIN_CONTRACT,PROMOTION_CONTRACT,UNIT_CONTRACT})
 
 
 def candidate(coordinator, admission, ticket_ref):
@@ -28,7 +30,7 @@ def candidate(coordinator, admission, ticket_ref):
     ticket = coordinator.launcher.status(ticket_ref)
     summary = ticket.get("summary")
     if (ticket.get("status") not in {"failed", "orphaned"} or not isinstance(summary, Mapping)
-            or summary.get("error") not in {ERROR,CHAIN_ERROR} or summary.get("status") != "failed"
+            or summary.get("error") not in {ERROR,CHAIN_ERROR,UNIT_ERROR} or summary.get("status") != "failed"
             or summary.get("admission_ref") != admission["id"]
             or summary.get("admission_hash") != admission["content_hash"]
             or ticket.get("admission_ref") != admission["id"]
@@ -43,7 +45,7 @@ def candidate(coordinator, admission, ticket_ref):
         return None
     scheduler = object.__new__(Scheduler)
     scheduler.connection = coordinator.store.connection
-    proofs = []
+    proofs = []; envelopes=[]
     for ordinal, ref in enumerate(coordinator._effective_work_hints(admission)[:3], 1):
         stored = scheduler.work_order_authority(ref)
         formal = scheduler.formal_result(ref)
@@ -64,10 +66,20 @@ def candidate(coordinator, admission, ticket_ref):
             return None
         proofs.append({"ordinal": ordinal, "work_ref": ref,
             "work_hash": stored["work_order_hash"], "formal_hash": _formal_hash(formal)})
+        envelopes.append(envelope)
     if len(proofs) != 3:
         return None
-    body = {"contract_ref": CONTRACT if summary['error']==ERROR else CHAIN_CONTRACT, "admission_ref": admission["id"],
+    if summary['error']==UNIT_ERROR:
+        from .directed_numeric_source_unit import candidate_figures
+        units=candidate_figures(scheduler.connection,admission,envelopes[0]['outputs'],envelopes[1]['outputs'],envelopes[2]['outputs'])
+        if not units:return None
+    body = {"contract_ref": {ERROR:CONTRACT,CHAIN_ERROR:CHAIN_CONTRACT,UNIT_ERROR:UNIT_CONTRACT}[summary['error']], "admission_ref": admission["id"],
         "admission_hash": admission["content_hash"], "source_ticket_ref": ticket_ref,
         "source_summary_sha256": hashlib.sha256(raw).hexdigest(), "completed_stages": proofs,
         "model_calls_allowed": 0}
+    if summary['error']==UNIT_ERROR:body['legacy_scale_figures']=units
+    if summary['error']==UNIT_ERROR:
+        scope={k:body[k] for k in ('contract_ref','admission_ref','admission_hash')}
+        ref=coordinator.launcher.TICKET_PREFIX+':'+content_hash(scope)[:24]
+        if coordinator.launcher._ticket_path(ref).exists():return None
     return {**body, "content_hash": content_hash(body)}

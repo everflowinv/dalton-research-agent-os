@@ -153,6 +153,10 @@ class DocumentFigureResolver:
     def figure(self, figure_id: str) -> dict[str, Any]:
         """The Core row for one figure, as a plain mapping."""
 
+        from .directed_numeric_source_unit import PREFIX, TABLE, read
+        if figure_id.startswith(PREFIX) and self._table(TABLE):
+            return read(self.connection, figure_id)
+
         if not self._table("coverage_mission_document_figures"):
             raise FigureNotFound("this Core holds no document figures")
         row = self.connection.execute(

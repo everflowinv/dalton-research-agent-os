@@ -172,7 +172,7 @@ def _record_numeric(executor,admission,works,*,measure_repair=False):
     spoken=spoken_answer(admission)
     votes={item['target_ref']:item['verdict'] for item in verifier['output']['targets']}
     targets={item['target_ref']:item for item in admission['numeric_authority']['targets']}
-    figures=[];pending=[];claims=[];supports=[];measures=[]
+    figures=[];pending=[];claims=[];supports=[];measures=[];unit_clarifications=[]
     if verifier['output']['verdict']=='reject':
         pending=[{'target_ref':ref,'reason':'independent_numeric_verifier_rejected'} for ref in targets]
     else:
@@ -184,16 +184,31 @@ def _record_numeric(executor,admission,works,*,measure_repair=False):
             from .document_numeric_claim import verify_numeric_candidate
             expected=verify_numeric_candidate(row['figure'],quote_map,numeric_contract_ref=CONTRACT_REF)
             citation=quote_map[expected['quote_id']]
-            executor.authority._missions.record_document_figures(
-                company_ref=admission['company_ref'],review_ref=source['review_id'],document_ref=admission['request']['registration']['document_ref'],
-                source_manifest_hash=source['source_manifest_hash'],source_grade=source['source_grade'],
-                figures=[{**expected,'citation_text':citation}],observed_by=admission['actor_ref'],numeric_contract_ref=CONTRACT_REF)
+            from .coverage_mission import _ref, _period_key
+            legacy_ref = _ref('mission-document-figure', {'company_ref':admission['company_ref'],
+                'metric_ref':expected['metric_ref'],'period':_period_key(expected['period']),
+                'document_ref':admission['request']['registration']['document_ref']})
+            legacy_row = executor.connection.execute(
+                'SELECT * FROM coverage_mission_document_figures WHERE figure_id=?', (legacy_ref,)).fetchone()
+            clarified = None
+            if (legacy_row is not None and 'numeric_local_reconciliation_ref' in works[3]['metadata']
+                    and tuple(legacy_row[k] for k in ('unit','currency','scale')) !=
+                        tuple(expected[k] for k in ('unit','currency','scale'))):
+                from .directed_numeric_source_unit import record
+                clarified, mapping = record(executor, works=works, figure=dict(legacy_row), expected=expected,
+                    admission=admission, target=target, search_proof=proof, draft=draft, verifier=verifier)
+                unit_clarifications.append({'target_ref':ref,'mapping':mapping})
+            if clarified is None:
+                executor.authority._missions.record_document_figures(
+                    company_ref=admission['company_ref'],review_ref=source['review_id'],document_ref=admission['request']['registration']['document_ref'],
+                    source_manifest_hash=source['source_manifest_hash'],source_grade=source['source_grade'],
+                    figures=[{**expected,'citation_text':citation}],observed_by=admission['actor_ref'],numeric_contract_ref=CONTRACT_REF)
             held=executor.authority._missions.document_figures(company_ref=admission['company_ref'],metric_ref=target['metric_ref'],limit=2000)
-            matching=[f for f in held if not f['figure_id'].startswith('mission-document-figure:source-measure:')
+            matching=[f for f in held if not f['figure_id'].startswith(('mission-document-figure:source-measure:','mission-document-figure:source-unit:'))
                       and f['document_ref']==admission['request']['registration']['document_ref']
                       and f['period']==target['period'] and f['source_manifest_hash']==source['source_manifest_hash']]
             if len(matching)!=1:raise DirectedNumericError('numeric Figure identity is absent or ambiguous')
-            figure=matching[0]
+            figure=clarified or matching[0]
             support=None
             if (figure['quote_id']!=expected['quote_id'] or figure['citation_text']!=citation
                     or any(figure.get(k)!=expected[k] for k in ('metric_ref','as_reported_label','period','value','unit','currency','scale','basis'))):
@@ -316,6 +331,9 @@ def _record_numeric(executor,admission,works,*,measure_repair=False):
     if measures:
         from .directed_numeric_measure_identity import CONTRACT as measure_contract
         body.update(source_measure_contract=measure_contract,source_measures=measures)
+    if unit_clarifications:
+        from .directed_numeric_source_unit import CONTRACT
+        body.update(source_unit_clarification_contract=CONTRACT, source_unit_clarifications=unit_clarifications)
     if supports:
         from .directed_numeric_figure_support import SUPPORT_CONTRACT, REGISTERED_RENDER_SUPPORT_CONTRACT
         contract=REGISTERED_RENDER_SUPPORT_CONTRACT if any(s['schema_version']==REGISTERED_RENDER_SUPPORT_CONTRACT for s in supports) else SUPPORT_CONTRACT
@@ -452,6 +470,15 @@ def read_numeric_result(executor,admission,works,formal,*,receipt_row=None,inclu
         measures={item['target_ref']:item['mapping'] for item in items}
         if len(measures)!=len(items) or not set(measures).issubset(completed):
             raise DirectedNumericError('source measure completion bindings differ')
+    unit_clarifications={}
+    if 'source_unit_clarification_contract' in receipt or 'source_unit_clarifications' in receipt:
+        from .directed_numeric_source_unit import CONTRACT
+        items=receipt.get('source_unit_clarifications')
+        if receipt.get('source_unit_clarification_contract')!=CONTRACT or not isinstance(items,list) or not items:
+            raise DirectedNumericError('source unit clarification receipt contract differs')
+        unit_clarifications={item['target_ref']:item['mapping'] for item in items}
+        if len(unit_clarifications)!=len(items) or not set(unit_clarifications).issubset(completed):
+            raise DirectedNumericError('source unit clarification target bindings differ')
     figures=[]
     for ref,item in completed.items():
         if ref not in supported or ref not in approved or verifier['output']['verdict']!='pass':
@@ -460,6 +487,12 @@ def read_numeric_result(executor,admission,works,formal,*,receipt_row=None,inclu
         expected=verify_numeric_candidate(supported[ref],quotes(proof),numeric_contract_ref=CONTRACT_REF)
         if figure['content_hash']!=item['figure_hash'] or item['metric_definition_hash']!=target['metric_definition_hash']:
             raise DirectedNumericError('completed numeric Figure differs from source-bound typed definition')
+        if ref in unit_clarifications:
+            from .directed_numeric_source_unit import verify
+            verify(unit_clarifications[ref],connection=executor.connection,registry=executor.registry,
+                admission=admission,target=target,figure=figure,search_proof=proof,draft=draft,verifier=verifier)
+        elif figure['figure_id'].startswith('mission-document-figure:source-unit:'):
+            raise DirectedNumericError('source unit Figure lacks its original-source mapping')
         if ref in measures:
             from .directed_numeric_measure_identity import verify_measure
             verify_measure(measures[ref],connection=executor.connection,registry=executor.registry,admission=admission,
