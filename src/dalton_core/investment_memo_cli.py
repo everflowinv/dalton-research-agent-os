@@ -494,19 +494,23 @@ def _checks(sections: Sequence[Mapping[str, Any]], questions: Sequence[Mapping[s
 
 def _validated_group(store, outcome, material):
     """Check every section before buying another group; no new repair slot."""
-    if outcome.get('status') != 'drafted':return outcome
+    parse_refused = (outcome.get('status') == 'refused' and outcome.get('failure_class') == 'content'
+                     and bool(outcome.get('diagnostic_sections')))
+    if outcome.get('status') != 'drafted' and not parse_refused:return outcome
+    candidate_sections = outcome['diagnostic_sections'] if parse_refused else outcome['sections']
     from .product_passage_validation import checked_rendered_passages
     index=citation_index(material)
     path=str(getattr(store,'path',':memory:'))
     try:
         passages=checked_rendered_passages(Path(path).parent if path!=':memory:' else ':memory:',
-                                           outcome['sections'],index['passages'])
+                                           candidate_sections,index['passages'])
     except (ValueError,OSError) as exc:
         return {**outcome,'status':'refused','repairable':False,
+                'failure_class':'source_unavailable',
                 'reason':'memo_source_proof_unavailable: '+str(exc)}
     from .mission_deliverable import pack_passage_resolver
-    checked=[];findings=[]
-    for section in outcome['sections']:
+    checked=[];findings=list(outcome.get('findings') or []) if parse_refused else []
+    for section in candidate_sections:
         try:
             checked.append(validate_section(section,live_claim_refs=index['claims'],
                 resolve_cell=lambda cell:index['cells'].get(str(cell.get('ref')))==dict(cell),
@@ -516,9 +520,10 @@ def _validated_group(store, outcome, material):
             findings.append({'section':section['title'],'code':'section_authority',
                              'detail':str(exc)[:700]})
     if findings:
-        return {**outcome,'status':'refused','repairable':True,'findings':findings,
-                'reason':'section authority rejected: '+json.dumps(findings,ensure_ascii=False),
-                'refs':[]}
+        return {**outcome,'status':'refused','repairable':True,'failure_class':'content','findings':findings,
+                'reason':((outcome['reason']+'; complete diagnostics: ') if parse_refused else
+                          'section authority rejected: ')+json.dumps(findings,ensure_ascii=False),
+                'refs':list(outcome.get('refs') or []) if parse_refused else []}
     return {**outcome,'sections':checked}
 
 
@@ -543,7 +548,7 @@ def run_memo(*, store: DaltonStore, frozen: Mapping[str, Any], model: Any, verif
             questions=[questions[i] for i in question_indexes],
             material=frozen['material'], company=company)
             for group, section_indexes, question_indexes in GROUPS]
-        repair_budget.bind_macro(prompts, mission)
+        repair_budget.bind_macro(prompts, mission,allow_maintenance=max_repairs>0)
         verifier_model = MemoMacroVerifier(verifier_model, repair_budget)
         # A complete fee census is a free accounting operation, not a
         # refused answer and not a paid retry generation. Stop before drafting
@@ -585,6 +590,20 @@ def run_memo(*, store: DaltonStore, frozen: Mapping[str, Any], model: Any, verif
             outcome = _validated_group(store,draft_group(model, **kwargs, repair=first),frozen['material'])
             cost_micros += int(outcome.get("model", {}).get("cost_micros") or outcome.get("cost_micros") or 0)
             repaired.append(first)
+        if (max_repairs > 0 and isinstance(repair_budget,MemoRepairBudget)
+                and outcome.get('status') != 'drafted' and outcome.get('failure_class') == 'content'):
+            context = {key:kwargs[key] for key in ('group','section_titles','questions','material','company')}
+            maintenance = repair_budget.prepare_maintenance(context=context,outcome=outcome,
+                remaining_groups=len(GROUPS)-group_index-1)
+            if maintenance is not None:
+                repair_budget.begin_stage(max_units=max_units,allow_technical=False,quiesce=quiesce,
+                                          maintenance=maintenance)
+                outcome = _validated_group(store,draft_group(model,**kwargs,maintenance=maintenance),
+                                           frozen['material'])
+                cost_micros += int(outcome.get('model',{}).get('cost_micros') or outcome.get('cost_micros') or 0)
+                repaired.append({'group':group,'maintenance_permission_ref':maintenance['permission_ref'],
+                                 'parent_work_order_ref':maintenance['parent']['work_order_ref'],
+                                 'findings':maintenance['diagnostics']['findings']})
         if outcome["status"] != "drafted":
             refused = {"status": "refused", "memo_status": "draft_refused", "reason": outcome["reason"],
                        "cost_micros": cost_micros}
@@ -592,6 +611,8 @@ def run_memo(*, store: DaltonStore, frozen: Mapping[str, Any], model: Any, verif
                 refused["offending_refs"] = list(outcome["refs"])
             if outcome.get('findings'):
                 refused['findings']=list(outcome['findings'])
+            if isinstance(repair_budget,MemoRepairBudget) and repair_budget.maintenance_hold is not None:
+                refused["maintenance_hold"] = repair_budget.maintenance_hold
             if repaired:
                 refused["repairs"] = repaired
             return refused

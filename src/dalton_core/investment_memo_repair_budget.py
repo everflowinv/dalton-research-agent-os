@@ -19,11 +19,15 @@ class MemoRepairBudget:
         self.macro = None
         self.macro_error = None
         self.pending_repair = None
+        self.selected_maintenance = None
+        self.maintenance_hold = None
+        self.maintenance_enabled = False
 
-    def begin_stage(self, *, max_units, allow_technical, quiesce=None, repair=False):
-        self.stage = {"max_units":max_units,"allow_technical":allow_technical,"quiesce":quiesce,"repair":repair}
+    def begin_stage(self, *, max_units, allow_technical, quiesce=None, repair=False, maintenance=None):
+        self.stage = {"max_units":max_units,"allow_technical":allow_technical,"quiesce":quiesce,"repair":repair,"maintenance":maintenance}
 
-    def bind_macro(self, prompts, mission):
+    def bind_macro(self, prompts, mission, *, allow_maintenance=False):
+        self.maintenance_enabled = allow_maintenance is True
         # Injected non-transport test doubles retain their old small interface.
         # Every actual CockpitModel has a Scheduler path and must bind here.
         if getattr(self.model, 'scheduler_db', None) is None:
@@ -61,7 +65,15 @@ class MemoRepairBudget:
         if self.macro is not None:
             from .cockpit_model import CockpitModelError
             try:
-                if self.stage and self.stage.get('repair'):
+                maintenance = None if not self.stage else self.stage.get('maintenance')
+                if not maintenance and not (self.stage and self.stage.get('repair')):
+                    kwargs, maintenance = self.macro.group_request(kwargs)
+                self.selected_maintenance = maintenance
+                if maintenance is not None:
+                    if self.stage and self.stage.get('maintenance') and not self.maintenance_enabled:
+                        raise ValueError('memo group maintenance is disabled by the current repair policy')
+                    self.macro.register_maintenance(maintenance,kwargs)
+                elif self.stage and self.stage.get('repair'):
                     if self.macro_error is not None:
                         raise ValueError(self.macro_error)
                     self.macro.register(role='semantic', kwargs=kwargs)
@@ -74,11 +86,14 @@ class MemoRepairBudget:
                         proof = failure_cost(self.model.model, exc, kwargs, watermark=self.model.watermark)
                         self.model.failures[proof['work_order_ref'] or ('unbound', kwargs['purpose'], kwargs['request_id'])] = proof
                 if cached is None and cached_failure is None:
+                    if maintenance is not None and not self.maintenance_enabled:
+                        raise ValueError('memo group maintenance is disabled by the current repair policy')
                     if self.macro_error is not None:
                         raise ValueError(self.macro_error)
                     self.macro.before_paid(kwargs, run_micros=self.run_micros,
                         producer_micros=self.producer_micros, verifier_micros=self.verifier_micros,
-                        role='semantic' if self.stage and self.stage.get('repair') else 'normal')
+                        role='maintenance' if maintenance is not None else (
+                            'semantic' if self.stage and self.stage.get('repair') else 'normal'))
             except AUDIT_ERRORS as exc:
                 self.macro_error = str(exc)
                 raise CockpitModelError('memo_macro_fee_audit_required: '+str(exc)) from exc
@@ -145,6 +160,30 @@ class MemoRepairBudget:
                 return False
         needed = self.accounted_micros + (remaining_groups + 1) * self.producer_micros + self.verifier_micros
         return needed <= self.run_micros
+
+    def prepare_maintenance(self, *, context, outcome, remaining_groups):
+        """A new fixed permission only after the original slot is consumed."""
+        self.maintenance_hold = None
+        if (not self.maintenance_enabled or self.macro is None or self.macro_error is not None
+                or self.selected_maintenance is not None):
+            return None
+        try:
+            body = self.macro.prepare_maintenance(context,outcome)
+            total, reserved = self.macro.room(group_index=3-remaining_groups,
+                producer_micros=self.producer_micros,verifier_micros=self.verifier_micros)
+            # Conservatively retain every remaining group and the independent
+            # verifier, even when an old provider success may later validate.
+            reserved = max(reserved,remaining_groups*self.producer_micros+self.verifier_micros)
+            if total+reserved+self.producer_micros > self.run_micros:
+                self.maintenance_hold = {"status":"budget_refused", "accounted_micros":total,
+                    "future_reserved_micros":reserved, "run_ceiling_micros":self.run_micros}
+                return None
+            return body
+        except AUDIT_ERRORS as exc:
+            self.maintenance_hold = {"status":"qualification_unproved","reason":str(exc)}
+            # Qualification failure is not a provider failure and cannot
+            # purchase a correction. Preserve the actual content diagnostic.
+            return None
 
 
 class MemoMacroVerifier:

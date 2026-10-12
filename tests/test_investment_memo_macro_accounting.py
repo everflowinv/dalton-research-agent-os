@@ -282,7 +282,7 @@ class MemoMacroAccountingTests(unittest.TestCase):
         with self.assertRaisesRegex(CockpitModelError,'fee_audit_required'):second.call(**self.kw(0))
         self.assertEqual(self.adapter.served,[])
 
-    def test_real_run_memo_registers_all_groups_and_free_restarts_its_single_paid_repair(self):
+    def test_real_run_memo_preserves_old_slot_and_free_restarts_one_fixed_maintenance(self):
         import json
         from dataclasses import replace
         from types import SimpleNamespace
@@ -304,10 +304,13 @@ class MemoMacroAccountingTests(unittest.TestCase):
         result,first=run()
         self.assertEqual(result['status'],'refused')
         self.assertEqual(len(result['findings']),2)
-        self.assertEqual(len(result['repairs']),1)
-        self.assertEqual(len(self.adapter.served),2)
+        # The old single repair remains; one separately proved maintenance
+        # attempt may now repair its remaining content failures. Bad replies
+        # never publish and neither attempt can be bought again on restart.
+        self.assertEqual(len(result['repairs']),2)
+        self.assertEqual(len(self.adapter.served),3)
         with Scheduler(self.model.scheduler_db) as scheduler:
-            self.assertEqual(scheduler.connection.execute('SELECT count(*) FROM '+REQUESTS).fetchone()[0],5)
+            self.assertEqual(scheduler.connection.execute('SELECT count(*) FROM '+REQUESTS).fetchone()[0],6)
             self.assertEqual(scheduler.connection.execute('SELECT count(*) FROM '+EXTRA).fetchone()[0],1)
         fees=self.fees()
         free,second=run()
@@ -315,7 +318,7 @@ class MemoMacroAccountingTests(unittest.TestCase):
         self.assertEqual(free['cost_micros'],0)
         self.assertEqual(second.accounted_micros,first.accounted_micros)
         self.assertEqual(self.fees(),fees)
-        self.assertEqual(len(self.adapter.served),2)
+        self.assertEqual(len(self.adapter.served),3)
 
 
 if __name__=='__main__':unittest.main()

@@ -51,6 +51,7 @@ def company_signature(frozen: Mapping[str, Any], launcher: Any) -> str:
     from .investment_memo_macro_accounting import CONTRACT_REF as MACRO_ACCOUNTING_REF
     from .investment_memo_legacy_accounting import CONTRACT_REF as LEGACY_ACCOUNTING_REF
     from .product_passage_validation import PRODUCT_VALIDATION_CONTRACT
+    from .investment_memo_group_maintenance import CONTRACT_REF as GROUP_MAINTENANCE_REF
     from .mission_deliverable import SECTION_NUMBERS_VALIDATION_CONTRACT
     from .store import content_hash
 
@@ -77,6 +78,9 @@ def company_signature(frozen: Mapping[str, Any], launcher: Any) -> str:
         "section_numbers_validation_contract": SECTION_NUMBERS_VALIDATION_CONTRACT,
         "macro_accounting_contract": MACRO_ACCOUNTING_REF,
         "legacy_accounting_contract": LEGACY_ACCOUNTING_REF,
+        # Free re-validation wakes old content holds. Fixed owner permissions
+        # and paid request identities do not depend on this scheduling marker.
+        "group_maintenance_contract": GROUP_MAINTENANCE_REF,
     }
     parts = [content_hash(payload), verifier_provider_contract_fingerprint(
         "investment_memo_verifier")]

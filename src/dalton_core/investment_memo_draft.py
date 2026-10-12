@@ -61,9 +61,11 @@ class InvestmentMemoCitationError(InvestmentMemoDraftError):
     frozen input" for a ref that was in the frozen input all along.
     """
 
-    def __init__(self, message: str, refs: Sequence[str] = ()) -> None:
+    def __init__(self, message: str, refs: Sequence[str] = (), *, findings=()) -> None:
         super().__init__(message)
         self.refs = list(dict.fromkeys(str(ref) for ref in refs))
+        self.findings = list(findings)
+        self.diagnostic_sections = []
 
 
 def _json(value: Any) -> str:
@@ -394,14 +396,22 @@ def parse_group_output(value: Any, *, section_titles: Sequence[str],
     if problems:
         refs = [ref for _, found in problems for ref in found]
         more = f" (+{len(problems) - 1} more)" if len(problems) > 1 else ""
-        raise InvestmentMemoCitationError(problems[0][0] + more, refs)
+        error = InvestmentMemoCitationError(problems[0][0] + more, refs,
+            findings=[{"code":"citation_slot", "detail":detail, "refs":list(refs)}
+                      for detail, refs in problems])
+        # Already parsed sections are diagnostic only. They are never accepted
+        # or published when any citation fails, but remaining section arithmetic
+        # must also reach the one bounded repair instead of being hidden.
+        error.diagnostic_sections = checked_sections
+        raise error
     return {"sections": checked_sections, "key_questions": checked_answers}
 
 
 def draft_group(model: Any, *, group: str, section_titles: Sequence[str],
                 questions: Sequence[Mapping[str, str]], material: Sequence[Mapping[str, Any]],
                 company: Mapping[str, Any], mission: Mapping[str, Any],
-                repair: Mapping[str, Any] | None = None, quiesce: Any = None) -> dict[str, Any]:
+                repair: Mapping[str, Any] | None = None, quiesce: Any = None,
+                maintenance: Mapping[str, Any] | None = None) -> dict[str, Any]:
     """One paid draft of one group, or -- with ``repair`` -- its one paid redo.
 
     ``repair`` carries the refused draft's reason and offending refs; the
@@ -411,6 +421,8 @@ def draft_group(model: Any, *, group: str, section_titles: Sequence[str],
 
     prompt = build_group_prompt(group=group, section_titles=section_titles, questions=questions,
                                 material=material, company=company, repair=repair)
+    if maintenance is not None:
+        prompt = maintenance["prompt"]
     request_id = "memo-" + content_hash({"contract": MEMO_PROMPT_CONTRACT_VERSION, "group": group, "prompt": prompt})[:24]
     call: Mapping[str, Any] = {}
     try:
@@ -419,6 +431,24 @@ def draft_group(model: Any, *, group: str, section_titles: Sequence[str],
         call = model.call(purpose=DRAFT_PURPOSE, request_id=request_id, prompt=prompt, mission=mission)
         if quiesce is not None:
             quiesce.returned(model, call, mission, purpose=DRAFT_PURPOSE)
+        return parse_group_call(model, call, group=group, section_titles=section_titles,
+                                questions=questions, material=material)
+    except (CockpitModelError, KeyError, json.JSONDecodeError) as exc:
+        return {"status": "refused", "reason": f"{type(exc).__name__}: {exc}",
+                "cost_micros": int(call.get("cost_micros") or 0)}
+
+
+def parse_group_call(model, call, *, group, section_titles, questions, material):
+    """Validate a durable answer without dispatch; retain its exact paid identity.
+
+    Typed content diagnostics authorize no retry themselves. Source failures
+    are distinct, and the maintenance authority re-runs this whole validator.
+    """
+    metadata = {key:call.get(key) for key in (
+        "work_order_ref", "route_decision_ref", "result_envelope_ref", "invocation_ref")}
+    metadata["cost_micros"] = int(call.get("cost_micros") or 0)
+    evidence = {"model":metadata, "raw_response":call.get("text")}
+    try:
         value = unwrap_json_object(call["text"])
         from .mission_deliverable import value_tokens
         index = citation_index(material)
@@ -447,25 +477,25 @@ def draft_group(model: Any, *, group: str, section_titles: Sequence[str],
                                     questions=questions, allowed_refs={str(row["ref"]) for row in material},
                                     material=material, original_passages=originals)
     except InvestmentMemoSourceError as exc:
-        return {"status": "refused", "reason": f"{type(exc).__name__}: {exc}",
-                "refs": [], "repairable": False, "cost_micros": int(call.get("cost_micros") or 0)}
+        return {**evidence, "status":"refused", "reason":f"{type(exc).__name__}: {exc}",
+                "refs":[], "repairable":False, "failure_class":"source_unavailable",
+                "cost_micros":metadata["cost_micros"]}
     except InvestmentMemoCitationError as exc:
-        return {"status": "refused", "reason": f"{type(exc).__name__}: {exc}",
-                "refs": list(exc.refs), "repairable": True,
-                "cost_micros": int(call.get("cost_micros") or 0)}
-    except InvestmentMemoDraftError as exc:
-        return {"status": "refused", "reason": f"{type(exc).__name__}: {exc}",
-                "refs": [], "repairable": True,
-                "cost_micros": int(call.get("cost_micros") or 0)}
-    except (CockpitModelError, KeyError, json.JSONDecodeError) as exc:
-        return {"status": "refused", "reason": f"{type(exc).__name__}: {exc}",
-                "cost_micros": int(call.get("cost_micros") or 0)}
-    return {"status": "drafted", **parsed, "group": group,
-            "model": {"work_order_ref": call.get("work_order_ref"),
-                      "route_decision_ref": call.get("route_decision_ref"),
-                      "result_envelope_ref": call.get("result_envelope_ref"),
-                      "invocation_ref": call.get("invocation_ref"),
-                      "cost_micros": int(call.get("cost_micros") or 0)}}
+        return {**evidence, "status":"refused", "reason":f"{type(exc).__name__}: {exc}",
+                "refs":list(exc.refs), "repairable":True, "failure_class":"content",
+                "findings":exc.findings or [{"code":"citation_slot","detail":str(exc),"refs":list(exc.refs)}],
+                "diagnostic_sections":exc.diagnostic_sections,
+                "cost_micros":metadata["cost_micros"]}
+    except (InvestmentMemoDraftError, json.JSONDecodeError) as exc:
+        return {**evidence, "status":"refused", "reason":f"{type(exc).__name__}: {exc}",
+                "refs":[], "repairable":True, "failure_class":"content",
+                "findings":[{"code":"group_shape", "detail":str(exc)}],
+                "cost_micros":metadata["cost_micros"]}
+    except KeyError as exc:
+        return {**evidence, "status":"refused", "reason":f"{type(exc).__name__}: {exc}",
+                "repairable":False, "failure_class":"authority_unavailable",
+                "cost_micros":metadata["cost_micros"]}
+    return {**evidence, "status":"drafted", **parsed, "group":group}
 
 
 def verified_material_hash(*, sections: Sequence[Mapping[str, Any]], questions: Sequence[Mapping[str, Any]],

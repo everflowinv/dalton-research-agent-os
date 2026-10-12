@@ -27,6 +27,7 @@ SCANS = 'investment_memo_accounting_legacy_scans'
 PAGES = 'investment_memo_accounting_import_pages'
 SCAN_BATCH = 128
 MAX_REQUESTS = 6  # four producer groups, one optional redo, one verifier
+MAX_TOTAL_REQUESTS = MAX_REQUESTS + 4  # independently proved maintenance permissions
 MAX_WORKS = 16
 
 
@@ -37,14 +38,16 @@ def request_id(group, prompt):
 
 
 def _schema(cur):
-    for table, key in ((SCOPES, 'macro_ref'), (REQUESTS, 'request_key'), (EXTRA, 'macro_ref'), (IMPORTS,'macro_ref'), (SCANS,'checkpoint_id'), (PAGES,'checkpoint_id')):
+    from .investment_memo_group_maintenance import TABLE as MAINTENANCE
+    for table, key in ((MAINTENANCE,'permission_ref'), (SCOPES, 'macro_ref'), (REQUESTS, 'request_key'), (EXTRA, 'macro_ref'), (IMPORTS,'macro_ref'), (SCANS,'checkpoint_id'), (PAGES,'checkpoint_id')):
         cur.execute(f'CREATE TABLE IF NOT EXISTS {table} ('
                     f'{key} TEXT PRIMARY KEY, macro_binding TEXT NOT NULL, '
                     'record_json TEXT NOT NULL, content_hash TEXT NOT NULL)')
     cur.execute(f'CREATE INDEX IF NOT EXISTS {REQUESTS}_macro ON {REQUESTS}(macro_binding)')
     cur.execute(f'CREATE INDEX IF NOT EXISTS {SCANS}_macro ON {SCANS}(macro_binding,checkpoint_id DESC)')
     cur.execute(f'CREATE INDEX IF NOT EXISTS {PAGES}_macro ON {PAGES}(macro_binding,checkpoint_id)')
-    for table in (SCOPES, REQUESTS, EXTRA, IMPORTS, SCANS, PAGES):
+    cur.execute(f'CREATE INDEX IF NOT EXISTS {MAINTENANCE}_macro ON {MAINTENANCE}(macro_binding)')
+    for table in (SCOPES, REQUESTS, EXTRA, IMPORTS, SCANS, PAGES, MAINTENANCE):
         cur.execute(f'CREATE TRIGGER IF NOT EXISTS {table}_insert_owner BEFORE INSERT ON {table} '
                     'WHEN dalton_scheduler_authorized() != 1 BEGIN SELECT RAISE(ABORT, '
                     "'memo accounting insert requires the Scheduler owner'); END")
@@ -294,10 +297,10 @@ class MemoMacroAccounting:
             # reader below. No write may occur inside its file-stability guard.
             with Scheduler(self.model.scheduler_db) as scheduler:
                 rows=scheduler.connection.execute(f'SELECT * FROM {REQUESTS} WHERE macro_binding=? LIMIT ?',
-                                                   (self.ref,MAX_REQUESTS+1)).fetchall()
-            if len(rows)>MAX_REQUESTS:
-                raise ValueError('legacy memo registered requests exceed six')
+                                                   (self.ref,MAX_TOTAL_REQUESTS+1)).fetchall()
+                maintenance = self._registered_requests(rows,scheduler.connection)
             entries={_body(r)['request_id']:_body(r) for r in rows}
+            entries.update({e['request_id']:e for e in maintenance})
             entries.update({e['request_id']:e for e in self.legacy['historical_requests']})
             routes=set()
             with Scheduler(self.model.scheduler_db) as scheduler:
@@ -404,6 +407,100 @@ class MemoMacroAccounting:
                     raise ValueError('memo macro already has its sole verifier request')
             self._register(cur, entry)
 
+    def _registered_requests(self, rows, connection):
+        entries = [_body(row) for row in rows]
+        ordinary = [entry for entry in entries if entry['role'] != 'maintenance']
+        if (len(entries)>MAX_TOTAL_REQUESTS or len(ordinary)>MAX_REQUESTS
+                or any(entry['role'] not in {'normal','semantic','verifier','maintenance'} for entry in entries)):
+            raise ValueError('memo macro exceeds six original or four maintenance requests')
+        # The extra entries cannot be manufactured by the ordinary registrar.
+        from .investment_memo_group_maintenance import read_entries
+        proved = read_entries(self,connection)
+        if sorted((entry for entry in entries if entry['role']=='maintenance'),key=lambda e:e['request_id']) != sorted(proved,key=lambda e:e['request_id']):
+            raise ValueError('memo maintenance accounting entries lack exact owner permissions')
+        return proved
+
+    def prepare_maintenance(self, context, outcome):
+        from .investment_memo_group_maintenance import derive, record_for, _context
+        from .planner_paid_output_recovery import _authority_connection
+        if not self.complete or outcome.get('failure_class') != 'content':
+            raise ValueError('memo maintenance needs complete fees and a typed content failure')
+        self.snapshot()  # includes every historical known/unknown charge
+        if self.extra is None:
+            raise ValueError('memo original extra slot must be used before group maintenance')
+        index = _context(self,context)
+        with _authority_connection(self.model.scheduler_db) as connection:
+            if record_for(self,connection,index) is not None:
+                raise ValueError('memo fixed group maintenance was already attempted')
+        return derive(self,context,outcome['model']['work_order_ref'])
+
+    def register_maintenance(self, body, kwargs):
+        from .investment_memo_group_maintenance import derive, TABLE
+        if (not self.complete or body['mission'] != {k:self.mission[k] for k in ('id','content_hash')}
+                or kwargs != {'purpose':'investment_memo','request_id':body['entry']['request_id'],
+                              'prompt':body['prompt'],'mission':self.mission}):
+            raise ValueError('memo maintenance current mission or request differs')
+        if derive(self,body['context'],body['parent']['work_order_ref'],
+                  through_rowid=body['parent_append_rowid']) != body:
+            raise ValueError('memo maintenance parent diagnostics/source differ before registration')
+        with Scheduler(self.model.scheduler_db) as scheduler, scheduler._transaction() as cur:
+            _schema(cur)
+            _record(cur,TABLE,'permission_ref',body['permission_ref'],self.ref,body)
+            # Old runtimes still account these Work rows, or refuse once their
+            # original six-request bound is exceeded; never hide new charges.
+            self._register(cur,body['entry'])
+
+    def group_request(self, kwargs):
+        """Free selection of the latest registered answer for a normal group.
+
+        Old successful semantic answers must be re-used on restart, rather
+        than discovering the old normal error and purchasing its repair again.
+        A consumed maintenance permission always selects its exact request,
+        including a no-send/in-flight refusal; never a fresh generation.
+        """
+        from .investment_memo_timeout_recovery import prompt_identity
+        from .investment_memo_group_maintenance import record_for
+        from .planner_paid_output_recovery import _authority_connection
+        if (not self.complete or kwargs['purpose'] != 'investment_memo'
+                or kwargs['prompt'] not in self.prompts):
+            return kwargs, None
+        index = prompt_identity(kwargs['prompt'])[2]
+        with _authority_connection(self.model.scheduler_db) as connection:
+            rows = connection.execute(f'SELECT * FROM {REQUESTS} WHERE macro_binding=? LIMIT ?',
+                                      (self.ref,MAX_TOTAL_REQUESTS+1)).fetchall()
+            self._registered_requests(rows,connection)
+            # Selecting an already-paid answer is free. Preserve the existing
+            # incremental-census contract: growth blocks new fees, not this
+            # strong same-request replay. before_paid still runs full snapshot.
+            entries = {_body(row)['request_id']:_body(row) for row in rows}
+            entries.update({entry['request_id']:entry for entry in
+                            self._legacy_entries(connection,check_growth=False)})
+            reader=Scheduler.__new__(Scheduler);reader.connection=connection
+            permission = record_for(self,connection,index)
+            if permission is not None:
+                if permission['mission'] != {k:self.mission[k] for k in ('id','content_hash')}:
+                    raise ValueError('memo group maintenance was consumed under another mission')
+                return {**kwargs,'request_id':permission['entry']['request_id'],
+                        'prompt':permission['prompt']}, permission
+            candidates = []
+            for entry in entries.values():
+                if entry['role'] not in {'normal','semantic'} or entry['group_index'] != index:
+                    continue
+                works = _works(connection,entry)
+                if works:
+                    work,_ = works[-1]
+                    rowid = connection.execute('SELECT rowid FROM scheduler_work_orders WHERE work_order_id=?',
+                                               (work.id,)).fetchone()[0]
+                    candidates.append((rowid,entry,work))
+            if candidates:
+                _, entry, work = max(candidates,key=lambda row:row[0])
+                if entry['role']=='semantic':
+                    # Old authority is not borrowed into a different mission.
+                    if not self._free_current(work,reader.formal_result(work.id)):
+                        raise ValueError('memo old semantic answer cannot authorize a new mission or failed call')
+                    return {**kwargs,'request_id':entry['request_id'],'prompt':work.question}, None
+        return kwargs, None
+
     def claim_technical(self, parent_work_ref):
         if not self.complete:
             raise ValueError('memo macro legacy fee audit is required before technical continuation')
@@ -441,13 +538,13 @@ class MemoMacroAccounting:
             if scope is None or _body(scope) != self.scope:
                 raise ValueError('memo macro scope completeness changed')
             rows = connection.execute(f'SELECT * FROM {REQUESTS} WHERE macro_binding=? ORDER BY request_key '
-                                      'LIMIT ?', (self.ref, MAX_REQUESTS+1)).fetchall()
-            if len(rows) > MAX_REQUESTS:
-                raise ValueError('memo macro exceeds its six bounded logical requests')
+                                      'LIMIT ?', (self.ref, MAX_TOTAL_REQUESTS+1)).fetchall()
+            maintenance = self._registered_requests(rows,connection)
             reader = Scheduler.__new__(Scheduler); reader.connection = connection
             bills = {}; latest = {}; entries = []
             imported = self._legacy_entries(connection)
             held_entries = {_body(row)['request_id']:_body(row) for row in rows}
+            held_entries.update({e['request_id']:e for e in maintenance})
             for entry in imported:
                 existing=held_entries.get(entry['request_id'])
                 if existing is not None and existing != entry:
@@ -526,7 +623,9 @@ class MemoMacroAccounting:
             row = connection.execute(f'SELECT * FROM {REQUESTS} WHERE request_key=?',
                 (self.ref+':'+kwargs['request_id'],)).fetchone()
             if row is None:
-                entry=next((e for e in self._legacy_entries(connection,check_growth=False) if e['request_id']==kwargs['request_id']),None)
+                from .investment_memo_group_maintenance import read_entries
+                maintenance = read_entries(self,connection)
+                entry=next((e for e in maintenance+self._legacy_entries(connection,check_growth=False) if e['request_id']==kwargs['request_id']),None)
                 if entry is None:
                     return None
             else:
@@ -613,6 +712,8 @@ class MemoMacroAccounting:
         index = 3 if role == 'verifier' else prompt_identity(kwargs['prompt'])[2]
         total, future = self.room(group_index=index, producer_micros=producer_micros,
                                   verifier_micros=0 if role == 'verifier' else verifier_micros)
+        if role == 'maintenance':
+            future = max(future,(3-index)*producer_micros+verifier_micros)
         cost = verifier_micros if role == 'verifier' else producer_micros
         if total + future + cost > run_micros:
             raise ValueError('memo macro historical costs and retained future reservations exceed the run ceiling')
