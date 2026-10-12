@@ -306,6 +306,46 @@ def _label_sources() -> Mapping[str, str]:
 # This separates prompt structure; it does not prove any source metadata.
 _RENDER_TRANSCRIPT_BOUNDARY = r"《[^\n》]{1,500}》(?:19|20)\d{2}-\d{2}-\d{2}：管理层发言[ \t]*\r?$(?=\n(?:[ \t]*\r?\n)*\[P\d{1,4}\])"
 _BLOCK_HEAD_RE = re.compile(r"(?m)^\[(?P<tag>[PCO]\d{1,4})\](?P<head>[^\n]*)\n?")
+_BROKER_RENDER_HEADER_RE = re.compile(
+    r"(?m)^券商：(?P<house>[^\n]{1,256}?)（(?:偏多|偏空|中性|立场未识别)）· "
+    r"(?P<date>(?:19|20)\d{2}-\d{2}-\d{2})(?:· [^\n]{0,2048})?\r?\n"
+    r"《(?P<title>[^\n》]{1,500})》[ \t]*(?:\r?\n[ \t]*)*\Z")
+
+
+def _without_next_broker_header(pack: Mapping[str, Any], tag: str, body: str,
+                                next_block: re.Match[str] | None) -> str:
+    """Separate an identified next report's renderer header, never source text.
+
+    The current exact span bounds protect an original header-like suffix. The
+    original/hash verifier still has to prove every byte of the remaining row.
+    This parser cannot certify report metadata or repair a corrupt old pack.
+    """
+    if not tag.startswith("P") or next_block is None:
+        return body
+    next_tag = next_block.group("tag")
+    tags = pack.get("tags") or {}
+    meta = ((pack.get("json") or {}).get("passage_tags") or {}).get(next_tag) or {}
+    header = _BROKER_RENDER_HEADER_RE.search(body)
+    if not next_tag.startswith("P") or next_tag not in tags or not header or meta.get("doc_kind") != "broker_report":
+        return body
+    parts = [part.strip() for part in next_block.group("head").split("·") if part.strip()]
+    if (header.group("house") != meta.get("house") or header.group("date") != meta.get("date")
+            or header.group("house") not in parts or header.group("date") not in parts
+            or f"《{header.group('title')}》" not in next_block.group("head")):
+        return body
+    from .evidence_index import parse_passage_ref, PassageRefInvalid
+    try:
+        current = parse_passage_ref(tags[tag])
+        following = parse_passage_ref(tags[next_tag])
+    except PassageRefInvalid:
+        return body
+    if following["document_ref"] != meta.get("document_ref"):
+        return body
+    candidate = body[:header.start()]
+    span_length = current["end"] - current["start"]
+    if candidate.strip() and len(candidate.strip()) <= span_length < len(body.strip()):
+        return candidate
+    return body
 
 
 def _block_entry(pack: Mapping[str, Any], tag: str) -> dict[str, Any]:
@@ -322,6 +362,8 @@ def _block_entry(pack: Mapping[str, Any], tag: str) -> dict[str, Any]:
         tail = text[match.end():]
         stop = re.search(r"(?m)^(?:\[[PNCO]\d{1,4}\]|## |" + _RENDER_TRANSCRIPT_BOUNDARY + r")", tail)
         body = tail[:stop.start()] if stop else tail
+        next_block = _BLOCK_HEAD_RE.match(tail, stop.start()) if stop else None
+        body = _without_next_broker_header(pack, tag, body, next_block)
         head = match.group("head")
         out: dict[str, Any] = {}
         parts = [part.strip() for part in head.split("·") if part.strip()]
