@@ -88,7 +88,7 @@ MAX_OUTPUT_TOKENS = int(DEFAULT_MODEL_SPEC_CALL_BUDGET["max_output_tokens"])
 MAX_COST_USD = float(DEFAULT_MODEL_SPEC_CALL_BUDGET["max_cost_usd"])
 TIMEOUT_SECONDS = int(DEFAULT_MODEL_SPEC_CALL_BUDGET["timeout_seconds"])
 from .model_spec_signed_expense_repair import (
-    CONTRACT_REF as SIGNED_EXPENSE_REPAIR_REF, ERROR_CODE as SIGNED_EXPENSE_REPAIR_CODE,
+    CONTRACT_REF as SIGNED_EXPENSE_REPAIR_REF, JOINT_CONTRACT_REF as JOINT_SIGNED_REPAIR_REF, ERROR_CODE as SIGNED_EXPENSE_REPAIR_CODE,
     assert_only_coefficient_changed, validate_coefficient_parent, validate_financials_for_repair,
 )
 
@@ -98,7 +98,7 @@ from .model_spec_typed_field_repair import (
     assert_only_typed_fields_changed, validate_parent as validate_typed_parent,
 )
 
-REPAIR_CONTRACT_REF = "contract:company-model-spec-structured-output-repair:0.11"
+REPAIR_CONTRACT_REF = "contract:company-model-spec-structured-output-repair:0.12"
 # One repair call, which is the number every other lane in this repository
 # uses for the same bargain (``draft_contract_repair.MAX_REPAIR_ATTEMPTS``).
 DEFAULT_REPAIR_ATTEMPTS = 1
@@ -152,6 +152,9 @@ REPAIR_CONTRACT = {
     "signed_filed_income_sum": {"ref": SIGNED_EXPENSE_REPAIR_REF,
         "scope": "one_exact_coefficient_only_with_all_held_periods_strictly_proven",
         "validation": "full_financial_validation_after_every_new_or_replayed_answer"},
+    "joint_signed_filed_income_sum": {"ref": JOINT_SIGNED_REPAIR_REF,
+        "scope": "two_to_four_exact_coefficients_unique_all_held_periods_full_DAG_proven",
+        "attempts": "shares_existing_single_repair_limit"},
     "typed_field_change": {"ref": TYPED_FIELD_REPAIR_REF,
         "scope": "exact_parent_paths_only_with_source_group_reconstruction_for_identity",
         "validation": "full_spec_and_financial_validation_after_every_new_or_replayed_answer"},
@@ -435,6 +438,17 @@ def _repair_prompt(original_text: str, error: CompanyModelSpecError, *,
             "must still tie exactly. Return the complete original JSON with only "
             "that one coefficient changed.\n\n"
         )
+        if error.proof.get('contract_ref') == JOINT_SIGNED_REPAIR_REF:
+            head = (
+                "Correct only the exact coefficient_path (or each path in changes) identified by the source-proven "
+                "signed expense proof in VALIDATION_ERROR, to its required_coefficient. Do not change "
+                "any other field, filed fact, period, concept, evidence, line, formula, "
+                "amount, source, or assessment. The original filed values are already "
+                "signed; do not reinterpret or take their absolute value. Every originally complete comparable historical period "
+                "must still tie exactly; uncovered periods remain evidence gaps. Return the complete original JSON with only "
+                "those proven coefficients changed. A joint proof permits at most four exact coefficient changes; "
+                "it does not permit adding a balancing item or changing any original fact.\n\n"
+            )
     elif error.code == CASH_FLOW_OPERATING_BASE_SHAPE_CODE:
         head = (
             "Repair only cash_flow_companion operating_cash_flow whose declared "
@@ -941,6 +955,7 @@ def model_spec_validation_contract() -> dict[str, str]:
         "typed_field_repair": TYPED_FIELD_REPAIR_REF,
         "assessment_compatible_replay": ASSESSMENT_COMPATIBILITY_REF,
         "assessment_compatible_signed_repair": SIGNED_COMPATIBLE_REPLAY_REF,
+        "joint_signed_filed_income_sum": JOINT_SIGNED_REPAIR_REF,
     }
 
 
