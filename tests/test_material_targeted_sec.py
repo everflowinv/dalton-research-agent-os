@@ -1,6 +1,7 @@
 """Exact request dates survive the SEC coordinator, launch, child and settlement."""
 import json
 import sqlite3
+import subprocess
 import unittest
 from datetime import date,datetime,timezone
 from types import SimpleNamespace
@@ -57,7 +58,11 @@ class TargetedSecTests(unittest.TestCase):
             with self.assertRaises(TargetedSecError):self.params(q)
     def test_changed_binding_refuses_before_spawn(self):
         r,q=self.queued();_,b=self.params(q)
-        with mock.patch('subprocess.Popen') as spawn,self.assertRaises(DiscoveryLaunchRejected):
+        spawn=mock.Mock()
+        # Spy only on discovery children; SQLite header isolation is a real
+        # read-only subprocess and must not be mistaken for a provider call.
+        process=SimpleNamespace(Popen=spawn,DEVNULL=subprocess.DEVNULL,STDOUT=subprocess.STDOUT)
+        with mock.patch('dalton_core.mission_source_discovery.subprocess',process),self.assertRaises(DiscoveryLaunchRejected):
             self.launcher().start(authorization=self.auth(),spec_ref='annual-report-10k',as_of=date(2026,9,8),
                                   targeted_binding={**b,'request_hash':'0'*64})
         spawn.assert_not_called()

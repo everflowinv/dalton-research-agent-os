@@ -66,6 +66,14 @@ SEC_PLAN_SPECS += tuple(MappingProxyType({
     "rediscovery_interval_days": 30 if form.startswith(("20-F", "40-F")) else 2,
     "retry_interval_days": 2, "item_filter": None,
 }) for ref, form in FOREIGN_SPECS.items() if not form.endswith('/A'))
+# Exact unit/context requests already use this public SEC form. A bounded
+# three-year default covers the held eight-quarter history and comparison
+# periods; explicit owner intervals remain authoritative in effective_sec_plan.
+SEC_PLAN_SPECS += (MappingProxyType({
+    "spec_ref": "quarterly-report-10q", "form": "10-Q",
+    "lookback_days": 1095, "rediscovery_interval_days": 7, "retry_interval_days": 2,
+    "item_filter": None,
+}),)
 _GOVERNED_SPEC_FIELDS = ("lookback_days", "rediscovery_interval_days", "retry_interval_days")
 
 
