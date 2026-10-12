@@ -153,8 +153,8 @@ class SourceAccuracyTests(unittest.TestCase):
         with tempfile.TemporaryDirectory()as td:
             c=sqlite3.connect(Path(td)/'core.sqlite');c.row_factory=sqlite3.Row
             self.addCleanup(c.close)
-            c.execute('CREATE TABLE coverage_mission_statement_filings(ingest_id TEXT,content_hash TEXT,company_ref TEXT,accession TEXT)')
-            c.execute('INSERT INTO coverage_mission_statement_filings VALUES(?,?,?,?)',('ingest:synthetic','a'*64,p['company_ref'],'accession:synthetic'))
+            c.execute('CREATE TABLE coverage_mission_statement_filings(ingest_id TEXT,content_hash TEXT,company_ref TEXT,accession TEXT,cik TEXT)')
+            c.execute('INSERT INTO coverage_mission_statement_filings VALUES(?,?,?,?,?)',('ingest:synthetic','a'*64,p['company_ref'],'accession:synthetic','0000000042'))
             record={'company_ref':p['company_ref'],'execution_contract':{'source_accuracy':p}}
             with patch('dalton_core.company_model_annual_projection.verify_statement_filing'),patch('dalton_core.sec_filing_units._source',return_value=({},raw)):
                 validate_originals(c,record)
@@ -230,3 +230,45 @@ class SourceAccuracyTests(unittest.TestCase):
         self.assertEqual(TASK_HASH,'608338bcd6cf70cbe6e012acd5f579b99d34f9d990d5bc846c4059a198eda9af')
         self.assertEqual(REPAIR_CONTRACT_REF,'contract:company-model-spec-structured-output-repair:0.11')
         self.assertEqual(REPAIR_CONTRACT_HASH,'044ffd4812e6beb89152f2cc120e793265bffeb5e9022c86fac04bb44487912d')
+
+    def test_ticker_company_uses_verified_filing_issuer_not_ticker_suffix(self):
+        from dalton_core.forecast_source_accuracy import _document
+        raw, p, ds = self.fixture(issuer='42')
+        p['company_ref'] = 'company:ticker:synthetic-other-company'
+        filing = {'ingest_id':'ingest:synthetic','content_hash':'a'*64,
+                  'accession':'accession:synthetic','cik':'0000000042'}
+        source = _document(None, None, filing, {}, raw, {'gaap:Revenue'})
+        self.assertEqual(source['issuer_cik'], '0000000042')
+        p['sources'] = [source]
+        p['content_hash'] = content_hash({k:v for k,v in p.items() if k!='content_hash'})
+        validate_shape(p,p['company_ref'])
+        self.assertEqual(history_assessment(p,ds[:2],ds[2],ds[0]['history'][0]['period_end'])['status'],
+                         'within_disclosed_accuracy')
+        wrong = copy.deepcopy(p);wrong['sources'][0]['issuer_cik'] = '0000000099'
+        self.assertIsNone(history_assessment(wrong,ds[:2],ds[2],ds[0]['history'][0]['period_end']))
+        legacy = copy.deepcopy(p);del legacy['sources'][0]['issuer_cik']
+        self.assertIsNone(history_assessment(legacy,ds[:2],ds[2],ds[0]['history'][0]['period_end']))
+        legacy['company_ref'] = 'company:sec-cik:0000000042'
+        self.assertEqual(history_assessment(legacy,ds[:2],ds[2],ds[0]['history'][0]['period_end'])['status'],
+                         'within_disclosed_accuracy')
+
+    def test_rehashed_ticker_proof_issuer_must_replay_physical_filing_identity(self):
+        raw,p,ds = self.fixture(issuer='42')
+        p['company_ref'] = 'company:ticker:unrelated-name'
+        p['sources'][0]['issuer_cik'] = '0000000042'
+        p['content_hash'] = content_hash({k:v for k,v in p.items() if k!='content_hash'})
+        with tempfile.TemporaryDirectory() as td:
+            c = sqlite3.connect(Path(td)/'core.sqlite');c.row_factory=sqlite3.Row
+            self.addCleanup(c.close)
+            c.execute('CREATE TABLE coverage_mission_statement_filings(ingest_id TEXT,content_hash TEXT,company_ref TEXT,accession TEXT,cik TEXT)')
+            c.execute('INSERT INTO coverage_mission_statement_filings VALUES(?,?,?,?,?)',
+                      ('ingest:synthetic','a'*64,p['company_ref'],'accession:synthetic','0000000042'))
+            record={'company_ref':p['company_ref'],'execution_contract':{'source_accuracy':p}}
+            with patch('dalton_core.company_model_annual_projection.verify_statement_filing'), \
+                    patch('dalton_core.sec_filing_units._source',return_value=({},raw)):
+                validate_originals(c,record)
+                bad=copy.deepcopy(record);q=bad['execution_contract']['source_accuracy']
+                q['sources'][0]['issuer_cik']='0000000099'
+                q['content_hash']=content_hash({k:v for k,v in q.items()if k!='content_hash'})
+                with self.assertRaisesRegex(ForecastModelValidationError,'issuer identity drifted'):
+                    validate_originals(c,bad)

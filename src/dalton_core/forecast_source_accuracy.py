@@ -80,6 +80,7 @@ def _document(connection, state_dir, filing, source, raw, names):
     concepts = {_expanded(name, parsed['namespace_bindings']) for name in names
                 if name.split(':')[0] in parsed['namespace_bindings']}
     return {'ingest_id': filing['ingest_id'], 'filing_hash': filing['content_hash'],
+            'issuer_cik': str(filing['cik']).zfill(10),
             'source': source, 'raw_sha256': hashlib.sha256(raw).hexdigest(),
             'namespace_bindings': parsed['namespace_bindings'], 'concepts': sorted(concepts),
             'facts': _facts(raw, parsed, filing['accession'], concepts)}
@@ -133,6 +134,9 @@ def validate_shape(proof, company_ref):
             or proof.get('content_hash') != content_hash({k: v for k, v in proof.items() if k != 'content_hash'})):
         _refuse('proof identity or hash differs')
     for source in proof.get('sources') or []:
+        if 'issuer_cik' in source and (not isinstance(source['issuer_cik'], str)
+                or not re.fullmatch(r'\d{10}', source['issuer_cik'])):
+            _refuse('source issuer identity is invalid')
         for fact in source['facts']:
             r = radius(fact['value'], fact['decimals'], fact['precision'])
             if fact['radius'] != (None if r is None else str(r)):
@@ -162,6 +166,9 @@ def validate_originals(connection, record):
         verify_statement_filing(connection, filing, allow_legacy_metadata=True)
         if filing['content_hash'] != stored['filing_hash'] or filing['company_ref'] != record['company_ref']:
             _refuse('original filing identity drifted')
+        if ('issuer_cik' in stored
+                and stored['issuer_cik'] != str(filing['cik']).zfill(10)):
+            _refuse('original filing issuer identity drifted')
         source, raw = _source(connection, state_dir, filing, source=stored['source'])
         from .sec_filing_units import _parse_source_units
         parsed = _parse_source_units(connection, state_dir, filing, source, raw)
@@ -170,6 +177,16 @@ def validate_originals(connection, record):
                     'facts': _facts(raw, parsed, filing['accession'], set(stored['concepts']))}
         if expected != stored:
             _refuse('original fact/context/unit/accuracy does not replay')
+
+
+def _issuer_cik(proof, source):
+    # New proofs bind issuer to the verified filing, independent of public
+    # company naming. Old SEC-ref proofs retain their exact matching rule.
+    cik = source.get('issuer_cik')
+    if cik is not None:
+        return cik if isinstance(cik, str) and re.fullmatch(r'\d{10}', cik) else None
+    company = str(proof.get('company_ref') or '')
+    return company[len('company:sec-cik:'):] if re.fullmatch(r'company:sec-cik:\d{10}', company) else None
 
 
 def _atomic(proof, *, concept, dimensions, unit, accession, start, end, value):
@@ -183,7 +200,7 @@ def _atomic(proof, *, concept, dimensions, unit, accession, start, end, value):
             continue
         for f in source['facts']:
             if (f['concept'] == expanded and f['dimensions'] == dims and f['accession'] == accession
-                    and f['cik'] == str(proof['company_ref']).rsplit(':', 1)[-1]
+                    and f['cik'] == _issuer_cik(proof, source)
                     and f['period_start'] == start and f['period_end'] == end
                     and f['unit'].casefold() == unit.casefold()):
                 matches.append(f)
@@ -215,7 +232,7 @@ def expression(proof, driver, cell):
                 continue
             for f in source['facts']:
                 if (f['concept'] == concept and f['dimensions'] == dims
-                        and f['cik'] == str(proof['company_ref']).rsplit(':', 1)[-1]
+                        and f['cik'] == _issuer_cik(proof, source)
                         and f['accession'] in cell['accessions'] and f['unit'].casefold() == driver['unit'].casefold()
                         and f['period_end'] in {earlier_end, cell['period_end']}):
                     candidates.setdefault(f['period_end'], set()).add((f['period_start'], f['period_end'], f['value'], f['unit'], f['accession']))
