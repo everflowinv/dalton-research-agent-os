@@ -485,6 +485,19 @@ class RoutedTranscriptPolishModelWorker:
         evidence = getattr(exc, "post_send_unknown_evidence", None)
         return evidence if isinstance(evidence, PostSendUnknownEvidence) else None
 
+    @staticmethod
+    def _returned_provider_health(result):
+        """Health only; never authority to refund or dispatch another call."""
+        from .model_profile_health import UNAVAILABLE_COOLDOWN_CODES
+        error = result.error or {}
+        if (result.status == "failed" and error.get("source") == "openclaw-model-broker"
+                and error.get("code") in UNAVAILABLE_COOLDOWN_CODES):
+            return {"outcome": "failed", "failure_class": "provider_failure",
+                    "error_code": error["code"]}
+        # Other returned failures must not masquerade as endpoint success, but
+        # this change grants no broader recovery/paid-retry classification.
+        return {"outcome": "served" if result.status == "succeeded" else "failed"}
+
     def run_once(
         self, work_order: WorkOrder | Mapping[str, Any]
     ) -> dict[str, Any]:
@@ -537,6 +550,7 @@ class RoutedTranscriptPolishModelWorker:
             else None
         )
         route_replayed = recovery_route is not None
+        chain_observed_provider = False
         if recovery_route is not None:
             route = recovery_route
             profile = self.router.get_profile(
@@ -685,7 +699,8 @@ class RoutedTranscriptPolishModelWorker:
                     # A returned envelope may represent a paid provider response.
                     # Preserve it for the normal accounting path; only failures
                     # before an invocation exists are safe to switch past here.
-                    return {"outcome": "served", "value": value}
+                    return {"outcome": "served", "value": value,
+                            "provider_health_outcome": self._returned_provider_health(envelope)}
 
                 chained = execute_chain(
                     self.router,
@@ -705,6 +720,7 @@ class RoutedTranscriptPolishModelWorker:
                     call=call,
                     producer_decision_ref=self._producer_decision_ref(work),
                 )
+                chain_observed_provider = True
                 if chained["status"] != "served":
                     route_ref = chained.get("route_decision_ref")
                     if route_ref is None and chained.get("links"):
@@ -801,6 +817,14 @@ class RoutedTranscriptPolishModelWorker:
         if accounting_failure is None:
             self._accounted_route_replayed = route_replayed
             self._after_accounted_result(work, route, profile, invocation, adapter_result)
+        # Direct provider-retry routing does not pass through execute_chain.
+        # A completed empty frame remains a failed, possibly-paid Work; its
+        # endpoint health must nevertheless govern the next ordinary Work.
+        # Exact formal replay returns above and must not extend a cooldown.
+        if not route_replayed and not chain_observed_provider:
+            from .model_fallback_chain import _observe_provider_outcome
+            _observe_provider_outcome(self.router, profile["id"],
+                self._returned_provider_health(adapter_result), route["id"])
         try:
             self.scheduler.validate_lease_for_use(
                 work.id,
