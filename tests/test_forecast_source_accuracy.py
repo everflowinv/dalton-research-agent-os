@@ -228,8 +228,8 @@ class SourceAccuracyTests(unittest.TestCase):
         from dalton_core.company_model_cli import REPAIR_CONTRACT_REF,REPAIR_CONTRACT_HASH
         from dalton_core.company_model_spec import TASK_HASH
         self.assertEqual(TASK_HASH,'608338bcd6cf70cbe6e012acd5f579b99d34f9d990d5bc846c4059a198eda9af')
-        self.assertEqual(REPAIR_CONTRACT_REF,'contract:company-model-spec-structured-output-repair:0.11')
-        self.assertEqual(REPAIR_CONTRACT_HASH,'044ffd4812e6beb89152f2cc120e793265bffeb5e9022c86fac04bb44487912d')
+        self.assertEqual(REPAIR_CONTRACT_REF,'contract:company-model-spec-structured-output-repair:0.13')
+        self.assertEqual(REPAIR_CONTRACT_HASH,'3c5fa10ea1a061644a44bf9f49edc6a290ee39e34b616a86269ad4a481ec1679')
 
     def test_ticker_company_uses_verified_filing_issuer_not_ticker_suffix(self):
         from dalton_core.forecast_source_accuracy import _document
