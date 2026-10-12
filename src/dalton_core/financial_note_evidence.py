@@ -16,7 +16,7 @@ from .company_model_series import (
 )
 from .contracts import ModelInvocation, ResultEnvelope, WorkOrder
 from .document_research import DocumentResearchRegistry, validate_registration
-from .document_research_inventory import financial_note_targets_for_registration
+from .document_research_inventory import financial_note_targets_for_registration, financial_note_source_mission
 from .document_research_strategy import (
     FINANCIAL_NOTE_TARGET_REF, FINANCIAL_NOTE_TARGET_SCHEMA_VERSION,
     validate_financial_note_target as _validate_financial_note_target,
@@ -377,8 +377,6 @@ def resolve_financial_note_evidence(
           and registration["content_hash"] == admission["document_authority_hash"]
           and registration["source_authority"]["kind"]
               == "coverage-mission-acquired-document"
-          and registration["source_authority"]["mission_version_ref"]
-              == admission["mission_version_ref"]
           and registration["source_authority"]["company_ref"]
               == admission["company_ref"],
           "directed admission registration authority disagrees")
@@ -391,6 +389,13 @@ def resolve_financial_note_evidence(
     _need(mission_row["mission_version_id"] == mission["id"]
           and mission["content_hash"] == admission["mission_version_hash"],
           "coverage mission differs from the directed admission")
+    if target["schema_version"] == FINANCIAL_NOTE_TARGET_SCHEMA_VERSION:
+        _need(registration["source_authority"]["mission_version_ref"] == mission["id"],
+              "directed admission registration authority disagrees")
+    else:
+        _need(financial_note_source_mission(connection=core_connection, mission=mission,
+                  company_ref=admission["company_ref"], registration=registration) is not None,
+              "directed admission original is outside its current mission authority")
     derived_targets = financial_note_targets_for_registration(
         connection=core_connection, mission=mission,
         company_ref=admission["company_ref"], registration=registration,

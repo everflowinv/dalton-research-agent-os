@@ -419,6 +419,9 @@ class FinancialNoteResolverTests(unittest.TestCase):
                 "evidence_target": target,
             },
         }
+        if options.get("inherit_mission"):
+            fixture.mission = document_fixtures.MissionDocumentResearchTests()._roll_mission(
+                fixture, budget={**fixture.mission["budget"], "max_daily_cost_usd": 9.0})
         plan = {
             "schema_version": "0.1", "task_ref": "task:research-plan-directives:0.1",
             "created_at": fixture.mission["created_at"], "state_hash": "e" * 64,

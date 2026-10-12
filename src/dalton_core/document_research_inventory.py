@@ -190,6 +190,38 @@ def _legacy_financial_note_targets_for_registration(
     }
     return [normalize_evidence_target(target)]
 
+def financial_note_source_mission(*, connection: Any, mission: Mapping[str, Any],
+                                 company_ref: str, registration: Mapping[str, Any]) -> Mapping[str, Any] | None:
+    """Keep the original acquisition while proving a current-project inheritance.
+
+    Used only by target0.2; target0.1 retains its exact-version contract.
+    This does not grant source access or change any acquired record.
+    """
+    authority = registration.get("source_authority", {})
+    if (registration.get("source_ref") != "source:sec-edgar"
+            or authority.get("kind") != "coverage-mission-acquired-document"
+            or authority.get("company_ref") != company_ref):
+        return None
+    original_ref = authority.get("mission_version_ref")
+    if original_ref == mission.get("id"):
+        return mission
+    if (company_ref not in {item["company_ref"] for item in mission.get("universe", ())}
+            or not any(item.get("source_ref") == registration["source_ref"]
+                       and item.get("status") == "connected"
+                       for item in mission.get("source_plan", ()))):
+        return None
+    from .coverage_mission import CoverageMissionAuthority, CoverageMissionError
+    from .document_mission_lineage import document_mission_versions
+    try:
+        if original_ref not in document_mission_versions(connection, mission):
+            return None
+        reader = object.__new__(CoverageMissionAuthority)
+        reader.connection = connection
+        return reader._mission_record(original_ref)
+    except (CoverageMissionError, ValueError, KeyError, TypeError):
+        return None
+
+
 def financial_note_targets_for_registration(
     *, connection: Any, mission: Mapping[str, Any], company_ref: str,
     registration: Mapping[str, Any],
@@ -208,11 +240,10 @@ def financial_note_targets_for_registration(
             registration=registration)
     if target_schema_version not in {None, FINANCIAL_NOTE_HISTORY_TARGET_SCHEMA_VERSION}:
         raise ValueError("unsupported financial note target schema")
-    authority = registration.get("source_authority", {})
-    if (registration.get("source_ref") != "source:sec-edgar"
-            or authority.get("kind") != "coverage-mission-acquired-document"
-            or authority.get("mission_version_ref") != mission.get("id")
-            or authority.get("company_ref") != company_ref):
+    source_mission = financial_note_source_mission(
+        connection=connection, mission=mission, company_ref=company_ref,
+        registration=registration)
+    if source_mission is None:
         return []
     ref = registration.get("document_ref")
     if not isinstance(ref, str) or not ref.startswith("sec:filing:"):
@@ -236,8 +267,8 @@ def financial_note_targets_for_registration(
     filing = dict(rows[0])
     if (filing["form"] not in FINANCIAL_NOTE_FORMS
             or filing["dispatch_form"] != filing["form"]
-            or filing["dispatch_mission_version_ref"] != mission.get("id")
-            or filing["dispatch_mission_version_hash"] != mission.get("content_hash")
+            or filing["dispatch_mission_version_ref"] != source_mission.get("id")
+            or filing["dispatch_mission_version_hash"] != source_mission.get("content_hash")
             or filing["dispatch_company_ref"] != company_ref
             or filing["dispatch_status"] != "succeeded"):
         return []
