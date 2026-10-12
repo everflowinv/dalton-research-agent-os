@@ -95,6 +95,12 @@ def priority_gaps(state_dir: str | Path, pending: Sequence[Mapping[str, Any]], *
         return {}, info
     state = Path(state_dir)
     qualified: dict[str, dict] = {}
+    def partial(reason: str):
+        # Each entry has its own complete source proof. A later candidate's
+        # timeout or invalid record cannot invalidate earlier independent
+        # proofs. The service still rechecks each proof before claiming a turn.
+        return qualified, {**info, "qualified": len(qualified),
+            "status": "partial" if qualified else "unavailable", "reason_code": reason}
     try:
         with ExitStack() as stack:
             core = stack.enter_context(closing(connect_read_only(state / "core.sqlite")))
@@ -120,7 +126,7 @@ def priority_gaps(state_dir: str | Path, pending: Sequence[Mapping[str, Any]], *
             failure_candidates = []
             for candidate in candidates:
                 if time.monotonic() >= deadline:
-                    return {}, {**info, "status": "unavailable", "reason_code": "priority_read_budget"}
+                    return partial("priority_read_budget")
                 company = candidate["subject"]
                 if company not in members:
                     continue
@@ -189,7 +195,8 @@ def priority_gaps(state_dir: str | Path, pending: Sequence[Mapping[str, Any]], *
                 if proof:
                     qualified[request["id"]] = proof
     except (OSError, sqlite3.Error, ValueError, KeyError, TypeError, CoverageMissionError, ForecastModelError):
-        return {}, {**info, "status": "unavailable", "reason_code": "current_gap_proof_unavailable"}
+        return partial("priority_read_budget" if time.monotonic() >= deadline
+                       else "current_gap_proof_unavailable")
     return qualified, {**info, "qualified": len(qualified)}
 
 
