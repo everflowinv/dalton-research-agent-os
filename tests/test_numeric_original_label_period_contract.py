@@ -4,7 +4,8 @@ import unittest
 from unittest.mock import patch
 from dalton_core.store import content_hash, canonical_json
 from dalton_core.directed_numeric_output import draft_prompt, legacy_draft_prompt_v2, LABEL_PERIOD_CONTRACT_REF
-from dalton_core.directed_numeric_recovery import build_numeric_output_repair, replay_numeric_output_repair, _replacement, DRAFT_IDENTITY_CONTRACT
+from dalton_core.directed_numeric_recovery import build_numeric_output_repair, replay_numeric_output_repair, DRAFT_IDENTITY_CONTRACT
+from dalton_core.directed_numeric_research import DirectedNumericError
 from dalton_core.mission_document_research_executor import _effective_stage
 from tests import test_directed_numeric_workflow as fixtures
 
@@ -78,8 +79,14 @@ class OriginalLabelPeriodContractTests(unittest.TestCase):
         prompt,_ = replay_numeric_output_repair(failed,new)
         self.assertEqual(json.loads(prompt)['label_period_contract_ref'],LABEL_PERIOD_CONTRACT_REF)
         self.assertIn('as_reported_label', json.loads(prompt)['previous_output_error'])
-        old = copy.deepcopy(new);old['contract_ref'] = DRAFT_IDENTITY_CONTRACT
-        old['replacement_prompt'] = _replacement(json.loads(failed['question']),failed['metadata']['numeric_targets'],old['diagnostic'],contract_ref=DRAFT_IDENTITY_CONTRACT)
-        old['replacement_prompt_hash'] = content_hash(old['replacement_prompt']);old.pop('content_hash');old['content_hash']=content_hash(old)
+        # Retagging a v3 record leaves v3-only fields behind and is not a
+        # historical identity record. Build the actual frozen older shape.
+        old = build_numeric_output_repair(failed,formal,contract_ref=DRAFT_IDENTITY_CONTRACT)
+        self.assertNotIn('rejected_output',old)
+        self.assertNotIn('rejected_output_hash',old)
         self.assertEqual(replay_numeric_output_repair(failed,old)[0],old['replacement_prompt'])
+        retagged = copy.deepcopy(new);retagged['contract_ref'] = DRAFT_IDENTITY_CONTRACT
+        retagged.pop('content_hash');retagged['content_hash']=content_hash(retagged)
+        with self.assertRaisesRegex(DirectedNumericError,'invalid closed shape'):
+            replay_numeric_output_repair(failed,retagged)
         self.assertEqual((p.calls,v.calls),(1,0))
