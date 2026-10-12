@@ -97,13 +97,31 @@ def profile_from_discovery(connection, spool, *, discovery_ref, company_ref, iss
     return {**body, "content_hash": content_hash(body)}
 
 
-def current_profile(connection, spool, *, mission_version_ref, company_ref, issuer, as_of, deadline=None):
-    """Latest current mission root candidate; never scan another company/history."""
+def current_profile(connection, spool, *, mission_version_ref, company_ref, issuer, as_of, deadline=None, requested_by=None):
+    """Latest held issuer facts in this mission's lineage under fresh authority.
+
+    A mission revision does not change the issuer's original submissions bytes.
+    It does change permission to start another query: recheck that independently
+    before consulting bounded historical facts, without inheriting an old grant
+    or changing the original profile/hash and its durable replay contract.
+    """
+    from .coverage_mission import CoverageMissionAuthority, CoverageMissionError
+    authority = object.__new__(CoverageMissionAuthority)
+    authority.connection = connection
+    try:
+        mission = authority._mission_record(mission_version_ref)
+        authority.authorize_source_discovery(
+            company_ref=company_ref, source_ref="source:sec-edgar",
+            requested_by=mission["autonomy"]["automation_principal"] if requested_by is None else requested_by,
+            mission_version_ref=mission["id"], mission_version_hash=mission["content_hash"])
+    except CoverageMissionError as exc:
+        raise SecReportingProfileError("current SEC discovery authorization rejected: " + str(exc)) from exc
     rows = bounded_rows(connection,
         "SELECT record_id FROM coverage_mission_source_discoveries "
-        "WHERE mission_version_ref=? AND company_ref=? AND source_ref='source:sec-edgar' "
+        "WHERE mission_version_ref IN (SELECT mission_version_id FROM coverage_mission_versions WHERE mission_ref=?) "
+        "AND company_ref=? AND source_ref='source:sec-edgar' "
         "ORDER BY created_at DESC,record_id DESC LIMIT 8",
-        (mission_version_ref, company_ref), deadline=deadline)
+        (mission["mission_ref"], company_ref), deadline=deadline)
     for row in rows:
         d = _record(connection, "coverage_mission_source_discoveries", "record_id", row[0])
         # An archived column document is not a complete root profile.

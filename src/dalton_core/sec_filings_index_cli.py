@@ -154,7 +154,8 @@ def run_discovery(
             bound = verify_profile(core.connection, spool, reporting_profile, company_ref=company_ref,
                 issuer=parameters['issuer'], as_of=as_of)
             latest = current_profile(core.connection, spool, mission_version_ref=mission_version_ref,
-                company_ref=company_ref, issuer=parameters['issuer'], as_of=as_of)
+                company_ref=company_ref, issuer=parameters['issuer'], as_of=as_of,
+                requested_by=authorization['requested_by'])
             if latest != bound or not allows_form(bound, parameters['form']):
                 raise ValueError('foreign reporting profile is no longer current or form is not applicable')
             summary['reporting_profile'] = bound

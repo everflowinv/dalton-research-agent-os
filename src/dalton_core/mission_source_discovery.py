@@ -1046,7 +1046,8 @@ class _SearchLauncherBase:
                     reporting_profile = verify_profile(reader, spool, reporting_profile,
                         company_ref=authorization['company_ref'], issuer=plan['companies'][authorization['company_ref']]['cik'], as_of=as_of_date)
                     latest = current_profile(reader, spool, mission_version_ref=authorization['mission_version_ref'],
-                        company_ref=authorization['company_ref'], issuer=reporting_profile['issuer'], as_of=as_of_date)
+                        company_ref=authorization['company_ref'], issuer=reporting_profile['issuer'], as_of=as_of_date,
+                        requested_by=authorization['requested_by'])
                     if latest != reporting_profile or not allows_form(reporting_profile, plan_spec(plan, spec_ref)['form']):
                         raise ValueError('foreign reporting profile is no longer current or form is not applicable')
             except (ValueError, OSError, sqlite3.Error, RawSpoolError) as exc:
