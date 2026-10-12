@@ -20,7 +20,7 @@
       "max_units": 3
     },
     "investment_memo": {
-      "max_cost_usd": 70.0,
+      "max_cost_usd": 84.0,
       "max_units": 4
     },
     "mission_annual_research_admission": {
