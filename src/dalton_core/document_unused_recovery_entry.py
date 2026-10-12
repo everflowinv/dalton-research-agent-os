@@ -86,6 +86,10 @@ def qualification(authority, scheduler, admission, work_ref, worker):
 
 def candidate(coordinator, admission, ticket_ref, work_ref):
     """Read exact local Router/budget authorities, without mutation constructors."""
+    # A persisted candidate awaiting canonical promotion has no unfinished
+    # model Work. It continues through the ordinary local resume path.
+    if not isinstance(work_ref, str) or not work_ref.strip():
+        return None
     from .mission_document_model_authority import load_mission_document_model_configs
     from .mission_document_research import MissionDocumentResearchAuthority
     from .document_research_qualitative import MissionDocumentDraftWorker, MissionDocumentVerifierWorker

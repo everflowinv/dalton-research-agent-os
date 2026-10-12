@@ -262,12 +262,13 @@ class FinancialNoteResolverTests(unittest.TestCase):
         old = connection.execute(
             "SELECT dispatch_id FROM coverage_mission_statement_filings"
         ).fetchone()
+        trigger_sql = connection.execute(
+            "SELECT sql FROM sqlite_master WHERE type='trigger' AND name=?",
+            ("coverage_mission_statement_filings_no_delete",),
+        ).fetchone()[0]
         connection.execute("DROP TRIGGER coverage_mission_statement_filings_no_delete")
         connection.execute("DELETE FROM coverage_mission_statement_filings")
-        connection.execute(
-            "CREATE TRIGGER coverage_mission_statement_filings_no_delete "
-            "BEFORE DELETE ON coverage_mission_statement_filings "
-            "BEGIN SELECT RAISE(ABORT,'statement filings are append-only'); END")
+        connection.execute(trigger_sql)
         identity = {
             "company_ref": COMPANY, "cik": fixture.source.accession[:10],
             "accession": fixture.source.accession, "form": "10-K", "line_count": 2,
