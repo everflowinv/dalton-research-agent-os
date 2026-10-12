@@ -49,6 +49,10 @@ class InvestmentMemoDraftError(ValueError):
     pass
 
 
+class InvestmentMemoSourceError(InvestmentMemoDraftError):
+    """Acquired-original checks failed; another paid draft cannot repair them."""
+
+
 class InvestmentMemoCitationError(InvestmentMemoDraftError):
     """A draft cited a ref in a place the memo contract does not let it stand.
 
@@ -286,7 +290,8 @@ def _short(title: str) -> str:
 
 def parse_group_output(value: Any, *, section_titles: Sequence[str],
                        questions: Sequence[Mapping[str, str]], allowed_refs: set[str],
-                       material: Sequence[Mapping[str, Any]] = ()) -> dict[str, Any]:
+                       material: Sequence[Mapping[str, Any]] = (),
+                       original_passages: Mapping[str, str] | None = None) -> dict[str, Any]:
     index = citation_index(material, allowed_refs=allowed_refs)
     allowed = set(index["kinds"])
     if not isinstance(value, Mapping) or set(value) != {"sections", "key_questions"}:
@@ -319,16 +324,40 @@ def parse_group_output(value: Any, *, section_titles: Sequence[str],
         if any(not isinstance(gap, str) for gap in section["gaps"]):
             raise InvestmentMemoDraftError("section gaps must be text")
         numbers = []
+        sources = []
         for number in section["numbers"]:
             if not isinstance(number, Mapping):
                 raise InvestmentMemoDraftError("each section number must be an object")
             try:
-                numbers.append(_number(number, title=title, index=index))
+                checked_number = _number(number, title=title, index=index)
+                text = checked_number.get("text")
+                ref = checked_number.get("passage_ref")
+                from .mission_deliverable import value_tokens
+                if ref and isinstance(text, str) and text.strip() and not value_tokens(text, include_small=True):
+                    original = (original_passages or {}).get(ref)
+                    if original_passages is None:
+                        # Standalone parsing only: a rendered header/trimmed pack
+                        # cannot stand in for its original. Production supplies
+                        # acquired-original proofs for every qualitative quote.
+                        import hashlib
+                        from .evidence_index import parse_passage_ref
+                        passage = index["passages"][ref]
+                        if hashlib.sha256(passage.encode()).hexdigest()[:12] == parse_passage_ref(ref)["hash12"]:
+                            original = passage
+                    if not isinstance(original, str) or text not in original:
+                        raise InvestmentMemoCitationError(
+                            f"section「{title}」qualitative quote is not verbatim in its acquired original: {ref}", [ref])
+                    if {"ref": ref} not in sources:
+                        sources.append({"ref": ref})
+                    continue
+                numbers.append(checked_number)
             except InvestmentMemoCitationError as exc:
                 problems.append((str(exc), exc.refs))
         checked = {**dict(section)}
         if not checked.get("gap_items"):
             checked.pop("gap_items", None)
+        if sources:
+            checked["source_refs"] = sources
         checked_sections.append({**checked, "body": str(section["body"]).strip(),
                                  "claim_refs": list(dict.fromkeys(str(ref) for ref in refs)),
                                  "numbers": numbers,
@@ -390,9 +419,36 @@ def draft_group(model: Any, *, group: str, section_titles: Sequence[str],
         call = model.call(purpose=DRAFT_PURPOSE, request_id=request_id, prompt=prompt, mission=mission)
         if quiesce is not None:
             quiesce.returned(model, call, mission, purpose=DRAFT_PURPOSE)
-        parsed = parse_group_output(unwrap_json_object(call["text"]), section_titles=section_titles,
+        value = unwrap_json_object(call["text"])
+        from .mission_deliverable import value_tokens
+        index = citation_index(material)
+        candidate_sections = value.get("sections") if isinstance(value, Mapping) else None
+        qualitative_refs = {str(number["passage_ref"])
+            for section in (candidate_sections if isinstance(candidate_sections, list) else [])
+            if isinstance(section, Mapping) and isinstance(section.get("numbers"), list)
+            for number in section["numbers"] if isinstance(number, Mapping)
+            and isinstance(number.get("passage_ref"), str) and number["passage_ref"] in index["passages"]
+            and isinstance(number.get("text"), str) and number["text"].strip()
+            and not value_tokens(number["text"], include_small=True)}
+        originals = None
+        if qualitative_refs:
+            from pathlib import Path
+            from .initial_screen_failure_feedback import _checked_originals
+            scheduler_db = getattr(model, "scheduler_db", None)
+            if scheduler_db and str(scheduler_db) != ":memory:":
+                try:
+                    proofs = _checked_originals(Path(scheduler_db).parent, qualitative_refs)
+                    originals = {ref: proofs[ref]["text"] for ref in qualitative_refs}
+                except (ValueError, OSError, KeyError) as exc:
+                    raise InvestmentMemoSourceError("qualitative quotation original could not be verified") from exc
+            else:
+                raise InvestmentMemoSourceError("qualitative quotation needs its acquired original")
+        parsed = parse_group_output(value, section_titles=section_titles,
                                     questions=questions, allowed_refs={str(row["ref"]) for row in material},
-                                    material=material)
+                                    material=material, original_passages=originals)
+    except InvestmentMemoSourceError as exc:
+        return {"status": "refused", "reason": f"{type(exc).__name__}: {exc}",
+                "refs": [], "repairable": False, "cost_micros": int(call.get("cost_micros") or 0)}
     except InvestmentMemoCitationError as exc:
         return {"status": "refused", "reason": f"{type(exc).__name__}: {exc}",
                 "refs": list(exc.refs), "repairable": True,
