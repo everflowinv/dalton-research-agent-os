@@ -3,7 +3,7 @@
 This package is intentionally isolated from the live Dalton Coverage OS.
 """
 
-__version__ = "0.11.23"
+__version__ = "0.11.24"
 
 from importlib import import_module
 
