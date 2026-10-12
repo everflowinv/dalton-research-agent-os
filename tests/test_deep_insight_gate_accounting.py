@@ -110,3 +110,22 @@ class DeepGateAccountingTests(unittest.TestCase):
         with self.assertRaisesRegex(ValueError,'original run budget'):
             a.before_paid(run_micros=1000000,next_call_micros=500000,retained_future_micros=500000)
         self.assertEqual(len(self.adapter.served),1)
+
+    def test_later_config_cannot_raise_an_original_frozen_run_ceiling(self):
+        self.model.config['purpose_run_budgets']={'deep_insight_gate':{'max_cost_usd':1,'max_units':4}}
+        a=self.accounting()
+        self.model.config['purpose_run_budgets']['deep_insight_gate']['max_cost_usd']=100
+        b=self.accounting();self.assertEqual(b.ref,a.ref)
+        self.assertEqual(b.scope['original_run_budget']['max_cost_usd'],1)
+        with self.assertRaisesRegex(ValueError,'original run budget'):
+            b.before_paid(run_micros=100000000,next_call_micros=1500000)
+
+    def test_verifier_group_alias_cannot_create_another_generation(self):
+        a=self.accounting();k=dict(purpose='deep_insight_gate_verifier',request_id='verify-one',prompt='verdict')
+        for group in ('industry','other',None):
+            with self.assertRaisesRegex(ValueError,'one fixed'):
+                a.register(role='verifier',group=group,kwargs=k)
+        a.register(role='verifier',group='all',kwargs=k)
+        a.register(role='verifier',group='all',kwargs={**k,'request_id':'verify-two','prompt':'new verdict'})
+        with self.assertRaisesRegex(ValueError,'generation'):
+            a.register(role='verifier',group='all',kwargs={**k,'request_id':'verify-three','prompt':'third'})

@@ -79,6 +79,8 @@ def billed_work(connection, router, budget, authority, formal):
     """Keep terminal unknown charges at their original conservative ceiling."""
     from .contracts import ResultEnvelope
     work = WorkOrder.from_dict(authority['work_order'])
+    if work.metadata.get('purpose')not in {'deep_insight_gate','deep_insight_gate_verifier'}:
+        raise ValueError('deep-gate billing authority has another purpose')
     if formal is None:
         raise ValueError('deep-gate Work is still in flight or has no terminal formal')
     result = ResultEnvelope.from_dict(formal['result_envelope'])
@@ -158,6 +160,8 @@ class DeepGateAccounting:
         self.entries = [{'role':'normal', 'group':g, 'purpose':'deep_insight_gate',
                          'request_id':normal_request_id(g, company_ref, prompts[g]),
                          'prompt_hash':content_hash(prompts[g])} for g in GROUPS]
+        from .call_budget import resolve_run_budget
+        original_run_budget=resolve_run_budget(model.config,'deep_insight_gate',defaults={'max_cost_usd':3.0,'max_units':4})
         body = {'contract_ref':CONTRACT_REF, 'company_ref':company_ref,
                 'normal_requests':self.entries}
         self.ref = 'deep-gate-accounting:' + content_hash(body)
@@ -166,7 +170,7 @@ class DeepGateAccounting:
             row = cur.execute(f'SELECT * FROM {SCOPES} WHERE scope_ref=?', (self.ref,)).fetchone()
             if row is None:
                 legacy = any(works(scheduler.connection, entry) for entry in self.entries)
-                scope = {**body, 'complete':not legacy,
+                scope = {**body, 'complete':not legacy, 'original_run_budget':original_run_budget,
                          'registered_work_rowid':cur.execute('SELECT coalesce(max(rowid),0) FROM scheduler_work_orders').fetchone()[0]}
                 _record(cur, SCOPES, 'scope_ref', self.ref, self.ref, scope)
             else:
@@ -181,6 +185,8 @@ class DeepGateAccounting:
     def register(self, *, role, group, kwargs):
         if role not in {'shape','numbers','rubric','verifier'}:
             raise ValueError('deep-gate unknown request role')
+        if role == 'verifier' and group != 'all':
+            raise ValueError('deep-gate verifier must use the one fixed all-groups identity')
         if role != 'verifier' and group not in {e['group'] for e in self.entries}:
             raise ValueError('deep-gate correction has no frozen group')
         expected = 'deep_insight_gate_verifier' if role == 'verifier' else 'deep_insight_gate'
@@ -195,6 +201,8 @@ class DeepGateAccounting:
             if len(rows) > MAX_REQUESTS:
                 raise ValueError('deep-gate request index exceeds bounded18')
             prior = [_body(r) for r in rows]
+            if entry not in prior and len(prior)>=MAX_REQUESTS:
+                raise ValueError('deep-gate complete request index exceeds bounded18')
             same = [e for e in prior if e['role']==role and e['group']==group]
             limit = 2 if role=='verifier' else 1
             if entry not in same and len(same)>=limit:
@@ -274,6 +282,10 @@ class DeepGateAccounting:
             raise ValueError('deep-gate systemic unknown fee stops this round; no new request authorized')
         if not proof['cost_complete']:
             raise ValueError('deep-gate legacy full fee import required; only exact success replay is allowed')
-        if proof['accounted_micros']+next_call_micros+retained_future_micros>run_micros:
+        original_cap=int(round(self.scope['original_run_budget']['max_cost_usd']*1_000_000))
+        # A later configuration may tighten this scope. Raising it requires an
+        # explicit future version-bound grant, never a new directory or tick.
+        effective_cap=min(run_micros,original_cap)
+        if proof['accounted_micros']+next_call_micros+retained_future_micros>effective_cap:
             raise ValueError('deep-gate historical costs plus retained stages exceed original run budget')
         return proof
