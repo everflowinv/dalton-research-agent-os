@@ -125,10 +125,10 @@ class OriginalRevenueTests(unittest.TestCase):
     def test_new_rule_does_not_change_task_or_repair_contract_paid_replay_identity(self):
         from dalton_core.company_model_cli import REPAIR_CONTRACT_REF, REPAIR_CONTRACT_HASH, model_spec_validation_contract
         from dalton_core.company_model_spec import TASK_HASH
-        self.assertEqual(REPAIR_CONTRACT_REF, 'contract:company-model-spec-structured-output-repair:0.10')
+        self.assertEqual(REPAIR_CONTRACT_REF, 'contract:company-model-spec-structured-output-repair:0.11')
         self.assertEqual(TASK_HASH, '608338bcd6cf70cbe6e012acd5f579b99d34f9d990d5bc846c4059a198eda9af')
         self.assertEqual(model_spec_validation_contract()['original_revenue_context'], RULE_REF)
-        self.assertEqual(REPAIR_CONTRACT_HASH, 'f3ce13aea7c505a44a28d9c34cf6889b1a14b566ae71b7eda23a6fe97bc1e235')
+        self.assertEqual(REPAIR_CONTRACT_HASH, '044ffd4812e6beb89152f2cc120e793265bffeb5e9022c86fac04bb44487912d')
         from dalton_core import statement_context as context
         # The additive rule is not a blanket revision of every old context.
         # Changing this helper's bytes cannot change the base normalizer hash.

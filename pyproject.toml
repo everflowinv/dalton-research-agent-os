@@ -4,7 +4,7 @@ build-backend = "setuptools.build_meta"
 
 [project]
 name = "dalton-core"
-version = "0.11.15"
+version = "0.11.16"
 description = "Runtime-independent control kernel prototype for Dalton Research Agent OS"
 requires-python = ">=3.11"
 
