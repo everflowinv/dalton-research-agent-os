@@ -761,6 +761,54 @@ def _evaluate(node: Any) -> float:
     raise MissionDeliverableValidationError("a derivation is arithmetic over numbers only (+ - * / and parentheses)")
 
 
+def _bound_scale_constants(tree: Any, sourced: set[Decimal]) -> set[int]:
+    """Powers of ten are operators on proved operands, never new facts.
+
+    The expression's AST supplies the operation type. A scale is accepted
+    only as a multiplication/division factor whose other branch recursively
+    consists of cited inputs and valid arithmetic. Additive amounts and a
+    bare scale-as-result remain subject to the source requirement.
+    """
+    import ast
+    constants: set[int] = set()
+    def scalar(node):
+        return Decimal(str(node.value)) if isinstance(node, ast.Constant) and type(node.value) in (int,float) else None
+    def scale(node):
+        value=scalar(node)
+        return value is not None and value in {Decimal(10) ** n for n in range(1,13)}
+    def bound(node):
+        if isinstance(node,ast.Expression):return bound(node.body)
+        value=scalar(node)
+        if value is not None:return value in sourced
+        if isinstance(node,ast.UnaryOp) and isinstance(node.op,(ast.USub,ast.UAdd)):return bound(node.operand)
+        if not isinstance(node,ast.BinOp):return False
+        if isinstance(node.op,(ast.Mult,ast.Div)):
+            if scale(node.right) and bound(node.left):
+                constants.add(id(node.right));return True
+            if isinstance(node.op,ast.Mult) and scale(node.left) and bound(node.right):
+                constants.add(id(node.left));return True
+        if isinstance(node.op,(ast.Add,ast.Sub,ast.Mult,ast.Div)):
+            # A ratio minus one is the dimensionless growth/return operation.
+            if (isinstance(node.op,ast.Sub) and scalar(node.right)==1
+                    and isinstance(node.left,ast.BinOp) and isinstance(node.left.op,ast.Div)
+                    and bound(node.left.left) and bound(node.left.right)):
+                constants.add(id(node.right));return True
+            return bound(node.left) and bound(node.right)
+        return False
+    bound(tree)
+    return constants
+
+
+def _without_verified_expression(text: str, expression: str) -> str:
+    """Remove only the exact checked formula, including typographic operators.
+
+    A prose claim that happens to contain 1 or 100 is still checked as a fact.
+    """
+    translated=text.translate(str.maketrans({'−':'-','×':'*','÷':'/','（':'(','）':')'}))
+    pattern=r'\s*'.join(re.escape(char) for char in re.sub(r'\s+','',expression))
+    return re.sub(r'(?<![\d.+*/(-])'+pattern+r'(?!\s*[\d.+*/)-])',' ',translated)
+
+
 def validate_derived_number(item: Mapping[str, Any], cited: Sequence[Mapping[str, Any]], *, check_stray: bool = True) -> dict[str, Any]:
     """A figure computed from figures this section cites, re-computed here."""
 
@@ -792,15 +840,22 @@ def validate_derived_number(item: Mapping[str, Any], cited: Sequence[Mapping[str
             exact_operands.add(Decimal(token))
         except InvalidOperation:
             continue
-    for literal in re.findall(r"\d+(?:\.\d+)?", expression):
+    try:
+        tree=ast.parse(expression,mode='eval')
+    except SyntaxError as exc:
+        raise MissionDeliverableValidationError('a derivation must be a valid arithmetic expression') from exc
+    scale_constants=_bound_scale_constants(tree,exact_operands)
+    for node in ast.walk(tree):
+        if not isinstance(node,ast.Constant) or type(node.value) not in (int,float):continue
+        literal=ast.get_source_segment(expression,node)
         plain = literal.rstrip("0").rstrip(".") if "." in literal else literal
-        if (literal in sourced or plain in sourced or Decimal(literal) in exact_operands or literal in _DERIVATION_CONSTANTS
+        if (literal in sourced or plain in sourced or Decimal(literal) in exact_operands or id(node) in scale_constants or literal in _DERIVATION_CONSTANTS
                 or (literal.isdigit() and int(literal) <= _BARE_SMALL_INTEGER)):
             continue
         raise MissionDeliverableConflict(
             f"a derivation uses {literal}, which no other figure in this section cites")
     try:
-        value = _evaluate(ast.parse(expression, mode="eval"))
+        value = _evaluate(tree)
     except SyntaxError as exc:
         raise MissionDeliverableValidationError("a derivation must be a valid arithmetic expression") from exc
     decimals = len(result.split(".", 1)[1]) if "." in result else 0
@@ -811,7 +866,9 @@ def validate_derived_number(item: Mapping[str, Any], cited: Sequence[Mapping[str
     if result.lstrip("-") not in stated:
         raise MissionDeliverableConflict(
             f"a derived number entry's text must state its result {result}")
-    stray = [token for token in stated if token != result.lstrip("-") and token not in sourced]
+    prose = [_bare(_normalise_number(token)) for token in
+             value_tokens(_without_verified_expression(text,expression),include_small=True)]
+    stray = [token for token in prose if token != result.lstrip("-") and token not in sourced]
     if stray and check_stray:
         raise MissionDeliverableConflict(
             f"a derived number entry states figures that are neither its result nor cited: {stray[:3]}")

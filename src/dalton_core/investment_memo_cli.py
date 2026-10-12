@@ -544,14 +544,18 @@ def run_memo(*, store: DaltonStore, frozen: Mapping[str, Any], model: Any, verif
     cells = index["cells"]
     from .mission_deliverable import pack_passage_resolver
 
-    resolve_passage = pack_passage_resolver(None, index["passages"])
     try:
+        from .product_passage_validation import checked_rendered_passages
+        path = str(getattr(store,'path',':memory:'))
+        passages = checked_rendered_passages(Path(path).parent if path != ':memory:'
+                                            else ':memory:', sections, index['passages'])
+        resolve_passage = pack_passage_resolver(None, passages)
         sections = [validate_section(section, live_claim_refs=live_claims,
                                      resolve_cell=lambda cell: cells.get(str(cell.get("ref"))) == dict(cell),
                                      resolve_passage=resolve_passage,
                                      resolve_number=index["numbers"].get, strict=True)
                     for section in sections]
-    except MissionDeliverableError as exc:
+    except (MissionDeliverableError, ValueError, OSError) as exc:
         return {"status": "refused", "memo_status": "authority_validation_failed",
                 "reason": str(exc), "cost_micros": cost_micros}
     checks = _checks(sections, answers, frozen["material"])

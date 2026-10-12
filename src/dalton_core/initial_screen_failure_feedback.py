@@ -301,20 +301,22 @@ def _source_resolvers(authority, sections, pack, frozen_bindings):
         elif isinstance(value,str) and value.startswith('doc-passage:'):used.add(value)
     visit(sections)
     if any(ref not in frozen_bindings for ref in used):raise ValueError('initial-screen source version was not frozen before the call')
-    originals=_checked_originals(Path(authority.store.path).parent,used) if used else {}
+    originals=_checked_originals(Path(authority.store.path).parent,used,include_render_metadata=True) if used else {}
     for ref,found in originals.items():
         if {k:found[k] for k in ('document_ref','document_sha256','start','end')}!=frozen_bindings[ref]:
             raise ValueError('initial-screen original version differs from the frozen call')
     def passage(ref):
         found=originals.get(ref)
         if not found:return None
-        proof[ref]={k:v for k,v in found.items() if k!='text'}
+        proof[ref]={k:v for k,v in found.items() if k not in {'text','render_header'}}
         return found['text']
     # Pack text cannot bypass original-span verification by resolving first.
     for tag in pack.get('tags',{}):
         entry=tag_entry(pack,tag)
         if entry and entry['kind']=='passage' and entry['ref'] in used:
-            if passage(entry['ref'])!=entry.get('text'):
+            from .product_passage_validation import rendered_passage_matches
+            if not rendered_passage_matches(passage(entry['ref']),entry.get('text'),
+                                            originals[entry['ref']].get('render_header')):
                 raise ValueError('initial-screen frozen passage differs from its original')
     return live,cell,passage,proof
 
@@ -323,14 +325,14 @@ MAX_ORIGINALS = 16
 MAX_SOURCE_BYTES = 64_000_000
 SOURCE_TIMEOUT_SECONDS = 4
 
-def _checked_originals(state, refs):
+def _checked_originals(state, refs, *, include_render_metadata=False):
     """One bounded pure-reader process; it has no model or writable authority."""
     import subprocess
     import sys
     if len(refs)>MAX_PASSAGES:raise DiagnosticUnavailable('original_passage_limit')
     code='from dalton_core.initial_screen_failure_feedback import _original_check_main;_original_check_main()'
     try:
-        result=subprocess.run([sys.executable,'-c',code],input=canonical_json({'state_dir':str(state),'refs':sorted(refs)}),
+        result=subprocess.run([sys.executable,'-c',code],input=canonical_json({'state_dir':str(state),'refs':sorted(refs),'include_render_metadata':include_render_metadata}),
             text=True,stdout=subprocess.PIPE,stderr=subprocess.DEVNULL,timeout=SOURCE_TIMEOUT_SECONDS,check=False)
     except subprocess.TimeoutExpired as exc:
         raise DiagnosticUnavailable('original_verification_timeout') from exc
@@ -390,11 +392,11 @@ class _BoundedOriginalSpool:
 def _original_check_main():
     import sys
     request=json.loads(sys.stdin.read(MAX_BYTES+1))
-    try:result=_original_passages(request['state_dir'],request['refs'])
+    try:result=_original_passages(request['state_dir'],request['refs'],include_render_metadata=request.get('include_render_metadata',False))
     except DiagnosticUnavailable as exc:result={'failure_code':exc.code}
     print(canonical_json(result))
 
-def _original_passages(state_dir, refs):
+def _original_passages(state_dir, refs, *, include_render_metadata=False):
     """Strong local originals, once per document, and exact frozen spans."""
     from .planner_paid_output_recovery import _authority_connection
     from .evidence_index import _resolve
@@ -445,6 +447,8 @@ def _original_passages(state_dir, refs):
             if body.text[found['start']:found['end']]!=found['text']:raise ValueError('original passage span differs')
             out[ref]={'document_ref':found['document_ref'],'document_sha256':found['document_sha256'],
                       'passage_hash':content_hash(found['text']),'start':found['start'],'end':found['end'],'text':found['text']}
+            if include_render_metadata and body.title and body.document_date:
+                out[ref]['render_header']=f'《{body.title}》{body.document_date}：管理层发言'
         return out
 
 def _semantic(mission, context, findings):
