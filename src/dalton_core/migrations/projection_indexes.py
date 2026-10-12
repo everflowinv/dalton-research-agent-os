@@ -143,9 +143,22 @@ RESULT_ENVELOPE_FOLD_COVER_INDEX = IndexSpec(
     columns="result_envelope_id, work_order_id, attempt_number, created_at",
     reason="dashboard cold receipt fold reads complete receipt metadata without response JSON pages",
 )
+ATTEMPT_EVENT_FOLD_COVER_INDEX = IndexSpec(
+    name="scheduler_attempt_events_projection_fold_cover",
+    table="scheduler_attempt_events",
+    columns="event_seq, work_order_id, state, attempt_number, event_id, created_at",
+    reason="dashboard cold event fold reads complete state metadata without reason or result authority columns",
+)
+LEASE_FOLD_COVER_INDEX = IndexSpec(
+    name="scheduler_leases_projection_fold_cover",
+    table="scheduler_leases",
+    columns="lease_revision_id, work_order_id, attempt_number, lease_version, expires_at, created_at",
+    reason="dashboard cold lease fold reads complete revision metadata without token or ownership columns",
+)
 SCHEDULER_FOLD_COVER_INDEXES = (
     WORK_ORDER_FOLD_COVER_INDEX, FORMAL_RESULT_FOLD_COVER_INDEX,
-    RESULT_ENVELOPE_FOLD_COVER_INDEX,
+    RESULT_ENVELOPE_FOLD_COVER_INDEX, ATTEMPT_EVENT_FOLD_COVER_INDEX,
+    LEASE_FOLD_COVER_INDEX,
 )
 # Deliberately separate from SCHEDULER_PROJECTION_INDEXES used by worker opens.
 # apply_projection_indexes (also used by service startup) installs this index.

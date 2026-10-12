@@ -26,7 +26,8 @@ from .dashboard import ProjectionWriter, SCHEMA_VERSION
 from .projection_stage_diagnostics import stage_timing
 from .migrations.projection_indexes import (
     WORK_ORDER_FOLD_COVER_INDEX, FORMAL_RESULT_FOLD_COVER_INDEX,
-    RESULT_ENVELOPE_FOLD_COVER_INDEX,
+    RESULT_ENVELOPE_FOLD_COVER_INDEX, ATTEMPT_EVENT_FOLD_COVER_INDEX,
+    LEASE_FOLD_COVER_INDEX,
 )
 from .projection_cancellation import check_cancelled, install_cancel_handler
 from .projection_folds import (
@@ -300,6 +301,7 @@ _ATTEMPT_EVENT_FOLD = AppendOnlyFold(
     "scheduler.latest_events", "scheduler_attempt_events",
     "event_seq, work_order_id, state, attempt_number, event_id, created_at",
     key="event_id", init=dict, reduce=_keyed(lambda row: row["work_order_id"]),
+    cold_cover_index=ATTEMPT_EVENT_FOLD_COVER_INDEX.name,
 )
 _FORMAL_RESULT_FOLD = AppendOnlyFold(
     "scheduler.formal_results", "scheduler_formal_results",
@@ -323,6 +325,7 @@ _LEASE_FOLD = AppendOnlyFold(
     key="lease_revision_id", init=dict,
     reduce=_keyed_max(lambda row: (row["work_order_id"], row["attempt_number"]),
                       lambda row: (row["lease_version"], row["created_at"])),
+    cold_cover_index=LEASE_FOLD_COVER_INDEX.name,
 )
 
 _INVOCATION_FOLD = AppendOnlyFold(
