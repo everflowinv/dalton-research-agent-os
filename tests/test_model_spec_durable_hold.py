@@ -343,7 +343,7 @@ class RequestInFlightTests(unittest.TestCase):
         # lease would buy it twice.
         self.assertEqual(REQUEST_IN_FLIGHT_STATUS, "request_in_flight")
         self.assertEqual(REPAIR_CONTRACT_REF,
-                         "contract:company-model-spec-structured-output-repair:0.11")
+                         "contract:company-model-spec-structured-output-repair:0.13")
         self.assertEqual(REPAIR_CONTRACT["ref"], REPAIR_CONTRACT_REF)
         self.assertEqual(REPAIR_CONTRACT_HASH, content_hash(REPAIR_CONTRACT))
         state_hash = "a" * 64
