@@ -47,7 +47,7 @@ class ModelUnitPriorityTests(unittest.TestCase):
         self.assertEqual(mr.request(self.state,self.request['id'])['attempt_count'],0)
 
     def test_descriptor_parity_with_actual_writer_across_forms_and_statuses(self):
-        for form in ('10-K','10-Q','10-Q/A'):
+        for form in ('10-K','10-K/A','10-Q','10-Q/A'):
             filing={**self.filing,'form':form}
             for context in (self.context,{**self.context,'status':'refused'}, {'status':'available','lines':[],'unresolved_unit_refs':[]}):
                 with self.subTest(form=form,status=context['status']),patch('dalton_core.material_requests.open_request') as writer:

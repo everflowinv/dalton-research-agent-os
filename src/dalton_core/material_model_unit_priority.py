@@ -22,7 +22,7 @@ def unit_gap_request_fields(filing, record):
     if record.get('status')!='available' or not (unresolved_unit_refs(record.get('lines')or[])or record.get('unresolved_unit_refs')):return None
     return dict(requester={'lane':'statement_context','product_ref':filing['ingest_id'],'run_ref':record['version_id'],'section':'exact_xml_units'},
         subject=filing['company_ref'],period=filing['report_date'],
-        need={'kind':'document','doc_kinds':['sec_10k'if filing['form']=='10-K'else'sec_10q'],
+        need={'kind':'document','doc_kinds':['sec_10k'if filing['form'] in {'10-K','10-K/A'}else'sec_10q'],
               'question':'Obtain the original primary SEC filing '+filing['accession']+' for exact XML unit id→namespace measure/divide and full-context numeric fact proof. Opaque unit ids cannot be guessed or inherited from another accession.'},
         source_priority=['indexed_corpus','sec_edgar'],
         acceptance={'min_passages':1,'about_company':True,'date_from':filing['filed'],'date_to':filing['filed'],'document_ref':'sec:filing:'+filing['accession'],'accession':filing['accession'],'cik':filing['cik'],'unit_proof_rule_ref':RULE_REF,
