@@ -3876,13 +3876,15 @@ class MissionSourceDiscoveryCoordinator:
         steps = {"settle": 0.0, "carry": 0.0, "held": 0.0, "acquire": 0.0, "search": 0.0}
 
         active_step = None
+        from .source_discovery_diagnostics import phase
 
         def timed(step: str, call: Callable[[], Any]) -> Any:
             nonlocal active_step
             active_step = step
             started = _monotonic()
             try:
-                return call()
+                with phase(self.source_ref, step):
+                    return call()
             finally:
                 steps[step] += max(0.0, _monotonic() - started)
 

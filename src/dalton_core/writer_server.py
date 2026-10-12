@@ -5827,7 +5827,11 @@ class WriterServer:
             _monotonic, discovery_coordinator_order, discovery_coordinator_state,
         )
 
-        self._retry_pending_first_mission_sec_plan()
+        from .source_discovery_diagnostics import DiagnosticBudget, diagnostic_scope, phase
+
+        diagnostics = DiagnosticBudget()
+        with diagnostic_scope(diagnostics), phase(SEC_SOURCE_REF, "first_mission_preflight"):
+            self._retry_pending_first_mission_sec_plan()
 
         started = _monotonic()
         deadline = started + TICK_BUDGET_SECONDS
@@ -5864,7 +5868,8 @@ class WriterServer:
                     "source_ref": source_ref,
                 }
             else:
-                results[key] = coordinator.dispatch_once(min(deadline, now + share))
+                with diagnostic_scope(diagnostics), phase(source_ref, "coordinator"):
+                    results[key] = coordinator.dispatch_once(min(deadline, now + share))
             state = discovery_coordinator_state(results[key])
             state.update({
                 "position": position,
