@@ -1,4 +1,5 @@
 import json
+import sqlite3
 import tempfile
 import unittest
 from pathlib import Path
@@ -79,6 +80,45 @@ class DayBudgetConfigurationTests(unittest.TestCase):
         with self.assertRaises(ValueError):
             configuration.synchronize_day_budget_policy(self.state, wrong, cap_usd=2)
         self.assertEqual(self.models[0].read_bytes(), before)
+
+    def test_dry_run_closed_ledger_creates_no_sidecars_locks_or_receipts(self):
+        def files():
+            return {p.relative_to(self.root): (p.read_bytes(), p.stat().st_mtime_ns)
+                    for p in self.root.rglob('*') if p.is_file()}
+        for empty_wal in (False, True):
+            with self.subTest(empty_wal=empty_wal):
+                if empty_wal:
+                    Path(str(self.db) + '-wal').write_bytes(b'')
+                before = files()
+                result = configuration.synchronize_day_budget_policy(
+                    self.state, cap_usd=2, dry_run=True)
+                self.assertEqual(result['status'], 'planned')
+                self.assertEqual(files(), before)
+
+    def test_dry_run_reads_live_wal_policy_without_using_checkpoint_snapshot(self):
+        with ThesisImpactBudgetStore(self.db) as budget:
+            budget.register_policy(policy_version_id='budget:live',
+                                   day_cap_micros=2_000_000, prior_version_id='budget:1')
+            for path in self.models:
+                value = json.loads(path.read_text())
+                value['budget_policy_ref'] = 'budget:live'
+                path.write_text(json.dumps(value))
+            with patch('dalton_core.budget_policy_snapshot.read_checkpointed_budget_policy',
+                       side_effect=AssertionError('must read live WAL')):
+                result = configuration.synchronize_day_budget_policy(
+                    self.state, cap_usd=3, dry_run=True)
+            self.assertEqual(result['status'], 'planned')
+
+    def test_dry_run_refuses_missing_policy_and_incomplete_nonempty_wal(self):
+        from dalton_core.thesis_impact_budget import ThesisImpactBudgetConflict
+        value = json.loads(self.models[0].read_text())
+        value['budget_policy_ref'] = 'budget:missing'
+        self.models[0].write_text(json.dumps(value))
+        with self.assertRaises(ThesisImpactBudgetConflict):
+            configuration.synchronize_day_budget_policy(self.state, cap_usd=2, dry_run=True)
+        Path(str(self.db) + '-wal').write_bytes(b'uncheckpointed-pages')
+        with self.assertRaisesRegex(sqlite3.OperationalError, 'nonempty WAL'):
+            configuration.synchronize_day_budget_policy(self.state, cap_usd=2, dry_run=True)
 
 
 if __name__ == "__main__":
