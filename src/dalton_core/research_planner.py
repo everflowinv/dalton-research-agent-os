@@ -1283,7 +1283,32 @@ def _projection_hash_for_state(state: Mapping[str, Any]) -> str:
     return content_hash(rule)
 
 
+def _history_note_prompt_schema(state: Mapping[str, Any]) -> dict[str, Any]:
+    # Ordinary and legacy planning prompts remain byte-identical. A new target
+    # is an explicit state change and carries its exact extended output shape.
+    if not any(target.get("schema_version") == "financial-note-target-0.2"
+               for company in state.get("companies", ())
+               for document in company.get("readable_documents", ())
+               for target in document.get("evidence_targets", ())):
+        return OUTPUT_SCHEMA
+    import copy
+    schema = copy.deepcopy(OUTPUT_SCHEMA)
+    props = schema["properties"]["inquiries"]["items"]["properties"]["directed_document"]["properties"]
+    legacy = props["evidence_target"]
+    history = copy.deepcopy(legacy)
+    history["required"] += ["statement_context_ref", "statement_context_hash"]
+    target = history["properties"]
+    target["schema_version"] = {"const": "financial-note-target-0.2"}
+    target["form"] = {"enum": ["10-K", "10-Q", "10-K/A", "10-Q/A"]}
+    target["statement_context_ref"] = {"type": ["string", "null"]}
+    target["statement_context_hash"] = {"type": ["string", "null"]}
+    props["evidence_target"] = {"oneOf": [legacy, history]}
+    return schema
+
+
 def build_prompt(state: Mapping[str, Any]) -> str:
+    output_schema = _history_note_prompt_schema(state)
+    note_original = "filing" if output_schema is not OUTPUT_SCHEMA else "10-K"
     validation_notice = (
         "initial_screen_validation_feedback: verified draft defects, not evidence or retry authority. "
         "Fix cited defects within normal gates; invent no facts or unrelated material requests. "
@@ -1342,7 +1367,7 @@ def build_prompt(state: Mapping[str, Any]) -> str:
           "subject/prior_review: attachment proves neither relevance nor filing/call eligibility. Use bounded "
           "original-language query_terms (synonyms/translations allowed), explain query_rationale, obey "
           "document_research_policy; invent no document/version/path/route. A miss is not absence; revise "
-          "retrieval/context when warranted. Copy only an exact listed evidence_target: cited 10-K "
+          f"retrieval/context when warranted. Copy only an exact listed evidence_target: cited {note_original} "
           "diluted-EPS-numerator note text for its bound company/document/filing/period, not numeric/formula "
           "authority. Never retag it; omit for ordinary qualitative work.\n\n"
         f"{numeric_notice}"
@@ -1409,7 +1434,7 @@ def build_prompt(state: Mapping[str, Any]) -> str:
         "owner's floor, never lower it. Unjudged items keep the standard.\n\nName only listed company_ref/item_ref; "
         "Inventing either voids the whole plan. Return fewer directives, never padding.\nReturn raw strict JSON "
         "matching OUTPUT_SCHEMA, no markdown fence and no prose outside it.\n"
-        f"OUTPUT_SCHEMA={canonical_json(OUTPUT_SCHEMA)}\n"
+        f"OUTPUT_SCHEMA={canonical_json(output_schema)}\n"
         f"RESEARCH_STATE={canonical_json(state)}"
     )
 

@@ -109,13 +109,27 @@ def _statement_filing(connection: Any, target: Mapping[str, Any],
           and row["form"] == target["form"]
           and registration["document_ref"] == f"sec:filing:{row['accession']}",
           "statement filing and registered original disagree")
-    lines = connection.execute(
-        "SELECT * FROM coverage_mission_statement_lines WHERE ingest_id=?",
-        (row["ingest_id"],),
-    ).fetchall()
+    if target["schema_version"] == "financial-note-target-0.2":
+        from .statement_context import statement_rows, context_record
+        try:
+            lines = statement_rows(connection, row["ingest_id"],
+                                   version_id=target["statement_context_ref"], latest=False)
+            context_hash = (None if target["statement_context_ref"] is None else
+                            context_record(connection, target["statement_context_ref"])["content_hash"])
+            _need(context_hash == target["statement_context_hash"], "financial note context hash differs")
+        except ValueError as exc:
+            raise FinancialNoteEvidenceError(str(exc)) from exc
+    else:
+        lines = [dict(line) for line in connection.execute(
+            "SELECT * FROM coverage_mission_statement_lines WHERE ingest_id=?",
+            (row["ingest_id"],),
+        ).fetchall()]
     for item in target["periods"]:
         selected = [line for line in lines
-                    if line["period_start"] == item["period_start"]
+                    if (target["schema_version"] == "financial-note-target-0.1"
+                        or (line["dimension_axis"] is None and line["dimension_member"] is None
+                            and line.get("dimension_count", 0) == 0 and not line.get("dimensions")))
+                    and line["period_start"] == item["period_start"]
                     and line["period_end"] == item["period_end"]]
         eps_rows = [line for line in selected if not bool(line["is_breakdown"])
                     and str(line["concept"]).split(":")[-1]
@@ -380,6 +394,8 @@ def resolve_financial_note_evidence(
     derived_targets = financial_note_targets_for_registration(
         connection=core_connection, mission=mission,
         company_ref=admission["company_ref"], registration=registration,
+        target_schema_version=target["schema_version"],
+        context_version_ref=target.get("statement_context_ref"), latest_context=False,
     )
     _need(sum(item == target for item in derived_targets) == 1,
           "financial note target differs from current filing authority")
@@ -518,6 +534,12 @@ def resolve_financial_note_evidence(
           "registered note passage proof differs from the promoted execution")
     candidate = payload["draft_proof"]["output"]["candidate"]
     _need(isinstance(candidate, Mapping), "promoted financial note has no candidate")
+    if target["schema_version"] == "financial-note-target-0.2":
+        from .document_research_strategy import validate_history_note_candidate
+        try:
+            validate_history_note_candidate(target, candidate)
+        except ValueError as exc:
+            raise FinancialNoteEvidenceError(str(exc)) from exc
     indexes = candidate.get("cited_match_indexes")
     _need(isinstance(indexes, list) and indexes,
           "promoted financial note has no cited passages")
@@ -531,6 +553,9 @@ def resolve_financial_note_evidence(
     body = {
         "schema_version": EVIDENCE_SCHEMA_VERSION,
         "target_ref": target["target_ref"], "company_ref": admission["company_ref"],
+        **({"statement_context_ref": target["statement_context_ref"],
+            "statement_context_hash": target["statement_context_hash"]}
+           if target["schema_version"] == "financial-note-target-0.2" else {}),
         "mission_version_ref": admission["mission_version_ref"],
         "mission_version_hash": admission["mission_version_hash"],
         "admission_ref": admission["id"], "admission_hash": admission["content_hash"],

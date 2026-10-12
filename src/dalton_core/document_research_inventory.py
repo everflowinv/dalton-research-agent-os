@@ -18,10 +18,13 @@ from .document_research import (
     build_document_research_registry, validate_document_research_policy,
 )
 from .company_model_annual_projection import AnnualProjectionError, verify_statement_filing
-from .company_model_series import ANNUAL_MAX_DAYS, NINE_MONTH_MAX_DAYS
+from .company_model_series import (
+    ANNUAL_MAX_DAYS, NINE_MONTH_MAX_DAYS, QUARTER_MIN_DAYS, QUARTER_MAX_DAYS,
+)
 from .document_research_strategy import (
     FINANCIAL_NOTE_TARGET_REF,
     FINANCIAL_NOTE_TARGET_SCHEMA_VERSION,
+    FINANCIAL_NOTE_HISTORY_TARGET_SCHEMA_VERSION, FINANCIAL_NOTE_FORMS,
     inventory_document,
     normalize_evidence_target,
 )
@@ -84,7 +87,7 @@ def _unavailable_financial_note_target(
     }]
 
 
-def financial_note_targets_for_registration(
+def _legacy_financial_note_targets_for_registration(
     *, connection: Any, mission: Mapping[str, Any], company_ref: str,
     registration: Mapping[str, Any],
 ) -> list[dict[str, Any]]:
@@ -186,6 +189,121 @@ def financial_note_targets_for_registration(
         "applicability_kind": "annual", "periods": annual_periods,
     }
     return [normalize_evidence_target(target)]
+
+def financial_note_targets_for_registration(
+    *, connection: Any, mission: Mapping[str, Any], company_ref: str,
+    registration: Mapping[str, Any],
+    target_schema_version: str | None = None,
+    context_version_ref: str | None = None, latest_context: bool = True,
+) -> list[dict[str, Any]]:
+    """Advertise only exact EPS/share periods actually held by this original.
+
+    Version0.1 remains byte-identical for replay. Version0.2 includes comparative
+    quarters and annual periods; filing report_date is not a data-period filter.
+    Half-year/YTD and ambiguous or dimensional totals are never note targets.
+    """
+    if target_schema_version == FINANCIAL_NOTE_TARGET_SCHEMA_VERSION:
+        return _legacy_financial_note_targets_for_registration(
+            connection=connection, mission=mission, company_ref=company_ref,
+            registration=registration)
+    if target_schema_version not in {None, FINANCIAL_NOTE_HISTORY_TARGET_SCHEMA_VERSION}:
+        raise ValueError("unsupported financial note target schema")
+    authority = registration.get("source_authority", {})
+    if (registration.get("source_ref") != "source:sec-edgar"
+            or authority.get("kind") != "coverage-mission-acquired-document"
+            or authority.get("mission_version_ref") != mission.get("id")
+            or authority.get("company_ref") != company_ref):
+        return []
+    ref = registration.get("document_ref")
+    if not isinstance(ref, str) or not ref.startswith("sec:filing:"):
+        return []
+    tables = {r[0] for r in connection.execute(
+        "SELECT name FROM sqlite_master WHERE type='table' AND name IN "
+        "('coverage_mission_statement_filings','coverage_mission_statement_dispatches',"
+        "'coverage_mission_statement_lines')")}
+    if len(tables) != 3:
+        return []
+    rows = connection.execute(
+        "SELECT f.*,d.mission_version_ref AS dispatch_mission_version_ref,"
+        "d.mission_version_hash AS dispatch_mission_version_hash,"
+        "d.company_ref AS dispatch_company_ref,d.form AS dispatch_form,"
+        "d.status AS dispatch_status FROM coverage_mission_statement_filings f "
+        "JOIN coverage_mission_statement_dispatches d ON d.dispatch_id=f.dispatch_id "
+        "WHERE f.company_ref=? AND f.accession=?",
+        (company_ref, ref.removeprefix("sec:filing:"))).fetchall()
+    if len(rows) != 1:
+        return []
+    filing = dict(rows[0])
+    if (filing["form"] not in FINANCIAL_NOTE_FORMS
+            or filing["dispatch_form"] != filing["form"]
+            or filing["dispatch_mission_version_ref"] != mission.get("id")
+            or filing["dispatch_mission_version_hash"] != mission.get("content_hash")
+            or filing["dispatch_company_ref"] != company_ref
+            or filing["dispatch_status"] != "succeeded"):
+        return []
+    try:
+        verify_statement_filing(connection, filing)
+    except (AnnualProjectionError, KeyError, TypeError, ValueError):
+        return []
+    from .statement_context import statement_rows, context_record, StatementContextError
+    try:
+        source_rows = statement_rows(connection, filing["ingest_id"],
+                                    version_id=context_version_ref, latest=latest_context)
+        contexts = {row["statement_context_ref"] for row in source_rows if row.get("statement_context_ref")}
+        if len(contexts) > 1:
+            return []
+        context_ref = next(iter(contexts), None)
+        context_hash = None if context_ref is None else context_record(connection, context_ref)["content_hash"]
+    except StatementContextError:
+        return []
+    # Exact modern contexts include the same source/unit supplements used by
+    # model inputs. Version0.1 continues to inspect only its frozen base table.
+    periods = {}
+    for row in source_rows:
+        if (row["statement"] != "income" or row["concept"] not in {
+                _DILUTED_EPS_CONCEPT, _DILUTED_SHARES_CONCEPT}
+                or row["period_start"] is None or row["period_end"] is None or row["value"] is None
+                or bool(row["is_breakdown"]) or row.get("dimension_axis") is not None
+                or row.get("dimension_member") is not None or row.get("dimension_count", 0) != 0
+                or row.get("dimensions")):
+            continue
+        periods.setdefault((row["period_start"], row["period_end"]), {}).setdefault(
+            row["concept"], []).append(row["unit"])
+    targets = []
+    for (start, end), held in sorted(periods.items()):
+        eps, shares = held.get(_DILUTED_EPS_CONCEPT, []), held.get(_DILUTED_SHARES_CONCEPT, [])
+        if (len(eps) != 1 or len(shares) != 1 or not isinstance(eps[0], str)
+                or re.fullmatch(r"[a-z]{3}PerShare", eps[0], re.IGNORECASE) is None
+                or not isinstance(shares[0], str) or shares[0].casefold() != "shares"):
+            continue
+        try:
+            days = (date.fromisoformat(end) - date.fromisoformat(start)).days + 1
+        except (TypeError, ValueError):
+            continue
+        kind = ("annual" if NINE_MONTH_MAX_DAYS < days <= ANNUAL_MAX_DAYS
+                else "quarter" if QUARTER_MIN_DAYS <= days <= QUARTER_MAX_DAYS else None)
+        if kind is None:
+            continue
+        targets.append(normalize_evidence_target({
+            "schema_version": FINANCIAL_NOTE_HISTORY_TARGET_SCHEMA_VERSION,
+            "target_ref": FINANCIAL_NOTE_TARGET_REF, "kind": "diluted_eps_numerator",
+            "statement_ingest_ref": filing["ingest_id"],
+            "statement_filing_hash": filing["content_hash"],
+            "statement_context_ref": context_ref, "statement_context_hash": context_hash,
+            "accession": filing["accession"], "form": filing["form"],
+            "applicability_kind": kind,
+            "periods": [{"period_start": start, "period_end": end}],
+        }))
+    if target_schema_version is None:
+        legacy = _legacy_financial_note_targets_for_registration(
+            connection=connection, mission=mission, company_ref=company_ref,
+            registration=registration)
+        covered = {(item["applicability_kind"], tuple(
+            (p["period_start"], p["period_end"]) for p in item["periods"])) for item in legacy}
+        return legacy + [item for item in targets if (item["applicability_kind"], tuple(
+            (p["period_start"], p["period_end"]) for p in item["periods"])) not in covered]
+    return targets
+
 
 
 def validate_inventory_config(value: Any) -> dict[str, Any]:

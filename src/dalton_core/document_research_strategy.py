@@ -19,6 +19,8 @@ from .store import content_hash
 STRATEGY_VERSION = "directed-document:0.1"
 FINANCIAL_NOTE_TARGET_REF = "financial_note:diluted_eps_numerator:0.1"
 FINANCIAL_NOTE_TARGET_SCHEMA_VERSION = "financial-note-target-0.1"
+FINANCIAL_NOTE_HISTORY_TARGET_SCHEMA_VERSION = "financial-note-target-0.2"
+FINANCIAL_NOTE_FORMS = frozenset({"10-Q", "10-K", "10-Q/A", "10-K/A"})
 _STRATEGY_REQUIRED_FIELDS = frozenset({
     "strategy_version", "document_ref", "document_version_hash",
     "query_terms", "query_rationale",
@@ -41,12 +43,18 @@ class DocumentResearchStrategyError(ValueError):
 def normalize_evidence_target(value: Any) -> dict[str, Any]:
     """Validate the exact typed note target selected from document inventory."""
 
-    if not isinstance(value, Mapping) or set(value) != FINANCIAL_NOTE_TARGET_FIELDS:
+    fields = (FINANCIAL_NOTE_TARGET_FIELDS | {"statement_context_ref", "statement_context_hash"}
+              if isinstance(value, Mapping) and value.get("schema_version") == FINANCIAL_NOTE_HISTORY_TARGET_SCHEMA_VERSION
+              else FINANCIAL_NOTE_TARGET_FIELDS)
+    if not isinstance(value, Mapping) or set(value) != fields:
         raise DocumentResearchStrategyError("financial note target has an invalid closed shape")
-    if (value["schema_version"] != FINANCIAL_NOTE_TARGET_SCHEMA_VERSION
+    if (value["schema_version"] not in {FINANCIAL_NOTE_TARGET_SCHEMA_VERSION,
+                                        FINANCIAL_NOTE_HISTORY_TARGET_SCHEMA_VERSION}
             or value["target_ref"] != FINANCIAL_NOTE_TARGET_REF
             or value["kind"] != "diluted_eps_numerator"
-            or value["form"] != "10-K"
+            or value["form"] not in (
+                {"10-K"} if value["schema_version"] == FINANCIAL_NOTE_TARGET_SCHEMA_VERSION
+                else FINANCIAL_NOTE_FORMS)
             or value["applicability_kind"] not in {"annual", "quarter"}):
         raise DocumentResearchStrategyError("financial note target is unsupported")
     for name in ("statement_ingest_ref", "accession"):
@@ -59,9 +67,18 @@ def normalize_evidence_target(value: Any) -> dict[str, Any]:
     digest = value["statement_filing_hash"]
     if not isinstance(digest, str) or _HASH.fullmatch(digest) is None:
         raise DocumentResearchStrategyError("financial note statement hash is invalid")
+    if value["schema_version"] == FINANCIAL_NOTE_HISTORY_TARGET_SCHEMA_VERSION:
+        ref, digest = value["statement_context_ref"], value["statement_context_hash"]
+        if (ref is None) != (digest is None) or (ref is not None and (
+                not isinstance(ref, str) or re.fullmatch(r"statement-context:[0-9a-f]{32}", ref) is None
+                or not isinstance(digest, str) or _HASH.fullmatch(digest) is None)):
+            raise DocumentResearchStrategyError("financial note statement context identity is invalid")
     periods = value["periods"]
     if not isinstance(periods, list) or not periods:
         raise DocumentResearchStrategyError("financial note target periods are empty")
+    if (value["schema_version"] == FINANCIAL_NOTE_HISTORY_TARGET_SCHEMA_VERSION
+            and len(periods) != 1):
+        raise DocumentResearchStrategyError("history note needs one exact period")
     normalized_periods = []
     for period in periods:
         if not isinstance(period, Mapping) or set(period) != {"period_start", "period_end"}:
@@ -97,6 +114,27 @@ def validate_financial_note_target(value: Any) -> dict[str, Any]:
     """Public canonical validator shared by target producers and consumers."""
 
     return normalize_evidence_target(value)
+
+
+
+def history_note_candidate_scope(target: Any) -> dict[str, str]:
+    """Closed text-result scope for a single version0.2 statement period."""
+    target = normalize_evidence_target(target)
+    if (target["schema_version"] != FINANCIAL_NOTE_HISTORY_TARGET_SCHEMA_VERSION
+            or len(target["periods"]) != 1):
+        raise DocumentResearchStrategyError("history note needs one exact period")
+    period = target["periods"][0]
+    return {"metric_or_aspect": "diluted EPS numerator attribution",
+            "period": period["period_start"] + "/" + period["period_end"],
+            "basis": "filed note"}
+
+
+def validate_history_note_candidate(target: Any, candidate: Any) -> None:
+    """A note is neither generic prose nor a different period's authority."""
+    expected = history_note_candidate_scope(target)
+    if (not isinstance(candidate, Mapping)
+            or any(candidate.get(key) != value for key, value in expected.items())):
+        raise DocumentResearchStrategyError("history note candidate metric/period/basis differs from exact target")
 
 
 def normalize_strategy(value: Any, *, max_query_terms: int,

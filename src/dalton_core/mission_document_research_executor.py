@@ -1221,6 +1221,18 @@ def _derive(admission: Mapping[str, Any], scheduler: Scheduler,
             draft_prompt_builder = (draft_prompt_v2 if draft_contract
                                     == DRAFT_CONTRACT_VERSION_V2 else draft_prompt)
         prompt = draft_prompt_builder(question=question, search_proof=proof)
+        note_target = (admission["planner_inquiry"].get("directed_document") or {}).get("evidence_target")
+        if isinstance(note_target, Mapping) and note_target.get("schema_version") == "financial-note-target-0.2":
+            from .document_research_strategy import normalize_evidence_target, history_note_candidate_scope
+            note_target = normalize_evidence_target(note_target)
+            body = json.loads(prompt)
+            body["financial_note_target"] = note_target
+            body["required_candidate_scope"] = history_note_candidate_scope(note_target)
+            body["task"] += (" For this typed EPS note, copy required_candidate_scope exactly. "
+                "Answer only attribution applicable to that exact filing and period; if the original "
+                "does not establish it, return insufficient_evidence. Do not infer a numerator amount.")
+            prompt = canonical_json(body)
+            metadata["financial_note_target"] = note_target
         context_hash = content_hash(proof["matches"])
         binding = {
             "prompt_hash": content_hash(prompt), "search_proof_hash": proof["content_hash"],
@@ -1251,6 +1263,18 @@ def _derive(admission: Mapping[str, Any], scheduler: Scheduler,
         prompt = (verifier_prompt if verifier_contract == "0.1" else verifier_prompt_v2)(
             question=question, search_proof=proof,
             draft=draft["output"], producer_proof=producer)
+        note_target = (admission["planner_inquiry"].get("directed_document") or {}).get("evidence_target")
+        if isinstance(note_target, Mapping) and note_target.get("schema_version") == "financial-note-target-0.2":
+            from .document_research_strategy import normalize_evidence_target, history_note_candidate_scope
+            note_target = normalize_evidence_target(note_target)
+            body = json.loads(prompt)
+            body["financial_note_target"] = note_target
+            body["required_candidate_scope"] = history_note_candidate_scope(note_target)
+            body["task"] += (" Verify that the cited original establishes this EPS attribution for "
+                "the exact bound filing and period. A different period or missing applicability is "
+                "an error, not permission to infer an amount or apply an annual note to other quarters.")
+            prompt = canonical_json(body)
+            metadata["financial_note_target"] = note_target
         binding = {
             "prompt_hash": content_hash(prompt), "draft_hash": draft["output_hash"],
             "search_proof_hash": proof["content_hash"],

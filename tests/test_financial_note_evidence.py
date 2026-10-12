@@ -257,7 +257,8 @@ class FinancialNoteExecutionCheckpointTests(unittest.TestCase):
 
 class FinancialNoteResolverTests(unittest.TestCase):
     @staticmethod
-    def _replace_statement_filing(fixture):
+    def _replace_statement_filing(fixture, *, form="10-K", start="2024-09-01",
+                                  end="2025-08-31", report_date="2025-08-31"):
         connection = fixture.store.connection
         old = connection.execute(
             "SELECT dispatch_id FROM coverage_mission_statement_filings"
@@ -271,7 +272,7 @@ class FinancialNoteResolverTests(unittest.TestCase):
         connection.execute(trigger_sql)
         identity = {
             "company_ref": COMPANY, "cik": fixture.source.accession[:10],
-            "accession": fixture.source.accession, "form": "10-K", "line_count": 2,
+            "accession": fixture.source.accession, "form": form, "line_count": 2,
         }
         ingest = "statement-ingest:" + content_hash(identity)[:32]
         rows = [
@@ -279,19 +280,19 @@ class FinancialNoteResolverTests(unittest.TestCase):
              "label": "Diluted earnings per share", "level": 0,
              "parent_concept": None, "is_breakdown": False,
              "dimension_axis": None, "dimension_member": None, "dimension_count": 0,
-             "period_start": "2024-09-01", "period_end": "2025-08-31",
+             "period_start": start, "period_end": end,
              "value": "10.5", "unit": "USDPerShare", "balance": None},
             {"statement": "income",
              "concept": "us-gaap:WeightedAverageNumberOfDilutedSharesOutstanding",
              "label": "Diluted weighted average shares", "level": 0,
              "parent_concept": None, "is_breakdown": False,
              "dimension_axis": None, "dimension_member": None, "dimension_count": 0,
-             "period_start": "2024-09-01", "period_end": "2025-08-31",
+             "period_start": start, "period_end": end,
              "value": "10", "unit": "shares", "balance": None},
         ]
         body = {
             **identity, "entity_name": "Test issuer", "filed": "2025-10-01",
-            "report_date": "2025-08-31",
+            "report_date": report_date,
             "source_record_refs": ["raw-sink:" + "1" * 64],
             "governance_ref": "governance:test", "governance_hash": "2" * 64,
         }
@@ -300,14 +301,14 @@ class FinancialNoteResolverTests(unittest.TestCase):
         with coverage._transaction() as cursor:
             cursor.execute(
                 "UPDATE coverage_mission_statement_dispatches SET "
-                "mission_version_ref=?,mission_version_hash=?,company_ref=?,form='10-K',"
+                "mission_version_ref=?,mission_version_hash=?,company_ref=?,form=?,"
                 "status='succeeded' WHERE dispatch_id=?",
-                (fixture.mission["id"], fixture.mission["content_hash"], COMPANY,
+                (fixture.mission["id"], fixture.mission["content_hash"], COMPANY, form,
                  old["dispatch_id"]))
             cursor.execute(
                 "INSERT INTO coverage_mission_statement_filings VALUES(?,?,?,?,?,?,?,?,?,?,?,?,?,?,?)",
                 (ingest, old["dispatch_id"], COMPANY, identity["cik"], body["entity_name"],
-                 identity["accession"], "10-K", body["filed"], body["report_date"], 2,
+                 identity["accession"], form, body["filed"], body["report_date"], 2,
                  json.dumps(body["source_record_refs"], separators=(",", ":")),
                  body["governance_ref"], body["governance_hash"],
                  fixture.mission["created_at"], filing_hash))
@@ -324,10 +325,12 @@ class FinancialNoteResolverTests(unittest.TestCase):
                      line["period_end"], line["value"], line["unit"], line["balance"]))
         return ingest, filing_hash
 
-    def _completed_typed(self):
+    def _completed_typed(self, *, target_options=None):
         with patch("tests.test_research_plan_annual_report.TEXT", NOTE_TEXT):
             fixture = MissionAnnualFixture(self, company_in_mandate=True, auto_commit=True)
-        ingest, filing_hash = self._replace_statement_filing(fixture)
+        options = target_options or {}
+        ingest, filing_hash = self._replace_statement_filing(fixture, **{
+            key: options[key] for key in ("form", "start", "end", "report_date") if key in options})
         document_ref = f"sec:filing:{fixture.source.accession}"
 
         class Launcher:
@@ -396,6 +399,12 @@ class FinancialNoteResolverTests(unittest.TestCase):
             "form": "10-K", "applicability_kind": "annual",
             "periods": [{"period_start": "2024-09-01", "period_end": "2025-08-31"}],
         }
+        if options:
+            target.update({"schema_version": "financial-note-target-0.2",
+                           "form": options.get("form", "10-K"),
+                           "statement_context_ref": None, "statement_context_hash": None,
+                           "applicability_kind": options["kind"],
+                           "periods": [{"period_start": options["start"], "period_end": options["end"]}]})
         inquiry = {
             "rank": 0, "company_ref": COMPANY,
             "question": "What disclosed adjustment defines the diluted EPS numerator?",
@@ -444,7 +453,8 @@ class FinancialNoteResolverTests(unittest.TestCase):
             "schema_version": "0.1", "status": "answered", "answer": statement,
             "candidate": {"normalized_statement": statement,
                           "metric_or_aspect": "diluted EPS numerator attribution",
-                          "period": "year ended 2025-08-31", "basis": "filed note",
+                          "period": (options["start"] + "/" + options["end"] if options
+                                     else "year ended 2025-08-31"), "basis": "filed note",
                           "cited_match_indexes": [0]}, "missing": []})
         verifier = document_fixtures.RouteBoundCountingFakeAdapter(
             document_fixtures.passing_verifier_reply)
