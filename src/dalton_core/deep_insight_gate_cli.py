@@ -230,7 +230,7 @@ def valuation_rows(store: Any, company_ref: str) -> list[dict[str, Any]]:
 #: refused under an old rule stayed refused after the rule was fixed, until the
 #: dossier happened to move.  Bump this when the drafting, repair or refusal
 #: rules change and every such hold lifts on the next tick.
-GATE_DRAFTING_CONTRACT = "deep-insight-gate-drafting:2026-10-11-execution-separation"
+GATE_DRAFTING_CONTRACT = "deep-insight-gate-drafting:2026-10-12-source-bound-accounting-quiesce"
 
 
 def deep_insight_company_source_fingerprint(
@@ -1253,6 +1253,10 @@ def run_gate(
         "failure_reason": None,
         "formal_authority_writes": 0,
     }
+    from .deep_insight_gate_quiesce import GateQuiesced, GateQuiesceUnproved
+    from .deep_insight_gate_execution import GateExecutionStopped
+    executions = []
+    run_accounting = None
     store = DaltonStore(str(state_dir / "core.sqlite"))
     try:
         missions = CoverageMissionAuthority(store)
@@ -1485,8 +1489,8 @@ def run_gate(
                             "failure_reason": "no model configured"})
             return summary
 
-        config = freeze_shared_budget_policy(json.loads(
-            Path(model_config_path).expanduser().read_text(encoding="utf-8")))
+        producer_bytes = Path(model_config_path).expanduser().read_bytes()
+        config = freeze_shared_budget_policy(json.loads(producer_bytes))
         run_budget = resolve_run_budget(config, "deep_insight_gate", defaults={
             "max_cost_usd": MAX_RUN_COST_USD, "max_units": len(GROUPS)})
         run_cost_micros = int(float(run_budget["max_cost_usd"]) * 1_000_000)
@@ -1501,10 +1505,13 @@ def run_gate(
 
         factory = model_factory or (lambda: build(config))
         verifier_factory = verifier_model_factory
-        if verifier_factory is None and verifier_model_config_path is not None:
-            verifier_config = freeze_shared_budget_policy(json.loads(
-                Path(verifier_model_config_path).expanduser().read_text(encoding="utf-8")))
-            verifier_factory = lambda: build(verifier_config)  # noqa: E731
+        verifier_bytes = None
+        verifier_config = {}
+        if verifier_model_config_path is not None:
+            verifier_bytes = Path(verifier_model_config_path).expanduser().read_bytes()
+            verifier_config = freeze_shared_budget_policy(json.loads(verifier_bytes))
+            if verifier_factory is None:
+                verifier_factory = lambda: build(verifier_config)  # noqa: E731
         if verifier_factory is None:
             summary.update({
                 "status": "held", "gate_status": "no_verifier",
@@ -1513,6 +1520,16 @@ def run_gate(
                                    "verdict from a different model family (D2)")})
             return summary
         model = factory()
+        prebuilt_verifier = None
+        if isinstance(model,CockpitModel):
+            if verifier_bytes is None:
+                raise ValueError('a paid deep-gate run requires frozen verifier configuration bytes')
+            prebuilt_verifier = verifier_factory()
+            if (not isinstance(prebuilt_verifier,CockpitModel)
+                    or prebuilt_verifier.scheduler_db != model.scheduler_db
+                    or any(prebuilt_verifier.config.get(k)!=model.config.get(k)
+                           for k in ('budget_db','model_router_db'))):
+                raise ValueError('deep-gate producer/verifier must use one source-bound accounting ledger')
         producer_reserve = int(float(getattr(model, "budget_for", lambda p: {
             "max_cost_usd": MAX_COST_USD})("deep_insight_gate")["max_cost_usd"]) * 1_000_000)
         verifier_budget = resolve_call_budget(
@@ -1587,7 +1604,62 @@ def run_gate(
             if limited:
                 wanted = limited
             summary["redrafted_questions"] = list(targeted)
+        # Production always uses the source-bound cost index. Legacy test
+        # doubles do not own a Scheduler or paid ledger and keep their old API.
+        gate_control = None
+        if isinstance(model, CockpitModel):
+            if verifier_bytes is None:
+                raise ValueError('a paid deep-gate run requires frozen verifier configuration bytes')
+            from .deep_insight_gate_accounting import DeepGateAccounting
+            from .deep_insight_gate_execution import GateExecution
+            from .deep_insight_gate_quiesce import RunQuiesce
+            from .deep_insight_gate_draft import build_group_prompt
+            prompts = {g:build_group_prompt(group=g,
+                questions={r:question_by_ref[r] for r in GROUP_QUESTIONS[g]},
+                material=plan[g][0],company=company,prior_answers=prior_bodies,
+                notes=plan[g][1],review=draft_review) for g in GROUPS}
+            run_accounting = DeepGateAccounting(model,prompts,company_ref=chosen)
+            consumer_inputs={g:{'questions':{r:question_by_ref[r] for r in GROUP_QUESTIONS[g]},
+                'material':plan[g][0],'company':company,'prior_answers':prior_bodies,
+                'notes':plan[g][1],'review':draft_review}for g in GROUPS}
+            run_accounting.bind_consumer(consumer_inputs,wanted=wanted)
+            if not run_accounting.scope['complete']:
+                try:run_accounting.import_legacy()
+                except ValueError as exc:
+                    summary['legacy_fee_import']={'status':'unproved','reason':str(exc)}
+            # Authorizations are control records, not dispatches. Prepare the
+            # finite old TIMEOUT set before a paid step or a resume checkpoint.
+            old_steps={};old_proof={}
+            try:
+                _,old_steps,old_proof=run_accounting.snapshot()
+                for entry in run_accounting.entries:
+                    last=old_steps.get(entry['request_id'])
+                    if (entry['group']in wanted and last is not None
+                            and last[2]['terminal_state']=='failed' and old_proof['unknown_work_refs']):
+                        run_accounting.recovery_grant({'mission':mission},group=entry['group'])
+                        break
+            except ValueError as exc:
+                summary['execution_recovery']={'status':'not_authorized','reason':str(exc),
+                    'next_action':'revalidate exact old task and human budget authority; do not repurchase'}
+            retained_units = int(run_accounting.scope['original_run_budget'].get('max_units',len(GROUPS)))
+            wanted = [g for g in wanted if g in GROUPS[:min(max_groups,retained_units)]]
+            gate_control = RunQuiesce(summary_dir,model_config_path,verifier_model_config_path,
+                producer_bytes=producer_bytes,verifier_bytes=verifier_bytes,
+                accounting=run_accounting,company_ref=chosen,
+                source_fingerprint=expected_source_fingerprint)
+            prior_bills={b['work_ref']:b for b in old_proof.get('bills',[])}
+            free_groups={e['group']for e in run_accounting.entries
+                if e['request_id']in old_steps and old_steps[e['request_id']][2]['terminal_state']=='succeeded'
+                and old_steps[e['request_id']][0].metadata.get('mission_version_ref')==mission['id']
+                and prior_bills[old_steps[e['request_id']][0].id]['mission_hashes']==[mission['content_hash']]}
+            base_model=model
+            model=GateExecution(base_model,run_accounting,run_micros=run_cost_micros,
+                                verifier_micros=verifier_reserve,quiesce=gate_control)
+            executions.append(model)
         for group in wanted:
+            if gate_control is not None:
+                remaining=sum(bool(plan[g][0])and g not in free_groups for g in wanted[wanted.index(group)+1:])
+                model.stage('normal',group,future_groups=remaining)
             rows, notes = plan[group]
             if not rows:
                 group_outcomes[group] = "no_material"
@@ -1678,6 +1750,7 @@ def run_gate(
             for group in [name for name in wanted
                           if group_outcomes.get(name) == "drafted"]:
                 rows, notes = plan[group]
+                if gate_control is not None:model.stage('numbers',group)
                 outcome = repair_group_numbers(
                     model, group=group,
                     questions={ref: question_by_ref[ref]
@@ -1728,7 +1801,16 @@ def run_gate(
             }
             summary.update({"status": "succeeded", "gate_status": "unverified"})
             return summary
-        verifier = verifier_factory()
+        verifier = prebuilt_verifier or verifier_factory()
+        if gate_control is not None:
+            from .deep_insight_gate_execution import GateExecution
+            if (verifier.scheduler_db != base_model.scheduler_db
+                    or any(verifier.config.get(k)!=base_model.config.get(k)
+                           for k in ('budget_db','model_router_db'))):
+                raise ValueError('deep-gate producer/verifier must use one source-bound accounting ledger')
+            verifier=GateExecution(verifier,run_accounting,run_micros=run_cost_micros,
+                                   verifier_micros=verifier_reserve,quiesce=gate_control)
+            executions.append(verifier)
         # One repair round, at most.  Everything below -- the verdict, the
         # record, both rubrics -- is re-derived from ``answers``, so a repaired
         # group is re-verified by a second independent call and re-gated before
@@ -1744,6 +1826,7 @@ def run_gate(
             changed = False
             for group in sorted(targets)[:len(GROUPS)]:
                 rows, notes = plan[group]
+                if gate_control is not None:model.stage('rubric',group)
                 outcome = repair_group_findings(
                     model, group=group,
                     questions={ref: question_by_ref[ref]
@@ -1774,6 +1857,7 @@ def run_gate(
             return changed
 
         while True:
+            if gate_control is not None:verifier.stage('verifier','all')
             verdict = verify(
                 verifier, answers, company=company, mission=mission,
                 producer_route_decision_refs=draft_routes,
@@ -1957,10 +2041,39 @@ def run_gate(
         summary["failure_reason"] = f"{type(exc).__name__}: {exc}"
         summary["status"] = "failed"
         return summary
+    except GateQuiesced as stopped:
+        summary.update(status='quiesced',gate_status='quiesced',resumable=True,
+            stop_reason='cooperative_quiesce',quiesce=stopped.request,
+            completed_calls=stopped.completed,
+            cost_micros=(run_accounting.last or {}).get('current_run_cost',{}).get('settled_micros',0),
+            cost_status='new_cost_reported_history_preserved')
+        return summary
+    except GateQuiesceUnproved as stopped:
+        summary.update(status='held',gate_status='quiesce_boundary_unproved',resumable=False,
+            failure_reason=str(stopped),cost_status='unproved')
+        return summary
+    except GateExecutionStopped as stopped:
+        summary.update(status='held',gate_status='execution_incomplete',resumable=False,
+            failure_reason=stopped.reason,run_accounting=stopped.proof,
+            execution_recovery={'status':'blocked','reason':stopped.reason,
+                'completed_steps':stopped.proof.get('completed_steps',[]),
+                'failed_steps':stopped.proof.get('failed_steps',[]),
+                'remaining_budget_micros':stopped.proof.get('remaining_budget_micros'),
+                'next_action':'await a provable source/budget authorization; no automatic repeated purchase'},
+            cost_micros=(run_accounting.last or {}).get('current_run_cost',{}).get('settled_micros',0),cost_status='unproved')
+        return summary
     except Exception as exc:  # unexpected: record for the parent, then surface
         summary["failure_reason"] = f"unexpected {type(exc).__name__}: {exc}"
         raise
     finally:
+        if run_accounting is not None:
+            summary["run_accounting"] = run_accounting.last
+            report=(run_accounting.last or {}).get('current_run_cost')
+            if report is not None:
+                summary['current_run_cost']=report
+                summary['cost_micros']=report['settled_micros']
+                summary['cost_status']=('settled_with_unknown_retained' if report['unknown_work_refs']
+                    or report['unsettled_admission_refs'] else 'new_settled_cost_history_separate')
         _hold_after_return(state_dir, summary)
         _write_owner_only(summary_dir / "summary.json", summary)
         store.close()

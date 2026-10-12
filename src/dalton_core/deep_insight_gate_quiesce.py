@@ -142,7 +142,8 @@ class RunQuiesce:
                 raise ValueError("deep-gate quiesce request does not bind this live run and loaded configs")
             if self.accounting is not None:
                 proof=self.accounting.snapshot()[2]
-                if not proof['cost_complete'] or proof['unknown_work_refs']:
+                if (not proof['cost_complete']
+                        or set(proof['unknown_work_refs'])-self.accounting._allowed_unknowns()):
                     raise ValueError('deep-gate whole frozen-input costs are not fully proved for resume')
             completed = [settled_call(model, call, mission, purpose=purpose)
                          for model, call, mission, purpose in self.calls]

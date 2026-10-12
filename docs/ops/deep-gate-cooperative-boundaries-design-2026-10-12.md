@@ -31,3 +31,13 @@
 - 其他公司与真正新材料 scope 不受无关旧文章费用污染。
 
 费用归属比单纯暂停接线更大，交付应独立于已就绪 v25/A/C；不以未验证的部分接线声称可安全免费续跑。
+
+## 已实现的候选与真实验收边界
+
+候选固定 scope 为公司与四组原始 request/prompt 身份；当前 mission、原件及问题通过单独的强 consumer 记录重验，不声称旧 Work 曾拥有不存在的原始 source hash。旧 schema、Work、prompt、成功回答及账本不改。仅可证明生产组阶段提前失败、未到达匿名修正/核验的旧记录支持 normal-only 完整导入；其他旧记录仍可免费强重验成功答案，额外购买保持 audit hold。
+
+正常每个新 admission 前复读同 scope 全部已付/未知费用及当前 active Work 的已完成 attempts。已结算失败费用和原未知保守上界保留。当前运行新增费用与历史费用分列；未发送不凭空补结算。下一正常组、形状修正以及核验前保留其余尚未免费成功复用的组和 verifier；所有入口停派仅在完整 CockpitModel.complete 前后，不中断 Work 内部既有 fallback/transport。
+
+人工共享预算确实增加 timeout/run 额度且旧步骤为强 pure TIMEOUT 时，可登记唯一 scope/group/normal request 的 continuation grant。后来再次提高限额或无关 policy revision 不重置该槽。AMZN/GOOGL 实录只读 counterfactual 证明当前 rev22 可授权各一个旧 thesis 步骤，历史保守占用分别 3,209,064 与 2,070,908 微美元；这是资格与余量证明，不是新正式产品或实际恢复成功。
+
+完整界限：每 scope 最多 18 个注册角色（固定四组各 normal/shape/numbers/rubric、固定 all verifier 两项）；每前缀最多 64 个强 Work；旧 verifier census 最多 128 项；人工预算链最多 64 个 revisions。超界明确拒，不截最近 N。合作暂停正式入口为 `python -m dalton_core.deep_insight_gate_quiesce --run-dir <exact-run> --expected-ticket-hash <hash>`，部署调用方须按精确运行 ticket 发送请求；本包不改 release switch。

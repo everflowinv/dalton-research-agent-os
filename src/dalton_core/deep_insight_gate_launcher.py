@@ -107,6 +107,25 @@ class DeepInsightGateLauncher(LaneChildLauncher):
                 (not isinstance(source_fingerprint, str)
                  or len(source_fingerprint) != 64)):
             raise LaneChildRejected("a company gate run needs its sha256 source fingerprint")
+        from .deep_insight_gate_quiesce import quiesced_summary_matches
+        resumed_from = None
+        for _ in range(64):
+            directory = self.tickets_dir / digest
+            if not (directory / 'quiesce-request.json').exists():
+                break
+            previous = self.status(f'{self.TICKET_PREFIX}:{digest}')
+            if previous['status']=='running':return previous
+            if not quiesced_summary_matches(previous.get('summary'),previous):
+                raise LaneChildRejected('deep-gate pause is unproved; no automatic resume')
+            resumed_from=previous['id']
+            digest=hashlib.sha256((resumed_from+'|'+previous['summary']['quiesce']['content_hash']).encode()).hexdigest()[:24]
+        else:
+            raise LaneChildRejected('deep-gate pause chain exceeds bounded64 lookup')
+        try:
+            fingerprints = [None if p is None else hashlib.sha256(p.read_bytes()).hexdigest()
+                for p in (self.model_config_path,self.verifier_model_config_path)]
+        except OSError as exc:
+            raise LaneChildRejected('deep-gate configuration cannot be frozen') from exc
         ticket_id = f"{self.TICKET_PREFIX}:{digest}"
         if (self._current is None and ticket_id not in self._adopted_finished
                 and self._ticket_path(ticket_id).is_file()):
@@ -122,6 +141,11 @@ class DeepInsightGateLauncher(LaneChildLauncher):
                 "signature": signature.strip(),
                 "run_digest": digest,
                 "model_configured": self.configured,
+                "model_config_path":str(self.model_config_path),
+                "model_config_fingerprint":fingerprints[0],
+                "verifier_model_config_path":str(self.verifier_model_config_path),
+                "verifier_model_config_fingerprint":fingerprints[1],
+                **({} if resumed_from is None else {'resumed_from':resumed_from}),
             },
             company_ref=company_ref, source_fingerprint=source_fingerprint,
         )
