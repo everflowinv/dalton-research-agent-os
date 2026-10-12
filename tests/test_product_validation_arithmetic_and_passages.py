@@ -58,11 +58,44 @@ class ProductPassageTests(unittest.TestCase):
         resolved=checked_rendered_passages(':memory:',self.sections,{self.ref:self.raw,'not-a-ref':'unused'})
         self.assertEqual(resolved,{self.ref:self.raw})
 
-    def test_only_exact_source_title_date_header_can_be_recovered(self):
+    def test_unbound_metadata_header_is_refused_even_when_provenance_is_tampered(self):
         proof=_checked_originals(self.state,{self.ref},include_render_metadata=True)[self.ref]
-        header=proof['render_header']
-        result=checked_rendered_passages(self.state,self.sections,{self.ref:self.raw.strip()+'\n'+header})
-        self.assertEqual(result[self.ref],self.raw)
-        for wrong in (header.replace('2026','2025'),header.replace('Accenture','Foreign Issuer'),header+' profit 9.5'):
-            with self.subTest(header=wrong),self.assertRaises(ValueError):
-                checked_rendered_passages(self.state,self.sections,{self.ref:self.raw.strip()+'\n'+wrong})
+        self.assertNotIn('render_header',proof)
+        for header in ('《Accenture Q1 2026》2026-03-20：管理层发言',
+                       '《Foreign Issuer》1999-01-01：管理层发言'):
+            with self.subTest(header=header),self.assertRaises(ValueError):
+                checked_rendered_passages(self.state,self.sections,{self.ref:self.raw.strip()+'\n'+header})
+        # A provenance edit cannot authorize removing any added header.
+        from dalton_core.readonly_sqlite import connect_read_only
+        import sqlite3,json
+        core=sqlite3.connect(self.state/'core.sqlite')
+        row=core.execute('SELECT document_ref,record_json FROM document_provenance_records LIMIT 1').fetchone()
+        if row:
+            core.execute('DROP TRIGGER IF EXISTS document_provenance_records_no_update')
+            body=json.loads(row[1]);body.update(title='Foreign Issuer',published_at='1999-01-01')
+            core.execute('UPDATE document_provenance_records SET record_json=? WHERE document_ref=?',(json.dumps(body),row[0]));core.commit()
+        core.close()
+        with self.assertRaises(ValueError):
+            checked_rendered_passages(self.state,self.sections,{self.ref:self.raw.strip()+'\n《Foreign Issuer》1999-01-01：管理层发言'})
+
+    def test_qualitative_refs_require_original_even_when_pack_hash_matches(self):
+        sections=[{'numbers':[],'source_refs':[{'ref':self.ref}]}]
+        result=checked_rendered_passages(self.state,sections,{self.ref:self.raw})
+        self.assertEqual(result,{self.ref:self.raw})
+        with self.assertRaises(ValueError):checked_rendered_passages(':memory:',sections,{self.ref:self.raw})
+        with self.assertRaises(ValueError):checked_rendered_passages(self.state,sections,{})
+        from dalton_core.investment_memo_cli import cited_refs
+        self.assertEqual(cited_refs(sections,[]),{self.ref})
+
+    def test_new_pack_stops_at_renderer_header_and_preserves_strong_original(self):
+        from dalton_core.product_contract import tag_entry
+        p={'tags':{'P1':self.ref,'P2':self.ref},'json':{},'text':
+            '[P1] · 电话会纪要 · 2026-10-01 · 《Synthetic Call》\n'+self.raw.strip()+
+            '\n\n《Next Call》2026-11-01：管理层发言\n[P2] · 电话会纪要\n'+self.raw.strip()}
+        row=tag_entry(p,'P1');self.assertEqual(row['text'],self.raw.strip())
+        self.assertEqual(checked_rendered_passages(self.state,self.sections,{self.ref:row['text']})[self.ref],self.raw)
+        # A similar line inside the source, without a next block, is not erased.
+        p['text']='[P1] · 电话会纪要\n'+self.raw.strip()+'\n《Next Call》2026-11-01：管理层发言\nquoted continuation'
+        self.assertIn('quoted continuation',tag_entry(p,'P1')['text'])
+        with self.assertRaises(ValueError):
+            checked_rendered_passages(self.state,self.sections,{self.ref:tag_entry(p,'P1')['text']})

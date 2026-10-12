@@ -750,7 +750,17 @@ def _call_json(model: Any, *, request_id: str, prompt: str, mission: Mapping[str
     return unwrap_json_object(call["text"]), call
 
 
-def _run_strl(
+def _run_strl(*args,**kwargs):
+    try:result=_run_strl_body(*args,**kwargs)
+    except BaseException:
+        kwargs['summary'].pop('_failed_input_binding',None)
+        raise
+    from .initial_screen_failed_input import record_failure
+    record_failure(kwargs['state'],result)
+    return result
+
+
+def _run_strl_body(
     args: argparse.Namespace, *, state: Path, store: DaltonStore, mission: dict[str, Any],
     playbook: dict[str, Any], entry: dict[str, Any], summary: dict[str, Any],
     deliverable_authority: MissionDeliverableAuthority, missions: CoverageMissionAuthority,
@@ -847,6 +857,21 @@ def _run_strl(
     from .initial_screen_failure_feedback import prepare_prompt,snapshot_passage_bindings
     validation_context['source_bindings']=(resumed['source_bindings'] if resumed is not None
         else snapshot_passage_bindings(deliverable_authority,pack))
+    from .initial_screen_failed_input import input_binding,unchanged_failure,execution_binding
+    if resumed is None:
+        try:
+            binding=input_binding(mission,company,pack,prior_block,validation_context['source_bindings'],
+                reopen=entry.get('reopen'),execution=execution_binding(model,state))
+            previous=unchanged_failure(state,binding)
+        except (ValueError,OSError) as exc:
+            summary.update(status='held',reason_code='initial_screen_failed_input_unverified',failure_reason=str(exc))
+            return summary
+        if previous is not None:
+            summary.update(status='held',reason_code='initial_screen_unchanged_failure',
+                failure_reason='相同研究材料与核验规则已失败；等待实质材料变化或明确的新授权',
+                failed_input_hash=binding['content_hash'])
+            return summary
+        summary['_failed_input_binding']=binding
     model=wrap(model,args,context={**validation_context,'mode':'strl',
         'contract':STRL_CONTRACT_VERSION,'entry':entry,'playbook':playbook},
         mission=mission,authority=deliverable_authority)

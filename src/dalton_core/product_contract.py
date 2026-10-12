@@ -302,6 +302,9 @@ def _label_sources() -> Mapping[str, str]:
     return _LABEL_SOURCE
 
 
+# Only a known renderer delimiter followed by its next passage block.
+# This separates prompt structure; it does not prove any source metadata.
+_RENDER_TRANSCRIPT_BOUNDARY = r"《[^\n》]{1,500}》(?:19|20)\d{2}-\d{2}-\d{2}：管理层发言[ \t]*\r?$(?=\n(?:[ \t]*\r?\n)*\[P\d{1,4}\])"
 _BLOCK_HEAD_RE = re.compile(r"(?m)^\[(?P<tag>[PCO]\d{1,4})\](?P<head>[^\n]*)\n?")
 
 
@@ -317,7 +320,7 @@ def _block_entry(pack: Mapping[str, Any], tag: str) -> dict[str, Any]:
         if match.group("tag") != tag:
             continue
         tail = text[match.end():]
-        stop = re.search(r"(?m)^(?:\[[PNCO]\d{1,4}\]|## )", tail)
+        stop = re.search(r"(?m)^(?:\[[PNCO]\d{1,4}\]|## |" + _RENDER_TRANSCRIPT_BOUNDARY + r")", tail)
         body = tail[:stop.start()] if stop else tail
         head = match.group("head")
         out: dict[str, Any] = {}

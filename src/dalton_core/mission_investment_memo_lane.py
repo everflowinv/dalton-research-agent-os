@@ -48,6 +48,7 @@ def company_signature(frozen: Mapping[str, Any], launcher: Any) -> str:
     from .investment_memo_cli import anchor_bindings
     from .investment_memo_draft import MEMO_PROMPT_CONTRACT_VERSION
     from .investment_memo_timeout_recovery import CONTRACT_REF as TIMEOUT_CONTINUATION_REF
+    from .product_passage_validation import PRODUCT_VALIDATION_CONTRACT
     from .store import content_hash
 
     mission = frozen["mission"]
@@ -67,6 +68,7 @@ def company_signature(frozen: Mapping[str, Any], launcher: Any) -> str:
         # fixed (same rule as the gate's GATE_DRAFTING_CONTRACT).
         "drafting_contract": MEMO_PROMPT_CONTRACT_VERSION,
         "timeout_continuation_contract": TIMEOUT_CONTINUATION_REF,
+        "validation_contract": PRODUCT_VALIDATION_CONTRACT,
     }
     parts = [content_hash(payload), verifier_provider_contract_fingerprint(
         "investment_memo_verifier")]

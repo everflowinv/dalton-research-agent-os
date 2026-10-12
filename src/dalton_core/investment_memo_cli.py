@@ -355,6 +355,8 @@ def cited_refs(sections: Sequence[Mapping[str, Any]],
     refs: set[str] = set()
     for section in sections:
         refs.update(str(ref) for ref in section.get("claim_refs") or ())
+        refs.update(str(row["ref"]) for row in section.get("source_refs") or ()
+                    if isinstance(row, Mapping) and isinstance(row.get("ref"), str))
         for number in section.get("numbers") or ():
             if not isinstance(number, Mapping):
                 continue
@@ -432,6 +434,8 @@ def source_kinds_for(section: Mapping[str, Any], material: Sequence[Mapping[str,
     rows = {str(row.get("ref")): row for row in material}
     kinds: set[str] = set()
     cited = [str(ref) for ref in section.get("claim_refs") or ()]
+    cited.extend(str(row["ref"]) for row in section.get("source_refs") or ()
+                 if isinstance(row, Mapping) and isinstance(row.get("ref"), str))
     for number in section.get("numbers") or ():
         for key in ("number_ref", "passage_ref", "claim_version_ref"):
             if number.get(key):
@@ -488,6 +492,36 @@ def _checks(sections: Sequence[Mapping[str, Any]], questions: Sequence[Mapping[s
              "evidence_refs": refs} for ref, (passed, reason) in zip(CHECK_REFS_V2, values)]
 
 
+def _validated_group(store, outcome, material):
+    """Check every section before buying another group; no new repair slot."""
+    if outcome.get('status') != 'drafted':return outcome
+    from .product_passage_validation import checked_rendered_passages
+    index=citation_index(material)
+    path=str(getattr(store,'path',':memory:'))
+    try:
+        passages=checked_rendered_passages(Path(path).parent if path!=':memory:' else ':memory:',
+                                           outcome['sections'],index['passages'])
+    except (ValueError,OSError) as exc:
+        return {**outcome,'status':'refused','repairable':False,
+                'reason':'memo_source_proof_unavailable: '+str(exc)}
+    from .mission_deliverable import pack_passage_resolver
+    checked=[];findings=[]
+    for section in outcome['sections']:
+        try:
+            checked.append(validate_section(section,live_claim_refs=index['claims'],
+                resolve_cell=lambda cell:index['cells'].get(str(cell.get('ref')))==dict(cell),
+                resolve_passage=pack_passage_resolver(None,passages),
+                resolve_number=index['numbers'].get,strict=True))
+        except MissionDeliverableError as exc:
+            findings.append({'section':section['title'],'code':'section_authority',
+                             'detail':str(exc)[:700]})
+    if findings:
+        return {**outcome,'status':'refused','repairable':True,'findings':findings,
+                'reason':'section authority rejected: '+json.dumps(findings,ensure_ascii=False),
+                'refs':[]}
+    return {**outcome,'sections':checked}
+
+
 def run_memo(*, store: DaltonStore, frozen: Mapping[str, Any], model: Any, verifier_model: Any,
              max_units: int = 4, max_repairs: int = 0, quiesce: Any = None,
              repair_budget: Any = None) -> dict[str, Any]:
@@ -513,7 +547,7 @@ def run_memo(*, store: DaltonStore, frozen: Mapping[str, Any], model: Any, verif
             kwargs["quiesce"] = quiesce
         if repair_budget is not None:
             repair_budget.begin_stage(max_units=max_units, allow_technical=bool(repairs_left), quiesce=quiesce)
-        outcome = draft_group(model, **kwargs)
+        outcome = _validated_group(store,draft_group(model, **kwargs),frozen['material'])
         cost_micros += int(outcome.get("model", {}).get("cost_micros") or outcome.get("cost_micros") or 0)
         if (outcome["status"] != "drafted" and outcome.get("repairable") and repairs_left
                 and (repair_budget is None or repair_budget.can_repair(
@@ -523,7 +557,7 @@ def run_memo(*, store: DaltonStore, frozen: Mapping[str, Any], model: Any, verif
             first = {"group": group, "reason": outcome["reason"], "refs": outcome.get("refs") or []}
             if repair_budget is not None:
                 repair_budget.begin_stage(max_units=max_units, allow_technical=False, quiesce=quiesce)
-            outcome = draft_group(model, **kwargs, repair=first)
+            outcome = _validated_group(store,draft_group(model, **kwargs, repair=first),frozen['material'])
             cost_micros += int(outcome.get("model", {}).get("cost_micros") or outcome.get("cost_micros") or 0)
             repaired.append(first)
         if outcome["status"] != "drafted":
@@ -531,6 +565,8 @@ def run_memo(*, store: DaltonStore, frozen: Mapping[str, Any], model: Any, verif
                        "cost_micros": cost_micros}
             if outcome.get("refs"):
                 refused["offending_refs"] = list(outcome["refs"])
+            if outcome.get('findings'):
+                refused['findings']=list(outcome['findings'])
             if repaired:
                 refused["repairs"] = repaired
             return refused

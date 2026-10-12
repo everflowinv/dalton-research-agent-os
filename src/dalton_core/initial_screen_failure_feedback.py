@@ -447,8 +447,8 @@ def _original_passages(state_dir, refs, *, include_render_metadata=False):
             if body.text[found['start']:found['end']]!=found['text']:raise ValueError('original passage span differs')
             out[ref]={'document_ref':found['document_ref'],'document_sha256':found['document_sha256'],
                       'passage_hash':content_hash(found['text']),'start':found['start'],'end':found['end'],'text':found['text']}
-            if include_render_metadata and body.title and body.document_date:
-                out[ref]['render_header']=f'《{body.title}》{body.document_date}：管理层发言'
+            # Current provenance title/date are not frozen acquisition proof.
+            # Never certify a renderer header from those mutable metadata rows.
         return out
 
 def _semantic(mission, context, findings):
