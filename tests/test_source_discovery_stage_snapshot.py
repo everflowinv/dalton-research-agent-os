@@ -18,6 +18,10 @@ class StageSnapshotTests(unittest.TestCase):
         self.c.execute('CREATE TABLE facts(value INTEGER)');self.c.execute('INSERT INTO facts VALUES(10)')
         self.co=object.__new__(msd.MissionSourceDiscoveryCoordinator)
         self.co.store=SimpleNamespace(connection=self.c)
+        # This fixture models the AlphaEngine coordinator's cumulative reads;
+        # native SEC reporting-profile lookup is a different source path.
+        self.co.source_ref=msd.ALPHAENGINE_SOURCE_REF
+        self.co.spool_dir=None
         self.co._tick_stage_cache={};self.co._tick_read_deadline=time.monotonic()+10
         self.mission={'id':'mission-version:a:1','content_hash':'synthetic'}
 
