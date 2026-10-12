@@ -339,7 +339,7 @@ def _original_limits(proof_scope):
         return CHECKPOINT_MAX_PASSAGES, CHECKPOINT_MAX_ORIGINALS, CHECKPOINT_SOURCE_TIMEOUT_SECONDS
     raise ValueError('unknown original proof scope')
 
-def _checked_originals(state, refs, *, include_render_metadata=False, proof_scope='diagnostic'):
+def _checked_originals(state, refs, *, include_render_metadata=False, proof_scope='diagnostic', include_source_metadata=False):
     """One bounded pure-reader process; it has no model or writable authority."""
     import subprocess
     import sys
@@ -347,7 +347,7 @@ def _checked_originals(state, refs, *, include_render_metadata=False, proof_scop
     if len(refs)>max_passages:raise DiagnosticUnavailable('original_passage_limit')
     code='from dalton_core.initial_screen_failure_feedback import _original_check_main;_original_check_main()'
     try:
-        result=subprocess.run([sys.executable,'-c',code],input=canonical_json({'state_dir':str(state),'refs':sorted(refs),'include_render_metadata':include_render_metadata,'proof_scope':proof_scope}),
+        result=subprocess.run([sys.executable,'-c',code],input=canonical_json({'state_dir':str(state),'refs':sorted(refs),'include_render_metadata':include_render_metadata,'proof_scope':proof_scope,**({'include_source_metadata':True} if include_source_metadata else {})}),
             text=True,stdout=subprocess.PIPE,stderr=subprocess.DEVNULL,timeout=timeout,check=False)
     except subprocess.TimeoutExpired as exc:
         raise DiagnosticUnavailable('original_verification_timeout') from exc
@@ -407,11 +407,11 @@ class _BoundedOriginalSpool:
 def _original_check_main():
     import sys
     request=json.loads(sys.stdin.read(MAX_BYTES+1))
-    try:result=_original_passages(request['state_dir'],request['refs'],include_render_metadata=request.get('include_render_metadata',False),proof_scope=request.get('proof_scope','diagnostic'))
+    try:result=_original_passages(request['state_dir'],request['refs'],include_render_metadata=request.get('include_render_metadata',False),proof_scope=request.get('proof_scope','diagnostic'),include_source_metadata=request.get('include_source_metadata',False))
     except DiagnosticUnavailable as exc:result={'failure_code':exc.code}
     print(canonical_json(result))
 
-def _original_passages(state_dir, refs, *, include_render_metadata=False, proof_scope='diagnostic'):
+def _original_passages(state_dir, refs, *, include_render_metadata=False, proof_scope='diagnostic', include_source_metadata=False):
     """Strong local originals, once per document, and exact frozen spans."""
     from .planner_paid_output_recovery import _authority_connection
     from .evidence_index import _resolve
@@ -463,6 +463,10 @@ def _original_passages(state_dir, refs, *, include_render_metadata=False, proof_
             if body.text[found['start']:found['end']]!=found['text']:raise ValueError('original passage span differs')
             out[ref]={'document_ref':found['document_ref'],'document_sha256':found['document_sha256'],
                       'passage_hash':content_hash(found['text']),'start':found['start'],'end':found['end'],'text':found['text']}
+            if include_source_metadata:
+                # Derived by the strong acquired-original loader, never a
+                # document prefix guess or an optional mission review.
+                out[ref]['source_ref']=body.source_ref
             # Current provenance title/date are not frozen acquisition proof.
             # Never certify a renderer header from those mutable metadata rows.
         return out

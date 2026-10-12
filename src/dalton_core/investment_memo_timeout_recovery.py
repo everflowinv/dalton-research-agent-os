@@ -116,7 +116,7 @@ def _historical_bill(connection, budget, work_ref):
     return {'work_ref':work.id,'work_hash':authority['work_order_hash'],'fees':bills,
             'mission_ref':next(iter(missions),None),'accounted_micros':amount}
 
-def historical_costs(connection, budget, work_refs, *, mission_ref, excluded_timeout_parent=None):
+def historical_costs(connection, budget, work_refs, *, mission_ref, excluded_timeout_parent=None, through_rowid=None):
     """Bounded request-index seeks, including prior budget/mission variants.
 
     These are bills only: no earlier failed/running answer is ever reused.
@@ -132,9 +132,13 @@ def historical_costs(connection, budget, work_refs, *, mission_ref, excluded_tim
         if prefix is None:
             raise ValueError('memo timeout parent has no exact content-addressed group request')
         key = prefix.group()
+        if through_rowid is not None and (type(through_rowid) is not int or through_rowid < 1):
+            raise ValueError('memo timeout historical append boundary is invalid')
+        boundary = '' if through_rowid is None else ' AND rowid<=?'
+        params = (key,key+'\uffff') if through_rowid is None else (key,key+'\uffff',through_rowid)
         ids = connection.execute("SELECT work_order_id FROM scheduler_work_orders WHERE "
             "json_extract(work_order_json,'$.metadata.request_id')>=? AND "
-            "json_extract(work_order_json,'$.metadata.request_id')<? LIMIT 17", (key,key+'\uffff')).fetchall()
+            "json_extract(work_order_json,'$.metadata.request_id')<?"+boundary+" LIMIT 17", params).fetchall()
         if len(ids)>16:
             raise ValueError('memo timeout group history exceeds the bounded16 Work authority read')
         for row in ids:
@@ -150,7 +154,7 @@ def historical_costs(connection, budget, work_refs, *, mission_ref, excluded_tim
                 found[work.id]=bill
     return [found[key] for key in sorted(found)]
 
-def verify_scope(connection, router, budget, scope, proof, *, mission):
+def verify_scope(connection, router, budget, scope, proof, *, mission, through_rowid=None):
     """The original extra call slot, exact preceding groups, and full worst-case bill."""
     from .scheduler import Scheduler
     from .investment_memo_draft import GROUPS
@@ -182,7 +186,7 @@ def verify_scope(connection, router, budget, scope, proof, *, mission):
     # its conservatively settled route estimate was lower. No refund is made.
     history=historical_costs(connection,budget,
         [call['work_order_ref'] for call in scope['completed']]+[parent.id],
-        mission_ref=mission['mission_ref'],excluded_timeout_parent=parent.id)
+        mission_ref=mission['mission_ref'],excluded_timeout_parent=parent.id,through_rowid=through_rowid)
     if (history!=scope.get('historical_costs') or len(history)>48
             or parent.id not in {h['work_ref']for h in history}
             or any(h['mission_ref']!=mission['mission_ref']for h in history)):

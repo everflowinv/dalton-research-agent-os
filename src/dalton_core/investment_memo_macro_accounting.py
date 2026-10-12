@@ -482,6 +482,11 @@ class MemoMacroAccounting:
                     raise ValueError('memo group maintenance was consumed under another mission')
                 return {**kwargs,'request_id':permission['entry']['request_id'],
                         'prompt':permission['prompt']}, permission
+            from .investment_memo_terminal_maintenance import persisted_entry
+            terminal=persisted_entry(self,connection,index)
+            if terminal is not None:
+                entry,proof=terminal
+                return {**kwargs,'request_id':entry['request_id'],'prompt':proof['prompt']}, None
             candidates = []
             for entry in entries.values():
                 if entry['role'] not in {'normal','semantic'} or entry['group_index'] != index:
@@ -625,7 +630,10 @@ class MemoMacroAccounting:
             if row is None:
                 from .investment_memo_group_maintenance import read_entries
                 maintenance = read_entries(self,connection)
-                entry=next((e for e in maintenance+self._legacy_entries(connection,check_growth=False) if e['request_id']==kwargs['request_id']),None)
+                from .investment_memo_terminal_maintenance import persisted_entry
+                terminal=persisted_entry(self,connection)
+                terminal_entries=[] if terminal is None else [terminal[0]]
+                entry=next((e for e in maintenance+terminal_entries+self._legacy_entries(connection,check_growth=False) if e['request_id']==kwargs['request_id']),None)
                 if entry is None:
                     return None
             else:

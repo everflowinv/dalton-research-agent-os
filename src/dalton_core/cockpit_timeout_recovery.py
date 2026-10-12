@@ -35,6 +35,7 @@ def failure_proof(connection, router, budget, *, work_ref, mission):
     meta = work.metadata
     if (meta.get('control_plane') != 'cockpit' or meta.get('purpose') not in PURPOSES
             or meta.get('timeout_recovery') is not None or MARKER in meta.get('request_id', '')
+            or ':memo-terminal-maintenance:' in meta.get('request_id', '')
             or meta.get('mission_version_ref') != mission['id']
             or meta.get('mission_version_hash') not in (None, mission['content_hash'])):
         return None

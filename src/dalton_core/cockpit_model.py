@@ -2608,6 +2608,16 @@ class CockpitModel:
             max_total_lease_seconds=lease_seconds * 2,
         ) as scheduler:
             work = _preserve_legacy_model_spec_transport_work(scheduler, work)
+            from .investment_memo_terminal_maintenance import MARKER as MEMO_TERMINAL_MARKER, Authority as MemoTerminalAuthority
+            from .coverage_mission import CoverageMissionError
+            if MEMO_TERMINAL_MARKER in work.metadata.get("request_id", ""):
+                authority = getattr(self, "_memo_terminal_maintenance_authority", None)
+                if not isinstance(authority, MemoTerminalAuthority):
+                    raise CockpitModelError("terminal memo maintenance requires the live owner authority")
+                try:
+                    authority.verify_child(scheduler, work)
+                except (ValueError, KeyError, TypeError, sqlite3.Error, CoverageMissionError) as exc:
+                    raise CockpitModelError("terminal memo maintenance authority differs: " + str(exc)) from exc
             if _structured_output_repair is not None:
                 _validate_structured_output_repair_authority(
                     scheduler, _structured_output_repair, work, self.config,
