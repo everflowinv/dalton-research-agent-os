@@ -15,7 +15,7 @@ from typing import Any, Mapping, Sequence
 from .readonly_sqlite import connect_read_only
 from .store import canonical_json, content_hash
 
-CONTRACT_REF = "material-current-product-gap-priority:0.1"
+CONTRACT_REF = "material-current-product-gap-priority:0.2"
 
 
 def _checked_record(row: Any) -> dict:
@@ -79,9 +79,16 @@ def priority_gaps(state_dir: str | Path, pending: Sequence[Mapping[str, Any]], *
     from .forecast_material_gaps import RULE_REF
     from .model_forecast_driver import ForecastModelAuthority, ForecastModelError
 
-    candidates = [v for v in pending if (v.get("acceptance") or {}).get("model_gap_rule_ref") == RULE_REF
-                  and (v.get("need") or {}).get("kind") == "data"
-                  and any(r.get("lane") == "company_model_forecast" for r in v.get("requesters") or ())]
+    from .sec_filing_units import RULE_REF as UNIT_RULE_REF
+    from .material_model_unit_priority import unit_input_proof
+    candidates = [v for v in pending if (
+        (v.get("acceptance") or {}).get("model_gap_rule_ref") == RULE_REF
+        and (v.get("need") or {}).get("kind") == "data"
+        and any(r.get("lane") == "company_model_forecast" for r in v.get("requesters") or ())) or (
+        (v.get("acceptance") or {}).get("unit_proof_rule_ref") == UNIT_RULE_REF
+        and (v.get("need") or {}).get("kind") == "document"
+        and any(r.get("lane") == "statement_context" and r.get("section") == "exact_xml_units"
+                for r in v.get("requesters") or ()))]
     info = {"contract_ref": CONTRACT_REF, "candidates": len(candidates), "qualified": 0,
             "status": "checked", "reason_code": None}
     if not candidates:
@@ -108,11 +115,24 @@ def priority_gaps(state_dir: str | Path, pending: Sequence[Mapping[str, Any]], *
                 raise ValueError("priority mission binding differs")
             members = {v["company_ref"] for v in mission.get("universe") or ()}
             cached = {}
+            unit_cache = {}
             for candidate in candidates:
                 if time.monotonic() >= deadline:
                     return {}, {**info, "status": "unavailable", "reason_code": "priority_read_budget"}
                 company = candidate["subject"]
                 if company not in members:
+                    continue
+                if (candidate.get("acceptance") or {}).get("unit_proof_rule_ref") == UNIT_RULE_REF:
+                    row = ledger.execute("SELECT * FROM material_requests WHERE request_id=?", (candidate["id"],)).fetchone()
+                    if row is None:continue
+                    raw = _checked_record(row)
+                    if raw["id"] != row["request_id"] or raw["subject"] != row["subject_ref"]:
+                        raise ValueError("priority unit request binding differs")
+                    view = _view(ledger, row, with_events=True)
+                    if view["status"] not in {"open", "partial"} or view["closed"]:continue
+                    request = {**raw, "requesters": view["requesters"]}
+                    proof = unit_input_proof(core,request,mission,contract_ref=CONTRACT_REF,cache=unit_cache)
+                    if proof:qualified[request["id"]]=proof
                     continue
                 if company not in cached:
                     spec_row = core.execute("SELECT * FROM coverage_mission_company_model_specs "
@@ -175,6 +195,9 @@ def still_current(state_dir: str | Path, proof: Mapping[str, Any], *, deadline: 
                 "ORDER BY p.mission_ref LIMIT 1").fetchone()
             if mission is None or tuple(mission) != (proof["mission_version_ref"], proof["mission_hash"]):
                 return False
+            from .material_model_unit_priority import BASIS, unit_input_still_current
+            if proof["basis"] == BASIS:
+                return (unit_input_still_current(core,proof) and time.monotonic()<deadline)
             spec = core.execute("SELECT spec_id,content_hash,mission_version_ref FROM coverage_mission_company_model_specs "
                 "WHERE company_ref=? ORDER BY created_at DESC,spec_id DESC LIMIT 1", (proof["company_ref"],)).fetchone()
             if spec is None or tuple(spec) != (proof["spec_ref"], proof["spec_hash"], proof["mission_version_ref"]):

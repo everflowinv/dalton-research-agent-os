@@ -5,13 +5,14 @@ import unittest
 from unittest import mock
 from dalton_core import material_acquisition as ma, material_requests as mr
 from dalton_core import material_source_queue_recovery as recovery
-from tests.test_material_source_queue_recovery import QueueRecoveryTests, NOW, START
+from tests import test_material_source_queue_recovery as recovery_fixture
+NOW, START = recovery_fixture.NOW, recovery_fixture.START
 
 class RetryContinuationTests(unittest.TestCase):
-    setUp = QueueRecoveryTests.setUp
-    queued = QueueRecoveryTests.queued
-    plan = QueueRecoveryTests.plan
-    setup_query = QueueRecoveryTests.setup_query
+    setUp = recovery_fixture.QueueRecoveryTests.setUp
+    queued = recovery_fixture.QueueRecoveryTests.queued
+    plan = recovery_fixture.QueueRecoveryTests.plan
+    setup_query = recovery_fixture.QueueRecoveryTests.setup_query
 
     def ordinary(self, number, *, close=True):
         r = mr.open_request(self.state, subject='company:synthetic:other',
