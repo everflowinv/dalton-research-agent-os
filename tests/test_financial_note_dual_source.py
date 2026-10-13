@@ -137,6 +137,7 @@ class NoteDirectoryProjectionTests(unittest.TestCase):
         from tests import test_financial_note_history_periods as history_tests
         from dalton_core.research_planner import project_state_for_prompt, build_prompt, ResearchPlanInputTooLarge
         from dalton_core.document_research_strategy import FINANCIAL_NOTE_HISTORY_TARGET_SCHEMA_VERSION
+        from dalton_core.planner_note_options import option_ref, expand_selection
         helper=history_tests.HistoryNotePeriodsTests();self.addCleanup(helper.doCleanups)
         target=helper.targets(helper.filing())[0]
         state=planner_tests.PromptTests().heavy_state()
@@ -155,8 +156,14 @@ class NoteDirectoryProjectionTests(unittest.TestCase):
             for company in projected['companies']:
                 held=next(x for x in company['readable_documents'] if x['document_ref']=='sec:filing:'+target['accession'])
                 self.assertEqual(held['evidence_targets'],[target])
+                selected = {'document_ref': held['document_ref'],
+                    'document_version_hash': held['document_version_hash'],
+                    'evidence_target_ref': option_ref(company['company_ref'], held, target)}
+                self.assertIn(selected['evidence_target_ref'], build_prompt(projected))
+                restored = expand_selection(selected, company_ref=company['company_ref'], state=state)
+                self.assertEqual(restored['evidence_target'], target)
+                self.assertEqual(restored['evidence_target']['schema_version'], FINANCIAL_NOTE_HISTORY_TARGET_SCHEMA_VERSION)
             self.assertIn('typed-note-directory',projected['prompt_projection']['rule_ref'])
-            self.assertIn(FINANCIAL_NOTE_HISTORY_TARGET_SCHEMA_VERSION,build_prompt(projected))
             break
         self.assertTrue(checked)
 
