@@ -166,7 +166,7 @@ def model_digest(
         "generator_ref": (
             GENERATOR_REF if statement_binding is None else
             COVERAGE_GENERATOR_REF
-            if str(structure.get("schema_version")) == "0.6" else
+            if str(structure.get("schema_version")) in {"0.6", "0.7"} else
             STRUCTURE_GENERATOR_REF
         ),
         "formula_hash": (
@@ -502,7 +502,7 @@ def run_company_forecast(
         sources["fcf_definition"] = None
     action = pending_action(prior, spec, table, reporting_boundary=boundary)
     if (action == "actualize" and structure is not None
-            and str(structure.get("schema_version")) == "0.6"
+            and str(structure.get("schema_version")) in {"0.6", "0.7"}
             and structure_topology_changed(prior, structure)):
         # The completed structure moved (a line reached enough history, a
         # subtotal became provable): a rebuilt model, not an actualisation.

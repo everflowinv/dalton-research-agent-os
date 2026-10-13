@@ -1113,7 +1113,7 @@ def model_spec_validation_contract() -> dict[str, str]:
     from .model_spec_assessment_replay import SIGNED_COMPATIBLE_REPLAY_REF
     from .company_financial_statement_structure import (
         CASH_LEAF_DURATION_UNIT_VALIDATION_REF,
-        NET_INCOME_SOURCE_CARRY_VALIDATION_REF, STRUCTURE_AUTHORITY_REF,
+        NET_INCOME_SOURCE_CARRY_VALIDATION_REF, STRUCTURE_AUTHORITY_REF, ANNUAL_CASH_VALIDATION_REF,
     )
     from .forecast_coverage import PROPOSAL_METHOD_COMPLETION_REF, INCOME_DEPRECIATION_POLICY_REF
     from .filed_period_composition import CONTRACT_REF as FILED_PERIOD_COMPOSITION_REF
@@ -1140,6 +1140,7 @@ def model_spec_validation_contract() -> dict[str, str]:
         "income_depreciation_forecast_policy": INCOME_DEPRECIATION_POLICY_REF,
         "net_income_source_carry": NET_INCOME_SOURCE_CARRY_VALIDATION_REF,
         "cash_leaf_duration_unit": CASH_LEAF_DURATION_UNIT_VALIDATION_REF,
+        "annual_cash_leaf_semantics": ANNUAL_CASH_VALIDATION_REF,
         "exact_filing_unit_document_set": DOCUMENT_SET_RULE_REF,
         "original_revenue_context": ORIGINAL_REVENUE_REF,
         "repairable_structure_rules": REPAIRABLE_STRUCTURE_RULES_REF,

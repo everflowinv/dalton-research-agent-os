@@ -42,7 +42,7 @@ from typing import Any, Iterable, Mapping, Sequence
 COVERAGE_RULE_REF = "rule:forecast-coverage:1"
 PROPOSAL_METHOD_COMPLETION_REF = "rule:forecast-proposal-method-completion:0.2"
 COVERAGE_SCHEMA_VERSION = "0.6"
-UPGRADEABLE_STRUCTURE_VERSIONS = frozenset({"0.3", "0.4", "0.5", "0.6"})
+UPGRADEABLE_STRUCTURE_VERSIONS = frozenset({"0.3", "0.4", "0.5", "0.6", "0.7"})
 MIN_HISTORY_QUARTERS = 8
 INCOME_DEPRECIATION_POLICY_REF = "filed-income-depreciation-method:0.1"
 INCOME_DEPRECIATION_METHODS = frozenset({"share_of_line", "carry_forward_mean"})
@@ -432,7 +432,7 @@ def income_depreciation_policy(spec: Mapping[str, Any], inputs: Mapping[str, Any
     """Bind a drafter's explicit income D&A assumption, never a cash fallback."""
     from .store import content_hash
     definition = spec.get("financial_statement_structure") or {}
-    if definition.get("schema_version") != COVERAGE_SCHEMA_VERSION:
+    if definition.get("schema_version") not in {COVERAGE_SCHEMA_VERSION, "0.7"}:
         return None
     filed = _filed_index(inputs)
     capex_method = next((x.get("forecast_method") for x in (spec.get("cash_flow_companion") or {}).get("lines", [])
@@ -1155,7 +1155,7 @@ class _Completion:
             line.setdefault("statement", "income")
             line.setdefault("annual_forecast_method", None)
         return {
-            "schema_version": COVERAGE_SCHEMA_VERSION,
+            "schema_version": "0.7" if self.definition.get("schema_version") == "0.7" else COVERAGE_SCHEMA_VERSION,
             "lines": lines,
             "formulas": [self.formulas[ref] for ref in self.formula_order
                          if ref in self.formulas],
@@ -1216,6 +1216,10 @@ def complete_methods_by_role(proposal: Mapping[str, Any],
         if line.get("kind") != "filed" or line.get("forecast_method") != "unavailable":
             continue
         role = str(line.get("role"))
+        if body.get("schema_version") == "0.7" and line.get("statement") == "cash" and line.get("annual_semantics") == "direct_annual":
+            # Annual evidence is not permission to create a quarterly method.
+            # Materialization retains the declaration and reports quarter gaps.
+            continue
         if role in EARNINGS_TOTAL_ROLES or role in {"diluted_eps", "diluted_eps_numerator"}:
             continue
         if str(line.get("concept")) in TOTAL_COST_CONCEPTS:

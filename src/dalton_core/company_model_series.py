@@ -308,6 +308,7 @@ def _derive_quarters(
 def quarterly_series(
     rows: Iterable[Mapping[str, Any]], *, legacy_replay: bool = False,
     non_additive_duration_policy: bool = True,
+    ifrs_non_additive_duration_policy: bool = False,
 ) -> dict[str, Any]:
     """A quarterly series for one concept, and an account of how it was built.
 
@@ -349,7 +350,8 @@ def quarterly_series(
     non_additive = (
         not legacy_replay
         and non_additive_duration_policy
-        and concept in NON_ADDITIVE_DURATION_CONCEPTS
+        and (concept in NON_ADDITIVE_DURATION_CONCEPTS or (ifrs_non_additive_duration_policy and concept in {
+            "ifrs-full:WeightedAverageShares", "ifrs-full:AdjustedWeightedAverageShares"}))
         and all(row.get("concept") == concept for row in rows)
     )
     derived = [] if non_additive else _derive_quarters(

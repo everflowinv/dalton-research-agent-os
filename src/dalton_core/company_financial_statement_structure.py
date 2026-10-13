@@ -31,6 +31,8 @@ REVENUE_PRETAX_SCHEMA_VERSION = "0.5"
 # cash and balance statements are open for leaf lines, and the code completes
 # and repairs a drafted structure (``forecast_coverage``) before it binds.
 COVERAGE_SCHEMA_VERSION = "0.6"
+ANNUAL_CASH_SCHEMA_VERSION = "0.7"
+ANNUAL_CASH_VALIDATION_REF = "filed-annual-cash-leaf-semantics:0.1"
 SCHEMA_VERSION = COVERAGE_SCHEMA_VERSION
 STRUCTURE_AUTHORITY_REF = "company-financial-statement-structure:0.6"
 NET_INCOME_SOURCE_CARRY_VALIDATION_REF = "filed-net-income-source-carry:0.1"
@@ -42,6 +44,7 @@ _STRUCTURE_AUTHORITY_REFS = {
     DIRECT_GROSS_PRETAX_SCHEMA_VERSION: "company-financial-statement-structure:0.4",
     REVENUE_PRETAX_SCHEMA_VERSION: "company-financial-statement-structure:0.5",
     COVERAGE_SCHEMA_VERSION: STRUCTURE_AUTHORITY_REF,
+    ANNUAL_CASH_SCHEMA_VERSION: "company-financial-statement-structure:0.7",
 }
 
 STATEMENTS = ("income", "balance", "cash")
@@ -123,17 +126,17 @@ DILUTED_EPS_NUMERATOR_NOTE_TARGET = "financial_note:diluted_eps_numerator:0.1"
 _ANNUAL_STRUCTURE_VERSIONS = {
     ANNUAL_SCHEMA_VERSION, TYPED_NOTE_SCHEMA_VERSION,
     DIRECT_GROSS_PRETAX_SCHEMA_VERSION, REVENUE_PRETAX_SCHEMA_VERSION,
-    COVERAGE_SCHEMA_VERSION,
+    COVERAGE_SCHEMA_VERSION, ANNUAL_CASH_SCHEMA_VERSION,
 }
 _TYPED_NOTE_STRUCTURE_VERSIONS = {
     TYPED_NOTE_SCHEMA_VERSION, DIRECT_GROSS_PRETAX_SCHEMA_VERSION,
-    REVENUE_PRETAX_SCHEMA_VERSION, COVERAGE_SCHEMA_VERSION,
+    REVENUE_PRETAX_SCHEMA_VERSION, COVERAGE_SCHEMA_VERSION, ANNUAL_CASH_SCHEMA_VERSION,
 }
-_REVENUE_PRETAX_VERSIONS = {REVENUE_PRETAX_SCHEMA_VERSION, COVERAGE_SCHEMA_VERSION}
+_REVENUE_PRETAX_VERSIONS = {REVENUE_PRETAX_SCHEMA_VERSION, COVERAGE_SCHEMA_VERSION, ANNUAL_CASH_SCHEMA_VERSION}
 
 
 def is_coverage_structure(value: Any) -> bool:
-    return value == COVERAGE_SCHEMA_VERSION
+    return value in (COVERAGE_SCHEMA_VERSION, ANNUAL_CASH_SCHEMA_VERSION)
 
 
 def _schema_object(properties: Mapping[str, Any], required: Sequence[str]) -> dict[str, Any]:
@@ -645,7 +648,7 @@ def _normalize_line(
         if line[field] not in allowed:
             raise FinancialStatementStructureError(f"lines[{index}].{field} is invalid")
     if line["role"] in STATEMENT_LEAF_ROLES:
-        _normalize_statement_leaf(line, index, filed, schema_version=schema_version)
+        _normalize_statement_leaf(line, index, filed, schema_version=schema_version, validate_values=validate_values)
         return line
     if line["statement"] != "income" or line["period_kind"] != "duration":
         raise FinancialStatementStructureError(
@@ -785,12 +788,13 @@ def _normalize_line(
 
 def _normalize_statement_leaf(
     line: dict[str, Any], index: int, filed: Mapping[str, Mapping[str, Any]], *,
-    schema_version: str = SCHEMA_VERSION,
+    schema_version: str = SCHEMA_VERSION, validate_values: bool = True,
 ) -> None:
     """A 0.6 cash-flow or balance-sheet leaf: filed, method-forecast, no formula."""
 
     cash = line["role"] in CASH_LEAF_ROLES
-    expected = ("cash", "duration", "sum_quarters") if cash else (
+    annual_cash = cash and schema_version == ANNUAL_CASH_SCHEMA_VERSION and line["annual_semantics"] == "direct_annual"
+    expected = ("cash", "duration", "direct_annual" if annual_cash else "sum_quarters") if cash else (
         "balance", "instant", "not_applicable")
     if (line["statement"], line["period_kind"], line["annual_semantics"]) != expected:
         raise FinancialStatementStructureError(
@@ -839,6 +843,9 @@ def _normalize_statement_leaf(
     units = _units(source, include_duration=schema_version in _TYPED_NOTE_STRUCTURE_VERSIONS)
     if units != {line["unit"]} or not _is_currency_unit(line["unit"]):
         raise FinancialStatementStructureError("filed line unit differs or is ambiguous")
+    if annual_cash and validate_values:
+        from .annual_cash_statement_leaf import validate_source
+        validate_source(source, unit=line["unit"], concept=concept)
     line["concept"] = concept
 
 
@@ -1499,6 +1506,13 @@ def validate_structure_proposal(
     body = _closed(proposal, {"schema_version", "lines", "formulas"},
                    "financial statement structure proposal")
     schema_version = body["schema_version"]
+    # This previously invalid 0.6 answer has an explicit annual cash intent.
+    # Persist the new semantic version; never change a stored valid 0.6 model.
+    if schema_version == COVERAGE_SCHEMA_VERSION and isinstance(body["lines"], list) and any(
+        isinstance(line, Mapping) and line.get("role") in CASH_LEAF_ROLES
+        and line.get("annual_semantics") == "direct_annual" for line in body["lines"]):
+        body = {**body, "schema_version": ANNUAL_CASH_SCHEMA_VERSION}
+        schema_version = ANNUAL_CASH_SCHEMA_VERSION
     if schema_version not in _STRUCTURE_AUTHORITY_REFS:
         raise FinancialStatementStructureError("unsupported structure proposal version")
     if is_coverage_structure(schema_version) and isinstance(body["lines"], list):
@@ -1916,7 +1930,9 @@ def replay_historical_structure(
                 annual_ready = annual_report["status"] == "validated"
     result = {
         "schema_version": (
-            "financial-statement-structure-replay-0.6"
+            "financial-statement-structure-replay-0.7"
+            if structure.get("schema_version") == ANNUAL_CASH_SCHEMA_VERSION
+            else "financial-statement-structure-replay-0.6"
             if structure.get("schema_version") == COVERAGE_SCHEMA_VERSION
             else "financial-statement-structure-replay-0.5"
             if structure.get("schema_version") == REVENUE_PRETAX_SCHEMA_VERSION
@@ -2540,7 +2556,9 @@ def forecast_structure_binding(
         raise FinancialStatementStructureError("statement structure is not ready for forecast")
     projection = {
         "schema_version": (
-            "forecast-statement-structure-binding-0.6"
+            "forecast-statement-structure-binding-0.7"
+            if structure.get("schema_version") == ANNUAL_CASH_SCHEMA_VERSION
+            else "forecast-statement-structure-binding-0.6"
             if structure.get("schema_version") == COVERAGE_SCHEMA_VERSION
             else "forecast-statement-structure-binding-0.5"
             if structure.get("schema_version") == REVENUE_PRETAX_SCHEMA_VERSION

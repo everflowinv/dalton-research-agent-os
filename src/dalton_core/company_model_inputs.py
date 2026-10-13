@@ -227,6 +227,7 @@ def _declared_statement_hints(spec: Mapping[str, Any]) -> dict[str, str]:
 def _series_for(
     missions: Any, company_ref: str, concept: str, *, legacy_replay: bool = False,
     non_additive_duration_policy: bool = True,
+    ifrs_non_additive_duration_policy: bool = False,
     statement_hint: str | None = None,
 ) -> dict[str, Any]:
     """The filed series for one concept, and which statement it came from.
@@ -260,6 +261,7 @@ def _series_for(
     series = quarterly_series(
         lines, legacy_replay=legacy_replay,
         non_additive_duration_policy=non_additive_duration_policy,
+        ifrs_non_additive_duration_policy=ifrs_non_additive_duration_policy,
     )
     if not legacy_replay:
         for kind in ("quarters", "instants", "durations"):
@@ -545,7 +547,7 @@ def build_model_inputs(
     structure_definition = spec.get("financial_statement_structure")
     non_additive_duration_policy = (
         isinstance(structure_definition, Mapping)
-        and structure_definition.get("schema_version") in {"0.4", "0.5", "0.6"}
+        and structure_definition.get("schema_version") in {"0.4", "0.5", "0.6", "0.7"}
     )
     for concept in statement_structure_concepts:
         concepts.setdefault(concept, [])
@@ -573,12 +575,14 @@ def build_model_inputs(
             # Outer company specs already reached 0.4 while their structures
             # were still 0.3, so only inner 0.4 and later opt into this correction.
             non_additive_duration_policy=non_additive_duration_policy,
+            ifrs_non_additive_duration_policy=(isinstance(structure_definition, Mapping) and structure_definition.get("schema_version") == "0.7"),
             statement_hint=statement_hints.get(concept),
         )
     for concept in sorted(coverage_candidates):
         entry = _series_for(
             missions, company_ref, concept, legacy_replay=legacy_series,
             non_additive_duration_policy=non_additive_duration_policy,
+            ifrs_non_additive_duration_policy=(isinstance(structure_definition, Mapping) and structure_definition.get("schema_version") == "0.7"),
         )
         if entry["status"] == FILED and entry.get("series"):
             filed[concept] = entry
