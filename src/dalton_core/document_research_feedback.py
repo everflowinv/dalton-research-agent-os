@@ -29,6 +29,7 @@ def read_document_research_feedback(core: Any, mission: Mapping[str, Any]) -> di
         from .directed_numeric_period_replacement import superseding_admission
         from .mission_document_research import MissionDocumentResearchAuthority
         replacements = {}
+        numeric_successors = {}
         for observation in observations:
             ref=observation.get('admission_ref')
             if ref and ref not in replacements:
@@ -45,8 +46,22 @@ def read_document_research_feedback(core: Any, mission: Mapping[str, Any]) -> di
             rejection=numeric_rejection(core.connection,observation["admission_ref"]) if observation.get("admission_ref") else None
             if rejection is not None and (observation['company_ref'], content_hash(
                     {k:rejection[k] for k in ('admission_ref','admission_hash','rejection_ref','rejection_hash')})) not in resolved:
-                observation={**observation,"numeric_strategy_required":True,
-                    "replaces_numeric_rejection":{k:rejection[k] for k in ("admission_ref","admission_hash","rejection_ref","rejection_hash")}}
+                ref=rejection['admission_ref']
+                if ref not in numeric_successors:
+                    from .numeric_capability_supersession import successor_for
+                    try:numeric_successors[ref]=(successor_for(core.connection,rejection,mission=mission),None)
+                    except Exception as exc:numeric_successors[ref]=(None,type(exc).__name__)
+                successor,unproved=numeric_successors[ref]
+                if successor is None:
+                    observation={**observation,"numeric_strategy_required":True,
+                        "replaces_numeric_rejection":{k:rejection[k] for k in ("admission_ref","admission_hash","rejection_ref","rejection_hash")}}
+                    if unproved:
+                        observation={**observation,'numeric_upgrade_supersession_status':'unverified',
+                            'numeric_upgrade_supersession_reason':unproved}
+                else:
+                    observation={k:v for k,v in observation.items() if k not in ('numeric_strategy_required','replaces_numeric_rejection')}
+                    observation={**observation,'numeric_upgrade_status':'superseded_by_admitted_numeric_read',
+                        'numeric_upgrade_supersession':successor}
             if (observation.get("mission_version_ref") != mission["id"]
                     or observation.get("company_ref") not in companies):
                 raise ValueError("directed-reading feedback escaped its mission/company")

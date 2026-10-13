@@ -184,16 +184,21 @@ class NumericWorkflowTests(unittest.TestCase):
         self.assertFalse(any(x.get('numeric_strategy_required') for x in feedback['by_company'][COMPANY]))
         self.assertTrue(any(x['outcome']=='numeric_targets_completed' for x in feedback['by_company'][COMPANY]))
 
-    def test_partial_replacement_keeps_the_exact_old_numeric_requirement(self):
+    def test_partial_replacement_keeps_research_pending_after_admitted_operation_supersession(self):
         f,authority,admission,executor,producer,verifier=self.fixture(old_rejection=1,missing=True)
         self.drive(executor,admission)
         from dalton_core.document_research_feedback import read_document_research_feedback
         feedback=read_document_research_feedback(f.store,f.mission)
         self.assertEqual(feedback['status'],'available')
-        self.assertTrue(any(x.get('numeric_strategy_required') for x in feedback['by_company'][COMPANY]))
+        self.assertFalse(any(x.get('numeric_strategy_required') for x in feedback['by_company'][COMPANY]))
+        ancestor=[x for x in feedback['by_company'][COMPANY]if x.get('numeric_upgrade_supersession')]
+        self.assertTrue(ancestor)
+        self.assertTrue(all(x['numeric_upgrade_supersession']['successor_admission_ref']==admission['id']
+                            and x['numeric_upgrade_supersession']['research_status']=='pending'for x in ancestor))
+        self.assertFalse(any(x['outcome']=='numeric_targets_completed'for x in feedback['by_company'][COMPANY]))
         self.assertTrue(any(x['outcome']=='numeric_waiting_evidence' for x in feedback['by_company'][COMPANY]))
 
-    def test_missing_final_formal_result_cannot_clear_the_old_requirement(self):
+    def test_missing_final_formal_result_cannot_complete_the_admitted_upgrade(self):
         f,authority,admission,executor,producer,verifier=self.fixture(old_rejection=1)
         self.drive(executor,admission)
         work=f.store.connection.execute('SELECT work_order_ref FROM mission_document_numeric_results WHERE admission_ref=?',(admission['id'],)).fetchone()[0]
@@ -207,7 +212,12 @@ class NumericWorkflowTests(unittest.TestCase):
         from dalton_core.document_research_feedback import read_document_research_feedback
         feedback=read_document_research_feedback(SimpleNamespace(connection=MissingFinal()),f.mission)
         self.assertEqual(feedback['status'],'available')
-        self.assertTrue(any(x.get('numeric_strategy_required') for x in feedback['by_company'][COMPANY]))
+        self.assertFalse(any(x.get('numeric_strategy_required') for x in feedback['by_company'][COMPANY]))
+        ancestor=[x for x in feedback['by_company'][COMPANY]if x.get('numeric_upgrade_supersession')]
+        self.assertTrue(ancestor)
+        self.assertTrue(all(x['numeric_upgrade_supersession']['successor_admission_ref']==admission['id']
+                            and x['numeric_upgrade_supersession']['research_status']=='pending'for x in ancestor))
+        self.assertFalse(any(x['outcome']=='numeric_targets_completed'for x in feedback['by_company'][COMPANY]))
         self.assertFalse(any(x['outcome']=='numeric_targets_completed' for x in feedback['by_company'][COMPANY]))
 
     def test_actual_window_and_typed_definition_drift_refuse_before_model_call(self):
