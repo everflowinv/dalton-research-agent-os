@@ -110,6 +110,10 @@ def derive(structure: Mapping[str, Any], base_ref: str, cash_source: Mapping[str
     cash_cells = [{**c, "concept": cash_source["concept"], "accessions": c.get("source_accessions") or []}
                   for c in cash_source.get("series", {}).get("quarters") or []]
     latest = sorted(cash_cells, key=lambda c:c["period_end"])[-TRAILING_QUARTERS:]
+    from .cash_flow_ratio_applicability import refuse_if_inapplicable
+    refuse_if_inapplicable(cash_cells, reported_values, reported_refs, [source_driver],
+        role=cash_source['role'], base_ref=base_ref,
+        input_hash=content_hash({'cash_source':cash_source,'source':source,'structure':structure}), unit=unit)
     denominators = [reported_values.get(c["period_end"]) for c in latest]
     if len(latest) == TRAILING_QUARTERS and all(v is not None for v in denominators):
         if any(v == 0 for v in denominators):

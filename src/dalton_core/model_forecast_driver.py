@@ -2482,6 +2482,13 @@ def build_cash_flow_companion(
             if not derived_base_is_forecastable(structure, base_ref):
                 raise ForecastModelUnavailable(
                     f"cash-flow companion {line['role']} derived income base is not executable")
+            from .cash_flow_ratio_applicability import refuse_if_inapplicable
+            if any(str(c.get('unit') or '').casefold()!=line['unit']
+                   for c in line['source']['series']['quarters']):
+                raise ForecastModelUnavailable('cash ratio source quarter units differ')
+            refuse_if_inapplicable(quarterly_history(cash_drivers[str(line["role"])]),
+                historical.get(base_ref, {}), historical_refs.get(base_ref, {}), income_drivers,
+                role=line['role'], base_ref=base_ref, input_hash=content_hash(table), unit=line['unit'])
             if derived_trailing_share(
                     quarterly_history(cash_drivers[str(line["role"])]),
                     historical.get(base_ref, {}), historical_refs.get(base_ref, {}),
@@ -2501,6 +2508,8 @@ def build_cash_flow_companion(
                     line["historical_base"] = filed_tie_basis(
                         structure, base_ref, line["source"], sources[0], income_drivers)
                 except ForecastModelUnavailable as exc:
+                    from .cash_flow_ratio_applicability import CashRatioUnavailable
+                    if isinstance(exc, CashRatioUnavailable):raise
                     raise ForecastModelUnavailable(
                         f"cash-flow companion {line['role']} derived income base lacks a complete same-duration "
                         f"trailing window; independent filed tie unavailable: {exc}") from exc
@@ -3582,6 +3591,16 @@ def _cash_companion_definition(value: Mapping[str, Any]) -> dict[str, Any]:
             "content_hash", "financial_input_hash", "income_structure_hash", "lines",
         }
     } | {"lines": lines}
+
+
+def cash_companion_topology_changed(prior, spec, table, structure):
+    held=prior.get('cash_flow_companion')
+    if not isinstance(held, Mapping):return False
+    if (held.get('income_structure_hash')==structure.get('content_hash')
+            and held.get('financial_input_hash')==content_hash({'cash_flow_inputs':list(table.get('cash_flow_inputs')or [])})):
+        return False
+    current=build_cash_flow_companion(spec,table,structure)
+    return _cash_companion_definition(held)!=_cash_companion_definition(current)
 
 
 def _cash_historical_values(

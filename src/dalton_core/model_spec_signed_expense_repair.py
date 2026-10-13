@@ -11,6 +11,7 @@ from .company_financial_statement_structure import (
     FinancialStatementStructureError, _period_cells,
 )
 from .company_model_spec import CompanyModelSpecError
+from .cash_flow_ratio_applicability import CashRatioUnavailable
 from .store import canonical_json, content_hash
 
 CONTRACT_REF = 'model-spec-signed-filed-income-sum-coefficient:0.1'
@@ -339,6 +340,15 @@ def validate_financials_for_repair(missions, spec, *, note_evidence_resolver=Non
     try:
         return missions.validate_company_model_spec_financials(spec,
             note_evidence_resolver=note_evidence_resolver)
+    except CashRatioUnavailable as exc:
+        from .cash_flow_ratio_applicability import repair_error
+        from .company_model_inputs import build_model_inputs
+        from .coverage_mission import company_model_spec_id
+        candidate={**dict(spec),'spec_id':company_model_spec_id(spec['company_ref'],spec['state_hash'],spec['task_hash'])}
+        inputs=build_model_inputs(missions,candidate)
+        error=repair_error(candidate,inputs,exc.diagnostic,note_evidence_resolver=note_evidence_resolver)
+        if error is None:raise
+        raise error from exc
     except FinancialStatementStructureError as exc:
         if not _recognized_tie_failure(spec,str(exc)):raise
         from .company_model_inputs import build_model_inputs

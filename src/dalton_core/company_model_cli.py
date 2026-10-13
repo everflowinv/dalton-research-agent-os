@@ -104,7 +104,13 @@ from .model_spec_complete_diagnostics import (
     assert_only_allowed_changed, repair_slot_used, strong_result,
 )
 
-REPAIR_CONTRACT_REF = "contract:company-model-spec-structured-output-repair:0.13"
+from .cash_flow_ratio_applicability import (
+    RULE_REF as CASH_RATIO_REF, ERROR_CODE as CASH_RATIO_CODE,
+    validate_parent as validate_cash_ratio_parent,
+    assert_only_allowed_changed as assert_cash_ratio_only_changed,
+)
+
+REPAIR_CONTRACT_REF = "contract:company-model-spec-structured-output-repair:0.14"
 # One repair call, which is the number every other lane in this repository
 # uses for the same bargain (``draft_contract_repair.MAX_REPAIR_ATTEMPTS``).
 DEFAULT_REPAIR_ATTEMPTS = 1
@@ -131,7 +137,7 @@ REPAIR_CONTRACT = {
     # refusal, because a repair there is an invitation to make the numbers
     # agree.  12 live refusals between 2026-09-11 and 09-13 were wiring.
     "eligible_error_codes": ["format", "structure", "text_length",
-                             CASH_FLOW_OPERATING_BASE_SHAPE_CODE, SIGNED_EXPENSE_REPAIR_CODE, *TYPED_FIELD_ERROR_CODES, COMPLETE_DIAGNOSTICS_CODE],
+                             CASH_FLOW_OPERATING_BASE_SHAPE_CODE, CASH_RATIO_CODE, SIGNED_EXPENSE_REPAIR_CODE, *TYPED_FIELD_ERROR_CODES, COMPLETE_DIAGNOSTICS_CODE],
     "eligible_structure_rules_ref": REPAIRABLE_STRUCTURE_RULES_REF,
     "eligible_structure_rules": list(REPAIRABLE_STRUCTURE_RULES),
     "validation": "full_spec_from_response_and_supplied_financial_validator_after_every_attempt",
@@ -155,6 +161,11 @@ REPAIR_CONTRACT = {
         "preserve": "all_other_fields_including_filed_concept_and_fcf_formula",
         "scope_validation": "exact_parent_and_repaired_body_comparison",
     },
+    "cash_flow_ratio_applicability": {"ref": CASH_RATIO_REF,
+        "allowed_fields": ["forecast_method", "forecast_base_ref", "because"],
+        "scope": "one_operating_cash_line_only_source_complete_zero_or_mixed_sign_latest_four",
+        "choices": "proved_existing_declared_income_base_or_unavailable_null",
+        "attempts": "shares_existing_single_repair_limit"},
     "signed_filed_income_sum": {"ref": SIGNED_EXPENSE_REPAIR_REF,
         "scope": "one_exact_coefficient_only_with_all_held_periods_strictly_proven",
         "validation": "full_financial_validation_after_every_new_or_replayed_answer"},
@@ -360,7 +371,7 @@ def validate_structured_output_repair_binding(
         "repair_number",
     }
     binding = dict(value)
-    if set(binding) not in (expected, expected | {"typed_field_proof"}, expected | {"diagnostic_bundle"}, expected | {"diagnostic_bundle", "maintenance_grant"}) or binding.get("schema_version") != (
+    if set(binding) not in (expected, expected | {"cash_ratio_proof"}, expected | {"typed_field_proof"}, expected | {"diagnostic_bundle"}, expected | {"diagnostic_bundle", "maintenance_grant"}) or binding.get("schema_version") != (
         "company-model-spec-repair-binding-0.1"
     ):
         raise CockpitModelError("structured output repair binding is invalid")
@@ -411,6 +422,16 @@ def validate_structured_output_repair_binding(
         or request_id != "model-spec-repair:" + content_hash(binding)[:32]
     ):
         raise CockpitModelError("structured output repair binding is invalid")
+    ratio = error['code'] == CASH_RATIO_CODE
+    if ratio != ('cash_ratio_proof' in binding):
+        raise CockpitModelError('cash ratio proof is missing or unexpected')
+    if ratio and (not isinstance(binding['cash_ratio_proof'], Mapping)
+                  or binding['cash_ratio_proof'].get('code') != CASH_RATIO_CODE
+                  or binding['cash_ratio_proof'].get('rule_ref') != CASH_RATIO_REF
+                  or binding['cash_ratio_proof'].get('state_hash') != binding['state_hash']
+                  or content_hash({k:v for k,v in binding['cash_ratio_proof'].items() if k!='content_hash'})
+                     != binding['cash_ratio_proof'].get('content_hash')):
+        raise CockpitModelError('cash ratio proof is invalid')
     typed = error["code"] in TYPED_FIELD_ERROR_CODES
     if typed != ("typed_field_proof" in binding):
         raise CockpitModelError("typed structured output repair proof is missing or unexpected")
@@ -453,6 +474,16 @@ def _repair_prompt(original_text: str, error: CompanyModelSpecError, *,
             "settings corrected; full financial validation remains mandatory.\n\n"
             f"DIAGNOSTIC_BUNDLE:\n{canonical_json(error.proof)}\n\n"
         )
+    elif error.code == CASH_RATIO_CODE:
+        head = (
+            "The exact latest four cash quarters have proved original operands, but the declared ratio "
+            "denominator is zero or crosses signs. This is method inapplicability, not a missing-period request. "
+            "Change only the operating_cash_flow line forecast_method, forecast_base_ref and because: choose "
+            "one proved existing base from allowed_base_refs, or explicitly unavailable with null base. "
+            "Do not change any amount, source, period, concept, formula, evidence, other field or array order. "
+            "The ratio remains unavailable; cash/FCF stay missing unless an independently proved existing cash formula computes them. Income/profit may continue. Full financial validation "
+            "still runs. Return the whole original JSON.\n\n"
+            f"CASH_RATIO_PROOF:\n{canonical_json(error.proof)}\n\n")
     elif error.code in TYPED_FIELD_ERROR_CODES:
         head = (
             "Correct only the exact paths in TYPED_FIELD_PROOF. For periodicity choose quarterly or annual. "
@@ -720,6 +751,8 @@ def _validated_spec_with_repair(
                 raise
             if error.code not in REPAIR_CONTRACT["eligible_error_codes"]:
                 raise
+            if error.code == CASH_RATIO_CODE:
+                validate_cash_ratio_parent(parse_response(current_call['text']), error.proof)
             if error.code == SIGNED_EXPENSE_REPAIR_CODE:
                 validate_coefficient_parent(parse_response(current_call["text"]),error.proof)
             if error.code in TYPED_FIELD_ERROR_CODES:
@@ -758,6 +791,9 @@ def _validated_spec_with_repair(
                 if error.code == CASH_FLOW_OPERATING_BASE_SHAPE_CODE:
                     _assert_cash_flow_operating_base_only_changed(
                         parse_response(current_call["text"]), parse_response(prior["text"]))
+                    cash_base_repair_applied = True
+                if error.code == CASH_RATIO_CODE:
+                    assert_cash_ratio_only_changed(parse_response(current_call['text']),parse_response(prior['text']),error.proof)
                     cash_base_repair_applied = True
                 if error.code == SIGNED_EXPENSE_REPAIR_CODE:
                     assert_only_coefficient_changed(parse_response(current_call["text"]),
@@ -835,6 +871,8 @@ def _validated_spec_with_repair(
                 "repair_config": dict(repair_config),
                 "repair_number": depth + 1,
             }
+            if error.code == CASH_RATIO_CODE:
+                binding['cash_ratio_proof'] = copy.deepcopy(error.proof)
             if error.code in TYPED_FIELD_ERROR_CODES:
                 binding["typed_field_proof"] = copy.deepcopy(error.proof)
             if error.code == COMPLETE_DIAGNOSTICS_CODE:
@@ -884,6 +922,9 @@ def _validated_spec_with_repair(
             if error.code == CASH_FLOW_OPERATING_BASE_SHAPE_CODE:
                 _assert_cash_flow_operating_base_only_changed(
                     parse_response(current_call["text"]), parse_response(repaired_call["text"]))
+                cash_base_repair_applied = True
+            if error.code == CASH_RATIO_CODE:
+                assert_cash_ratio_only_changed(parse_response(current_call['text']),parse_response(repaired_call['text']),error.proof)
                 cash_base_repair_applied = True
             if error.code == SIGNED_EXPENSE_REPAIR_CODE:
                 assert_only_coefficient_changed(parse_response(current_call["text"]),
@@ -1067,6 +1108,7 @@ def model_spec_validation_contract() -> dict[str, str]:
         "cash_flow_companion": CASH_FLOW_COMPANION_VALIDATION_CONTRACT_HASH,
         "cash_flow_derived_income_base": DERIVED_CASH_BASE_REF,
         "cash_flow_independent_filed_tie_base": FILED_CASH_BASE_REF,
+        "cash_flow_ratio_applicability": CASH_RATIO_REF,
         "financial_statement_structure": STRUCTURE_AUTHORITY_REF,
         "filed_period_income_composition": FILED_PERIOD_COMPOSITION_REF,
         "income_depreciation_forecast_policy": INCOME_DEPRECIATION_POLICY_REF,

@@ -138,7 +138,7 @@ class CompatibleSignedReplayTests(unittest.TestCase):
         self.assertNotEqual(f.launcher.started[0]['financial_validation_contract_hash'],f.launcher.started[1]['financial_validation_contract_hash'])
         self.assertEqual(len(f.launcher.started),2)
         self.assertEqual(specs.TASK_HASH,'608338bcd6cf70cbe6e012acd5f579b99d34f9d990d5bc846c4059a198eda9af')
-        self.assertEqual(cli.REPAIR_CONTRACT_REF,'contract:company-model-spec-structured-output-repair:0.13')
+        self.assertEqual(cli.REPAIR_CONTRACT_REF,'contract:company-model-spec-structured-output-repair:0.14')
         self.assertEqual(f.launcher.repair_config,{'max_attempts':0})
 
     def test_current_same_task_specs_do_not_launch_when_free_validation_marker_changes(self):

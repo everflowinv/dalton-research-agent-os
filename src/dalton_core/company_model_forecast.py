@@ -505,6 +505,13 @@ def run_company_forecast(
         # The completed structure moved (a line reached enough history, a
         # subtotal became provable): a rebuilt model, not an actualisation.
         action = "rules_upgrade"
+    if (action in {None, 'actualize'} and structure is not None and prior is not None
+            and isinstance(prior.get('cash_flow_companion'), Mapping)):
+        from .model_forecast_driver import cash_companion_topology_changed
+        if cash_companion_topology_changed(prior, spec, table, structure):
+            # The historical source-basis contract changed. Rebuild freely;
+            # never relabel an old model or buy another specification.
+            action = 'rules_upgrade'
     backfill_proof = (
         action is None and prior is not None
         and models.filing_proof(prior["id"]) is None
