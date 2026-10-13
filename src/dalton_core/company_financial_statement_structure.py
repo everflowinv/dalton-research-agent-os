@@ -920,9 +920,13 @@ def _normalize_formula(
             or is_coverage_structure(schema_version)
         )
     ):
-        raise FinancialStatementStructureError(
-            "every derived formula must tie to an exact filed concept"
-        )
+        error = FinancialStatementStructureError(
+            "every derived formula must tie to an exact filed concept")
+        from .model_spec_filed_tie_repair import DIAGNOSTIC_REF
+        diagnostic = {'contract_ref':DIAGNOSTIC_REF,'formula_index':index,'output_ref':output,
+            'output_line':{k:lines[output][k] for k in ('ref','role','statement','unit','period_kind')}}
+        error.diagnostics = {**diagnostic,'content_hash':content_hash(diagnostic)}
+        raise error
     result: dict[str, Any] = {
         "output_ref": output, "operator": operator,
         "tie_out_concept": tie, "evidence_refs": list(refs),

@@ -20,6 +20,7 @@ class FinancialRepairAuthority:
         from .company_model_spec import spec_from_response,CompanyModelSpecError,parse_response
         from .model_spec_signed_expense_repair import ERROR_CODE as SIGNED,validate_coefficient_parent
         from .cash_flow_ratio_applicability import ERROR_CODE as RATIO,validate_parent
+        from .model_spec_filed_tie_repair import ERROR_CODE as TIE,validate_parent as validate_tie
         error=binding['validation_error']
         if mission_binding != (self._mission.get('id'), self._mission.get('content_hash')):
             raise ValueError('financial repair owner mission differs')
@@ -37,11 +38,15 @@ class FinancialRepairAuthority:
             validate_parent(parse_response(parent_text),proof)
             if proof.get('company_ref')!=self._state['company_ref'] or proof.get('state_hash')!=self._state['state_hash']:
                 raise ValueError('cash ratio financial proof source/company differs')
+        elif code==TIE:
+            proof=binding.get('filed_tie_proof')
+            validate_tie(parse_response(parent_text),proof,state=self._state)
         else:raise ValueError('financial repair code is unsupported')
         # Rebuild from the parent's immutable raw answer and current strong
         # originals. A caller's self-rehashed proof is never the authority.
-        spec=spec_from_response(self._state,parent_text,decided_by=self._decided_by)
-        try:self._validate(spec)
+        try:
+            spec=spec_from_response(self._state,parent_text,decided_by=self._decided_by)
+            self._validate(spec)
         except CompanyModelSpecError as actual:
             rebuilt=getattr(actual,'proof',None)
             if (actual.code!=code or str(actual)!=error['message'] or not isinstance(rebuilt,Mapping)

@@ -1448,7 +1448,8 @@ def _validate_structured_output_repair_authority(
     transported_proof = bundle if bundle is not None else typed_proof
     from .model_spec_signed_expense_repair import ERROR_CODE as SIGNED_CODE
     from .cash_flow_ratio_applicability import ERROR_CODE as RATIO_CODE
-    if binding["validation_error"]["code"] in (SIGNED_CODE, RATIO_CODE):
+    from .model_spec_filed_tie_repair import ERROR_CODE as FILED_TIE_CODE
+    if binding["validation_error"]["code"] in (SIGNED_CODE, RATIO_CODE, FILED_TIE_CODE):
         from .model_spec_financial_repair_authority import FinancialRepairAuthority
         if type(financial_authority) is not FinancialRepairAuthority:
             raise CockpitModelError("financial correction requires the live source validation owner")

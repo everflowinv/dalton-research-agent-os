@@ -1413,6 +1413,12 @@ def spec_from_response(
             note_evidence_resolver=note_evidence_resolver,
         )
     except (FinancialStatementStructureError, FinancialNoteContextError) as exc:
+        if isinstance(exc, FinancialStatementStructureError):
+            from .model_spec_filed_tie_repair import proof as filed_tie_proof, ERROR_CODE as FILED_TIE_CODE
+            held = filed_tie_proof(body,state,getattr(exc,'diagnostics',None))
+            if held is not None:
+                raise CompanyModelSpecError(f"financial_statement_structure is invalid: {exc}",
+                    code=FILED_TIE_CODE,proof=held) from exc
         import re
         match = re.fullmatch(r"lines\[(\d+)\] acquisitions cannot use zero_one_off", str(exc))
         if isinstance(exc, FinancialStatementStructureError) and match:

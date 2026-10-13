@@ -116,8 +116,13 @@ from .model_spec_joint_field_diagnostics import (
     validate_parent as validate_joint_parent,
     assert_only_allowed_changed as assert_joint_fields_changed,
 )
+from .model_spec_filed_tie_repair import (
+    CONTRACT_REF as FILED_TIE_REPAIR_REF, ERROR_CODE as FILED_TIE_CODE,
+    validate_parent as validate_filed_tie_parent,
+    assert_only_structure_changed as assert_filed_tie_structure_changed,
+)
 
-REPAIR_CONTRACT_REF = "contract:company-model-spec-structured-output-repair:0.16"
+REPAIR_CONTRACT_REF = "contract:company-model-spec-structured-output-repair:0.17"
 # One repair call, which is the number every other lane in this repository
 # uses for the same bargain (``draft_contract_repair.MAX_REPAIR_ATTEMPTS``).
 DEFAULT_REPAIR_ATTEMPTS = 1
@@ -144,12 +149,16 @@ REPAIR_CONTRACT = {
     # refusal, because a repair there is an invitation to make the numbers
     # agree.  12 live refusals between 2026-09-11 and 09-13 were wiring.
     "eligible_error_codes": ["format", "structure", "text_length",
-                             CASH_FLOW_OPERATING_BASE_SHAPE_CODE, CASH_RATIO_CODE, SIGNED_EXPENSE_REPAIR_CODE, *TYPED_FIELD_ERROR_CODES, COMPLETE_DIAGNOSTICS_CODE, JOINT_FIELDS_CODE],
+                             CASH_FLOW_OPERATING_BASE_SHAPE_CODE, CASH_RATIO_CODE, SIGNED_EXPENSE_REPAIR_CODE, *TYPED_FIELD_ERROR_CODES, COMPLETE_DIAGNOSTICS_CODE, JOINT_FIELDS_CODE, FILED_TIE_CODE],
     "eligible_structure_rules_ref": REPAIRABLE_STRUCTURE_RULES_REF,
     "eligible_structure_rules": list(REPAIRABLE_STRUCTURE_RULES),
     "validation": "full_spec_from_response_and_supplied_financial_validator_after_every_attempt",
     "text_length_change": "only_overlong_schema_strings_may_change",
     "structure_change": "only_the_named_rule_may_change",
+    "missing_filed_tie_structure": {"ref":FILED_TIE_REPAIR_REF,
+        "change":"financial_statement_structure_only_from_original_current_sources",
+        "quota":"original_unused_ordinary_slot_only",
+        "validation":"all_nonstructure_fields_exact_and_full_financial_history_revalidation"},
     "eps_numerator_bridge": {
         "ref": EPS_NUMERATOR_BRIDGE_RULE_REF,
         "guidance": EPS_NUMERATOR_BRIDGE_GUIDANCE,
@@ -382,7 +391,7 @@ def validate_structured_output_repair_binding(
         "repair_number",
     }
     binding = dict(value)
-    if set(binding) not in (expected, expected | {"cash_ratio_proof"}, expected | {"typed_field_proof"}, expected | {"diagnostic_bundle"}, expected | {"diagnostic_bundle", "maintenance_grant"}, expected | {"typed_field_proof", "maintenance_grant"}) or binding.get("schema_version") != (
+    if set(binding) not in (expected, expected | {"filed_tie_proof"}, expected | {"cash_ratio_proof"}, expected | {"typed_field_proof"}, expected | {"diagnostic_bundle"}, expected | {"diagnostic_bundle", "maintenance_grant"}, expected | {"typed_field_proof", "maintenance_grant"}) or binding.get("schema_version") != (
         "company-model-spec-repair-binding-0.1"
     ):
         raise CockpitModelError("structured output repair binding is invalid")
@@ -433,6 +442,13 @@ def validate_structured_output_repair_binding(
         or request_id != "model-spec-repair:" + content_hash(binding)[:32]
     ):
         raise CockpitModelError("structured output repair binding is invalid")
+    filed_tie = error['code'] == FILED_TIE_CODE
+    if filed_tie != ('filed_tie_proof' in binding):
+        raise CockpitModelError('missing filed tie proof is missing or unexpected')
+    if filed_tie and (not isinstance(binding['filed_tie_proof'],Mapping)
+            or binding['filed_tie_proof'].get('contract_ref')!=FILED_TIE_REPAIR_REF
+            or binding['filed_tie_proof'].get('state_hash')!=binding['state_hash']):
+        raise CockpitModelError('missing filed tie proof is invalid')
     ratio = error['code'] == CASH_RATIO_CODE
     if ratio != ('cash_ratio_proof' in binding):
         raise CockpitModelError('cash ratio proof is missing or unexpected')
@@ -477,7 +493,21 @@ def _repair_prompt(original_text: str, error: CompanyModelSpecError, *,
                    output_schema: Mapping[str, Any] | None = None) -> str:
     contract = REPAIR_CONTRACT if contract is None else contract
     output_schema = OUTPUT_SCHEMA if output_schema is None else output_schema
-    if error.code == JOINT_FIELDS_CODE:
+    if error.code == FILED_TIE_CODE:
+        validate_filed_tie_parent(parse_response(original_text),getattr(error,'proof',None))
+        head = (
+            "The original structure declares a derived subtotal with no exact reported tie. Reconsider ONLY "
+            "financial_statement_structure using the SAME original state and filed authorities. You may "
+            "rearrange, remove or replace an unreported intermediate bridge, and update its consuming "
+            "formulas; or explicitly select a genuinely reported source concept that supports its complete "
+            "history. Do not infer a tie from a label, invent a total/residual, or change any reported value. "
+            "All fields OUTSIDE financial_statement_structure must remain exactly identical, including "
+            "revenue drivers, expense lines, operating metrics, cash_flow_companion, assessment and evidence. "
+            "Each new structure leaf/tie/evidence must be in the original sources. All original financial "
+            "and history checks remain mandatory. If sources cannot support an executable structure, "
+            "return the original answer rather than invent data. Return the complete original JSON.\n\n"
+            f"MISSING_FILED_TIE_PROOF:\n{canonical_json(error.proof)}\n\n")
+    elif error.code == JOINT_FIELDS_CODE:
         validate_joint_parent(parse_response(original_text), error.proof)
         head = (
             "Correct all JOINT_FIELD_DIAGNOSTICS in this one response using only their exact paths. "
@@ -807,6 +837,8 @@ def _validated_spec_with_repair(
                 raise CompanyModelSpecError("financial repair proof is missing", code=error.code) from error
             if error.code == CASH_RATIO_CODE:
                 validate_cash_ratio_parent(parse_response(current_call['text']), error.proof)
+            if error.code == FILED_TIE_CODE:
+                validate_filed_tie_parent(parse_response(current_call['text']),error.proof,state=state)
             if error.code == SIGNED_EXPENSE_REPAIR_CODE:
                 validate_coefficient_parent(parse_response(current_call["text"]),error.proof)
             if error.code in TYPED_FIELD_ERROR_CODES:
@@ -862,6 +894,10 @@ def _validated_spec_with_repair(
                 if error.code == CASH_RATIO_CODE:
                     assert_cash_ratio_only_changed(parse_response(current_call['text']),parse_response(prior['text']),error.proof)
                     cash_base_repair_applied = True
+                if error.code == FILED_TIE_CODE:
+                    validate_filed_tie_parent(parse_response(current_call['text']),error.proof,state=state)
+                    assert_filed_tie_structure_changed(parse_response(current_call['text']),parse_response(prior['text']),error.proof)
+                    bundle_repair_applied = True
                 if error.code == SIGNED_EXPENSE_REPAIR_CODE:
                     assert_only_coefficient_changed(parse_response(current_call["text"]),
                         parse_response(prior["text"]), error.proof)
@@ -876,7 +912,7 @@ def _validated_spec_with_repair(
                 current_call = {
                     key: value for key, value in prior.items()
                     if key not in {"binding_hash", "repair_contract_hash",
-                                   "repair_number", "typed_field_proof"}
+                                   "repair_number", "typed_field_proof", "filed_tie_proof"}
                 }
                 continue
             try:
@@ -945,6 +981,8 @@ def _validated_spec_with_repair(
             }
             if error.code == CASH_RATIO_CODE:
                 binding['cash_ratio_proof'] = copy.deepcopy(error.proof)
+            if error.code == FILED_TIE_CODE:
+                binding['filed_tie_proof'] = copy.deepcopy(error.proof)
             if error.code in TYPED_FIELD_ERROR_CODES:
                 binding["typed_field_proof"] = copy.deepcopy(error.proof)
             if error.code in (COMPLETE_DIAGNOSTICS_CODE, JOINT_FIELDS_CODE):
@@ -963,7 +1001,7 @@ def _validated_spec_with_repair(
                 # Different contract/error/proof is a new slot, not technical
                 # recovery of this exact immutable already-authorized question.
                 raise error
-            if error.code in (SIGNED_EXPENSE_REPAIR_CODE, CASH_RATIO_CODE):
+            if error.code in (SIGNED_EXPENSE_REPAIR_CODE, CASH_RATIO_CODE, FILED_TIE_CODE):
                 if financial_validator is None:
                     raise CompanyModelSpecError("financial repair source validator is missing", code=error.code)
                 from .model_spec_financial_repair_authority import FinancialRepairAuthority
@@ -1005,6 +1043,9 @@ def _validated_spec_with_repair(
             if error.code == CASH_RATIO_CODE:
                 assert_cash_ratio_only_changed(parse_response(current_call['text']),parse_response(repaired_call['text']),error.proof)
                 cash_base_repair_applied = True
+            if error.code == FILED_TIE_CODE:
+                assert_filed_tie_structure_changed(parse_response(current_call['text']),parse_response(repaired_call['text']),error.proof)
+                bundle_repair_applied = True
             if error.code == SIGNED_EXPENSE_REPAIR_CODE:
                 assert_only_coefficient_changed(parse_response(current_call["text"]),
                     parse_response(repaired_call["text"]), error.proof)
@@ -1124,7 +1165,7 @@ def _prior_contract_repair(
         text = (envelope.get("outputs") or {}).get("text")
         if not isinstance(text, str):
             continue
-        if binding.get("diagnostic_bundle") is not None or binding.get("typed_field_proof") is not None:
+        if binding.get("diagnostic_bundle") is not None or binding.get("typed_field_proof") is not None or binding.get('filed_tie_proof') is not None:
             try:
                 try:
                     checked_connection = connect_read_only(path)
@@ -1154,6 +1195,7 @@ def _prior_contract_repair(
             "repair_number": binding.get("repair_number"),
             **({"typed_field_proof": binding["typed_field_proof"]}
                if binding.get("typed_field_proof") is not None else {}),
+            **({'filed_tie_proof':binding['filed_tie_proof']} if binding.get('filed_tie_proof') is not None else {}),
         }
     return None
 
@@ -1193,6 +1235,7 @@ def model_spec_validation_contract() -> dict[str, str]:
         "fixed_cost_pair_maintenance_correction": "model-spec-fixed-maintenance-correction:0.2",
         "source_sign_projection": "model-spec-source-sign-projection:0.1",
         "financial_repair_admission": FINANCIAL_REPAIR_ADMISSION_REF,
+        "missing_filed_tie_structure": FILED_TIE_REPAIR_REF,
         "proposal_method_completion": PROPOSAL_METHOD_COMPLETION_REF,
         "cash_flow_companion": CASH_FLOW_COMPANION_VALIDATION_CONTRACT_HASH,
         "income_taxonomy_roles": INCOME_TAXONOMY_ROLE_REF,
