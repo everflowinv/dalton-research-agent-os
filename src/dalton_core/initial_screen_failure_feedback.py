@@ -544,7 +544,14 @@ def _compact_findings(ordered):
 def read_feedback(core, *,state_dir,mission,company_ref,config):
     """Exact local receipts only. Old weak summaries are explicitly unverified."""
     state=Path(state_dir).resolve();path=state/'initial-screen-validation-feedback'/(content_hash(company_ref)+'.json')
-    if not path.exists():return {'status':'not_recorded','items':[],'legacy_summary_authority':'unverified'}
+    if not path.exists():
+        from .initial_screen_validator_recovery import read_feedback as current_feedback
+        from .mission_deliverable import MissionDeliverableAuthority
+        store=object.__new__(DaltonStore);store.connection=core;store.path=str(state/'core.sqlite')
+        authority=object.__new__(MissionDeliverableAuthority);authority.connection=core;authority.store=store
+        model=SimpleNamespace(config=config,scheduler_db=str(state/'scheduler.sqlite'),clock=lambda:datetime.now(timezone.utc))
+        rechecked=current_feedback(authority,state=state,mission=mission,model=model,company_ref=company_ref)
+        return rechecked if rechecked is not None else {'status':'not_recorded','items':[],'legacy_summary_authority':'unverified'}
     try:
         index=_read(path);tickets=index['tickets']
         if not isinstance(tickets,list) or not 1<=len(tickets)<=2:raise ValueError('initial-screen feedback index is not bounded')
@@ -552,6 +559,9 @@ def read_feedback(core, *,state_dir,mission,company_ref,config):
         store=object.__new__(DaltonStore);store.connection=core;store.path=str(state/'core.sqlite')
         authority=object.__new__(MissionDeliverableAuthority);authority.connection=core;authority.store=store
         model=SimpleNamespace(config=config,scheduler_db=str(state/'scheduler.sqlite'),clock=lambda:datetime.now(timezone.utc))
+        from .initial_screen_validator_recovery import read_feedback as current_feedback
+        rechecked=current_feedback(authority,state=state,mission=mission,model=model,company_ref=company_ref)
+        if rechecked is not None:return rechecked
         for ref in tickets:
             match=_REF.fullmatch(ref)
             if not match:raise ValueError('initial-screen feedback ticket identity differs')

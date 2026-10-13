@@ -294,6 +294,11 @@ class InitialScreenCoordinator:
                     "reason_code": (ticket.get("summary") or {}).get("reason_code"),
                 }
         signature = self._signature()
+        # A validator change wakes only an existing failed/held screen for
+        # exact local revalidation. It is not a new drafting/repair permission.
+        if (result.get('last') or {}).get('summary_status') in {'failed','held'}:
+            from .initial_screen_validator_recovery import validator_fingerprint
+            signature['validator_recheck']=validator_fingerprint()
         if resumed_from is None and latest is not None and latest.get("idle_signature") == signature:
             held_since = latest.get("idle_at")
             if held_since:

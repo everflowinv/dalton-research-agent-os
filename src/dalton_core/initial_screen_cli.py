@@ -870,8 +870,37 @@ def _run_strl_body(
             summary.update(status='held',reason_code='initial_screen_unchanged_failure',
                 failure_reason='相同研究材料与核验规则已失败；等待实质材料变化或明确的新授权',
                 failed_input_hash=binding['content_hash'])
-            return summary
+            from . import initial_screen_validator_recovery as recovery
+            try:
+                result=recovery.qualify(state=state,binding=binding,previous=previous,
+                    mission=mission,model=model,authority=deliverable_authority)
+                receipt=recovery.persist(state,result)
+                summary['validator_recheck']={key:receipt[key] for key in
+                    ('contract_ref','validator_fingerprint','source_ticket_ref','content_hash')}
+                if receipt['findings']:
+                    summary.update(reason_code='initial_screen_revalidated_content_refused',
+                        findings=receipt['findings'][:40],failure_reason='当前完整核验仍拒绝：'+
+                        '、'.join(sorted({str(row.get('code')) for row in receipt['findings']})))
+                    return summary
+                verdict,verified_call=recovery.verifier(result,model=model,mission=mission,state=state,summary_dir=args.summary_dir)
+                if verdict['verdict']!='pass':
+                    summary.update(reason_code='initial_screen_revalidated_verifier_refused',
+                        findings=verdict['findings'],failure_reason='原独立 verifier 核验仍拒绝')
+                    return summary
+                summary.update(status='succeeded',reason_code=None,failure_reason=None,
+                    verification=[{'attempt':result['attempt'],'verdict':'pass','codes':[]}])
+                context=result['context']
+                return _publish_strl_revalidated(args=args,state=state,store=store,mission=mission,
+                    playbook=playbook,entry=entry,summary=summary,deliverable_authority=deliverable_authority,
+                    missions=missions,claims=claims,pack=context['pack'],worksheet=result['worksheet'],
+                    sections=result['sections'],verdict=verdict,prior_block=context.get('prior_reference'),
+                    invocations=list(dict.fromkeys(call['invocation_ref'] for call in [*result['calls'],verified_call]
+                        if call.get('invocation_ref'))),base_id=recovery._base(mission,context),company_ref=company_ref)
+            except (*recovery.PROOF_ERRORS,CockpitModelError) as exc:
+                summary['validator_recheck']={'status':'unverified','reason':str(exc)[:600]}
+                return summary
         summary['_failed_input_binding']=binding
+        summary['_failed_source_ticket_ref']='initial-screen:'+Path(args.summary_dir).name
     model=wrap(model,args,context={**validation_context,'mode':'strl',
         'contract':STRL_CONTRACT_VERSION,'entry':entry,'playbook':playbook},
         mission=mission,authority=deliverable_authority)
@@ -996,6 +1025,15 @@ def _run_strl_body(
             record_failure("document", {"worksheet":worksheet_call, "document":document_call},
                            document_repair=document_repair)
         return summary
+    return _publish_strl_revalidated(args=args,state=state,store=store,mission=mission,
+        playbook=playbook,entry=entry,summary=summary,deliverable_authority=deliverable_authority,
+        missions=missions,claims=claims,pack=pack,worksheet=worksheet,sections=sections,
+        verdict=verdict,prior_block=prior_block,invocations=invocations,base_id=base_id,company_ref=company_ref)
+
+
+def _publish_strl_revalidated(*, args, state, store, mission, playbook, entry, summary,
+        deliverable_authority, missions, claims, pack, worksheet, sections, verdict,
+        prior_block, invocations, base_id, company_ref):
     numbers_by_ref, passages_by_ref = pack_resolvers(pack)
     # Rubric H runs on every draft, before publish, and its result travels in
     # the summary whether or not the version is new.

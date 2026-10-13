@@ -96,6 +96,7 @@ def unchanged_failure(state,binding):
 
 def record_failure(state,summary):
     binding=summary.pop('_failed_input_binding',None)
+    source_ticket_ref=summary.pop('_failed_source_ticket_ref',None)
     if not binding or summary.get('status')!='failed':return
     path=_path(state,binding['company_ref']);path.parent.mkdir(mode=0o700,exist_ok=True)
     previous=[]
@@ -106,5 +107,8 @@ def record_failure(state,summary):
     entry={'input_hash':binding['content_hash'],'source_binding_hash':content_hash(binding['sources']),
         'validation_contract':binding['validation_contract'],'terminal_status':'failed',
         'failure_feedback':summary.get('validation_feedback'),'failure_reason':str(summary.get('failure_reason',''))[:700]}
+    if source_ticket_ref:
+        import re
+        if re.fullmatch(r'initial-screen:[0-9a-f]{24}',source_ticket_ref):entry['source_ticket_ref']=source_ticket_ref
     body={'schema_version':SCHEMA,'company_ref':binding['company_ref'],'inputs':[entry,*previous]}
     _write(path,{**body,'content_hash':content_hash(body)})
