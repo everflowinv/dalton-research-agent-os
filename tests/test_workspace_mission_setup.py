@@ -239,6 +239,7 @@ class WorkspaceFirstMissionTests(unittest.TestCase):
         from dalton_core.macos_launchagent import _sec_discovery_plan
         sec_plan = load_discovery_plan(_sec_discovery_plan(self.workspace.state_dir))
         self.assertEqual(sec_plan["companies"]["company:ticker:asml"]["cik"], "0001487729")
+        self.assertEqual(sec_plan["budget"]["max_calls_24h"], 200)
         from dalton_core.coverage_mission import CoverageMissionAuthority
         authority = CoverageMissionAuthority(store)
         self.assertEqual(authority.active_mission(mission["mission_ref"])["id"], mission["id"])

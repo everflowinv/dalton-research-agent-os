@@ -38,6 +38,7 @@ from .store import canonical_json, content_hash
 
 SEC_SOURCE_REF = "source:sec-edgar"
 SEC_PLAN_SCHEMA = "0.4"
+DEFAULT_SEC_CALLS_24H = 200
 EARNINGS_RELEASE_SPEC_REF = "current-report-8k"
 
 #: The SEC specs every environment runs, in order.  Interval defaults are the

@@ -25,7 +25,7 @@ from .cockpit_model import (
     validate_setup_planning_context,
 )
 from .store import content_hash
-from .sec_plan_specs import generator_specs
+from .sec_plan_specs import DEFAULT_SEC_CALLS_24H, generator_specs
 from .research_constitution import ResearchConstitutionAuthority
 from .research_playbook import read_exact_playbook_version
 from .workspace import WorkspaceError, WorkspacePaths
@@ -829,7 +829,9 @@ def materialize_first_mission_discovery_plans(
                 # Code-owned (``sec_plan_specs``): the 10-K and the Item
                 # 2.02 8-K, the same set every environment renders.
                 "specs": generator_specs(),
-                "budget": {"max_calls_24h": max(1, min(paid_calls, 50))},
+                # Public SEC reads have their own bounded plan window; the
+                # model-call allowance does not determine their capacity.
+                "budget": {"max_calls_24h": DEFAULT_SEC_CALLS_24H},
             }
             sec_plan = validate_discovery_plan(
                 {**sec_base, "content_hash": content_hash(sec_base)})
