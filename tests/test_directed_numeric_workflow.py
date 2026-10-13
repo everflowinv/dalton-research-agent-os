@@ -376,6 +376,11 @@ class NumericWorkflowTests(unittest.TestCase):
         import copy
         inquiry=copy.deepcopy(admission['planner_inquiry'])
         inquiry['question']='Read separately scoped FY2025 lease contractual commitment details.'
+        for target in inquiry['directed_document']['numeric_targets']:
+            target['metric_ref'] += '-commitment'
+            target['metric_definition']['meaning'] += ' Separately requested contractual commitment scope.'
+            target.pop('metric_definition_hash')
+        inquiry['directed_document']['numeric_targets']=normalize_targets(inquiry['directed_document']['numeric_targets'])
         inquiry['directed_document']['query_terms']=['a literal query not contained in the original']
         plan={'schema_version':'0.1','task_ref':'task:research-plan-directives:0.1','created_at':f.mission['created_at'],
             'state_hash':'3'*64,'mission_version_ref':f.mission['id'],'assessment':'Perform a bounded independent query.',

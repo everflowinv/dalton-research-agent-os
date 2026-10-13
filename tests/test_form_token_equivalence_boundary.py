@@ -31,13 +31,24 @@ class FormBoundaryTests(unittest.TestCase):
         helper, f, a, initial, _, producer, verifier = h.fixture()
         old = h.inquiry(initial, changed=False)
         old['question'] = 'Issuer FY2025 10-K债务附注里的债务金额是多少？'
-        admitted = h.admit(helper, f, a, initial, old, tag='distinct-old-debt')
+        def v1_match(company, inquiry, other):
+            return equivalence.signatures_equivalent(equivalence.inquiry_signature_for(company,inquiry),
+                                                      equivalence.inquiry_signature_for(company,other))
+        # Seed the historical record under the actual old text matcher; v2
+        # correctly treats an unchanged explicit target scope as a duplicate.
+        with patch('dalton_core.document_numeric_inquiry_equivalence.admission_match', side_effect=v1_match):
+            admitted = h.admit(helper, f, a, initial, old, tag='distinct-old-debt')
         parent = a.resolve_for_execution(admitted['admission_ref'])
         helper.drive(helper._executor(f, a, draft_adapter=producer, verifier_adapter=verifier)[0], parent)
         revised = h.inquiry(parent)
         revised['question'] = 'Issuer FY2025 10-K收入附注里的商业RPO金额是多少？'
         # Produce historical authority with the old code's documented bug.
-        with patch.object(equivalence, '_FORM', equivalence._LEGACY_FORM):
+        from dalton_core import numeric_target_revision
+        old_proof_for = numeric_target_revision._proof_for
+        def historical_proof(*args, **kwargs):
+            return old_proof_for(*args, **{**kwargs, '_historical_signature':equivalence.inquiry_signature_for})
+        with patch.object(equivalence, '_FORM', equivalence._LEGACY_FORM), \
+             patch.object(numeric_target_revision, '_proof_for', side_effect=historical_proof):
             consumer = h.admit(helper, f, a, parent, revised, tag='historical-form-collision')
             held = a.resolve_for_execution(consumer['admission_ref'])
         return h, helper, f, a, parent, held
@@ -52,8 +63,8 @@ class FormBoundaryTests(unittest.TestCase):
         lease = copy.deepcopy(held['planner_inquiry'])
         lease['question'] = 'Issuer FY2025 10-K中，2026财年合并租赁到期额是多少？'
         self.assertIsNone(derive_revision_proof(a, held['mission_ref'], lease))
-        self.assertIsNone(a.equivalent_open_admission({'company_ref':held['company_ref'],
-            'mission_ref':held['mission_ref'], 'planner_inquiry':lease}))
+        self.assertEqual(a.equivalent_open_admission({'company_ref':held['company_ref'],
+            'mission_ref':held['mission_ref'], 'planner_inquiry':lease})['state'], 'in_flight')
         from dalton_core.directed_numeric_research import normalize_targets
         target = copy.deepcopy(lease['directed_document']['numeric_targets'][-1])
         target['period'] = 'FY2026'

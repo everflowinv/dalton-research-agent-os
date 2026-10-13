@@ -8,7 +8,7 @@ from __future__ import annotations
 
 from typing import Any, Mapping
 from .directed_numeric_research import CONTRACT_REF, normalize_targets, pending_numeric_result
-from .document_inquiry_equivalence import inquiry_signature_for, signatures_equivalent
+from .document_inquiry_equivalence import inquiry_signature_for, signatures_equivalent, normalize_question
 from .store import content_hash
 
 RULE_REF = 'mission-document-numeric:zero-answer-target-revision:0.1'
@@ -64,10 +64,17 @@ def _proof_for(authority, mission_ref: str, inquiry: Mapping[str, Any], admissio
     if strategy.get('strategy_version') != CONTRACT_REF:
         return None
     parent = authority.admission(admission_ref)
-    signature = _historical_signature or inquiry_signature_for
+    # A new revision may narrow the executable targets of the same question,
+    # not borrow another question's one-use authority via a date/horizon token.
+    if _historical_signature is None:
+        same_question = bool(normalize_question(inquiry.get('question') or '')
+            and normalize_question(inquiry.get('question') or '')
+                == normalize_question(parent['planner_inquiry'].get('question') or ''))
+    else:
+        same_question = signatures_equivalent(_historical_signature(inquiry['company_ref'], inquiry),
+            _historical_signature(parent['company_ref'], parent['planner_inquiry'])) is not None
     if (parent['mission_ref'] != mission_ref or parent['company_ref'] != inquiry['company_ref']
-            or signatures_equivalent(signature(inquiry['company_ref'], inquiry),
-                signature(parent['company_ref'], parent['planner_inquiry'])) is None):
+            or not same_question):
         return None
     original = parent['request']['registration']
     if (strategy.get('document_ref') != original['document_ref']

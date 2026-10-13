@@ -109,7 +109,15 @@ class NumericWaitingRevisionTests(unittest.TestCase):
             inquiry['directed_document']['numeric_targets']=normalize_targets(targets)
             with self.subTest(mode=mode):
                 self.assertIsNone(derive_revision_proof(a,parent['mission_ref'],inquiry))
-                with self.assertRaises(MissionDocumentResearchEquivalentPending):self.admit(h,f,a,parent,inquiry,tag=mode)
+                if mode == 'ref':
+                    with self.assertRaises(MissionDocumentResearchEquivalentPending):
+                        self.admit(h,f,a,parent,inquiry,tag=mode)
+                else:
+                    # New-write v2 does not treat different explicit metrics,
+                    # definitions or required sets as the old unanswered scope.
+                    fresh=self.admit(h,f,a,parent,inquiry,tag=mode)
+                    self.assertEqual(fresh['status'],'fresh')
+                    self.assertIsNone(a.admission(fresh['admission_ref'])['numeric_authority'].get('target_revision_proof'))
         inquiry=self.inquiry(parent);inquiry['directed_document']['numeric_targets']=[]
         with self.assertRaises(ValueError):derive_revision_proof(a,parent['mission_ref'],inquiry)
 
@@ -121,7 +129,9 @@ class NumericWaitingRevisionTests(unittest.TestCase):
         self.assertTrue({tuple(row[1:]) for row in target_scope(changed['directed_document']['numeric_targets'])}
                         - {tuple(row[1:]) for row in target_scope(parent['numeric_authority']['targets'])})
         self.assertIsNone(derive_revision_proof(a,parent['mission_ref'],changed))
-        with self.assertRaises(MissionDocumentResearchEquivalentPending):self.admit(h,f,a,parent,changed)
+        fresh=self.admit(h,f,a,parent,changed)
+        self.assertEqual(fresh['status'],'fresh')
+        self.assertIsNone(a.admission(fresh['admission_ref'])['numeric_authority'].get('target_revision_proof'))
         h2,f2,a2,parent2,result2,p2,v2=self.fixture()
         for field,value in (('document_ref','source:other'),('document_version_hash','e'*64)):
             inquiry=self.inquiry(parent2);inquiry['directed_document'][field]=value
@@ -209,7 +219,7 @@ class NumericWaitingRevisionTests(unittest.TestCase):
     def test_complete_answer_blocks_and_forged_revision_marker_refuses(self):
         h=workflow.NumericWorkflowTests('test_three_required_figures_formal_claims_and_zero_call_replay');self.addCleanup(h.doCleanups)
         f,a,parent,ex,p,v=h.fixture();h.drive(ex,parent)
-        with self.assertRaises(MissionDocumentResearchEquivalentPending) as ctx:self.admit(h,f,a,parent,self.inquiry(parent))
+        with self.assertRaises(MissionDocumentResearchEquivalentPending) as ctx:self.admit(h,f,a,parent,self.inquiry(parent,changed=False))
         self.assertEqual(ctx.exception.equivalent['state'],'recently_answered')
         with self.assertRaises(MissionDocumentResearchError):verify_revision_proof(a,parent['mission_ref'],self.inquiry(parent),{'rule_ref':'invented'})
 
