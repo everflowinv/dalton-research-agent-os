@@ -937,8 +937,8 @@ def financial_line_gaps(state: Mapping[str, Any]) -> list[dict[str, str]]:
             gaps.append({
                 "company_ref": company_ref, "statement": statement,
                 "line": needle,
-                "detail": f"{company_ref} 的{statement}报表里找不到「{chinese}」"
-                          f"（匹配词 {needle!r}）；这一行缺失时，依赖它的结构规则只能拒绝",
+                "detail": f"{company_ref} 的{statement}报表中尚未识别出单独列示的「{chinese}」"
+                          f"（匹配词 {needle!r}）；可检查原报表是否采用其他列示方式",
             })
     return gaps
 

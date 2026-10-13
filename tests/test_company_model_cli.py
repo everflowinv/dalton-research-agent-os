@@ -668,6 +668,11 @@ class ChooseCompanyTests(unittest.TestCase):
         self.assertEqual(summary["spec_status"], "refused")
         self.assertEqual(summary["pre_persistence_validation"], "refused")
         self.assertIn("exact coefficient scope", summary["failure_reason"])
+        # An unrelated inventory warning must not become the reason that the
+        # planner is asked to repair. Keep it separately for inspection.
+        self.assertTrue(summary["financial_line_gaps"])
+        self.assertNotIn("；缺口：", summary["failure_reason"])
+        self.assertNotIn("负债总计", summary["failure_reason"])
         self.assertEqual(len(model_calls), 2)
         self.assertEqual(len(summary["repair_attempts"]), 1)
         self.assertEqual(summary["cost_micros"], 22)

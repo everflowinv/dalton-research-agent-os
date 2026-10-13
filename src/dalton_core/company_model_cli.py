@@ -1512,10 +1512,10 @@ def run_model_spec(
             # Refused whole. A specification with the invented lines stripped
             # out is no longer the model the model meant to describe.
             #
-            # But say what to go and fetch. Most of these refusals are a rule
-            # about a line that is not in the state at all, and "which company,
-            # which statement, which item" is the difference between a refusal
-            # an operator can act on and one they can only count.
+            # The statement inventory is supplemental, not causal evidence.
+            # A label scan cannot establish which inputs caused this refusal;
+            # appending it to the exception sends the planner after unrelated
+            # lines (for example a balance-sheet subtotal for a cash method).
             gaps = financial_line_gaps(state)
             if (isinstance(exc, (ModelInputError, FinancialStatementStructureError, ForecastModelError))
                     or getattr(exc, "code", None) == SIGNED_EXPENSE_REPAIR_CODE):
@@ -1528,10 +1528,7 @@ def run_model_spec(
             summary.update({"status": "succeeded", "spec_status": "refused",
                             "failure_reason": (
                                 f"{type(exc).__name__}: {exc}"
-                                + historical_hint
-                                + ("" if not gaps else
-                                   "；缺口：" + "；".join(
-                                       item["detail"] for item in gaps[:3])))[:500]})
+                                + historical_hint)[:500]})
         finally:
             summary["repair_attempts"] = repairs
             summary["cost_micros"] += sum(
