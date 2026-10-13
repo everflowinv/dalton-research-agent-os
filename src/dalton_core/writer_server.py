@@ -318,6 +318,8 @@ from .thesis_impact_control import (
     ResearchPlanThesisImpactPending,
 )
 from .writer_protocol import (
+    DISPATCH_REQUEST_TIMEOUT,
+    is_dispatch_operation,
     MAX_FRAME_BYTES,
     PROTOCOL_VERSION,
     ProtocolError,
@@ -3157,7 +3159,9 @@ class WriterServer:
                     future = (urgent or executor.submit)(handler, request)
                     try:
                         result = future.result(
-                            timeout=OWNER_REQUEST_TIMEOUT if owner else STORE_REQUEST_TIMEOUT)
+                            timeout=(OWNER_REQUEST_TIMEOUT if owner else
+                                     DISPATCH_REQUEST_TIMEOUT if is_dispatch_operation(operation)
+                                     else STORE_REQUEST_TIMEOUT))
                     except concurrent.futures.TimeoutError as exc:
                         # A request that never started must not execute later,
                         # after the caller has received a terminal timeout.
