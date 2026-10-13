@@ -184,6 +184,12 @@ def verify_statement_filing(
         "governance_ref": filing["governance_ref"],
         "governance_hash": filing["governance_hash"],
     }
+    if filing["form"] in {"20-F","20-F/A","40-F","40-F/A"}:
+        from .sec_native_annual import stored_evidence, NativeAnnualError
+        try:
+            body["native_evidence_hash"] = stored_evidence(connection,dict(filing))["content_hash"]
+        except (ValueError,KeyError,TypeError,OSError) as exc:
+            raise AnnualProjectionError("native annual source proof differs: "+str(exc)) from exc
     # The historical line shapes all serialize an empty filing as [].  Count
     # distinct proofs, not repeated candidates for the same exact line hash.
     matches = {line_hash for line_hash in line_hashes

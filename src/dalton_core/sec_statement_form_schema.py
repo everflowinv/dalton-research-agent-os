@@ -9,24 +9,25 @@ import re
 from pathlib import Path
 
 TABLE = 'coverage_mission_statement_filings'
-FORMS = "'10-Q','10-K','10-Q/A','10-K/A'"
+FORMS = "'10-Q','10-K','10-Q/A','10-K/A','20-F','20-F/A','40-F','40-F/A'"
 
 
 def _norm(sql):
     return ' '.join(sql.replace('IF NOT EXISTS ', '').replace('"' + TABLE + '"', TABLE).strip().rstrip(';').split())
 
 
-def migrate(connection):
+def migrate(connection, *, preview=False):
     schema = Path(__file__).with_name('coverage_mission_schema.sql').read_text()
     table_sql = re.search(r'CREATE TABLE IF NOT EXISTS coverage_mission_statement_filings \([\s\S]*?\n\);', schema).group()
-    # The frozen schema already declares the four-form contract. Replacing
+    # The frozen schema already declares the native annual contract. Replacing
     # its two-form prefix would duplicate the amended forms on every open.
     if table_sql.count("CHECK(form IN (" + FORMS + "))") != 1:
-        raise RuntimeError('statement form migration requires the exact four-form contract')
+        raise RuntimeError('statement form migration requires the exact native annual contract')
     new_sql = table_sql
     old_sql = new_sql.replace(FORMS, "'10-Q','10-K'")
+    amended_sql = new_sql.replace(FORMS, "'10-Q','10-K','10-Q/A','10-K/A'")
     actual = connection.execute('SELECT sql FROM sqlite_master WHERE type=? AND name=?', ('table',TABLE)).fetchone()
-    if actual is None or _norm(actual[0]) not in {_norm(old_sql), _norm(new_sql)}:
+    if actual is None or _norm(actual[0]) not in {_norm(old_sql), _norm(amended_sql), _norm(new_sql)}:
         raise RuntimeError('statement form migration refuses unknown filing DDL')
     trigger_sql = re.findall(r'CREATE TRIGGER IF NOT EXISTS coverage_mission_statement_filings_[\s\S]*?END;', schema)
     expected = {re.search(r'EXISTS (\w+)', sql).group(1):_norm(sql) for sql in trigger_sql}
@@ -36,6 +37,8 @@ def migrate(connection):
             'SELECT sql FROM sqlite_master WHERE type=? AND tbl_name=?', ('index',TABLE))):
         raise RuntimeError('statement form migration refuses unknown trigger/index DDL')
     if _norm(actual[0]) == _norm(new_sql):
+        return
+    if preview:
         return
     if connection.in_transaction:
         raise RuntimeError('statement form migration requires no open transaction')

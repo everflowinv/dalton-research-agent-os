@@ -103,6 +103,41 @@ class AmendmentTests(unittest.TestCase):
         bad = copy.deepcopy(result['observation']); bad['filings'][0]['form']='6-K'
         with self.assertRaises(Exception): _schema_matches(bad, schema, 'output')
 
+    def test_v6_selector_preserves_v5_cached_reparse_identity_and_local_command(self):
+        self.failure(); self.mission()
+        old_dispatch = prepare(self.missions,self.launcher,company_ref=COMPANY,form='10-Q')
+        path = request_path(self.state,old_dispatch['dispatch_id']); before=path.read_bytes()
+        v6path=self.govdir/'sec-financial-statements-v6.json'
+        v6path.write_text(json.dumps(build_governance_record(KIND,approved_by='human:synthetic-owner',
+            status='approved',effective_from='2026-01-01T00:00:00+00:00',version=6)))
+        self.launcher.governance_path=v6path
+        repeated=prepare(self.missions,self.launcher,company_ref=COMPANY,form='10-Q')
+        self.assertEqual(repeated['dispatch_id'],old_dispatch['dispatch_id'])
+        self.assertEqual(path.read_bytes(),before)
+        command=self.launcher._command(ticket_dir=self.out,ticker='ACN',form='10-Q',limit=8,replay_request_path=str(path))
+        self.assertEqual(command[command.index('--governance')+1],str(self.newpath))
+        self.assertNotIn('--allow-network',command)
+        self.out=self.root/'v6-local-output';self.out.mkdir()
+        with patch('dalton_core.sec_financials_cli.parse_live') as network:
+            result=run(self.args(self.newpath,replay=path))
+        network.assert_not_called();self.assertEqual(result['status'],'succeeded')
+        self.assertEqual(self.launcher.observation_governance(result).content_hash,self.new['content_hash'])
+
+    def test_v6_domestic_amendment_requires_exact_v6_approval(self):
+        self.failure(); self.mission()
+        auth=self.missions.sec_lane_authorization_for_company(COMPANY)
+        dispatch=self.missions.queue_statement_dispatch(authorization=auth,form='10-Q',filing_limit=8,retry_salt='v6-normal')
+        self.missions.mark_statement_dispatch_launched(dispatch['dispatch_id'],self.ref)
+        v6=build_governance_record(KIND,approved_by='human:synthetic-owner',status='approved',
+            effective_from='2026-01-01T00:00:00+00:00',version=6)
+        path=self.govdir/'sec-financial-statements-v6.json';path.write_text(json.dumps(v6))
+        with patch('dalton_core.sec_financials_cli.parse_live',return_value=self.captured()):
+            result=run(self.args(path))
+        self.assertEqual(result['status'],'succeeded')
+        self.missions.record_statement_observation(dispatch_id=dispatch['dispatch_id'],observation=result['observation'],
+            governance_ref=v6['id'],governance_hash=v6['content_hash'],governance_proof=v6)
+        self.assertEqual(self.missions.statement_filings(COMPANY)[0]['form'],'10-Q/A')
+
     def test_exact_cached_agent_filing_replays_through_real_cli_and_records(self):
         oldsummary = self.failure(); self.mission()
         before = [dict(r) for r in self.missions.connection.execute('SELECT * FROM coverage_mission_statement_dispatches')]
@@ -349,7 +384,7 @@ class ConsumerAndMigrationTests(unittest.TestCase):
         with self.assertRaises(Exception):c.execute(f'UPDATE {TABLE} SET content_hash=?',('0'*64,))
         c.rollback()
 
-    def test_real_old_ddl_and_repeated_authority_open_keep_exact_four_forms(self):
+    def test_real_old_ddl_and_repeated_authority_open_keep_native_storage_enum_and_old_rows(self):
         from dalton_core.sec_statement_form_schema import TABLE
         c = self.legacy()
         before = [tuple(r) for r in c.execute(f'SELECT rowid,* FROM {TABLE}')]
@@ -357,7 +392,8 @@ class ConsumerAndMigrationTests(unittest.TestCase):
             'SELECT sql FROM sqlite_master WHERE name=?', (TABLE,)).fetchone()[0])
         CoverageMissionAuthority(self.store)
         first = c.execute('SELECT sql FROM sqlite_master WHERE name=?', (TABLE,)).fetchone()[0]
-        self.assertIn("CHECK(form IN ('10-Q','10-K','10-Q/A','10-K/A'))", first)
+        self.assertIn("CHECK(form IN ('10-Q','10-K','10-Q/A','10-K/A','20-F','20-F/A','40-F','40-F/A'))", first)
+        self.assertNotIn("'6-K'", first)
         self.assertEqual(first.count("'10-Q/A'"), 1)
         self.assertEqual(first.count("'10-K/A'"), 1)
         CoverageMissionAuthority(self.store)

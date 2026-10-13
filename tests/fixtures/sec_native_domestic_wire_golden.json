@@ -1,0 +1,951 @@
+{
+  "base_commit": "4a2668cbb8bcd0703764214509f3056023026542",
+  "domestic_fixture_sha256": "2193152eb652d3c9df4d44d4b18981790a6ecca9edc7f465f0c485f665fdcc9d",
+  "domestic_normalised_filing": {
+    "accession": "0001352010-26-000046",
+    "dropped": {},
+    "filed": "2026-08-06",
+    "form": "10-Q",
+    "lines": [
+      {
+        "balance": "debit",
+        "concept": "us-gaap:Assets",
+        "dimension_axis": null,
+        "dimension_count": null,
+        "dimension_member": null,
+        "dimensions": null,
+        "is_breakdown": false,
+        "label": "Total assets",
+        "level": 1,
+        "parent_concept": null,
+        "period_end": "2026-06-30",
+        "period_start": null,
+        "statement": "balance",
+        "unit": "usd",
+        "value": "4574086000"
+      },
+      {
+        "balance": "credit",
+        "concept": "us-gaap:RevenueFromContractWithCustomerExcludingAssessedTax",
+        "dimension_axis": null,
+        "dimension_count": null,
+        "dimension_member": null,
+        "dimensions": null,
+        "is_breakdown": false,
+        "label": "Revenues",
+        "level": 1,
+        "parent_concept": "us-gaap:OperatingIncomeLoss",
+        "period_end": "2026-06-30",
+        "period_start": "2026-01-01",
+        "statement": "income",
+        "unit": "usd",
+        "value": "2814828000"
+      },
+      {
+        "balance": "credit",
+        "concept": "us-gaap:RevenueFromContractWithCustomerExcludingAssessedTax",
+        "dimension_axis": null,
+        "dimension_count": null,
+        "dimension_member": null,
+        "dimensions": null,
+        "is_breakdown": false,
+        "label": "Revenues",
+        "level": 1,
+        "parent_concept": "us-gaap:OperatingIncomeLoss",
+        "period_end": "2026-06-30",
+        "period_start": "2026-04-01",
+        "statement": "income",
+        "unit": "usd",
+        "value": "1414767000"
+      }
+    ],
+    "report_date": "2026-06-30"
+  },
+  "normalizer_hash": "d9195918cc645eff3f8a0452fc31df46e78c000afccb32100300150d5d54343a",
+  "normalizer_sources_sha256": {
+    "sec_filing_units.py": "6af256a98dfdfd9f63d54b15259b8a2f29784bd3ba112775faed6fe9b799a91b",
+    "sec_financials_normalise.py": "4a6fb5c223473d254ce78f65ab26911794a90e834f5e6b4f62da6a24618fdc67",
+    "statement_companyfacts_context.py": "7cb5c81625d440cd9caee38ffa1d6eddb4e86a57a7ce7c9470fd1c4b0d5e0ea6",
+    "statement_context.py": "516e2aee33f919274ef9004d21e9d5bbc5bedadcd7afa3853afefdb20b31542f"
+  },
+  "old_versions": {
+    "2": {
+      "identity": {
+        "adapter_hash": "59b8b92fc676fee6ca63aa873c375cdfdc32acd475ef9448ac45863684c06f36",
+        "adapter_ref": "transport:public-http:0.1",
+        "allowed_operations": [
+          "get_financial_statements"
+        ],
+        "capability_id": "capability:dalton:connector:sec-financial-statements",
+        "input_schema_hash": "e9ac765d737423888f30f091f4d4eff21ede8316fc3edd137c0fbd5b1321c623",
+        "input_schema_hashes": {
+          "get_financial_statements": "e9ac765d737423888f30f091f4d4eff21ede8316fc3edd137c0fbd5b1321c623"
+        },
+        "input_schema_ref": "schema:connector-inventory:sec-financials:get_financial_statements:input:0.1",
+        "input_schema_refs": {
+          "get_financial_statements": "schema:connector-inventory:sec-financials:get_financial_statements:input:0.1"
+        },
+        "operation": "get_financial_statements",
+        "output_schema_hash": "1034c6d637396b17169415f4d2a97f471dcf67ca903734ee6566a7e2cccee37e",
+        "output_schema_hashes": {
+          "get_financial_statements": "1034c6d637396b17169415f4d2a97f471dcf67ca903734ee6566a7e2cccee37e"
+        },
+        "output_schema_ref": "schema:connector-inventory:sec-financials:get_financial_statements:output:0.1",
+        "output_schema_refs": {
+          "get_financial_statements": "schema:connector-inventory:sec-financials:get_financial_statements:output:0.1"
+        },
+        "schema_hash": "086316a8feb82c20b8a8a54fc71fb055631edc31ada2ec44bffdd1cb90dc7330",
+        "source_hash": "6253f6a90041e29f6b92766c19687a6cbd7a57da1f8810c468f81e8617d0f9eb",
+        "source_identity": {
+          "source_ref": "source:sec-edgar",
+          "source_type": "official_filing",
+          "source_version": "inventory-2026-08-14"
+        }
+      },
+      "schema": {
+        "additionalProperties": false,
+        "properties": {
+          "cik": {
+            "pattern": "^[0-9]{10}$",
+            "type": "string"
+          },
+          "entity_name": {
+            "minLength": 1,
+            "type": "string"
+          },
+          "filings": {
+            "items": {
+              "additionalProperties": false,
+              "properties": {
+                "accession": {
+                  "pattern": "^[0-9]{10}-[0-9]{2}-[0-9]{6}$",
+                  "type": "string"
+                },
+                "filed": {
+                  "minLength": 1,
+                  "type": "string"
+                },
+                "form": {
+                  "enum": [
+                    "10-Q",
+                    "10-K"
+                  ],
+                  "type": "string"
+                },
+                "lines": {
+                  "items": {
+                    "additionalProperties": false,
+                    "properties": {
+                      "balance": {
+                        "type": [
+                          "string",
+                          "null"
+                        ]
+                      },
+                      "concept": {
+                        "minLength": 1,
+                        "type": "string"
+                      },
+                      "dimension_axis": {
+                        "type": [
+                          "string",
+                          "null"
+                        ]
+                      },
+                      "dimension_member": {
+                        "type": [
+                          "string",
+                          "null"
+                        ]
+                      },
+                      "is_breakdown": {
+                        "type": "boolean"
+                      },
+                      "label": {
+                        "minLength": 1,
+                        "type": "string"
+                      },
+                      "level": {
+                        "minimum": 0,
+                        "type": "integer"
+                      },
+                      "parent_concept": {
+                        "type": [
+                          "string",
+                          "null"
+                        ]
+                      },
+                      "period_end": {
+                        "minLength": 1,
+                        "type": "string"
+                      },
+                      "period_start": {
+                        "type": [
+                          "string",
+                          "null"
+                        ]
+                      },
+                      "statement": {
+                        "enum": [
+                          "income",
+                          "balance",
+                          "cash"
+                        ],
+                        "type": "string"
+                      },
+                      "unit": {
+                        "minLength": 1,
+                        "type": "string"
+                      },
+                      "value": {
+                        "pattern": "^-?(0|[1-9][0-9]*)([.][0-9]+)?$",
+                        "type": [
+                          "string",
+                          "null"
+                        ]
+                      }
+                    },
+                    "required": [
+                      "statement",
+                      "concept",
+                      "label",
+                      "level",
+                      "parent_concept",
+                      "is_breakdown",
+                      "dimension_axis",
+                      "dimension_member",
+                      "period_start",
+                      "period_end",
+                      "value",
+                      "unit",
+                      "balance"
+                    ],
+                    "type": "object"
+                  },
+                  "type": "array"
+                },
+                "report_date": {
+                  "minLength": 1,
+                  "type": "string"
+                }
+              },
+              "required": [
+                "accession",
+                "form",
+                "filed",
+                "report_date",
+                "lines"
+              ],
+              "type": "object"
+            },
+            "type": "array"
+          },
+          "next_cursor": {
+            "type": [
+              "string",
+              "null"
+            ]
+          },
+          "provider_status": {
+            "minimum": 100,
+            "type": "integer"
+          },
+          "schema_version": {
+            "enum": [
+              "0.1"
+            ],
+            "type": "string"
+          },
+          "source_record_refs": {
+            "items": {
+              "minLength": 1,
+              "type": "string"
+            },
+            "type": "array",
+            "uniqueItems": true
+          }
+        },
+        "required": [
+          "schema_version",
+          "cik",
+          "entity_name",
+          "filings",
+          "source_record_refs",
+          "next_cursor",
+          "provider_status"
+        ],
+        "type": "object"
+      }
+    },
+    "3": {
+      "identity": {
+        "adapter_hash": "59b8b92fc676fee6ca63aa873c375cdfdc32acd475ef9448ac45863684c06f36",
+        "adapter_ref": "transport:public-http:0.1",
+        "allowed_operations": [
+          "get_financial_statements"
+        ],
+        "capability_id": "capability:dalton:connector:sec-financial-statements",
+        "input_schema_hash": "e9ac765d737423888f30f091f4d4eff21ede8316fc3edd137c0fbd5b1321c623",
+        "input_schema_hashes": {
+          "get_financial_statements": "e9ac765d737423888f30f091f4d4eff21ede8316fc3edd137c0fbd5b1321c623"
+        },
+        "input_schema_ref": "schema:connector-inventory:sec-financials:get_financial_statements:input:0.1",
+        "input_schema_refs": {
+          "get_financial_statements": "schema:connector-inventory:sec-financials:get_financial_statements:input:0.1"
+        },
+        "operation": "get_financial_statements",
+        "output_schema_hash": "a5d717321541e2df312faa4f8957775d236e6f2e80fa384459a3e21fd8fd64cd",
+        "output_schema_hashes": {
+          "get_financial_statements": "a5d717321541e2df312faa4f8957775d236e6f2e80fa384459a3e21fd8fd64cd"
+        },
+        "output_schema_ref": "schema:connector-inventory:sec-financials:get_financial_statements:output:0.1",
+        "output_schema_refs": {
+          "get_financial_statements": "schema:connector-inventory:sec-financials:get_financial_statements:output:0.1"
+        },
+        "schema_hash": "b428a6dc9f4a3d0ebc11c0236d53dba00a0d4f0382e0a6a319d51b5efd5065ac",
+        "source_hash": "6253f6a90041e29f6b92766c19687a6cbd7a57da1f8810c468f81e8617d0f9eb",
+        "source_identity": {
+          "source_ref": "source:sec-edgar",
+          "source_type": "official_filing",
+          "source_version": "inventory-2026-08-14"
+        }
+      },
+      "schema": {
+        "additionalProperties": false,
+        "properties": {
+          "cik": {
+            "pattern": "^[0-9]{10}$",
+            "type": "string"
+          },
+          "entity_name": {
+            "minLength": 1,
+            "type": "string"
+          },
+          "filings": {
+            "items": {
+              "additionalProperties": false,
+              "properties": {
+                "accession": {
+                  "pattern": "^[0-9]{10}-[0-9]{2}-[0-9]{6}$",
+                  "type": "string"
+                },
+                "filed": {
+                  "minLength": 1,
+                  "type": "string"
+                },
+                "form": {
+                  "enum": [
+                    "10-Q",
+                    "10-K"
+                  ],
+                  "type": "string"
+                },
+                "lines": {
+                  "items": {
+                    "additionalProperties": false,
+                    "properties": {
+                      "balance": {
+                        "type": [
+                          "string",
+                          "null"
+                        ]
+                      },
+                      "concept": {
+                        "minLength": 1,
+                        "type": "string"
+                      },
+                      "dimension_axis": {
+                        "type": [
+                          "string",
+                          "null"
+                        ]
+                      },
+                      "dimension_count": {
+                        "minimum": 0,
+                        "type": [
+                          "integer",
+                          "null"
+                        ]
+                      },
+                      "dimension_member": {
+                        "type": [
+                          "string",
+                          "null"
+                        ]
+                      },
+                      "is_breakdown": {
+                        "type": "boolean"
+                      },
+                      "label": {
+                        "minLength": 1,
+                        "type": "string"
+                      },
+                      "level": {
+                        "minimum": 0,
+                        "type": "integer"
+                      },
+                      "parent_concept": {
+                        "type": [
+                          "string",
+                          "null"
+                        ]
+                      },
+                      "period_end": {
+                        "minLength": 1,
+                        "type": "string"
+                      },
+                      "period_start": {
+                        "type": [
+                          "string",
+                          "null"
+                        ]
+                      },
+                      "statement": {
+                        "enum": [
+                          "income",
+                          "balance",
+                          "cash"
+                        ],
+                        "type": "string"
+                      },
+                      "unit": {
+                        "minLength": 1,
+                        "type": "string"
+                      },
+                      "value": {
+                        "pattern": "^-?(0|[1-9][0-9]*)([.][0-9]+)?$",
+                        "type": [
+                          "string",
+                          "null"
+                        ]
+                      }
+                    },
+                    "required": [
+                      "statement",
+                      "concept",
+                      "label",
+                      "level",
+                      "parent_concept",
+                      "is_breakdown",
+                      "dimension_axis",
+                      "dimension_member",
+                      "dimension_count",
+                      "period_start",
+                      "period_end",
+                      "value",
+                      "unit",
+                      "balance"
+                    ],
+                    "type": "object"
+                  },
+                  "type": "array"
+                },
+                "report_date": {
+                  "minLength": 1,
+                  "type": "string"
+                }
+              },
+              "required": [
+                "accession",
+                "form",
+                "filed",
+                "report_date",
+                "lines"
+              ],
+              "type": "object"
+            },
+            "type": "array"
+          },
+          "next_cursor": {
+            "type": [
+              "string",
+              "null"
+            ]
+          },
+          "provider_status": {
+            "minimum": 100,
+            "type": "integer"
+          },
+          "schema_version": {
+            "enum": [
+              "0.1"
+            ],
+            "type": "string"
+          },
+          "source_record_refs": {
+            "items": {
+              "minLength": 1,
+              "type": "string"
+            },
+            "type": "array",
+            "uniqueItems": true
+          }
+        },
+        "required": [
+          "schema_version",
+          "cik",
+          "entity_name",
+          "filings",
+          "source_record_refs",
+          "next_cursor",
+          "provider_status"
+        ],
+        "type": "object"
+      }
+    },
+    "4": {
+      "identity": {
+        "adapter_hash": "59b8b92fc676fee6ca63aa873c375cdfdc32acd475ef9448ac45863684c06f36",
+        "adapter_ref": "transport:public-http:0.1",
+        "allowed_operations": [
+          "get_financial_statements"
+        ],
+        "capability_id": "capability:dalton:connector:sec-financial-statements",
+        "input_schema_hash": "e9ac765d737423888f30f091f4d4eff21ede8316fc3edd137c0fbd5b1321c623",
+        "input_schema_hashes": {
+          "get_financial_statements": "e9ac765d737423888f30f091f4d4eff21ede8316fc3edd137c0fbd5b1321c623"
+        },
+        "input_schema_ref": "schema:connector-inventory:sec-financials:get_financial_statements:input:0.1",
+        "input_schema_refs": {
+          "get_financial_statements": "schema:connector-inventory:sec-financials:get_financial_statements:input:0.1"
+        },
+        "operation": "get_financial_statements",
+        "output_schema_hash": "4d9703a314d137bbceafd5a1522c32478b728ae99388734d0267be58f6139a3c",
+        "output_schema_hashes": {
+          "get_financial_statements": "4d9703a314d137bbceafd5a1522c32478b728ae99388734d0267be58f6139a3c"
+        },
+        "output_schema_ref": "schema:connector-inventory:sec-financials:get_financial_statements:output:0.1",
+        "output_schema_refs": {
+          "get_financial_statements": "schema:connector-inventory:sec-financials:get_financial_statements:output:0.1"
+        },
+        "schema_hash": "effb7116542ef89bea4dd741fbc4cb0146984706e87c15710db5a7392b30e9d6",
+        "source_hash": "6253f6a90041e29f6b92766c19687a6cbd7a57da1f8810c468f81e8617d0f9eb",
+        "source_identity": {
+          "source_ref": "source:sec-edgar",
+          "source_type": "official_filing",
+          "source_version": "inventory-2026-08-14"
+        }
+      },
+      "schema": {
+        "additionalProperties": false,
+        "properties": {
+          "cik": {
+            "pattern": "^[0-9]{10}$",
+            "type": "string"
+          },
+          "entity_name": {
+            "minLength": 1,
+            "type": "string"
+          },
+          "filings": {
+            "items": {
+              "additionalProperties": false,
+              "properties": {
+                "accession": {
+                  "pattern": "^[0-9]{10}-[0-9]{2}-[0-9]{6}$",
+                  "type": "string"
+                },
+                "filed": {
+                  "minLength": 1,
+                  "type": "string"
+                },
+                "form": {
+                  "enum": [
+                    "10-Q",
+                    "10-K"
+                  ],
+                  "type": "string"
+                },
+                "lines": {
+                  "items": {
+                    "additionalProperties": false,
+                    "properties": {
+                      "balance": {
+                        "type": [
+                          "string",
+                          "null"
+                        ]
+                      },
+                      "concept": {
+                        "minLength": 1,
+                        "type": "string"
+                      },
+                      "dimension_axis": {
+                        "type": [
+                          "string",
+                          "null"
+                        ]
+                      },
+                      "dimension_count": {
+                        "minimum": 0,
+                        "type": [
+                          "integer",
+                          "null"
+                        ]
+                      },
+                      "dimension_member": {
+                        "type": [
+                          "string",
+                          "null"
+                        ]
+                      },
+                      "dimensions": {
+                        "additionalProperties": {
+                          "type": "string"
+                        },
+                        "type": [
+                          "object",
+                          "null"
+                        ]
+                      },
+                      "is_breakdown": {
+                        "type": "boolean"
+                      },
+                      "label": {
+                        "minLength": 1,
+                        "type": "string"
+                      },
+                      "level": {
+                        "minimum": 0,
+                        "type": "integer"
+                      },
+                      "parent_concept": {
+                        "type": [
+                          "string",
+                          "null"
+                        ]
+                      },
+                      "period_end": {
+                        "minLength": 1,
+                        "type": "string"
+                      },
+                      "period_start": {
+                        "type": [
+                          "string",
+                          "null"
+                        ]
+                      },
+                      "statement": {
+                        "enum": [
+                          "income",
+                          "balance",
+                          "cash"
+                        ],
+                        "type": "string"
+                      },
+                      "unit": {
+                        "minLength": 1,
+                        "type": "string"
+                      },
+                      "value": {
+                        "pattern": "^-?(0|[1-9][0-9]*)([.][0-9]+)?$",
+                        "type": [
+                          "string",
+                          "null"
+                        ]
+                      }
+                    },
+                    "required": [
+                      "statement",
+                      "concept",
+                      "label",
+                      "level",
+                      "parent_concept",
+                      "is_breakdown",
+                      "dimension_axis",
+                      "dimension_member",
+                      "dimension_count",
+                      "period_start",
+                      "period_end",
+                      "value",
+                      "unit",
+                      "balance",
+                      "dimensions"
+                    ],
+                    "type": "object"
+                  },
+                  "type": "array"
+                },
+                "report_date": {
+                  "minLength": 1,
+                  "type": "string"
+                }
+              },
+              "required": [
+                "accession",
+                "form",
+                "filed",
+                "report_date",
+                "lines"
+              ],
+              "type": "object"
+            },
+            "type": "array"
+          },
+          "next_cursor": {
+            "type": [
+              "string",
+              "null"
+            ]
+          },
+          "provider_status": {
+            "minimum": 100,
+            "type": "integer"
+          },
+          "schema_version": {
+            "enum": [
+              "0.1"
+            ],
+            "type": "string"
+          },
+          "source_record_refs": {
+            "items": {
+              "minLength": 1,
+              "type": "string"
+            },
+            "type": "array",
+            "uniqueItems": true
+          }
+        },
+        "required": [
+          "schema_version",
+          "cik",
+          "entity_name",
+          "filings",
+          "source_record_refs",
+          "next_cursor",
+          "provider_status"
+        ],
+        "type": "object"
+      }
+    },
+    "5": {
+      "identity": {
+        "adapter_hash": "59b8b92fc676fee6ca63aa873c375cdfdc32acd475ef9448ac45863684c06f36",
+        "adapter_ref": "transport:public-http:0.1",
+        "allowed_operations": [
+          "get_financial_statements"
+        ],
+        "capability_id": "capability:dalton:connector:sec-financial-statements",
+        "input_schema_hash": "e9ac765d737423888f30f091f4d4eff21ede8316fc3edd137c0fbd5b1321c623",
+        "input_schema_hashes": {
+          "get_financial_statements": "e9ac765d737423888f30f091f4d4eff21ede8316fc3edd137c0fbd5b1321c623"
+        },
+        "input_schema_ref": "schema:connector-inventory:sec-financials:get_financial_statements:input:0.1",
+        "input_schema_refs": {
+          "get_financial_statements": "schema:connector-inventory:sec-financials:get_financial_statements:input:0.1"
+        },
+        "operation": "get_financial_statements",
+        "output_schema_hash": "b3276261753bb8df8572a7354fe774507369e0d90c9d8a60ca994e067bc2e117",
+        "output_schema_hashes": {
+          "get_financial_statements": "b3276261753bb8df8572a7354fe774507369e0d90c9d8a60ca994e067bc2e117"
+        },
+        "output_schema_ref": "schema:connector-inventory:sec-financials:get_financial_statements:output:0.1",
+        "output_schema_refs": {
+          "get_financial_statements": "schema:connector-inventory:sec-financials:get_financial_statements:output:0.1"
+        },
+        "schema_hash": "dd3608e79d1e5f3f343bb3495ccea6ccf5cc4c97db08be094c8fc038ac9dcd7c",
+        "source_hash": "6253f6a90041e29f6b92766c19687a6cbd7a57da1f8810c468f81e8617d0f9eb",
+        "source_identity": {
+          "source_ref": "source:sec-edgar",
+          "source_type": "official_filing",
+          "source_version": "inventory-2026-08-14"
+        }
+      },
+      "schema": {
+        "additionalProperties": false,
+        "properties": {
+          "cik": {
+            "pattern": "^[0-9]{10}$",
+            "type": "string"
+          },
+          "entity_name": {
+            "minLength": 1,
+            "type": "string"
+          },
+          "filings": {
+            "items": {
+              "additionalProperties": false,
+              "properties": {
+                "accession": {
+                  "pattern": "^[0-9]{10}-[0-9]{2}-[0-9]{6}$",
+                  "type": "string"
+                },
+                "filed": {
+                  "minLength": 1,
+                  "type": "string"
+                },
+                "form": {
+                  "enum": [
+                    "10-Q",
+                    "10-K",
+                    "10-Q/A",
+                    "10-K/A"
+                  ],
+                  "type": "string"
+                },
+                "lines": {
+                  "items": {
+                    "additionalProperties": false,
+                    "properties": {
+                      "balance": {
+                        "type": [
+                          "string",
+                          "null"
+                        ]
+                      },
+                      "concept": {
+                        "minLength": 1,
+                        "type": "string"
+                      },
+                      "dimension_axis": {
+                        "type": [
+                          "string",
+                          "null"
+                        ]
+                      },
+                      "dimension_count": {
+                        "minimum": 0,
+                        "type": [
+                          "integer",
+                          "null"
+                        ]
+                      },
+                      "dimension_member": {
+                        "type": [
+                          "string",
+                          "null"
+                        ]
+                      },
+                      "dimensions": {
+                        "additionalProperties": {
+                          "type": "string"
+                        },
+                        "type": [
+                          "object",
+                          "null"
+                        ]
+                      },
+                      "is_breakdown": {
+                        "type": "boolean"
+                      },
+                      "label": {
+                        "minLength": 1,
+                        "type": "string"
+                      },
+                      "level": {
+                        "minimum": 0,
+                        "type": "integer"
+                      },
+                      "parent_concept": {
+                        "type": [
+                          "string",
+                          "null"
+                        ]
+                      },
+                      "period_end": {
+                        "minLength": 1,
+                        "type": "string"
+                      },
+                      "period_start": {
+                        "type": [
+                          "string",
+                          "null"
+                        ]
+                      },
+                      "statement": {
+                        "enum": [
+                          "income",
+                          "balance",
+                          "cash"
+                        ],
+                        "type": "string"
+                      },
+                      "unit": {
+                        "minLength": 1,
+                        "type": "string"
+                      },
+                      "value": {
+                        "pattern": "^-?(0|[1-9][0-9]*)([.][0-9]+)?$",
+                        "type": [
+                          "string",
+                          "null"
+                        ]
+                      }
+                    },
+                    "required": [
+                      "statement",
+                      "concept",
+                      "label",
+                      "level",
+                      "parent_concept",
+                      "is_breakdown",
+                      "dimension_axis",
+                      "dimension_member",
+                      "dimension_count",
+                      "period_start",
+                      "period_end",
+                      "value",
+                      "unit",
+                      "balance",
+                      "dimensions"
+                    ],
+                    "type": "object"
+                  },
+                  "type": "array"
+                },
+                "report_date": {
+                  "minLength": 1,
+                  "type": "string"
+                }
+              },
+              "required": [
+                "accession",
+                "form",
+                "filed",
+                "report_date",
+                "lines"
+              ],
+              "type": "object"
+            },
+            "type": "array"
+          },
+          "next_cursor": {
+            "type": [
+              "string",
+              "null"
+            ]
+          },
+          "provider_status": {
+            "minimum": 100,
+            "type": "integer"
+          },
+          "schema_version": {
+            "enum": [
+              "0.1"
+            ],
+            "type": "string"
+          },
+          "source_record_refs": {
+            "items": {
+              "minLength": 1,
+              "type": "string"
+            },
+            "type": "array",
+            "uniqueItems": true
+          }
+        },
+        "required": [
+          "schema_version",
+          "cik",
+          "entity_name",
+          "filings",
+          "source_record_refs",
+          "next_cursor",
+          "provider_status"
+        ],
+        "type": "object"
+      }
+    }
+  }
+}

@@ -1022,7 +1022,12 @@ class CoverageMissionAuthority:
         self._migrate_statement_dimension_count()
         self._migrate_statement_dimensions()
         from .sec_statement_form_schema import migrate
+        from .sec_native_statement_schema import migrate as migrate_native_dispatch
+        # Validate both original table contracts before changing either enum.
+        migrate(self.connection, preview=True)
+        migrate_native_dispatch(self.connection, preview=True)
         migrate(self.connection)
+        migrate_native_dispatch(self.connection)
 
     def _migrate_statement_dimensions(self) -> None:
         """Legacy projected contexts remain unknown; new complete identities persist."""
@@ -5060,6 +5065,7 @@ class CoverageMissionAuthority:
     def queue_statement_dispatch(
         self, *, authorization: Mapping[str, Any], form: str = "10-Q",
         filing_limit: int = 1, attempt: int = 0, retry_salt: str | None = None,
+        native_request: Mapping[str, Any] | None = None, native_spool: Any = None,
     ) -> dict[str, Any]:
         """Queue one financial-statements run for a company, idempotently.
 
@@ -5093,8 +5099,19 @@ class CoverageMissionAuthority:
         )
         if canonical_json(exact) != canonical_json(authorization):
             raise CoverageMissionConflict("statement dispatch authorization drifted")
-        if form not in {"10-Q", "10-K"}:
-            raise CoverageMissionValidationError("statement dispatch form must be 10-Q or 10-K")
+        if form not in {"10-Q", "10-K", "20-F", "40-F"}:
+            raise CoverageMissionValidationError("statement dispatch form is not an admitted periodic form")
+        if form in {"20-F", "40-F"}:
+            from .sec_native_annual import verify_request
+            try:
+                verify_request(self.connection, native_spool, dict(native_request or {}), current_authorization=exact)
+            except (ValueError, KeyError, TypeError) as exc:
+                raise CoverageMissionConflict("native annual request proof differs: " + str(exc)) from exc
+            if (len(native_request["filings"]) != filing_limit
+                    or native_request["filings"][0]["form"].removesuffix("/A") != form):
+                raise CoverageMissionConflict("native annual dispatch selection differs")
+        elif native_request is not None:
+            raise CoverageMissionConflict("domestic dispatch cannot carry foreign annual authority")
         if type(filing_limit) is not int or not 1 <= filing_limit <= MAX_STATEMENT_FILINGS:
             raise CoverageMissionValidationError(
                 f"statement dispatch limit must be 1..{MAX_STATEMENT_FILINGS}"
@@ -5112,6 +5129,8 @@ class CoverageMissionAuthority:
         }
         if retry_salt is not None:
             request["retry_salt"] = _text(retry_salt, "retry_salt")[:64]
+        if native_request is not None:
+            request["native_request_hash"] = native_request["content_hash"]
         request_hash = content_hash(request)
         dispatch_id = f"mission-statement-dispatch:{request_hash[:32]}"
         existing = self.connection.execute(
@@ -5138,11 +5157,25 @@ class CoverageMissionAuthority:
                     filing_limit, attempt, canonical_json(exact), request_hash, now, now,
                 ),
             )
+            if native_request is not None:
+                cur.execute("INSERT INTO coverage_mission_statement_native_requests(dispatch_id,record_json,content_hash) VALUES(?,?,?)",
+                    (dispatch_id, canonical_json(native_request), native_request["content_hash"]))
         return {
             **request, "dispatch_id": dispatch_id, "authorization": exact,
             "request_hash": request_hash, "status": "pending", "ticket_ref": None,
             "created_at": now, "updated_at": now, "status_marker": "fresh",
         }
+
+    def native_statement_request(self, dispatch_id: str) -> dict[str, Any] | None:
+        row = self.connection.execute(
+            "SELECT record_json,content_hash FROM coverage_mission_statement_native_requests WHERE dispatch_id=?",
+            (dispatch_id,)).fetchone()
+        if row is None:
+            return None
+        value = json.loads(row["record_json"])
+        if value.get("content_hash") != row["content_hash"] or content_hash({k:v for k,v in value.items() if k != "content_hash"}) != row["content_hash"]:
+            raise CoverageMissionConflict("native annual immutable request hash differs")
+        return value
 
     def _statement_dispatch(self, dispatch_id: str) -> Any:
         row = self.connection.execute(
@@ -5285,6 +5318,24 @@ class CoverageMissionAuthority:
         company_ref = row["company_ref"]
         governance_ref = _text(governance_ref, "governance_ref")
         governance_hash = _sha256(governance_hash, "governance_hash")
+        native = any(isinstance(f,Mapping) and f.get("form") in {"20-F","20-F/A","40-F","40-F/A"} for f in filings)
+        native_request = self.native_statement_request(dispatch_id) if native else None
+        if native:
+            from .connector_governance import ConnectorGovernance, ConnectorGovernanceError
+            from .sec_financials_core import sec_financials_identity
+            try:
+                approved=ConnectorGovernance(governance_proof or {})
+            except ConnectorGovernanceError as exc:
+                raise CoverageMissionConflict("native annual requires valid approved v6 proof") from exc
+            identity=sec_financials_identity(version=6)
+            if (not approved.approved or approved.id != "connector-governance:sec-financial-statements:v6"
+                    or approved.id != governance_ref or approved.content_hash != governance_hash
+                    or approved.wire["expected_source_hash"] != identity["source_hash"]
+                    or approved.wire["expected_schema_hash"] != identity["schema_hash"] or native_request is None):
+                raise CoverageMissionConflict("native annual requires exact approved v6 and immutable admission")
+            if (len(filings) != len(native_request["filings"])
+                    or {f.get("accession") for f in filings} != {f["accession"] for f in native_request["filings"]}):
+                raise CoverageMissionConflict("native annual observation is not the complete admitted filing set")
         amendments = any(isinstance(f, Mapping) and f.get("form") in {"10-Q/A", "10-K/A"}
                          for f in filings)
         if amendments:
@@ -5294,8 +5345,9 @@ class CoverageMissionAuthority:
                 approved = ConnectorGovernance(governance_proof or {})
             except ConnectorGovernanceError as exc:
                 raise CoverageMissionConflict("amended statements require valid v5 approval proof") from exc
-            expected = sec_financials_identity(version=5)
-            if (not approved.approved or approved.id != "connector-governance:sec-financial-statements:v5"
+            version = 6 if approved.id == "connector-governance:sec-financial-statements:v6" else 5
+            expected = sec_financials_identity(version=version)
+            if (not approved.approved or approved.id != f"connector-governance:sec-financial-statements:v{version}"
                     or approved.id != governance_ref or approved.content_hash != governance_hash
                     or approved.wire["expected_source_hash"] != expected["source_hash"]
                     or approved.wire["expected_schema_hash"] != expected["schema_hash"]):
@@ -5308,7 +5360,7 @@ class CoverageMissionAuthority:
             accession = _text(filing.get("accession"), "accession")
             if _ACCESSION_RE.fullmatch(accession) is None:
                 raise CoverageMissionValidationError("statement accession is invalid")
-            form = _vocabulary(filing.get("form"), ("10-Q", "10-K", "10-Q/A", "10-K/A"), "form")
+            form = _vocabulary(filing.get("form"), ("10-Q", "10-K", "10-Q/A", "10-K/A", "20-F", "20-F/A", "40-F", "40-F/A"), "form")
             if form.removesuffix("/A") != row["form"]:
                 raise CoverageMissionValidationError(
                     "statement filing form differs from its dispatch"
@@ -5363,8 +5415,21 @@ class CoverageMissionAuthority:
                 "governance_ref": governance_ref, "governance_hash": governance_hash,
                 "statement_lines_hash": content_hash(lines),
             }
+            native_evidence = None
+            if form in {"20-F","20-F/A","40-F","40-F/A"}:
+                from .sec_native_annual import prepare_evidence
+                path = self.connection.execute("PRAGMA database_list").fetchone()[2]
+                if not path:
+                    raise CoverageMissionConflict("native annual requires durably kept source originals")
+                try:
+                    native_evidence=prepare_evidence(self.connection,Path(path).parent,dispatch=dict(row),request=native_request,
+                        filing=dict(filing),cik=cik,source_refs=source_refs,governance_ref=governance_ref,governance_hash=governance_hash)
+                except (ValueError,KeyError,TypeError,OSError) as exc:
+                    raise CoverageMissionConflict("native annual original proof differs: "+str(exc)) from exc
+                body["native_evidence_hash"]=native_evidence["content_hash"]
             line_hash = content_hash(body)
             prepared.append({"accession": accession, "ingest_id": ingest_id,
+                             "native_evidence": native_evidence,
                              "body": body, "line_hash": line_hash,
                              "lines": normalized_lines})
 
@@ -5380,6 +5445,8 @@ class CoverageMissionAuthority:
                     (company_ref, item["accession"]),
                 ).fetchone()
                 if held is not None:
+                    if item["native_evidence"] is not None and held["content_hash"] != item["line_hash"]:
+                        raise CoverageMissionConflict("native annual accession already has a different immutable authority")
                     recorded.append({**dict(held), "status_marker": "duplicate"})
                     continue
                 body = item["body"]
@@ -5415,6 +5482,10 @@ class CoverageMissionAuthority:
                             period_end, value, unit, balance,
                         ),
                     )
+                if item["native_evidence"] is not None:
+                    proof=item["native_evidence"]
+                    cur.execute("INSERT INTO coverage_mission_statement_native_evidence(ingest_id,record_json,content_hash) VALUES(?,?,?)",
+                                (ingest_id,canonical_json(proof),proof["content_hash"]))
                 recorded.append({
                     **body, "ingest_id": ingest_id,
                     "dispatch_id": row["dispatch_id"], "recorded_at": now,

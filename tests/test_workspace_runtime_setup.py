@@ -147,12 +147,12 @@ class WorkspaceRuntimeSetupTests(unittest.TestCase):
             records, unsupported = _connector_records(load_workspace_manifest(self.manifest), 'human:workspace-owner')
         self.assertEqual(unsupported, [])
         self.assertEqual(set(records), {'alphaengine-search-library-v1.json', 'alphaengine-get-document-v1.json',
-            'sec-filings-index-v1.json', 'sec-company-facts-v3.json', 'sec-financial-statements-v5.json'})
+            'sec-filings-index-v1.json', 'sec-company-facts-v3.json', 'sec-financial-statements-v6.json'})
         from dalton_core.connector_governance import ConnectorGovernance
         from dalton_core.sec_financials_core import sec_financials_schema_hash
-        record = json.loads((self.state / 'connector-governance/sec-financial-statements-v5.json').read_text())
+        record = json.loads((self.state / 'connector-governance/sec-financial-statements-v6.json').read_text())
         self.assertTrue(ConnectorGovernance(record).approved)
-        self.assertEqual(record['expected_schema_hash'], sec_financials_schema_hash(version=5))
+        self.assertEqual(record['expected_schema_hash'], sec_financials_schema_hash(version=6))
         self.assertFalse((self.state / 'connector-governance/yfinance-daily-prices-v1.json').exists())
 
     def test_cockpit_first_goal_plans_once_and_publishes_existing_authorities(self):

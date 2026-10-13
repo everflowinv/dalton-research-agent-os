@@ -125,7 +125,7 @@ def prepare(missions, launcher, *, company_ref, form):
     from .sec_financials_cli import _load_governance
     from .workspace_runtime_setup import _atomic_seed
     try:
-        governance, version = _load_governance(launcher.governance_path)
+        governance, version = _load_governance(launcher.reparse_governance_path() if hasattr(launcher, "reparse_governance_path") else launcher.governance_path)
     except RuntimeError as exc:
         raise ValueError("cached SEC reparse current contract is unavailable") from exc
     if version != 5:

@@ -234,11 +234,61 @@ def _decision_signature(row: Mapping[str, Any]) -> tuple[Any, ...]:
             row["updated_at"], row["candidate_claim_version_ref"], row["rationale"])
 
 
+def _native_annual_authorities(connection, company_refs):
+    """Only a held, replayable native annual document set changes this item.
+
+    This is bounded to one latest annual per current company. Parsed facts by
+    themselves never satisfy acquired/read text counts below.
+    """
+    from .company_model_annual_projection import verify_statement_filing, AnnualProjectionError
+    result = {}
+    for company_ref in company_refs:
+        try:
+            row = connection.execute(
+                "SELECT * FROM coverage_mission_statement_filings WHERE company_ref=? "
+                "AND form IN ('20-F','40-F') ORDER BY report_date DESC,filed DESC,ingest_id DESC LIMIT 1",
+                (company_ref,)).fetchone()
+            if row is None:
+                # A strong reporting root can name the correct annual gap
+                # before a statements document set has been acquired.
+                databases = connection.execute("PRAGMA database_list").fetchall()
+                main = next((d[2] for d in databases if d[1] == "main"), "")
+                if not main:
+                    continue
+                state = Path(main).parent
+                from .sec_financials_cli import _load_governance
+                if _load_governance(state / "connector-governance" / "sec-financial-statements-v6.json")[1] != 6:
+                    continue
+                from .coverage_mission import CoverageMissionAuthority
+                from .raw_spool import RawSpoolReader
+                from .sec_native_annual import profile_for_company
+                from datetime import date
+                config_path = state / "document-research-config.json"
+                spool = (json.loads(config_path.read_bytes())["spool_dir"] if config_path.is_file()
+                         else state / "connector-spool")
+                authority = object.__new__(CoverageMissionAuthority)
+                authority.connection = connection
+                profile = profile_for_company(authority, lambda: RawSpoolReader(spool),
+                    company_ref=company_ref, as_of=date.today())
+                if profile and profile["family"] in {"foreign_20f", "foreign_40f"}:
+                    result[company_ref] = {"form": "20-F" if profile["family"] == "foreign_20f" else "40-F",
+                                           "accession": None}
+                continue
+            filing = dict(row)
+            verify_statement_filing(connection, filing)
+            result[company_ref] = {"form": filing["form"], "accession": filing["accession"]}
+        except (sqlite3.OperationalError, AnnualProjectionError, ValueError, RuntimeError, OSError, KeyError, TypeError):
+            # Unreadable or unproved native originals remain a visible gap.
+            continue
+    return result
+
+
 def _document_counts(
     connection: sqlite3.Connection, mission_version_ref: str,
     *, company_name_keys: Mapping[str, str] | None = None,
     latest_quarters: Mapping[str, str] | None = None,
     reported_quarters: Mapping[str, Mapping[str, Any]] | None = None,
+    native_annuals: Mapping[str, Mapping[str, str]] | None = None,
 ) -> dict[tuple[str, str], dict[str, int]]:
     """(company_ref, spec_ref) → acquired / pending / failed / read counts.
 
@@ -372,6 +422,11 @@ def _document_counts(
     except sqlite3.OperationalError:
         pass
 
+    native_authoritative = {
+        (company, "sec:filing:" + value["accession"], "annual-report-" + value["form"].lower().replace("-", ""))
+        for company, value in (native_annuals or {}).items() if value["accession"] is not None
+    }
+
     # A source can return the same external document for several companies or
     # specs.  Those are separate attribution claims.  Deduplicating on the
     # external id alone made an equal-rank row belong to whichever company
@@ -386,13 +441,18 @@ def _document_counts(
         params,
     ).fetchall():
         document_ref, status = entry["document_ref"], entry["status"]
+        if (native_annuals is not None and entry["spec_ref"] in {"annual-report-20f", "annual-report-40f"}
+                and (entry["source_ref"] != "source:sec-edgar"
+                     or (entry["company_ref"], document_ref, entry["spec_ref"]) not in native_authoritative)):
+            continue
         latest_review = latest_reviews.get((entry["company_ref"], document_ref), (None, None, None))
         dismissed = latest_review[0] == "dismissed"
         wrong_issuer = dismissed and isinstance(latest_review[2], str) and latest_review[2].startswith("P13i:")
         issuer_authoritative_annual = (
-            entry["spec_ref"] == "annual-report-10k"
-            and entry["source_ref"] == "source:sec-edgar"
-            and (entry["company_ref"], document_ref) in authoritative_annuals
+            entry["source_ref"] == "source:sec-edgar"
+            and ((entry["spec_ref"] == "annual-report-10k"
+                  and (entry["company_ref"], document_ref) in authoritative_annuals)
+                 or (entry["company_ref"], document_ref, entry["spec_ref"]) in native_authoritative)
         )
         completed = _proven((entry["company_ref"], document_ref))
         if dismissed and (wrong_issuer or (not issuer_authoritative_annual and not completed)):
@@ -772,6 +832,7 @@ def evaluate_mission(
     planned = set(planned_specs or set())
     periods = _claim_periods(connection)
     company_refs = [member["company_ref"] for member in mission["universe"]]
+    native_annuals = _native_annual_authorities(connection, company_refs)
     latest_quarters = _latest_fiscal_quarters(connection, company_refs)
     reported = _reported_quarters(connection, company_refs, latest_quarters)
     for company_ref, release in reported.items():
@@ -781,7 +842,7 @@ def evaluate_mission(
         company_name_keys={member["company_ref"]: member.get("ticker", "")
                            for member in mission["universe"]},
         latest_quarters=latest_quarters,
-        reported_quarters=reported,
+        reported_quarters=reported, native_annuals=native_annuals,
     )
     connected = {
         entry["source_ref"]
@@ -802,6 +863,11 @@ def evaluate_mission(
         status = None if stage is None else fold_stage_status(list(history.get(stage) or ()))
         items = []
         for item in SOURCE_BASE_ITEMS:
+            if item["item_ref"] == "annual_report" and company_ref in native_annuals:
+                form = native_annuals[company_ref]["form"]
+                item = {**item, "label": f"最新年报（{form}）正文",
+                        "spec_refs": ("annual-report-" + form.lower().replace("-", ""),),
+                        "gap_note": f"还没有获取 {form} 年度原件正文；已解析财报数字不等于已读原文"}
             if item["counted_by"] == "quantitative_claim_periods":
                 have = len(periods.get(company_ref, set()))
                 read = have
