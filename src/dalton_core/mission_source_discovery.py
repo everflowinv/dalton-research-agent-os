@@ -2886,6 +2886,9 @@ class MissionSourceDiscoveryCoordinator:
                 return verdict
         if row['status'] == 'failed' and self.source_ref == ALPHAENGINE_SOURCE_REF:
             from .alphaengine_cursor_recovery import expired_cursor_restart_available
+            from .alphaengine_desktop_recovery import desktop_module_recovered
+            if desktop_module_recovered(self, row):
+                return None
             if expired_cursor_restart_available(self, row):
                 # Only the latest exact cursor-bound terminal refusal gets
                 # this exception. The new cursor-free dispatch owns normal
