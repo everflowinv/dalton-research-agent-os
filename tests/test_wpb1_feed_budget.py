@@ -13,7 +13,6 @@ import unittest
 from unittest import mock
 
 from dalton_core.mission_feed_lane import (
-    FEED_CHILD_MIN_TIMEOUT_SECONDS,
     FEED_CHILD_TIMEOUT_SECONDS,
     MIN_DOCUMENT_READ_SECONDS,
     READ_RESERVE_SECONDS,
@@ -24,13 +23,15 @@ from dalton_core.mission_feed_lane import (
 
 
 class ChildTimeoutTests(unittest.TestCase):
-    def test_a_child_gets_a_workable_floor_however_small_the_tick_budget(self):
-        # The old cap was ``budget / 2``.  With the tick budget down at five
-        # seconds that is 2.5 s, which is barely a Python process start: the
-        # lane would kill healthy children and report its own scheduling as a
-        # connector failure.
-        self.assertEqual(feed_child_timeout_seconds(2.0), FEED_CHILD_MIN_TIMEOUT_SECONDS)
-        self.assertEqual(feed_child_timeout_seconds(5.0), FEED_CHILD_MIN_TIMEOUT_SECONDS)
+    def test_an_admitted_read_keeps_its_deadline_when_the_tick_slice_is_short(self):
+        # Live local reads were killed at six seconds by a shorter writer
+        # scheduling slice. Admission still uses that slice; execution does
+        # not turn the same healthy seven-second read into a failed connector.
+        for remaining in (0.5, 2.0, 5.0, 8.0):
+            with self.subTest(remaining=remaining):
+                self.assertGreater(feed_child_timeout_seconds(remaining), 7.0)
+                self.assertEqual(feed_child_timeout_seconds(remaining),
+                                 feed_child_timeout_seconds(None))
 
     def test_a_hung_child_is_still_capped(self):
         self.assertEqual(feed_child_timeout_seconds(600.0), FEED_CHILD_TIMEOUT_SECONDS)
