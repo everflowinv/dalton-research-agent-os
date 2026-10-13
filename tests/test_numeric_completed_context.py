@@ -59,18 +59,41 @@ class NumericCompletedContextTests(unittest.TestCase):
         self.assertEqual(numeric_requirements(rows), old)
         self.assertEqual(len(old['requirements']), 1)
 
-    def test_no_pending_or_different_company_original_or_version_never_reuses_success(self):
+    def test_completed_answer_retained_without_pending_and_not_rebound_to_another_source(self):
         row = completed()
-        foreign = requirement(); foreign['company_ref'] = 'company:ticker:other'
-        for rows in ([foreign, row], [row], [requirement(doc='other:original'), row],
-                     [requirement(version='f'*64), row],
-                     [requirement(), completed(company_ref='company:ticker:other')]):
-            self.assertEqual(self.context(rows), {'sources': [], 'omitted': 0})
+        for pending in ([], [requirement(doc='other:original')], [requirement(version='f'*64)]):
+            before = numeric_requirements(pending)
+            result = self.context([*pending, row])
+            self.assertEqual(result['sources'][0]['document_ref'], DOC)
+            self.assertEqual(result['sources'][0]['document_version_hash'], VERSION)
+            self.assertEqual(numeric_requirements([*pending, row]), before)
+        foreign = completed(company_ref='company:ticker:other')
+        self.assertEqual(self.context([foreign]), {'sources': [], 'omitted': 0})
 
     def test_partial_or_unverified_outcome_does_not_assert_completed_scope(self):
-        for outcome in ('candidate_staged', 'numeric_waiting_evidence', 'query_miss'):
+        for outcome in ('candidate_staged', 'query_miss'):
             self.assertEqual(self.context([requirement(), completed(outcome=outcome)]),
                              {'sources': [], 'omitted': 0})
+
+    def test_partial_feedback_preserves_completed_subset_and_explicit_remaining_targets(self):
+        row = completed(count=3, outcome='numeric_waiting_evidence')
+        row['completed_targets'] = row['completed_targets'][:2]
+        row['missing'] = [{'target_ref': 'target:2', 'reason': 'Exact source has no quoted amount.'}]
+        row = bind(row)
+        pending = requirement(); before = numeric_requirements([pending])
+        result = self.context([pending, row]); source = result['sources'][0]
+        self.assertEqual(source['result_status'], 'partial')
+        self.assertEqual(source['remaining_target_refs'], ['target:2'])
+        self.assertEqual([t['target_ref'] for t in source['targets']], ['target:0', 'target:1'])
+        self.assertEqual(numeric_requirements([pending, row]), before)
+        for mutate in ('overlap', 'unbound', 'no_reason', 'duplicate_missing'):
+            bad = copy.deepcopy(row)
+            if mutate == 'overlap': bad['missing'][0]['target_ref'] = 'target:0'
+            if mutate == 'unbound': bad['missing'][0]['target_ref'] = 'target:foreign'
+            if mutate == 'no_reason': bad['missing'][0]['reason'] = ''
+            if mutate == 'duplicate_missing': bad['missing'].append(copy.deepcopy(bad['missing'][0]))
+            with self.assertRaises(ValueError): self.context([bind(bad)])
+        with self.assertRaises(ValueError): self.context([completed(outcome='numeric_waiting_evidence')])
 
     def test_complete_hash_definition_and_figure_binding_tampering_refused(self):
         row = completed(); row['numeric_targets'][0]['period'] = 'FY2026'

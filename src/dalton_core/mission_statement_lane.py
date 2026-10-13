@@ -313,8 +313,11 @@ class MissionStatementLaneCoordinator:
                     dispatch_id=dispatch["dispatch_id"], observation=observation,
                     governance_ref=str(summary.get("governance_ref") or ""),
                     governance_hash=str(summary.get("governance_hash") or ""),
+                    **({"governance_proof": self.launcher.observation_governance(summary).wire}
+                       if any(f.get("form") in {"10-Q/A", "10-K/A", "20-F", "20-F/A", "40-F", "40-F/A"}
+                              for f in observation.get("filings", []) if isinstance(f, Mapping)) else {}),
                 )
-            except CoverageMissionError as exc:
+            except (CoverageMissionError, LaneChildRejected) as exc:
                 settled.append(self._settle(
                     dispatch, "failed", f"{type(exc).__name__}: {exc}"))
                 continue
@@ -378,7 +381,7 @@ class MissionStatementLaneCoordinator:
         # A 10-K covers a year, so asking for twenty quarters of annual reports
         # would be asking for twenty years. Quarters are quarters; anything
         # else is scaled to what the form actually reports.
-        if form == "10-K":
+        if form in {"10-K", "20-F", "40-F"}:
             quarters = max(1, (quarters + 3) // 4)
         return max(floor, min(quarters, MAX_STATEMENT_FILINGS))
 
@@ -437,6 +440,22 @@ class MissionStatementLaneCoordinator:
                 continue
             if coverage["open_dispatches"]:
                 continue
+            if hasattr(self.launcher, "native_enabled"):
+                try:
+                    native_enabled=self.launcher.native_enabled()
+                    if native_enabled:
+                        from .sec_native_annual import profile_for_company
+                        from .raw_spool import RawSpoolReader
+                        profile=profile_for_company(self.missions,lambda:RawSpoolReader(self.launcher.profile_spool_dir),
+                                                    company_ref,as_of=self.clock().date())
+                        if profile is not None and profile["family"] in {"foreign_20f","foreign_40f"}:
+                            result=self._queue_native_company(company_ref,profile,coverage)
+                            if result is not None:queued.append(result)
+                            continue
+                except (ValueError,OSError,CoverageMissionError,RuntimeError) as exc:
+                    queued.append({"company_ref":company_ref,"status":"held",
+                        "reason":"native annual source/configuration proof unavailable: "+str(exc)[:200]})
+                    continue
             # History first, then polling: a company still short of its
             # backfill in one form does not spend its slot watching for the
             # next filing of another.
@@ -455,6 +474,39 @@ class MissionStatementLaneCoordinator:
                 if done:
                     break
         return queued
+
+    def _queue_native_company(self, company_ref, profile, coverage):
+        from .sec_native_annual import annual_candidates, make_request
+        from .raw_spool import RawSpoolReader
+        form="40-F" if profile["family"]=="foreign_40f" else "20-F"
+        wanted=self._wanted_filings(company_ref,form)
+        spool=RawSpoolReader(self.launcher.profile_spool_dir)
+        candidates=annual_candidates(self.missions.connection,spool,profile,company_ref=company_ref,
+                                     issuer=profile["issuer"],as_of=self.clock().date(),limit=wanted)
+        if not candidates:
+            return {"company_ref":company_ref,"form":form,"status":"held",
+                    "reason":"native annual index contains no original XBRL financial candidate; disclosures remain readable material"}
+        if all(x["accession"] in coverage.get("accessions",()) for x in candidates):
+            return None
+        since=(coverage.get("last_success_by_form") or {}).get(form)
+        failures=[f for f in coverage.get("failures",()) if f.get("form")==form
+                  and (since is None or str(f.get("at") or "")>since)]
+        charged=[f for f in failures if not _is_configuration_failure(f.get("reason"))]
+        if len(charged)>=MAX_FAILURES_PER_COMPANY or len(failures)>=MAX_ATTEMPTS_PER_COMPANY:
+            return {"company_ref":company_ref,"form":form,"status":"held","reason":"native annual failure limit reached; no repeat acquisition authorized"}
+        if failures:
+            held=self._seconds_since(failures[-1].get("at"))
+            if _is_configuration_failure(failures[-1].get("reason")) and held is not None and held<CONFIGURATION_HOLD_SECONDS:
+                return {"company_ref":company_ref,"form":form,"status":"held","reason":"native annual configuration failure awaits bounded recheck"}
+        auth=self.missions.sec_lane_authorization_for_company(company_ref)
+        request=make_request(authorization=auth,reporting_profile=profile,filings=candidates,as_of=self.clock().date())
+        result=self.missions.queue_statement_dispatch(authorization=auth,form=form,filing_limit=len(candidates),
+            attempt=len(charged),retry_salt=self._retry_salt() if failures else None,
+            native_request=request,native_spool=spool)
+        if result["status_marker"]=="fresh":
+            return {"company_ref":company_ref,"form":form,"status":"queued","dispatch_ref":result["dispatch_id"],
+                    "source_profile_hash":profile["content_hash"],"annual_candidates":len(candidates)}
+        return None
 
     def _queue_company_form(self, *, company_ref: str, ticker: str, form: str,
                             coverage: Mapping[str, Any],
@@ -476,6 +528,16 @@ class MissionStatementLaneCoordinator:
         # Only failures for this company and form spend its attempt budget.
         charged = [item for item in failures
                    if not _is_configuration_failure(item.get("reason"))]
+        if phase == "backfill" and failures and hasattr(self.launcher, "start_reparse"):
+            from .sec_statement_cached_reparse import prepare
+            try:
+                recovery = prepare(self.missions, self.launcher, company_ref=company_ref, form=form)
+            except (ValueError, OSError, CoverageMissionError) as exc:
+                return {"company_ref": company_ref, "form": form, "status": "held",
+                        "reason": "cached SEC source replay is unproved: " + str(exc)[:200]}
+            if recovery is not None and recovery["status_marker"] == "fresh":
+                return {"company_ref": company_ref, "form": form, "status": "queued",
+                        "dispatch_ref": recovery["dispatch_id"], "local_replay": True}
         if len(charged) >= MAX_FAILURES_PER_COMPANY:
             return None
         if len(failures) >= MAX_ATTEMPTS_PER_COMPANY:
@@ -545,11 +607,19 @@ class MissionStatementLaneCoordinator:
             return {"status": "idle"}
         dispatch = pending[0]
         try:
-            ticket = self.launcher.start(
-                ticker=dispatch["ticker"], form=dispatch["form"],
-                limit=int(dispatch["filing_limit"]),
-                actor_ref=dispatch["actor_ref"],
-            )
+            from .sec_statement_cached_reparse import request_path, is_reparse_dispatch
+            path = request_path(self.launcher.state_dir, dispatch["dispatch_id"]) if hasattr(self.launcher, "start_reparse") else None
+            if path is not None and (path.exists() or path.is_symlink() or is_reparse_dispatch(self.missions, dispatch)):
+                ticket = self.launcher.start_reparse(replay_request_path=path, missions=self.missions,
+                                                    actor_ref=dispatch["actor_ref"])
+            elif dispatch["form"] in {"20-F","40-F"}:
+                ticket = self.launcher.start_native(missions=self.missions,dispatch=dispatch,actor_ref=dispatch["actor_ref"])
+            else:
+                ticket = self.launcher.start(
+                    ticker=dispatch["ticker"], form=dispatch["form"],
+                    limit=int(dispatch["filing_limit"]),
+                    actor_ref=dispatch["actor_ref"],
+                )
         except LaneChildConflict as exc:
             return {"status": "deferred", "dispatch_ref": dispatch["dispatch_id"],
                     "reason": f"{type(exc).__name__}: {exc}"}
@@ -586,6 +656,8 @@ STATEMENT_LANE_USER_AGENT = "Dalton Research Agent OS SEC financial-statements l
 # projected wires remain readable but cannot stand in for complete identities.
 STATEMENT_LANE_GOVERNANCE = "sec-financial-statements-v2.json"
 STATEMENT_LANE_GOVERNANCE_CANDIDATES = (
+    "sec-financial-statements-v6.json",
+    "sec-financial-statements-v5.json",
     "sec-financial-statements-v4.json",
     "sec-financial-statements-v3.json",
     STATEMENT_LANE_GOVERNANCE,
@@ -682,6 +754,7 @@ def build_launcher(args: Any) -> Any | None:
         user_agent=user_agent,
         scheduling_forms=forms,
         scheduling_limits=limits,
+        profile_spool_dir=getattr(args,"transcript_spool_dir",None),
     )
 
 
@@ -693,7 +766,7 @@ def argv_fragment(context: Any) -> list[str]:
     from .sec_financials_core import sec_financials_identity
 
     governance = None
-    for version, filename in zip((4, 3, 2), STATEMENT_LANE_GOVERNANCE_CANDIDATES):
+    for version, filename in zip((6, 5, 4, 3, 2), STATEMENT_LANE_GOVERNANCE_CANDIDATES):
         candidate = context.state / "connector-governance" / filename
         if not candidate.is_file():
             continue

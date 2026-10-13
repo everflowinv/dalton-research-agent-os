@@ -71,7 +71,17 @@ class CurrencySymbolTests(unittest.TestCase):
                          ["$4200"])
 
     def test_the_contract_moved_so_terminal_holds_release(self):
-        self.assertEqual(NUMBER_SOURCE_CONTRACT_VERSION, "number-source-contract:0.8")
+        from unittest.mock import patch
+        from dalton_core import mission_deliverable as numbers
+        current = numbers.number_source_contract_fingerprint()
+        with patch.object(numbers, 'NUMBER_SOURCE_CONTRACT_VERSION', 'number-source-contract:0.8'):
+            legacy = numbers.number_source_contract_fingerprint()
+        with patch.object(numbers, 'NUMBER_SOURCE_CONTRACT_VERSION', 'number-source-contract:0.9'):
+            reviewed = numbers.number_source_contract_fingerprint()
+        self.assertNotEqual(legacy, reviewed)
+        self.assertNotEqual(current, legacy)
+        with patch.object(numbers, 'NUMBER_SOURCE_CONTRACT_VERSION', NUMBER_SOURCE_CONTRACT_VERSION + ':next'):
+            self.assertNotEqual(current, numbers.number_source_contract_fingerprint())
 
 
 class NumbersRepairFindingsTests(unittest.TestCase):

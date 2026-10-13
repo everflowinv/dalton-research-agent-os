@@ -552,6 +552,10 @@ class SecFyMinus9mAuthorityResolver(SecStatementLineAuthorityResolver):
     to its dispatch.
     """
 
+    payload_kind = PAYLOAD_KIND
+    rule_ref = RULE_REF
+    identity_prefix = "sec-fy-minus-9m"
+
     def payload(self, ingest_id: str) -> dict[str, Any]:
         annual, _ = filing_rows(self.connection, ingest_id)
         derivation = derive(self.connection, ingest_id)
@@ -616,7 +620,7 @@ class SecFyMinus9mAuthorityResolver(SecStatementLineAuthorityResolver):
         when = self._recorded_at(payload)
         base = {
             "schema_version": "0.2",
-            "id": "sec-fy-minus-9m-material:" + content_hash({
+            "id": self.identity_prefix + "-material:" + content_hash({
                 "origin_ref": origin, "payload": canonical_json(payload)})[:32],
             "created_at": when,
             "source_envelope_ref": payload["ingest_id"],
@@ -662,7 +666,7 @@ class SecFyMinus9mAuthorityResolver(SecStatementLineAuthorityResolver):
         material_wire = validate_source_verification_material(material)
         payload = material_wire.get("normalized_payload")
         if (material_wire.get("provenance_mode") != self.provenance_mode
-                or not isinstance(payload, Mapping) or payload.get("kind") != PAYLOAD_KIND):
+                or not isinstance(payload, Mapping) or payload.get("kind") != self.payload_kind):
             raise QuantitativeClaimPromotionError(
                 "the FY−9M verifier requires FY−9M statement-line material")
         findings: list[dict[str, Any]] = []
@@ -727,7 +731,7 @@ class SecFyMinus9mAuthorityResolver(SecStatementLineAuthorityResolver):
         check("authority_resolution_hash", material_wire["authority_resolution_hash"],
               content_hash(rebuilt["components"]) if isinstance(rebuilt, Mapping) else None,
               "material.authority_resolution_hash", "material binds the exact component rows")
-        check("derivation_rule", (payload.get("derivation") or {}).get("rule_ref"), RULE_REF,
+        check("derivation_rule", (payload.get("derivation") or {}).get("rule_ref"), self.rule_ref,
               "material.normalized_payload.derivation.rule_ref",
               "the derivation names the FY−9M rule")
         check("source_ref", material_wire["source_ref"], SEC_STATEMENT_LINE_SOURCE_REF,
@@ -746,7 +750,7 @@ class SecFyMinus9mAuthorityResolver(SecStatementLineAuthorityResolver):
         ) else "pass"
         base = {
             "schema_version": "0.1",
-            "id": "sec-fy-minus-9m-source-verification:" + content_hash({
+            "id": self.identity_prefix + "-source-verification:" + content_hash({
                 "subject": material_wire["id"],
                 "filing": str(filing["content_hash"]),
                 "findings": [item["content_hash"] for item in findings],
@@ -850,11 +854,11 @@ def build_fy_minus_9m_candidate(
                              "material_hash": material["content_hash"]})[:32]
     evidence = validate_candidate_evidence(build_candidate_evidence(
         material, source_verification,
-        candidate_evidence_ref="candidate-evidence:sec-fy-minus-9m:" + identity,
+        candidate_evidence_ref="candidate-evidence:" + figures.identity_prefix + ":" + identity,
         actor_ref=actor_ref, created_at=when,
         verification_mode=SEC_STATEMENT_LINE_AUTHORITY_MODE,
     ))
-    claim_ref = "candidate-claim:sec-fy-minus-9m:" + identity
+    claim_ref = "candidate-claim:" + figures.identity_prefix + ":" + identity
     claim = {
         "schema_version": "0.1",
         "id": "candidate-claim-version:" + content_hash(

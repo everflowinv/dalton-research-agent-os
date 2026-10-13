@@ -117,7 +117,11 @@ class LongContextFloorTest(unittest.TestCase):
                           "purpose_run_budgets": {purpose: {"max_cost_usd": 0.5}}}
                 resolved = cb.resolve_run_budget(config, purpose, defaults={"max_cost_usd": 1})
                 self.assertEqual(resolved["max_cost_usd"], calls * cb.LONG_CONTEXT_CALL_FLOOR["max_cost_usd"])
-                self.assertEqual(cb.default_run_budget(purpose)["max_cost_usd"], resolved["max_cost_usd"])
+                # An explicit low run cap retains the required-only floor;
+                # the memo default additionally reserves its optional redo.
+                default_calls = 6 if purpose == "investment_memo" else calls
+                self.assertEqual(cb.default_run_budget(purpose)["max_cost_usd"],
+                                 default_calls * cb.LONG_CONTEXT_CALL_FLOOR["max_cost_usd"])
 
     def test_run_floor_uses_unit_count_and_higher_independent_verifier_cap(self) -> None:
         budgets = {"dossier": {"max_cost_usd": 20}, "dossier_verifier": {"max_cost_usd": 30}}

@@ -59,13 +59,23 @@ def derive_numeric_work(admission,scheduler,registry,blueprints,index,*,
     blueprint=dict(blueprints[index]);metadata=dict(blueprint['metadata']);refs=list(blueprint['input_refs'])
     planned=metadata['upstream_work_order_ref']
     metadata['upstream_work_order_ref']=source['id'];refs=[source['id'] if x==planned else x for x in refs]
-    metadata.update({'numeric_contract_ref':CONTRACT_REF,'numeric_targets':numeric['targets'],
+    numeric_contract = numeric['contract_ref']
+    metadata.update({'numeric_contract_ref':numeric_contract,'numeric_targets':numeric['targets'],
                      'numeric_metric_definitions':numeric['metric_definitions'],
                      'upstream_result_ref':envelope['id'],'upstream_result_hash':formal['result_envelope_hash']})
     question=admission['planner_inquiry']['question']
     if index==1:
         proof=registry.verify_search_proof(envelope['outputs'])
-        prompt=(draft_prompt_builder or draft_prompt)(question=question,search_proof=proof,targets=numeric['targets'],catalog=numeric['metric_definitions'])
+        if numeric_contract == 'directed-document-operating-numeric:0.1':
+            from .operating_source_measurements import registered_measurements
+            source_proof = registered_measurements(registry,admission['request']['registration'],
+                purpose=admission['request']['purpose'],search_proof=proof,
+                periods=list(dict.fromkeys(t['period'] for t in admission['numeric_authority']['targets'])))
+            if source_proof is not None:
+                metadata['operating_source_proof'] = source_proof
+        prompt=(draft_prompt_builder or draft_prompt)(question=question,search_proof=proof,targets=numeric['targets'],catalog=numeric['metric_definitions'],
+            **({'contract_ref':numeric_contract} if numeric_contract != CONTRACT_REF else {}),
+            **({'operating_source_proof':metadata['operating_source_proof']} if 'operating_source_proof' in metadata else {}))
         metadata.update({'purpose':'mission_directed_document_draft','retrieval_proof':proof,
                          'context_hash':content_hash(proof['matches']),'retrieval_match_count':len(proof['matches'])})
     elif index==2:
@@ -73,17 +83,22 @@ def derive_numeric_work(admission,scheduler,registry,blueprints,index,*,
         parse_draft(canonical_json(draft['output']),metadata=source['metadata'])
         proof=source['metadata']['retrieval_proof']
         producer={k:draft[k] for k in ('route_decision_ref','model_invocation_ref','model_family','request_binding_hash')}
-        prompt=verifier_prompt(question=question,search_proof=proof,draft=draft['output'],targets=numeric['targets'],catalog=numeric['metric_definitions'],producer_proof=producer)
+        prompt=verifier_prompt(question=question,search_proof=proof,draft=draft['output'],targets=numeric['targets'],catalog=numeric['metric_definitions'],producer_proof=producer,
+            **({'operating_source_proof':source['metadata']['operating_source_proof']} if 'operating_source_proof' in source['metadata'] else {}))
         metadata.update({'purpose':'mission_directed_document_verifier','retrieval_proof':proof,
                          'context_hash':source['metadata']['context_hash'],'retrieval_match_count':len(proof['matches']),
                          'draft':draft['output'],'draft_proof':draft,'producer_model_family':draft['model_family'],
                          'producer_route_decision_ref':draft['route_decision_ref'],
                          'verifier_provider_contract':PROVIDER_CONTRACT_REF,'verifier_output_schema_version':'0.1',
                          'verifier_provider_schema_hash':verifier_schema_hash_override or verifier_schema_hash()})
+        if 'operating_source_proof' in source['metadata']:
+            metadata['operating_source_proof']=source['metadata']['operating_source_proof']
     elif index==3:
         verifier=validate_model_proof(envelope['outputs'],stage='independent_qualitative_verifier',work=source)
         parse_verifier(canonical_json(verifier['output']),metadata=source['metadata'])
         proof=source['metadata']['retrieval_proof'];draft=source['metadata']['draft_proof']
+        if 'operating_source_proof' in source['metadata']:
+            metadata['operating_source_proof']=source['metadata']['operating_source_proof']
         metadata.update({'retrieval_proof':proof,'draft_proof':draft,'verifier_proof':verifier,
                          'producer_route_decision_ref':draft['route_decision_ref'],
                          'verifier_route_decision_ref':verifier['route_decision_ref']})
@@ -120,7 +135,8 @@ def source_binding(connection,registration,company_ref,*,strategy_version=CONTRA
         row=source_capability(connection,registration,company_ref)
     except ValueError as exc:
         raise DirectedNumericError(str(exc)) from exc
-    if strategy_version == CONTRACT_REF:
+    from .operating_driver_units import CONTRACT_REF as OPERATING_REF
+    if strategy_version in (CONTRACT_REF, OPERATING_REF):
         if row['source_grade'] != FILED:
             raise DirectedNumericError('numeric directed formal claims require a company-filed source; source grade is not admissible')
     elif strategy_version == SPOKEN_CONTRACT_REF:
@@ -145,6 +161,14 @@ def _execution_proof(executor,admission,works):
     from .model_router import independent_families
     proof=executor.registry.verify_search_proof(works[3]['metadata']['retrieval_proof'])
     if canonical_json(proof['request'])!=canonical_json(admission['request']):raise DirectedNumericError('numeric original differs from admitted source')
+    if admission['numeric_authority']['contract_ref'] == 'directed-document-operating-numeric:0.1':
+        from .operating_source_measurements import registered_measurements
+        native = registered_measurements(executor.registry,admission['request']['registration'],
+            purpose=admission['request']['purpose'],search_proof=proof,
+                periods=list(dict.fromkeys(t['period'] for t in admission['numeric_authority']['targets'])))
+        for work in works[1:]:
+            if work['metadata'].get('operating_source_proof') != native:
+                raise DirectedNumericError('operating numeric Work lost its complete current raw source proof')
     result=[]
     for index,worker in ((1,executor.draft_worker),(2,executor.verifier_worker)):
         formal=executor.scheduler.formal_result(works[index]['id'])
@@ -156,7 +180,12 @@ def _execution_proof(executor,admission,works):
     parse_verifier(canonical_json(verifier['output']),metadata=works[2]['metadata'])
     return proof,draft,verifier,[item['execution_proof'] for item in result]
 
-def _record_numeric(executor,admission,works):
+def _record_numeric(executor,admission,works,*,measure_repair=False):
+    if measure_repair:
+        from .directed_numeric_measure_reconciliation import _row,_validate
+        authorization=_row(executor.connection,admission['id'])
+        if authorization is None or canonical_json(_validate(executor,admission,authorization)[1])!=canonical_json(works):
+            raise DirectedNumericError('source measure write lacks its exact local authorization')
     from .claim_index_figures import MissionFigureAuthorityResolver
     from .research_auto_commit import ResearchAutoCommitRejected
     from .store import GateRejected
@@ -167,7 +196,7 @@ def _record_numeric(executor,admission,works):
     spoken=spoken_answer(admission)
     votes={item['target_ref']:item['verdict'] for item in verifier['output']['targets']}
     targets={item['target_ref']:item for item in admission['numeric_authority']['targets']}
-    figures=[];pending=[];claims=[];supports=[]
+    figures=[];pending=[];claims=[];supports=[];measures=[];unit_clarifications=[]
     if verifier['output']['verdict']=='reject':
         pending=[{'target_ref':ref,'reason':'independent_numeric_verifier_rejected'} for ref in targets]
     else:
@@ -177,17 +206,38 @@ def _record_numeric(executor,admission,works):
                 pending.append({'target_ref':ref,'reason':row['reason'] or 'independent_numeric_target_unavailable'})
                 continue
             from .document_numeric_claim import verify_numeric_candidate
-            expected=verify_numeric_candidate(row['figure'],quote_map,numeric_contract_ref=CONTRACT_REF)
+            expected=verify_numeric_candidate(row['figure'],quote_map,numeric_contract_ref=admission['numeric_authority']['contract_ref'],
+                operating_source_proof=works[1]['metadata'].get('operating_source_proof'))
             citation=quote_map[expected['quote_id']]
-            executor.authority._missions.record_document_figures(
-                company_ref=admission['company_ref'],review_ref=source['review_id'],document_ref=admission['request']['registration']['document_ref'],
-                source_manifest_hash=source['source_manifest_hash'],source_grade=source['source_grade'],
-                figures=[{**expected,'citation_text':citation}],observed_by=admission['actor_ref'],numeric_contract_ref=CONTRACT_REF)
+            from .coverage_mission import _ref, _period_key
+            legacy_ref = _ref('mission-document-figure', {'company_ref':admission['company_ref'],
+                'metric_ref':expected['metric_ref'],'period':_period_key(expected['period']),
+                'document_ref':admission['request']['registration']['document_ref']})
+            legacy_row = executor.connection.execute(
+                'SELECT * FROM coverage_mission_document_figures WHERE figure_id=?', (legacy_ref,)).fetchone()
+            clarified = None
+            if (legacy_row is not None and 'numeric_local_reconciliation_ref' in works[3]['metadata']
+                    and tuple(legacy_row[k] for k in ('unit','currency','scale')) !=
+                        tuple(expected[k] for k in ('unit','currency','scale'))):
+                from .directed_numeric_source_unit import record
+                clarified, mapping = record(executor, works=works, figure=dict(legacy_row), expected=expected,
+                    admission=admission, target=target, search_proof=proof, draft=draft, verifier=verifier)
+                unit_clarifications.append({'target_ref':ref,'mapping':mapping})
+            if clarified is None:
+                executor.authority._missions.record_document_figures(
+                    company_ref=admission['company_ref'],review_ref=source['review_id'],document_ref=admission['request']['registration']['document_ref'],
+                    source_manifest_hash=source['source_manifest_hash'],source_grade=source['source_grade'],
+                    figures=[{**expected,'citation_text':citation}],observed_by=admission['actor_ref'],numeric_contract_ref=admission['numeric_authority']['contract_ref'],
+                    operating_source_proof=works[1]['metadata'].get('operating_source_proof'))
             held=executor.authority._missions.document_figures(company_ref=admission['company_ref'],metric_ref=target['metric_ref'],limit=2000)
-            matching=[f for f in held if f['document_ref']==admission['request']['registration']['document_ref']
-                      and f['period']==target['period'] and f['source_manifest_hash']==source['source_manifest_hash']]
+            matching=[f for f in held if not f['figure_id'].startswith(('mission-document-figure:source-measure:','mission-document-figure:source-unit:'))
+                      and f['document_ref']==admission['request']['registration']['document_ref']
+                      and f['figure_id']==legacy_ref and f['source_manifest_hash']==source['source_manifest_hash']]
             if len(matching)!=1:raise DirectedNumericError('numeric Figure identity is absent or ambiguous')
-            figure=matching[0]
+            figure=clarified or matching[0]
+            if admission['numeric_authority']['contract_ref'] == 'directed-document-operating-numeric:0.1':
+                from .operating_figure_source import record as record_operating_source
+                record_operating_source(executor,admission,works,figure,proof)
             support=None
             if (figure['quote_id']!=expected['quote_id'] or figure['citation_text']!=citation
                     or any(figure.get(k)!=expected[k] for k in ('metric_ref','as_reported_label','period','value','unit','currency','scale','basis'))):
@@ -197,8 +247,13 @@ def _record_numeric(executor,admission,works):
                         admission=admission,target=target,figure=figure,search_proof=proof,
                         draft=draft,verifier=verifier)
                 except NumericMeasureIdentityConflict as exc:
-                    pending.append({'target_ref':ref,'reason':str(exc),'measure_conflict_proof':exc.proof})
-                    continue
+                    if not measure_repair:
+                        pending.append({'target_ref':ref,'reason':str(exc),'measure_conflict_proof':exc.proof})
+                        continue
+                    from .directed_numeric_measure_identity import record_measure
+                    figure,mapping=record_measure(executor,admission=admission,target=target,figure=figure,
+                        search_proof=proof,draft=draft,verifier=verifier,expected=expected)
+                    measures.append({'target_ref':ref,'mapping':mapping})
             if spoken:
                 if support is not None:supports.append(support)
                 figures.append({**figure,'metric_definition_hash':target['metric_definition_hash']})
@@ -208,11 +263,15 @@ def _record_numeric(executor,admission,works):
                 from .directed_numeric_figure_support import stage_exact_figure
                 staged=stage_exact_figure(executor,figure=figure,
                     actor_ref=admission['actor_ref'],idempotency_key=f'directed-numeric-figure:{admission["id"]}:{ref}',resolver=resolver)
-                committed=executor.authority.store.commit_policy_candidate(
-                    evidence=staged['evidence'],claim=staged['claim'],material=staged['material'],
-                    source_verification=staged['source_verification'],numeric_spec=None,
-                    numeric_verification=staged['numeric_verification'],
-                    idempotency_key=f'policy-ledger:directed-numeric:{admission["id"]}:{ref}')
+                from .directed_numeric_promotion_replay import replay as promotion_replay
+                replayed=promotion_replay(executor.authority.store,bundle={**staged,'figure':figure})
+                canonical_bundle=staged if replayed is None else replayed['bundle']
+                committed=(replayed['result'] if replayed is not None else
+                    executor.authority.store.commit_policy_candidate(
+                        evidence=staged['evidence'],claim=staged['claim'],material=staged['material'],
+                        source_verification=staged['source_verification'],numeric_spec=None,
+                        numeric_verification=staged['numeric_verification'],
+                        idempotency_key=f'policy-ledger:directed-numeric:{admission["id"]}:{ref}'))
             except (ResearchAutoCommitRejected,GateRejected) as exc:
                 pending.append({'target_ref':ref,'reason':'numeric_policy_authority_unavailable','detail':str(exc)})
                 continue
@@ -229,15 +288,17 @@ def _record_numeric(executor,admission,works):
                            'claim_version_hash':claim_row['content_hash'],'evidence_version_hash':evidence_row['content_hash'],
                            'evidence_version_ref':committed['evidence_version_ref'],
                            'review_decision_ref':committed['review_decision_ref']}
+            if replayed is not None:
+                claim_binding['canonical_period_replay']=replayed['mapping']
             if support is not None:
                 from .directed_numeric_figure_support import canonical_commit_support
                 claim_binding['canonical_commit_support']=canonical_commit_support(
-                    executor.authority.store,bundle=staged,committed=committed)
+                    executor.authority.store,bundle=canonical_bundle,committed=committed)
             claims.append(claim_binding)
             if support is not None:supports.append(support)
             figures.append({**figure,'metric_definition_hash':target['metric_definition_hash']})
     result=coverage(list(targets.values()),figures,company_ref=admission['company_ref'],
-                    document_ref=admission['request']['registration']['document_ref'],source_manifest_hash=source['source_manifest_hash'])
+                    document_ref=admission['request']['registration']['document_ref'],source_manifest_hash=source['source_manifest_hash'],contract_ref=admission['numeric_authority']['contract_ref'])
     if pending:result['pending_targets']=pending
     material_requests=[]
     from .material_requests import open_request
@@ -250,7 +311,7 @@ def _record_numeric(executor,admission,works):
             subject=admission['company_ref'],need={'kind':'answer','doc_kinds':(['earnings_call'] if spoken_answer(admission) else ['annual_report','quarterly_report','earnings_release']),
                 'data_item':target['metric_ref'], 'question':f"{admission['planner_inquiry']['question']}\nRequired: {canonical_json(target)}"},
             period=target['period'],source_priority=[admission['source_ref']],
-            acceptance={'numeric_contract_ref':CONTRACT_REF,
+            acceptance={'numeric_contract_ref':admission['numeric_authority']['contract_ref'],
                         **({'answer_contract_ref':admission['numeric_authority']['answer_contract_ref']} if spoken_answer(admission) else {}),'numeric_target':target,'admission_ref':admission['id'],
                         'document_authority_ref':admission['document_authority_ref'],'document_authority_hash':admission['document_authority_hash']},
             actor_ref=admission['actor_ref'],now=executor.clock().isoformat())
@@ -290,9 +351,18 @@ def _record_numeric(executor,admission,works):
     if 'numeric_local_reconciliation_ref' in works[3]['metadata']:
         body['local_reconciliation']={k:works[3]['metadata'][k] for k in (
             'numeric_local_reconciliation_ref','numeric_local_reconciliation_hash','numeric_local_reconciliation_contract')}
+    if 'numeric_promotion_reconciliation_ref' in works[3]['metadata']:
+        body['promotion_reconciliation']={k:works[3]['metadata'][k] for k in (
+            'numeric_promotion_reconciliation_ref','numeric_promotion_reconciliation_hash','numeric_promotion_reconciliation_contract')}
     if any('measure_conflict_proof' in item for item in result['pending_targets']):
         from .directed_numeric_figure_support import MEASURE_CONFLICT_CONTRACT
         body['measure_conflict_contract']=MEASURE_CONFLICT_CONTRACT
+    if measures:
+        from .directed_numeric_measure_identity import CONTRACT as measure_contract
+        body.update(source_measure_contract=measure_contract,source_measures=measures)
+    if unit_clarifications:
+        from .directed_numeric_source_unit import CONTRACT
+        body.update(source_unit_clarification_contract=CONTRACT, source_unit_clarifications=unit_clarifications)
     if supports:
         from .directed_numeric_figure_support import SUPPORT_CONTRACT, REGISTERED_RENDER_SUPPORT_CONTRACT
         contract=REGISTERED_RENDER_SUPPORT_CONTRACT if any(s['schema_version']==REGISTERED_RENDER_SUPPORT_CONTRACT for s in supports) else SUPPORT_CONTRACT
@@ -325,7 +395,17 @@ def management_answer(admission,source,completed,figures,proof,draft):
         'statements':statements}
 
 def complete_numeric_stage(executor,admission,works,*,failure_as_terminal=False):
-    work=works[3];lease=executor.scheduler.claim(executor.actor_ref,work_order_id=work['id'])
+    work=works[3]
+    # A receipt written before an expired completion is reusable, but only
+    # after the ordinary full source/fee/canonical checks. Do these expensive
+    # reads before a new lease; the original Work and receipt stay unchanged.
+    existing=executor.connection.execute('SELECT record_json,content_hash FROM mission_document_numeric_results WHERE admission_ref=?',(admission['id'],)).fetchone()
+    if existing is not None:
+        _verified_numeric_receipt(executor,admission,works,_read_receipt(existing,admission,works))
+    policy_row=executor.connection.execute('SELECT p.policy_json FROM scheduler_work_orders w JOIN scheduler_policy_versions p ON p.policy_version_id=w.policy_version_id WHERE w.work_order_id=?',(work['id'],)).fetchone()
+    if policy_row is None:raise DirectedNumericError('numeric local Work policy is absent')
+    lease_seconds=min(json.loads(policy_row[0])['max_lease_seconds'],work['budget']['max_seconds'])
+    lease=executor.scheduler.claim(executor.actor_ref,work_order_id=work['id'],lease_seconds=lease_seconds)
     if lease is None:return {'status':'pending','work_order_ref':work['id']}
     executor.scheduler.validate_lease_for_use(work['id'],lease['attempt']['attempt_number'],executor.actor_ref,
         lease['lease_token'],lease_revision_ref=lease['lease']['id'],lease_hash=lease['lease']['content_hash'],work_order_hash=lease['work_order_hash'])
@@ -343,7 +423,7 @@ def complete_numeric_stage(executor,admission,works,*,failure_as_terminal=False)
                     id='result-envelope:numeric-local-reconciliation-failed:'+content_hash({'work':work['id'],'error':error})[:32],
                     created_at=now,work_order_ref=work['id'],invocation_ref='execution:'+work['id'],
                     status='failed',outputs={},actual_side_effects=(),usage_refs=(),artifact_refs=(),
-                    error=error,metadata={'authority_ref':admission['id'],'local_reconciliation_contract':CONTRACT}).to_dict()
+                    error=error,metadata={'authority_ref':admission['id'],'local_reconciliation_contract':work['metadata'].get('numeric_promotion_reconciliation_contract',CONTRACT)}).to_dict()
                 executor.scheduler.complete(work['id'],lease['attempt']['attempt_number'],executor.actor_ref,
                     lease['lease_token'],failed,idempotency_key=work['id']+':terminal-local-failure',
                     result_envelope_hash=content_hash(failed))
@@ -351,7 +431,13 @@ def complete_numeric_stage(executor,admission,works,*,failure_as_terminal=False)
         with executor._transaction() as cur:
             cur.execute('INSERT INTO mission_document_numeric_results VALUES(?,?,?,?,?,?)',
                 (admission['id'],admission['content_hash'],work['id'],canonical_json(body),body['content_hash'],body['created_at']))
-    else:body=_read_receipt(row,admission,works)
+    else:
+        body=_read_receipt(row,admission,works)
+        if existing is None or row['record_json']!=existing['record_json'] or row['content_hash']!=existing['content_hash']:
+            raise DirectedNumericError('numeric receipt changed during free completion')
+        current=executor.authority.resolve_for_execution(admission['id'])
+        if current['content_hash']!=admission['content_hash']:
+            raise DirectedNumericError('numeric completion current authority differs')
     envelope=ResultEnvelope(schema_version='0.1',id='result-envelope:directed-numeric:'+body['content_hash'][:32],
         created_at=body['created_at'],work_order_ref=work['id'],invocation_ref='execution:directed-numeric:'+admission['identity_hash'][:32],
         status='succeeded',outputs=body,actual_side_effects=(),usage_refs=(),artifact_refs=(),error=None,
@@ -367,17 +453,34 @@ def _read_receipt(row,admission,works):
         raise DirectedNumericError('numeric receipt binding differs')
     return value
 
-def read_numeric_result(executor,admission,works,formal):
+def read_numeric_result(executor,admission,works,formal,*,receipt_row=None,include_supplement=True):
     from .claim_index_figures import MissionFigureAuthorityResolver
-    row=executor.connection.execute('SELECT record_json,content_hash FROM mission_document_numeric_results WHERE admission_ref=?',(admission['id'],)).fetchone()
+    if receipt_row is None and 'numeric_measure_reconciliation_ref' in works[3]['metadata']:
+        from .directed_numeric_measure_reconciliation import read_result
+        return read_result(executor,admission,works,formal)
+    row=receipt_row if receipt_row is not None else executor.connection.execute('SELECT record_json,content_hash FROM mission_document_numeric_results WHERE admission_ref=?',(admission['id'],)).fetchone()
     if row is None:raise DirectedNumericError('numeric final receipt is absent')
     receipt=_read_receipt(row,admission,works)
     if formal is None or formal['terminal_state']!='succeeded' or formal['result_envelope']['outputs']!=receipt:raise DirectedNumericError('numeric Scheduler final result differs')
     executor._stage_owned(works[3],formal)
+    result=_verified_numeric_receipt(executor,admission,works,receipt)
+    if include_supplement and receipt_row is None:
+        from .directed_numeric_measure_reconciliation import effective_result
+        supplement=effective_result(executor,admission)
+        if supplement is not None:return supplement
+    return result
+
+
+def _verified_numeric_receipt(executor,admission,works,receipt):
+    """Recheck the entire durable local result without asserting formal completion."""
+    from .claim_index_figures import MissionFigureAuthorityResolver
     proof,draft,verifier,accounting=_execution_proof(executor,admission,works)
     if (receipt['source_binding']!=_admitted_source_binding(executor.connection,admission) or receipt['source_proof_hash']!=proof['content_hash']
         or receipt['draft_proof_hash']!=draft['content_hash'] or receipt['verifier_proof_hash']!=verifier['content_hash'] or receipt['model_accounting_proofs']!=accounting):
         raise DirectedNumericError('numeric execution receipt differs from actual source/paid proofs')
+    if 'numeric_measure_reconciliation_ref' in works[3]['metadata'] or 'measure_reconciliation' in receipt:
+        from .directed_numeric_measure_reconciliation import verify_work
+        verify_work(executor,admission,works,receipt)
     if 'numeric_local_reconciliation_ref' in works[3]['metadata'] or 'local_reconciliation' in receipt:
         from .directed_numeric_local_reconciliation import verify_reconciliation_work
         verify_reconciliation_work(executor,admission,works)
@@ -385,6 +488,9 @@ def read_numeric_result(executor,admission,works,formal):
             'numeric_local_reconciliation_ref','numeric_local_reconciliation_hash','numeric_local_reconciliation_contract')}
         if receipt.get('local_reconciliation')!=expected_binding:
             raise DirectedNumericError('numeric local reconciliation receipt binding differs')
+    if 'numeric_promotion_reconciliation_ref' in works[3]['metadata'] or 'promotion_reconciliation' in receipt:
+        from .directed_numeric_promotion_reconciliation import verify_work
+        verify_work(executor,admission,works,receipt)
     from .directed_numeric_source_capabilities import spoken_answer
     spoken=spoken_answer(admission)
     resolver=MissionFigureAuthorityResolver(executor.connection)
@@ -411,14 +517,45 @@ def read_numeric_result(executor,admission,works,formal):
         supports={item['target_ref']:item for item in items}
         if len(supports)!=len(items) or not set(supports).issubset(completed):
             raise DirectedNumericError('numeric Figure support targets differ from completion')
+    measures={}
+    if 'source_measure_contract' in receipt or 'source_measures' in receipt:
+        from .directed_numeric_measure_identity import CONTRACT as measure_contract
+        items=receipt.get('source_measures')
+        if receipt.get('source_measure_contract')!=measure_contract or not isinstance(items,list) or not items:
+            raise DirectedNumericError('source measure receipt contract differs')
+        measures={item['target_ref']:item['mapping'] for item in items}
+        if len(measures)!=len(items) or not set(measures).issubset(completed):
+            raise DirectedNumericError('source measure completion bindings differ')
+    unit_clarifications={}
+    if 'source_unit_clarification_contract' in receipt or 'source_unit_clarifications' in receipt:
+        from .directed_numeric_source_unit import CONTRACT
+        items=receipt.get('source_unit_clarifications')
+        if receipt.get('source_unit_clarification_contract')!=CONTRACT or not isinstance(items,list) or not items:
+            raise DirectedNumericError('source unit clarification receipt contract differs')
+        unit_clarifications={item['target_ref']:item['mapping'] for item in items}
+        if len(unit_clarifications)!=len(items) or not set(unit_clarifications).issubset(completed):
+            raise DirectedNumericError('source unit clarification target bindings differ')
     figures=[]
     for ref,item in completed.items():
         if ref not in supported or ref not in approved or verifier['output']['verdict']!='pass':
             raise DirectedNumericError('numeric completion lacks independent accepted target')
         target=targets[ref];figure=resolver.figure(item['figure_ref']);resolver.verify_figure(figure)
-        expected=verify_numeric_candidate(supported[ref],quotes(proof),numeric_contract_ref=CONTRACT_REF)
+        expected=verify_numeric_candidate(supported[ref],quotes(proof),numeric_contract_ref=admission['numeric_authority']['contract_ref'],
+            operating_source_proof=works[1]['metadata'].get('operating_source_proof'))
         if figure['content_hash']!=item['figure_hash'] or item['metric_definition_hash']!=target['metric_definition_hash']:
             raise DirectedNumericError('completed numeric Figure differs from source-bound typed definition')
+        if ref in unit_clarifications:
+            from .directed_numeric_source_unit import verify
+            verify(unit_clarifications[ref],connection=executor.connection,registry=executor.registry,
+                admission=admission,target=target,figure=figure,search_proof=proof,draft=draft,verifier=verifier)
+        elif figure['figure_id'].startswith('mission-document-figure:source-unit:'):
+            raise DirectedNumericError('source unit Figure lacks its original-source mapping')
+        if ref in measures:
+            from .directed_numeric_measure_identity import verify_measure
+            verify_measure(measures[ref],connection=executor.connection,registry=executor.registry,admission=admission,
+                target=target,figure=figure,search_proof=proof,draft=draft,verifier=verifier)
+        elif figure['figure_id'].startswith('mission-document-figure:source-measure:'):
+            raise DirectedNumericError('source measure Figure lacks its mapping')
         if ref in supports:
             from .directed_numeric_figure_support import verify_support
             verify_support(supports[ref],connection=executor.connection,registry=executor.registry,
@@ -434,6 +571,15 @@ def read_numeric_result(executor,admission,works,formal):
             continue
         bundle=build_figure_candidate(executor.connection,figure=figure,actor_ref=admission['actor_ref'],resolver=resolver)
         committed=claims[ref]
+        period_replay=committed.get('canonical_period_replay')
+        if period_replay is not None:
+            from .directed_numeric_promotion_replay import replay as promotion_replay
+            rebuilt=promotion_replay(executor.authority.store,bundle=bundle)
+            if (rebuilt is None or canonical_json(rebuilt['mapping'])!=canonical_json(period_replay)
+                    or any(rebuilt['result'][k]!=committed[k] for k in
+                           ('claim_version_ref','evidence_version_ref','review_decision_ref'))):
+                raise DirectedNumericError('canonical period replay mapping differs')
+            bundle=rebuilt['bundle']
         for table,key,json_key,version_class,hash_key in (
             ('claim_versions','claim_version_id','claim_json',validate_claim_version_v0_2,'claim_version_hash'),
             ('evidence_versions','evidence_version_id','evidence_json',validate_evidence_version_v0_2,'evidence_version_hash')):
@@ -443,7 +589,8 @@ def read_numeric_result(executor,admission,works,formal):
             value=json.loads(held[json_key]);version=version_class(value)
             if canonical_json(version)!=held[json_key] or version['content_hash']!=held['content_hash'] or held['content_hash']!=committed[hash_key]:
                 raise DirectedNumericError('numeric canonical authority bytes differ')
-        canonical_key=f'policy-ledger:directed-numeric:{admission["id"]}:{ref}'
+        canonical_key=(period_replay['original_idempotency_key'] if period_replay is not None else
+                       f'policy-ledger:directed-numeric:{admission["id"]}:{ref}')
         if 'canonical_commit_support' in committed:
             if ref not in supports:raise DirectedNumericError('numeric canonical support lacks source support contract')
             from .directed_numeric_figure_support import canonical_commit_support
@@ -490,7 +637,7 @@ def read_numeric_result(executor,admission,works,formal):
             raise DirectedNumericError('management answer attribution or original quote differs')
     elif 'management_answer' in receipt:
         raise DirectedNumericError('filed numeric result carries a management answer')
-    replayed=coverage(list(targets.values()),figures,company_ref=admission['company_ref'],document_ref=admission['request']['registration']['document_ref'],source_manifest_hash=receipt['source_binding']['source_manifest_hash'])
+    replayed=coverage(list(targets.values()),figures,company_ref=admission['company_ref'],document_ref=admission['request']['registration']['document_ref'],source_manifest_hash=receipt['source_binding']['source_manifest_hash'],contract_ref=admission['numeric_authority']['contract_ref'])
     if receipt['status']!=replayed['status'] or receipt['completed_targets']!=replayed['completed_targets'] or {x['target_ref'] for x in receipt['pending_targets']}!={x['target_ref'] for x in replayed['pending_targets']}:
         raise DirectedNumericError('numeric completion declaration differs from canonical target coverage')
     return {'status':'complete','research_status':'numeric_targets_completed' if receipt['status']=='completed' else 'numeric_waiting_evidence',
@@ -516,6 +663,10 @@ def numeric_feedback(connection,mission_version_ref):
         if formal is None:continue  # receipt before final local Scheduler settlement is not completion.
         envelope=json.loads(formal['result_envelope_json'])
         if formal['terminal_state']!='succeeded' or formal['result_envelope_hash']!=content_hash(envelope) or envelope['outputs']!=value:raise DirectedNumericError('numeric feedback final result differs')
+        from .directed_numeric_measure_reconciliation import feedback_supplement
+        supplement=feedback_supplement(connection,admission,value)
+        if supplement is not None:
+            value=supplement;digest=value['content_hash']
         result={'schema_version':CONTRACT_REF,'id':'numeric-reading-feedback:'+digest[:32],
                 'mission_version_ref':mission_version_ref,'company_ref':admission['company_ref'],
                 'admission_ref':admission['id'],'admission_hash':parent_hash,'numeric_result_hash':digest,
@@ -552,6 +703,36 @@ def numeric_feedback(connection,mission_version_ref):
             result['resolved_numeric_rejections'] = [
                 {k: proof[k] for k in ('admission_ref','admission_hash','rejection_ref','rejection_hash')}
                 for proof in admission['numeric_authority'].get('capability_upgrade_proofs', ())]
+        # Values are read from the exact immutable Figure, never from a model's
+        # prose or an aggregate count.  This is planning context, not new admission.
+        from .claim_index_figures import MissionFigureAuthorityResolver
+        resolver = MissionFigureAuthorityResolver(connection)
+        targets = {t['target_ref']: t for t in value['numeric_authority']['targets']}
+        answers = []
+        for completed in value['completed_targets']:
+            target = targets.get(completed['target_ref'])
+            if target is None or completed['metric_definition_hash'] != target['metric_definition_hash']:
+                raise DirectedNumericError('numeric feedback completed target definition differs')
+            figure = resolver.figure(completed['figure_ref'])
+            resolver.verify_figure(figure)
+            if (figure['content_hash'] != completed['figure_hash']
+                    or figure['company_ref'] != admission['company_ref']
+                    or figure['document_ref'] != result['document_ref']
+                    or figure['source_manifest_hash'] != value['source_binding']['source_manifest_hash']
+                    or any(figure[k] != target[k] for k in ('metric_ref', 'period', 'unit', 'currency', 'basis'))):
+                raise DirectedNumericError('numeric feedback completed Figure scope differs')
+            citation = figure['citation_text']
+            import re
+            located = re.search(r'(?<![\d.])' + re.escape(str(figure['value'])) + r'(?![\d.])', citation)
+            excerpt_start = max(0, located.start() - 160) if located is not None else 0
+            # The full citation hash and exact quote ref retain the authority; a
+            # bounded excerpt is explicitly labelled and cannot authorize reuse.
+            answers.append({**completed, **{k: figure[k] for k in
+                ('value', 'unit', 'currency', 'scale', 'period', 'basis', 'as_reported_label', 'source_grade', 'quote_id')},
+                'citation_excerpt': citation[excerpt_start:excerpt_start + 512],
+                'citation_excerpt_start': excerpt_start, 'citation_excerpt_is_complete': len(citation) <= 512,
+                'citation_text_hash': content_hash(citation)})
+        result['completed_answers'] = answers
         from .numeric_target_revision import revision_source_candidate
         if not spoken and revision_source_candidate(connection, admission, value, digest):
             result['target_revision_candidate'] = True
@@ -569,7 +750,7 @@ def query_miss_requests(executor,admission):
             subject=admission['company_ref'],need={'kind':'answer','doc_kinds':(['earnings_call'] if spoken_answer(admission) else ['annual_report','quarterly_report','earnings_release']),
                 'data_item':target['metric_ref'],'question':f"{admission['planner_inquiry']['question']}\nRequired: {canonical_json(target)}"},
             period=target['period'],source_priority=[admission['source_ref']],
-            acceptance={'numeric_contract_ref':CONTRACT_REF,
+            acceptance={'numeric_contract_ref':admission['numeric_authority']['contract_ref'],
                         **({'answer_contract_ref':admission['numeric_authority']['answer_contract_ref']} if spoken_answer(admission) else {}),'numeric_target':target,'admission_ref':admission['id'],
                         'document_authority_ref':admission['document_authority_ref'],'document_authority_hash':admission['document_authority_hash']},
             actor_ref=admission['actor_ref'],now=executor.clock().isoformat())

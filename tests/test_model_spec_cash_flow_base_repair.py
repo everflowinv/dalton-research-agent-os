@@ -151,7 +151,7 @@ class CashFlowBaseRepairTests(unittest.TestCase):
             self.assertTrue(all(c['value']is None for c in result['cells']))
 
     def test_a_new_error_after_ocf_repair_cannot_open_another_paid_window(self):
-        state,bad=proposal();bad['assessment']='x'*1201;fixed=unavailable(bad)
+        state,bad=proposal();bad['assessment']='x'*(specs.MAX_ASSESSMENT_CHARS+1);fixed=unavailable(bad)
         class Model:
             scheduler_db=None
             calls=0
@@ -185,7 +185,7 @@ class CashFlowBaseRepairTests(unittest.TestCase):
 
     def test_contract_binds_exact_scoped_repair_and_net_income_source_carry(self):
         from dalton_core.company_financial_statement_structure import NET_INCOME_SOURCE_CARRY_VALIDATION_REF
-        self.assertEqual(cli.REPAIR_CONTRACT_REF,'contract:company-model-spec-structured-output-repair:0.9')
+        self.assertEqual(cli.REPAIR_CONTRACT_REF,cli.REPAIR_CONTRACT['ref'])
         self.assertEqual(cli.model_spec_validation_contract()['net_income_source_carry'],NET_INCOME_SOURCE_CARRY_VALIDATION_REF)
         self.assertEqual(cli.REPAIR_CONTRACT['cash_flow_operating_base_shape']['allowed_fields'],
             ['forecast_method','forecast_base_ref','because'])

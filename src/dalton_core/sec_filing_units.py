@@ -9,7 +9,12 @@ from decimal import Decimal,InvalidOperation,localcontext
 from xml.etree import ElementTree as ET
 from typing import Any,Mapping,Sequence
 from .store import content_hash
-RULE_REF='sec-filing-units:exact-definition-and-fact:1'
+from .pure_source_parse_cache import cache_byte_parser
+LEGACY_RULE_REF='sec-filing-units:exact-definition-and-fact:1'
+RULE_REF=LEGACY_RULE_REF
+NUMERIC_RULE_REF='sec-filing-units:exact-definition-and-fact:2'
+FIXED_ZERO_NAMESPACE='http://www.xbrl.org/inlineXBRL/transformation/2020-02-12'
+DOCUMENT_SET_RULE_REF='sec-filing-units:incorporated-annual-document-set:1'
 MAX_BYTES=32*1024*1024
 XBRLI='http://www.xbrl.org/2003/instance'
 XBRLDI='http://xbrl.org/2006/xbrldi'
@@ -33,7 +38,11 @@ def _measure(node,scopes):
     if q.startswith('{'+ISO+'}') and re.fullmatch('[A-Z]{3}',q.split('}',1)[1]):return q.split('}',1)[1]
     raise FilingUnitError('unit measure is not a supported currency/share measure')
 
-def parse_filing_units(raw:bytes)->dict[str,Any]:
+@cache_byte_parser('sec-filing-units-pure-parse:1', byte_arguments=('raw','resource_raw'))
+def parse_filing_units(raw:bytes, *, resource_raw:bytes|None=None, rule_ref:str=LEGACY_RULE_REF)->dict[str,Any]:
+    # Unversioned historical consumers retain exactly the v1 parse. New source
+    # proofs opt into v2 and bind this choice for every future strong replay.
+    if rule_ref not in {LEGACY_RULE_REF,NUMERIC_RULE_REF}:raise FilingUnitError('unsupported filing numeric parse rule')
     if not isinstance(raw,bytes) or len(raw)>MAX_BYTES:raise FilingUnitError('filing unit source exceeds the byte limit')
     body=raw
     if raw.startswith(b'\x1f\x8b'):
@@ -100,18 +109,36 @@ def parse_filing_units(raw:bytes)->dict[str,Any]:
                 if axis in dims:raise FilingUnitError('filing context repeats a dimension axis')
                 dims[axis]=member
         contexts[ref]={'context_ref':ref,'cik':(identifier.text or '').strip().zfill(10),'period_start':start,'period_end':end,'dimensions':dict(sorted(dims.items())),'supported':supported,'context_sha256':hashlib.sha256(fragment.encode()).hexdigest()}
+    resource = None
+    if resource_raw is not None:
+        resource = parse_filing_units(resource_raw,rule_ref=rule_ref)
+        for prefix, uri in resource['namespace_bindings'].items():
+            if prefix in ns and ns[prefix] != uri:
+                raise FilingUnitError('inline document set has conflicting namespace identities')
+            ns.setdefault(prefix, uri)
+        for name, local, shared in (('unit', units, resource['units']),
+                                    ('context', contexts, resource['contexts'])):
+            for ref, value in shared.items():
+                if ref in local and local[ref] != value:
+                    raise FilingUnitError('inline document set has conflicting '+name+' identities')
+                local.setdefault(ref, value)
     for node in nodes['fact']:
         try:
             fragment=ET.tostring(node,encoding='unicode')
             if node.tag.split('}')[0][1:] not in INLINE:continue
+            if rule_ref==NUMERIC_RULE_REF and node.get('{http://www.w3.org/2001/XMLSchema-instance}nil') in {'true','1'}:continue
             cref=node.get('contextRef');uref=node.get('unitRef');scope=scopes[id(node)];name=_expanded(node.get('name') or '',scope)
             if cref not in contexts or uref not in units:continue
             content=''.join(node.itertext()).strip();fmt=node.get('format');scale=node.get('scale','0');sign=node.get('sign')
             if not re.fullmatch(r'-?\d{1,3}',scale) or sign not in (None,'-'):continue
             if fmt:
                 expanded=_expanded(fmt,scope);uri,local=expanded[1:].split('}',1)
-                if not re.fullmatch(r'https?://www\.xbrl\.org/inlineXBRL/transformation/\d{4}-\d{2}-\d{2}',uri) or local not in {'num-dot-decimal','numdotdecimal','num-comma-decimal','numcommadecimal','zerodash','zero-dash'}:continue
-                if local in {'zerodash','zero-dash'}:
+                if rule_ref==NUMERIC_RULE_REF and uri==FIXED_ZERO_NAMESPACE and local=='fixed-zero':
+                    # Registry 4 section 4.93: any input text maps to numeric 0.
+                    # The raw fragment/hash, context and unit remain authoritative.
+                    content='0'
+                elif not re.fullmatch(r'https?://www\.xbrl\.org/inlineXBRL/transformation/\d{4}-\d{2}-\d{2}',uri) or local not in {'num-dot-decimal','numdotdecimal','num-comma-decimal','numcommadecimal','zerodash','zero-dash'}:continue
+                elif local in {'zerodash','zero-dash'}:
                     if content not in {'-','—','–'}:continue
                     content='0'
                 elif local in {'num-comma-decimal','numcommadecimal'}:content=content.replace('.','').replace(',','.')
@@ -125,7 +152,27 @@ def parse_filing_units(raw:bytes)->dict[str,Any]:
             if not value.is_finite() or (not value.is_zero() and abs(value.adjusted())>1000):continue
             facts.append({'concept':name,'context_ref':cref,'unit_ref':uref,'value':format(value,'f'),'fact_sha256':hashlib.sha256(fragment.encode()).hexdigest()})
         except (FilingUnitError,InvalidOperation,ValueError):continue
-    return {'rule_ref':RULE_REF,'raw_sha256':hashlib.sha256(raw).hexdigest(),'namespace_bindings':ns,'units':units,'contexts':contexts,'facts':facts}
+    result = {'rule_ref':rule_ref,'raw_sha256':hashlib.sha256(raw).hexdigest(),'namespace_bindings':ns,'units':units,'contexts':contexts,'facts':facts}
+    if resource is not None:
+        local_hash = result['raw_sha256']
+        parent_values = {}
+        for fact in resource['facts']:
+            key = (fact['concept'], fact['context_ref'], fact['unit_ref'])
+            parent_values.setdefault(key, set()).add(Decimal(fact['value']))
+        for fact in facts:
+            key = (fact['concept'], fact['context_ref'], fact['unit_ref'])
+            if key in parent_values and parent_values[key] != {Decimal(fact['value'])}:
+                raise FilingUnitError('inline document set has conflicting numeric fact identities')
+        result['facts'] = [{**f, 'fact_document_sha256': resource['raw_sha256']} for f in resource['facts']] + [{**f, 'fact_document_sha256': local_hash} for f in facts]
+        for kind in ('units', 'contexts'):
+            for ref, value in result[kind].items():
+                # Exact shared IDs are already checked above. Record where the
+                # definition was independently parsed, never infer its meaning.
+                origin = resource['raw_sha256'] if ref in resource[kind] else local_hash
+                value[kind[:-1] + '_document_sha256'] = origin
+        result['document_set_rule_ref'] = DOCUMENT_SET_RULE_REF
+        result['resource_raw_sha256'] = resource['raw_sha256']
+    return result
 
 def match_row_units(parsed:Mapping[str,Any],rows:Sequence[Mapping[str,Any]],*,cik:str)->tuple[list[dict[str,Any]],list[dict[str,Any]]]:
     resolved=[];proof=[];ns=parsed['namespace_bindings']
@@ -142,6 +189,10 @@ def match_row_units(parsed:Mapping[str,Any],rows:Sequence[Mapping[str,Any]],*,ci
             if not matches:raise FilingUnitError('no exact inline fact/context/unit match')
             selected=sorted(matches,key=lambda f:(f['context_ref'],f['fact_sha256']))[0];unit=parsed['units'][ref]
             binding={'ordinal':ordinal,'concept':row['concept'],'period_start':row.get('period_start'),'period_end':row.get('period_end'),'value':str(row['value']),'dimensions':row['dimensions'],'source_unit_ref':ref,'unit':unit['unit'],'definition_sha256':unit['definition_sha256'],'context_ref':selected['context_ref'],'context_sha256':parsed['contexts'][selected['context_ref']]['context_sha256'],'fact_sha256':selected['fact_sha256']}
+            if parsed.get('document_set_rule_ref') == DOCUMENT_SET_RULE_REF:
+                binding.update(fact_document_sha256=selected['fact_document_sha256'],
+                               context_document_sha256=parsed['contexts'][selected['context_ref']]['context_document_sha256'],
+                               unit_document_sha256=unit['unit_document_sha256'])
             binding['content_hash']=content_hash(binding);proof.append(binding);row.update(unit=unit['unit'],source_unit_ref=ref,unit_definition_hash=binding['content_hash'])
         except (FilingUnitError,InvalidOperation,KeyError,TypeError):pass
         resolved.append(row)
@@ -159,6 +210,8 @@ def _source(connection, state_dir, filing, *, source=None):
     from .connector_authority_port import ReadOnlyConnectorReceiptReader
     from .public_web_extraction_source import verified_public_web_source
     state=Path(state_dir)
+    if source is not None and source.get('document_set_rule_ref') is not None:
+        return _annual_document_set(connection, state, filing, source=source)
     document='sec:filing:'+filing['accession']
     if source is None:
         rows=connection.execute('SELECT * FROM coverage_mission_discovered_documents WHERE company_ref=? AND document_ref=? AND source_ref=? AND status=? ORDER BY updated_at DESC,record_id DESC',
@@ -197,6 +250,62 @@ def _source(connection, state_dir, filing, *, source=None):
     raise FilingUnitError('; '.join(failures))
 
 
+def _annual_document_set(connection, state_dir, filing, *, primary=None, primary_raw=None, source=None):
+    from types import SimpleNamespace
+    from .acquired_sec_filings import SPOOL_ROOTS
+    from .raw_spool import RawSpoolReader, MultiRootRawSpoolReader, RawSpoolError
+    from .connector_authority_port import ReadOnlyConnectorReceiptReader
+    from .sec_annual_report_exhibit import verified_exhibit_source, incorporates_annual_report
+    if filing['form'] not in {'10-K', '10-K/A'}:
+        raise FilingUnitError('incorporated resource source requires exact annual filing')
+    if source is not None:
+        if (set(source) != {'document_set_rule_ref', 'primary', 'annual_report_attachment'}
+                or source.get('document_set_rule_ref') != DOCUMENT_SET_RULE_REF
+                or not isinstance(source.get('primary'), Mapping)
+                or source['primary'].get('document_set_rule_ref') is not None):
+            raise FilingUnitError('unsupported annual inline document set source')
+        primary, primary_raw = _source(connection, state_dir, filing, source=source['primary'])
+    if primary is None or primary_raw is None:
+        raise FilingUnitError('annual inline document set has no verified primary source')
+    primary_body = primary_raw
+    if primary_raw.startswith(b'\x1f\x8b'):
+        with gzip.GzipFile(fileobj=io.BytesIO(primary_raw)) as original:
+            primary_body = original.read(MAX_BYTES + 1)
+    if len(primary_body) > MAX_BYTES or not incorporates_annual_report(primary_body):
+        raise FilingUnitError('annual inline document set lacks explicit original incorporation')
+    roots=[]
+    for name in SPOOL_ROOTS:
+        try:roots.append(RawSpoolReader(state_dir/name))
+        except RawSpoolError:pass
+    spool=MultiRootRawSpoolReader(roots)
+    attachment=verified_exhibit_source(SimpleNamespace(connection=connection),spool,state_dir,
+        ticket_ref=primary['ticket_ref'],parent_document_ref=primary['document_ref'],
+        company_ref=filing['company_ref'],receipt_reader=ReadOnlyConnectorReceiptReader(connection))
+    if attachment is None:
+        raise FilingUnitError('exact incorporated annual report original is unavailable')
+    binding=attachment['binding']
+    if (binding['parent_manifest_hash'] != primary['manifest_hash']
+            or binding['parent_body_sha256'] != hashlib.sha256(primary_raw).hexdigest()
+            or binding['accession'] != filing['accession']
+            or str(binding['cik']).zfill(10) != str(filing['cik']).zfill(10)):
+        raise FilingUnitError('annual inline document set primary binding differs')
+    identity={'document_set_rule_ref':DOCUMENT_SET_RULE_REF,'primary':primary,
+              'annual_report_attachment':binding}
+    if source is not None and identity != source:
+        raise FilingUnitError('annual inline document set receipt binding drifted')
+    raw=spool.read_object(binding['body_sha256'])
+    if hashlib.sha256(raw).hexdigest() != binding['body_sha256']:
+        raise FilingUnitError('annual inline document set original bytes drifted')
+    return identity,raw
+
+
+def _parse_source_units(connection, state_dir, filing, source, raw, *, rule_ref=LEGACY_RULE_REF):
+    if source.get('document_set_rule_ref') == DOCUMENT_SET_RULE_REF:
+        _,resource=_source(connection,state_dir,filing,source=source['primary'])
+        return parse_filing_units(raw,resource_raw=resource,rule_ref=rule_ref)
+    return parse_filing_units(raw,rule_ref=rule_ref)
+
+
 def supplemental_unit_lines(connection, state_dir, filing, rows):
     """Opaque unit ids require exact definitions AND matching original numeric facts."""
     if not any(row.get('unit') and not re.fullmatch(r'[A-Z]{3}(?:PerShare)?|shares|pure|count|usd|usd_per_share|usd_per_unit',str(row['unit'])) for row in rows):return [dict(row) for row in rows],None
@@ -205,10 +314,21 @@ def supplemental_unit_lines(connection, state_dir, filing, rows):
         # A missing source does not erase or canonically relabel a held old line.
         # Model-spec unit validation will retain the explicit unresolved gap.
         return [dict(row) for row in rows],None
-    parsed=parse_filing_units(raw)
+    parsed=parse_filing_units(raw,rule_ref=NUMERIC_RULE_REF)
     lines,evidence=match_row_units(parsed,rows,cik=filing['cik'])
+    if unresolved_unit_refs(lines):
+        try:
+            annual_source,annual_raw=_annual_document_set(connection,state_dir,filing,primary=source,primary_raw=raw)
+            annual_parsed=_parse_source_units(connection,state_dir,filing,annual_source,annual_raw,rule_ref=NUMERIC_RULE_REF)
+            annual_lines,annual_evidence=match_row_units(annual_parsed,rows,cik=filing['cik'])
+            if len(annual_evidence)>len(evidence):
+                source,raw,parsed,lines,evidence=annual_source,annual_raw,annual_parsed,annual_lines,annual_evidence
+        except (ValueError,KeyError,TypeError,OSError):
+            # A missing or conflicting attachment retains the exact unresolved
+            # original. It never turns a partial source into numeric authority.
+            pass
     if not evidence:return lines,None
-    proof={'rule_ref':RULE_REF,'source':source,'raw_sha256':parsed['raw_sha256'],'evidence':evidence,'evidence_hash':content_hash(evidence)}
+    proof={'rule_ref':RULE_REF,'numeric_parse_rule_ref':NUMERIC_RULE_REF,'source':source,'raw_sha256':parsed['raw_sha256'],'evidence':evidence,'evidence_hash':content_hash(evidence)}
     return lines,proof
 
 
@@ -230,7 +350,7 @@ def validate_unit_supplement(connection, record, filing):
         ordinals.add(ordinal);line=original[ordinal]
         if line.get('source_unit_ref')!=evidence['source_unit_ref'] or line.get('unit_definition_hash')!=evidence['content_hash'] or line.get('unit')!=evidence['unit']:raise FilingUnitError('unit XML proof line binding drifted')
         line['unit']=line.pop('source_unit_ref');line.pop('unit_definition_hash')
-    replay,evidence=match_row_units(parse_filing_units(raw),original,cik=filing['cik'])
+    replay,evidence=match_row_units(_parse_source_units(connection,Path(paths[0]).parent,filing,proof['source'],raw,rule_ref=proof.get('numeric_parse_rule_ref',LEGACY_RULE_REF)),original,cik=filing['cik'])
     if replay!=record['lines'] or evidence!=proof['evidence']:raise FilingUnitError('unit XML exact fact/context/definition replay differs')
 
 
@@ -246,7 +366,7 @@ def open_unit_gap_request(state_dir, filing, record):
     return open_request(state_dir,
         requester={'lane':'statement_context','product_ref':filing['ingest_id'],'run_ref':record['version_id'],'section':'exact_xml_units'},
         subject=filing['company_ref'],period=filing['report_date'],
-        need={'kind':'document','doc_kinds':['sec_10k' if filing['form']=='10-K' else 'sec_10q'],
+        need={'kind':'document','doc_kinds':['sec_10k' if filing['form'] in {'10-K', '10-K/A'} else 'sec_10q'],
               'question':'Obtain the original primary SEC filing '+filing['accession']+' for exact XML unit id→namespace measure/divide and full-context numeric fact proof. Opaque unit ids cannot be guessed or inherited from another accession.'},
         source_priority=['indexed_corpus','sec_edgar'],
         acceptance={'min_passages':1,'about_company':True,'date_from':filing['filed'],'date_to':filing['filed'],'document_ref':document,'accession':filing['accession'],'cik':filing['cik'],'unit_proof_rule_ref':RULE_REF,
@@ -274,8 +394,20 @@ def unit_requirement_status(state_dir, request):
             if ref is None:continue
             record=context_record(connection,ref);proof=record.get('supplementary_units')
             if not proof or not proof.get('evidence') or unresolved_unit_refs(record.get('lines') or []):continue
-            return {'met':True,'partial':False,'items':[{'document_ref':acceptance['document_ref'],'kind':((request.get('need') or {}).get('doc_kinds') or [None])[0],
-                'statement_context_ref':ref,'statement_context_hash':record['content_hash'],'source_manifest_hash':proof['source']['manifest_hash'],'raw_sha256':proof['raw_sha256']}],
+            source = proof['source']
+            primary = source['primary'] if source.get('document_set_rule_ref') == DOCUMENT_SET_RULE_REF else source
+            item = {'document_ref':acceptance['document_ref'],'kind':((request.get('need') or {}).get('doc_kinds') or [None])[0],
+                'statement_context_ref':ref,'statement_context_hash':record['content_hash'],'source_manifest_hash':primary['manifest_hash'],'raw_sha256':proof['raw_sha256']}
+            if source.get('document_set_rule_ref') == DOCUMENT_SET_RULE_REF:
+                attachment = source['annual_report_attachment']
+                item.update(document_set_rule_ref=DOCUMENT_SET_RULE_REF,
+                            raw_sha256=primary['manifest']['body_sha256'],
+                            primary_raw_sha256=primary['manifest']['body_sha256'],
+                            annual_report_attachment_ref=attachment['document_ref'],
+                            annual_report_attachment_manifest_hash=attachment['manifest_hash'],
+                            annual_report_attachment_raw_sha256=attachment['body_sha256'],
+                            annual_report_attachment_hash=attachment['content_hash'])
+            return {'met':True,'partial':False,'items':[item],
                 'reason':'已按真实申报原文重验单位定义、完整上下文与数值，并绑定到正式快照。'}
         return missing
     except (ValueError,KeyError,TypeError,OSError,sqlite3.Error):return missing

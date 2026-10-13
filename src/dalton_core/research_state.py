@@ -49,6 +49,9 @@ def company_state(
     contested: Sequence[Mapping[str, Any]] = (),
     acquisition: Mapping[str, Any] | None = None,
     dossier_feedback: Mapping[str, Any] | None = None,
+    initial_screen_feedback: Mapping[str, Any] | None = None,
+    initial_screen_quality_feedback: Mapping[str, Any] | None = None,
+    memo_question_feedback: Mapping[str, Any] | None = None,
     readable_documents: Sequence[Mapping[str, Any]] = (),
     unavailable_documents: Sequence[Mapping[str, Any]] = (),
     document_research_feedback: Sequence[Mapping[str, Any]] = (),
@@ -97,23 +100,43 @@ def company_state(
         # review -- so a gap is reported as its cause, not as "uneven depth".
         extra["reading_pipeline"] = dict(reading_pipeline)
     from .planner_numeric_requirements import numeric_requirements, numeric_waiting_targets, numeric_completed_context
+    from .document_execution_failure import compact_failures
+    failed = compact_failures(document_research_feedback)
+    if failed['failures']:
+        extra['document_execution_failures'] = failed
+    for key in ("model_execution_failures", "model_execution_failure_summary", "model_history_note_priority", "model_history_note_priority_unavailable"):
+        if key in (financial_model or {}):
+            extra[key] = (financial_model or {})[key]
+    priority = extra.get('model_history_note_priority')
+    if priority:
+        choices={(o['document_ref'],o['document_version_hash']) for o in priority['note_options']}
+        readable_documents=sorted(readable_documents,key=lambda d:
+            (d.get('document_ref'),d.get('document_version_hash')) not in choices)
     numeric = numeric_requirements(document_research_feedback)
     if numeric["requirements"]:
         extra["numeric_reading_requirements"] = numeric
+    if initial_screen_feedback and initial_screen_feedback.get("status") != "not_recorded":
+        extra["initial_screen_validation_feedback"] = dict(initial_screen_feedback)
+    if initial_screen_quality_feedback and initial_screen_quality_feedback.get("items"):
+        extra["initial_screen_quality_feedback"] = dict(initial_screen_quality_feedback)
+    if memo_question_feedback and memo_question_feedback.get('items'):
+        extra['memo_question_feedback'] = dict(memo_question_feedback)
     completed = numeric_completed_context(document_research_feedback, company_ref=entry.get('company_ref'))
     if completed['sources']:
         extra['numeric_completed_context'] = completed
     waiting = numeric_waiting_targets(document_research_feedback)
     if waiting["targets"]:
         extra["numeric_waiting_targets"] = waiting
+    from .numeric_source_admission_feedback import ADMISSION_OUTCOMES
     refusals = sorted({item["id"] for item in document_research_feedback
-                       if item.get("outcome") == "numeric_admission_source_grade_refused"})
+                       if item.get("outcome") in ADMISSION_OUTCOMES})
     if refusals:
         extra["numeric_source_refusal_ids"] = refusals
         extra["numeric_source_refusals"] = [{key:item[key] for key in (
-            "id", "document_ref", "document_version_hash", "reason", "source_grade")}
+            "id", "document_ref", "document_version_hash", "reason", "source_grade",
+            *(("unexecutable_period_targets",) if item.get("unexecutable_period_targets") else ()))}
             for item in document_research_feedback
-            if item.get("outcome") == "numeric_admission_source_grade_refused"]
+            if item.get("outcome") in ADMISSION_OUTCOMES]
     return {
         "company_ref": entry.get("company_ref"),
         "ticker": entry.get("ticker"),
@@ -253,6 +276,9 @@ def build_research_state(
     contested_by_company: Mapping[str, Sequence[Mapping[str, Any]]] | None = None,
     acquisition_by_company: Mapping[str, Mapping[str, Any]] | None = None,
     dossier_feedback_by_company: Mapping[str, Mapping[str, Any]] | None = None,
+    initial_screen_feedback_by_company: Mapping[str, Mapping[str, Any]] | None = None,
+    initial_screen_quality_feedback_by_company: Mapping[str, Mapping[str, Any]] | None = None,
+    memo_question_feedback_by_company: Mapping[str, Mapping[str, Any]] | None = None,
     readable_documents_by_company: Mapping[str, Sequence[Mapping[str, Any]]] | None = None,
     unavailable_documents_by_company: Mapping[str, Sequence[Mapping[str, Any]]] | None = None,
     document_research_policy: Mapping[str, Any] | None = None,
@@ -292,6 +318,9 @@ def build_research_state(
             contested=contested_by_company.get(entry.get("company_ref"), ()),
             acquisition=acquisition_by_company.get(entry.get("company_ref")),
             dossier_feedback=dossier_feedback_by_company.get(entry.get("company_ref")),
+            initial_screen_feedback=(initial_screen_feedback_by_company or {}).get(entry.get("company_ref")),
+            initial_screen_quality_feedback=(initial_screen_quality_feedback_by_company or {}).get(entry.get("company_ref")),
+            memo_question_feedback=(memo_question_feedback_by_company or {}).get(entry.get("company_ref")),
             readable_documents=readable_documents_by_company.get(entry.get("company_ref"), ()),
             unavailable_documents=unavailable_documents_by_company.get(entry.get("company_ref"), ()),
             document_research_feedback=document_research_feedback.get("by_company", {}).get(entry.get("company_ref"), ()),
@@ -444,6 +473,15 @@ def _material_subject(subject: Mapping[str, Any] | None) -> dict[str, Any] | Non
         "stage": subject.get("stage"),
         "stage_status": subject.get("stage_status"),
         "source_base_ready": bool(subject.get("source_base_ready")),
+        **({'document_execution_failures': content_hash(subject['document_execution_failures'])}
+           if 'document_execution_failures' in subject else {}),
+        **({key: content_hash(subject[key]) for key in (
+            "model_execution_failures", "model_execution_failure_summary", "model_history_note_priority") if key in subject}),
+        **({"initial_screen_validation_feedback": sorted(item["semantic_hash"] for item in
+            (subject["initial_screen_validation_feedback"].get("items") or []))}
+           if (subject.get("initial_screen_validation_feedback") or {}).get("items") else {}),
+        **({"initial_screen_quality_feedback": content_hash(subject["initial_screen_quality_feedback"])}
+           if subject.get("initial_screen_quality_feedback") else {}),
         **({"numeric_source_refusal_ids": subject["numeric_source_refusal_ids"]}
            if "numeric_source_refusal_ids" in subject else {}),
         **({"numeric_completed_context": content_hash(subject["numeric_completed_context"])}
@@ -454,6 +492,8 @@ def _material_subject(subject: Mapping[str, Any] | None) -> dict[str, Any] | Non
            if "document_execution_availability" in subject else {}),
         **({"numeric_reading_requirements": subject["numeric_reading_requirements"]}
            if "numeric_reading_requirements" in subject else {}),
+        **({'memo_question_feedback': subject['memo_question_feedback'].get('semantic_hash')}
+           if subject.get('memo_question_feedback', {}).get('items') else {}),
         "gaps": sorted(str(item) for item in subject.get("gaps") or ()),
         "blocked_on": sorted(
             content_hash(item) for item in subject.get("blocked_on") or ()

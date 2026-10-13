@@ -17,7 +17,7 @@ from .store import content_hash
 
 DRAFT_PURPOSE = register_purpose("investment_memo")
 VERIFIER_PURPOSE = register_purpose("investment_memo_verifier")
-MEMO_PROMPT_CONTRACT_VERSION = "investment-memo-prompt:0.5"
+MEMO_PROMPT_CONTRACT_VERSION = "investment-memo-prompt:0.6"
 MEMO_VERIFIER_PROMPT_CONTRACT_VERSION = "investment-memo-verifier-prompt:0.3"
 _CALL_BUDGET = default_call_budget(DRAFT_PURPOSE)
 MAX_INPUT_TOKENS = _CALL_BUDGET["max_input_tokens"]
@@ -49,6 +49,10 @@ class InvestmentMemoDraftError(ValueError):
     pass
 
 
+class InvestmentMemoSourceError(InvestmentMemoDraftError):
+    """Acquired-original checks failed; another paid draft cannot repair them."""
+
+
 class InvestmentMemoCitationError(InvestmentMemoDraftError):
     """A draft cited a ref in a place the memo contract does not let it stand.
 
@@ -57,9 +61,11 @@ class InvestmentMemoCitationError(InvestmentMemoDraftError):
     frozen input" for a ref that was in the frozen input all along.
     """
 
-    def __init__(self, message: str, refs: Sequence[str] = ()) -> None:
+    def __init__(self, message: str, refs: Sequence[str] = (), *, findings=()) -> None:
         super().__init__(message)
         self.refs = list(dict.fromkeys(str(ref) for ref in refs))
+        self.findings = list(findings)
+        self.diagnostic_sections = []
 
 
 def _json(value: Any) -> str:
@@ -168,8 +174,13 @@ def build_group_prompt(*, group: str, section_titles: Sequence[str], questions: 
         "Reasoning rules (a deterministic lint and the verifier reject the memo on any of these):",
         *VERIFIER_LINT_INSTRUCTIONS,
         "Every section must have substance: an empty, heading-only or gap-only section refuses the memo.",
-        "If evidence is missing for a key question, set unknown true for that question,",
-        "and name the exact document, metric, period, comparison, or research action needed.",
+        'For an unanswered key question use unknown=true, answer="", refs=[].',
+        "Put the exact missing document, metric, period or next research action in falsifier.",
+        "If the evidence answers the requested question, use unknown=false,",
+        "state only the supported conclusion in answer, cite its refs, and explain its limits",
+        "and the evidence that could change it in falsifier. Never pair unknown=true with an answer or refs.",
+        "Partial background that does not answer the question belongs in the relevant section,",
+        "with its citations and gaps; keep that key question unknown until its core is answered.",
         "Citation slots are closed; a ref in the wrong slot refuses the whole draft:",
         "- sections[].claim_refs and numbers[].claim_version_ref may name ONLY Claim refs.",
         "- A figure from the company model or valuation snapshot is a numbers[] entry with",
@@ -192,6 +203,14 @@ def build_group_prompt(*, group: str, section_titles: Sequence[str], questions: 
         "Return raw JSON only with exactly this shape and the exact requested titles/questions:",
         _json(contract),
     ]
+    if any(row.get('market_history_proof') for row in material):
+        lines += [
+            'Source-bound price-window rows are citable Number rows. Use their exact dates, currency and price basis.',
+            'Close price return excludes dividends; adjusted-price return uses source adj_close and must not add dividends again.',
+            'A broad-market benchmark is not an industry basket. A calendar event window is an observed reaction, not proof of causation or a complete event study.',
+            'A hedge answer may be a labelled research scenario with explicit assumptions and cited risk premises. It does not require invented user holdings or trade permission.',
+            'Do not claim knowledge of actual portfolio exposures, risk limits, approvals or option prices. Preserve those as execution limits; never approve a trade.',
+        ]
     if repair:
         lines += [
             "Your previous answer for this group was refused and was not used:",
@@ -281,7 +300,8 @@ def _short(title: str) -> str:
 
 def parse_group_output(value: Any, *, section_titles: Sequence[str],
                        questions: Sequence[Mapping[str, str]], allowed_refs: set[str],
-                       material: Sequence[Mapping[str, Any]] = ()) -> dict[str, Any]:
+                       material: Sequence[Mapping[str, Any]] = (),
+                       original_passages: Mapping[str, str] | None = None) -> dict[str, Any]:
     index = citation_index(material, allowed_refs=allowed_refs)
     allowed = set(index["kinds"])
     if not isinstance(value, Mapping) or set(value) != {"sections", "key_questions"}:
@@ -314,16 +334,40 @@ def parse_group_output(value: Any, *, section_titles: Sequence[str],
         if any(not isinstance(gap, str) for gap in section["gaps"]):
             raise InvestmentMemoDraftError("section gaps must be text")
         numbers = []
+        sources = []
         for number in section["numbers"]:
             if not isinstance(number, Mapping):
                 raise InvestmentMemoDraftError("each section number must be an object")
             try:
-                numbers.append(_number(number, title=title, index=index))
+                checked_number = _number(number, title=title, index=index)
+                text = checked_number.get("text")
+                ref = checked_number.get("passage_ref")
+                from .mission_deliverable import value_tokens
+                if ref and isinstance(text, str) and text.strip() and not value_tokens(text, include_small=True):
+                    original = (original_passages or {}).get(ref)
+                    if original_passages is None:
+                        # Standalone parsing only: a rendered header/trimmed pack
+                        # cannot stand in for its original. Production supplies
+                        # acquired-original proofs for every qualitative quote.
+                        import hashlib
+                        from .evidence_index import parse_passage_ref
+                        passage = index["passages"][ref]
+                        if hashlib.sha256(passage.encode()).hexdigest()[:12] == parse_passage_ref(ref)["hash12"]:
+                            original = passage
+                    if not isinstance(original, str) or text not in original:
+                        raise InvestmentMemoCitationError(
+                            f"section「{title}」qualitative quote is not verbatim in its acquired original: {ref}", [ref])
+                    if {"ref": ref} not in sources:
+                        sources.append({"ref": ref})
+                    continue
+                numbers.append(checked_number)
             except InvestmentMemoCitationError as exc:
                 problems.append((str(exc), exc.refs))
         checked = {**dict(section)}
         if not checked.get("gap_items"):
             checked.pop("gap_items", None)
+        if sources:
+            checked["source_refs"] = sources
         checked_sections.append({**checked, "body": str(section["body"]).strip(),
                                  "claim_refs": list(dict.fromkeys(str(ref) for ref in refs)),
                                  "numbers": numbers,
@@ -360,14 +404,22 @@ def parse_group_output(value: Any, *, section_titles: Sequence[str],
     if problems:
         refs = [ref for _, found in problems for ref in found]
         more = f" (+{len(problems) - 1} more)" if len(problems) > 1 else ""
-        raise InvestmentMemoCitationError(problems[0][0] + more, refs)
+        error = InvestmentMemoCitationError(problems[0][0] + more, refs,
+            findings=[{"code":"citation_slot", "detail":detail, "refs":list(refs)}
+                      for detail, refs in problems])
+        # Already parsed sections are diagnostic only. They are never accepted
+        # or published when any citation fails, but remaining section arithmetic
+        # must also reach the one bounded repair instead of being hidden.
+        error.diagnostic_sections = checked_sections
+        raise error
     return {"sections": checked_sections, "key_questions": checked_answers}
 
 
 def draft_group(model: Any, *, group: str, section_titles: Sequence[str],
                 questions: Sequence[Mapping[str, str]], material: Sequence[Mapping[str, Any]],
                 company: Mapping[str, Any], mission: Mapping[str, Any],
-                repair: Mapping[str, Any] | None = None) -> dict[str, Any]:
+                repair: Mapping[str, Any] | None = None, quiesce: Any = None,
+                maintenance: Mapping[str, Any] | None = None) -> dict[str, Any]:
     """One paid draft of one group, or -- with ``repair`` -- its one paid redo.
 
     ``repair`` carries the refused draft's reason and offending refs; the
@@ -377,30 +429,81 @@ def draft_group(model: Any, *, group: str, section_titles: Sequence[str],
 
     prompt = build_group_prompt(group=group, section_titles=section_titles, questions=questions,
                                 material=material, company=company, repair=repair)
+    if maintenance is not None:
+        prompt = maintenance["prompt"]
     request_id = "memo-" + content_hash({"contract": MEMO_PROMPT_CONTRACT_VERSION, "group": group, "prompt": prompt})[:24]
     call: Mapping[str, Any] = {}
     try:
+        if quiesce is not None:
+            quiesce.checkpoint()
         call = model.call(purpose=DRAFT_PURPOSE, request_id=request_id, prompt=prompt, mission=mission)
-        parsed = parse_group_output(unwrap_json_object(call["text"]), section_titles=section_titles,
-                                    questions=questions, allowed_refs={str(row["ref"]) for row in material},
-                                    material=material)
-    except InvestmentMemoCitationError as exc:
-        return {"status": "refused", "reason": f"{type(exc).__name__}: {exc}",
-                "refs": list(exc.refs), "repairable": True,
-                "cost_micros": int(call.get("cost_micros") or 0)}
-    except InvestmentMemoDraftError as exc:
-        return {"status": "refused", "reason": f"{type(exc).__name__}: {exc}",
-                "refs": [], "repairable": True,
-                "cost_micros": int(call.get("cost_micros") or 0)}
+        if quiesce is not None:
+            quiesce.returned(model, call, mission, purpose=DRAFT_PURPOSE)
+        return parse_group_call(model, call, group=group, section_titles=section_titles,
+                                questions=questions, material=material)
     except (CockpitModelError, KeyError, json.JSONDecodeError) as exc:
         return {"status": "refused", "reason": f"{type(exc).__name__}: {exc}",
                 "cost_micros": int(call.get("cost_micros") or 0)}
-    return {"status": "drafted", **parsed, "group": group,
-            "model": {"work_order_ref": call.get("work_order_ref"),
-                      "route_decision_ref": call.get("route_decision_ref"),
-                      "result_envelope_ref": call.get("result_envelope_ref"),
-                      "invocation_ref": call.get("invocation_ref"),
-                      "cost_micros": int(call.get("cost_micros") or 0)}}
+
+
+def parse_group_call(model, call, *, group, section_titles, questions, material):
+    """Validate a durable answer without dispatch; retain its exact paid identity.
+
+    Typed content diagnostics authorize no retry themselves. Source failures
+    are distinct, and the maintenance authority re-runs this whole validator.
+    """
+    metadata = {key:call.get(key) for key in (
+        "work_order_ref", "route_decision_ref", "result_envelope_ref", "invocation_ref")}
+    metadata["cost_micros"] = int(call.get("cost_micros") or 0)
+    evidence = {"model":metadata, "raw_response":call.get("text")}
+    try:
+        value = unwrap_json_object(call["text"])
+        from .mission_deliverable import value_tokens
+        index = citation_index(material)
+        candidate_sections = value.get("sections") if isinstance(value, Mapping) else None
+        qualitative_refs = {str(number["passage_ref"])
+            for section in (candidate_sections if isinstance(candidate_sections, list) else [])
+            if isinstance(section, Mapping) and isinstance(section.get("numbers"), list)
+            for number in section["numbers"] if isinstance(number, Mapping)
+            and isinstance(number.get("passage_ref"), str) and number["passage_ref"] in index["passages"]
+            and isinstance(number.get("text"), str) and number["text"].strip()
+            and not value_tokens(number["text"], include_small=True)}
+        originals = None
+        if qualitative_refs:
+            from pathlib import Path
+            from .initial_screen_failure_feedback import _checked_originals
+            scheduler_db = getattr(model, "scheduler_db", None)
+            if scheduler_db and str(scheduler_db) != ":memory:":
+                try:
+                    proofs = _checked_originals(Path(scheduler_db).parent, qualitative_refs)
+                    originals = {ref: proofs[ref]["text"] for ref in qualitative_refs}
+                except (ValueError, OSError, KeyError) as exc:
+                    raise InvestmentMemoSourceError("qualitative quotation original could not be verified") from exc
+            else:
+                raise InvestmentMemoSourceError("qualitative quotation needs its acquired original")
+        parsed = parse_group_output(value, section_titles=section_titles,
+                                    questions=questions, allowed_refs={str(row["ref"]) for row in material},
+                                    material=material, original_passages=originals)
+    except InvestmentMemoSourceError as exc:
+        return {**evidence, "status":"refused", "reason":f"{type(exc).__name__}: {exc}",
+                "refs":[], "repairable":False, "failure_class":"source_unavailable",
+                "cost_micros":metadata["cost_micros"]}
+    except InvestmentMemoCitationError as exc:
+        return {**evidence, "status":"refused", "reason":f"{type(exc).__name__}: {exc}",
+                "refs":list(exc.refs), "repairable":True, "failure_class":"content",
+                "findings":exc.findings or [{"code":"citation_slot","detail":str(exc),"refs":list(exc.refs)}],
+                "diagnostic_sections":exc.diagnostic_sections,
+                "cost_micros":metadata["cost_micros"]}
+    except (InvestmentMemoDraftError, json.JSONDecodeError) as exc:
+        return {**evidence, "status":"refused", "reason":f"{type(exc).__name__}: {exc}",
+                "refs":[], "repairable":True, "failure_class":"content",
+                "findings":[{"code":"group_shape", "detail":str(exc)}],
+                "cost_micros":metadata["cost_micros"]}
+    except KeyError as exc:
+        return {**evidence, "status":"refused", "reason":f"{type(exc).__name__}: {exc}",
+                "repairable":False, "failure_class":"authority_unavailable",
+                "cost_micros":metadata["cost_micros"]}
+    return {**evidence, "status":"drafted", **parsed, "group":group}
 
 
 def verified_material_hash(*, sections: Sequence[Mapping[str, Any]], questions: Sequence[Mapping[str, Any]],
@@ -436,13 +539,18 @@ def build_verifier_prompt(*, sections: Sequence[Mapping[str, Any]], questions: S
 
 def verify_memo(model: Any, *, sections: Sequence[Mapping[str, Any]], questions: Sequence[Mapping[str, Any]],
                 material: Sequence[Mapping[str, Any]], material_hash: str,
-                mission: Mapping[str, Any], producer_route_decision_refs: Sequence[str]) -> dict[str, Any]:
+                mission: Mapping[str, Any], producer_route_decision_refs: Sequence[str],
+                quiesce: Any = None) -> dict[str, Any]:
     prompt = build_verifier_prompt(sections=sections, questions=questions, material=material,
                                    material_hash=material_hash)
     call: Mapping[str, Any] = {}
     try:
+        if quiesce is not None:
+            quiesce.checkpoint()
         call = independent_model_call(model, producer_route_decision_refs=producer_route_decision_refs,
             purpose=VERIFIER_PURPOSE, request_id="memo-verify-" + material_hash[:24] + "-" + content_hash(MEMO_VERIFIER_PROMPT_CONTRACT_VERSION)[:8], prompt=prompt, mission=mission)
+        if quiesce is not None:
+            quiesce.returned(model, call, mission, purpose=VERIFIER_PURPOSE)
         value = unwrap_json_object(call["text"])
     except (CockpitModelError, KeyError, json.JSONDecodeError) as exc:
         return {"status": "refused", "reason": f"{type(exc).__name__}: {exc}",

@@ -3,6 +3,7 @@
 from __future__ import annotations
 
 import hashlib
+import json
 from pathlib import Path
 from typing import Any, Callable, Mapping
 
@@ -47,6 +48,20 @@ def company_signature(frozen: Mapping[str, Any], launcher: Any) -> str:
     from .cockpit_model import verifier_provider_contract_fingerprint
     from .investment_memo_cli import anchor_bindings
     from .investment_memo_draft import MEMO_PROMPT_CONTRACT_VERSION
+    from .investment_memo_timeout_recovery import CONTRACT_REF as TIMEOUT_CONTINUATION_REF
+    from .investment_memo_macro_accounting import CONTRACT_REF as MACRO_ACCOUNTING_REF
+    from .investment_memo_legacy_accounting import CONTRACT_REF as LEGACY_ACCOUNTING_REF
+    from .product_passage_validation import PRODUCT_VALIDATION_CONTRACT
+    from .investment_memo_group_maintenance import CONTRACT_REF as GROUP_MAINTENANCE_REF
+    from .investment_memo_terminal_maintenance import CONTRACT_REF as TERMINAL_MAINTENANCE_REF
+    from .mission_deliverable import SECTION_NUMBERS_VALIDATION_CONTRACT, NUMBER_SOURCE_CONTRACT_VERSION
+    from .derived_number_display import CONTRACT_REF as DERIVED_DISPLAY_REF
+    from .investment_memo_scheduler_retry import CONTRACT_REF as SCHEDULER_RETRY_REF
+    from .investment_memo_failure_cost import COPY_PROTOCOL_CONTRACT
+    from .investment_memo_question_gaps import CONTRACT_REF as QUESTION_GAPS_REF
+    from .investment_memo_market_history import CONTRACT_REF as MARKET_HISTORY_REF
+    from .investment_memo_second_maintenance import CONTRACT_REF as SECOND_MAINTENANCE_REF, scheduling_rounds
+    from .investment_memo_number_diagnostics import CONTRACT_REF as SECTION_DIAGNOSTICS_REF
     from .store import content_hash
 
     mission = frozen["mission"]
@@ -65,6 +80,30 @@ def company_signature(frozen: Mapping[str, Any], launcher: Any) -> str:
         # must not stay held for a day after the contract that refused it is
         # fixed (same rule as the gate's GATE_DRAFTING_CONTRACT).
         "drafting_contract": MEMO_PROMPT_CONTRACT_VERSION,
+        "timeout_continuation_contract": TIMEOUT_CONTINUATION_REF,
+        "validation_contract": PRODUCT_VALIDATION_CONTRACT,
+        # Compatible validation change: wake the lane, while the draft prompt,
+        # Work identity, existing paid answers and one repair slot stay bound.
+        "section_numbers_validation_contract": SECTION_NUMBERS_VALIDATION_CONTRACT,
+        "number_source_validation_contract": NUMBER_SOURCE_CONTRACT_VERSION,
+        "derived_display_validation_contract": DERIVED_DISPLAY_REF,
+        "scheduler_retry_validation_contract": SCHEDULER_RETRY_REF,
+        # Execution-only repair wakes held pre-call failures once. Macro,
+        # immutable Work and owner permissions still use their original keys.
+        "failure_reporter_copy_contract": COPY_PROTOCOL_CONTRACT,
+        "key_question_gap_feedback_contract": QUESTION_GAPS_REF,
+        "market_history_evidence_contract": MARKET_HISTORY_REF,
+        "macro_accounting_contract": MACRO_ACCOUNTING_REF,
+        "legacy_accounting_contract": LEGACY_ACCOUNTING_REF,
+        # Free re-validation wakes old content holds. Fixed owner permissions
+        # and paid request identities do not depend on this scheduling marker.
+        "group_maintenance_contract": GROUP_MAINTENANCE_REF,
+        "second_group_maintenance_contract": SECOND_MAINTENANCE_REF,
+        # Revalidate paid answers once; this does not change any prompt,
+        # immutable Work, fixed correction permission or macro accounting key.
+        "complete_section_diagnostics_contract": SECTION_DIAGNOSTICS_REF,
+        "terminal_maintenance_contract": TERMINAL_MAINTENANCE_REF,
+        "profile_maintenance_contract": "investment-memo-profile-capability-maintenance:0.1",
     }
     parts = [content_hash(payload), verifier_provider_contract_fingerprint(
         "investment_memo_verifier")]
@@ -73,6 +112,11 @@ def company_signature(frozen: Mapping[str, Any], launcher: Any) -> str:
             parts.append(hashlib.sha256(Path(path).read_bytes()).hexdigest())
         except OSError:
             parts.append("config:missing")
+    try:
+        parts.append('shared-memo-corrections:'+str(scheduling_rounds(
+            json.loads(Path(launcher.model_config_path).read_text()))))
+    except (OSError,ValueError,TypeError):
+        parts.append('shared-memo-corrections:unavailable')
     return f"{payload['company_ref']}|{hashlib.sha256('|'.join(parts).encode()).hexdigest()}"
 
 
@@ -122,6 +166,21 @@ class MissionInvestmentMemoLaneCoordinator:
             memo_status = settled.get("memo_status")
             if memo_status in QUIET:
                 self.quiet_signatures.add(signature)
+            elif memo_status == "macro_accounting_pending":
+                from .investment_memo_accounting_progress import resume_checkpoint
+                try:
+                    resume_checkpoint(ticket.get("summary"), ticket,
+                                      self.launcher.scheduler_db or self.launcher.state_dir / "scheduler.sqlite")
+                except (ValueError, OSError) as exc:
+                    return {"status":"held","reason":"memo accounting progress is unproved: "+str(exc),"settled":settled}
+                # Free persistent paging must remain eligible on the next
+                # normal tick, including after a writer restart.
+            elif memo_status == "quiesced":
+                from .investment_memo_quiesce import quiesced_summary_matches
+                if not quiesced_summary_matches(ticket.get("summary"), ticket):
+                    return {"status": "held", "reason": "memo pause proof is invalid", "settled": settled}
+                # A deployment pause is not a content/fee failure. The next
+                # normal tick resumes via the launcher's exact successor.
             elif memo_status in TERMINAL or _verification_is_content_refusal(settled):
                 self.budget.record(signature, status=f"content_refused:{memo_status}",
                                    reason=str(settled.get("reason") or memo_status))
@@ -145,6 +204,7 @@ class MissionInvestmentMemoLaneCoordinator:
                     continue
                 candidates.append((company_ref, company_signature(frozen, self.launcher), frozen))
         held_companies = {}
+        rejected_companies = {}
         for company_ref, signature, _frozen in candidates:
             if company_ref is not None:
                 for item in self.budget.permission_items():
@@ -160,13 +220,25 @@ class MissionInvestmentMemoLaneCoordinator:
             try:
                 ticket = self.launcher.start(signature=signature, company_ref=company_ref)
             except LaneChildConflict as exc:
-                return {"status": "busy", "reason": str(exc), "settled": settled}
+                return {"status": "busy", "reason": str(exc), "settled": settled,
+                        **({"rejected": rejected_companies} if rejected_companies else {})}
             except LaneChildRejected as exc:
-                return {"status": "rejected", "reason": str(exc), "settled": settled}
+                if company_ref is None:
+                    return {"status": "rejected", "reason": str(exc), "settled": settled}
+                # A company's unproved pause/configuration must remain refused,
+                # but does not occupy the shared child slot for other companies.
+                rejected_companies[company_ref] = str(exc)[:REASON_LIMIT]
+                continue
             self.open_ticket = ticket["id"]
             return {"status": "launched", "ticket_ref": ticket["id"],
                     "company_ref": company_ref, "signature": signature,
-                    "held": held_companies, "settled": settled}
+                    "held": held_companies, "settled": settled,
+                    **({"rejected": rejected_companies} if rejected_companies else {})}
+        if rejected_companies:
+            return {"status": "rejected", "rejected": rejected_companies,
+                    "held": held_companies, "settled": settled,
+                    "reason": "; ".join(f"{key}: {value}" for key, value
+                                        in rejected_companies.items())[:REASON_LIMIT]}
         if held_companies:
             return {"status": "held", "held": held_companies, "settled": settled,
                     "reason": "; ".join(f"{key}: {value}"

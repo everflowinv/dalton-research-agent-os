@@ -444,6 +444,20 @@ def run_fetch(
                 fetch, spool, primary_authority=authority, primary_receipt=receipt, out=out)
             summary["annual_report_exhibit"] = annual
             summary["provider_calls"] += int(annual.get("provider_calls") or 0)
+        if discovery.get('source_ref') == 'source:sec-edgar' and discovery.get('spec_ref') in {
+                'foreign-disclosure-6k', 'foreign-disclosure-6k-amendment'}:
+            from .sec_interim_attachments import identity, acquire, InterimAttachmentError
+            try:
+                interim_identity = identity(core.connection, spool, discovery['id'],
+                    company_ref=document['company_ref'], parent_ref=url_ref)
+                interim = acquire(fetch, spool, source_identity=interim_identity,
+                    primary_receipt=receipt, out=out)
+                summary['interim_attachments'] = interim
+                summary['provider_calls'] += interim['provider_calls']
+            except (ValueError, KeyError, TypeError) as exc:
+                summary['interim_attachments'] = {'status': 'refused',
+                    'failure_reason': type(exc).__name__ + ': ' + str(exc)[:400],
+                    'financial_periods_inferred': False}
         return summary
     except (PublicWebCoreFetchError, CoverageMissionError) as exc:
         summary["failure_reason"] = f"{type(exc).__name__}: {exc}"

@@ -509,16 +509,31 @@ def verified_original(writer, review, row, limits, receipt_reader):
     source_ref = review["source_ref"]
     document_ref = review["document_ref"]
     launcher = acquisition_ticket_reader(writer, source_ref)
+    if source_ref == SEC_EDGAR_SOURCE_REF and document_ref.startswith('sec:interim:'):
+        from .sec_interim_attachments import verified_sources
+        from .acquired_document_source_chain import acquired_annual_parent
+        parts = document_ref.split(':', 3)
+        if len(parts) != 4:
+            raise ResearchVerificationConflict('interim original document identity differs')
+        parent_ref = 'sec:filing:' + parts[2]
+        acquired_annual_parent(writer, review, row, parent_ref)
+        sources = verified_sources(writer.store, acquisition_spool(writer, launcher, source_ref), writer.state_dir,
+            ticket_ref=row['ticket_ref'], parent_document_ref=parent_ref, company_ref=review['company_ref'],
+            receipt_reader=receipt_reader, max_source_chars=limits['max_document_chars'],
+            max_pdf_pages=limits['max_pdf_pages'], max_decompressed_bytes=limits['max_decompressed_bytes'])
+        choices = [item for item in sources if item['document_ref'] == document_ref]
+        if len(choices) != 1:
+            raise ResearchVerificationConflict('interim original member is not uniquely acquired')
+        exact = choices[0]; manifest = exact['manifest']; rendering = exact['rendering']; text = rendering['text']
+        return manifest, text, _hash_text(text), {'canonical_url': manifest['canonical_url'], 'host': manifest['host'],
+            'raw_media_type': manifest['raw_media_type'], 'body_sha256': manifest['body_sha256'],
+            'source_renderer': rendering['renderer'], 'source_truncated': False, 'interim_attachment': exact['binding']}
     if source_ref == SEC_EDGAR_SOURCE_REF and document_ref.startswith('sec:exhibit:'):
         from .sec_annual_report_exhibit import verified_exhibit_source, AnnualReportExhibitConflict
         accession=document_ref.split(':',3)[2]
         parent_ref='sec:filing:'+accession
-        parent=writer.store.connection.execute(
-            'SELECT * FROM coverage_mission_discovered_documents WHERE document_ref=? AND ticket_ref=? '
-            'AND company_ref=? AND mission_version_ref=? AND source_ref=? AND status=\'acquired\'',
-            (parent_ref,row['ticket_ref'],review['company_ref'],review['mission_version_ref'],source_ref)).fetchone()
-        if parent is None:
-            raise ResearchVerificationConflict('annual report attachment has no acquired parent in this review scope')
+        from .acquired_document_source_chain import acquired_annual_parent
+        parent=acquired_annual_parent(writer,review,row,parent_ref)
         try:
             exact=verified_exhibit_source(writer.store,acquisition_spool(writer,launcher,source_ref),writer.state_dir,
                 ticket_ref=row['ticket_ref'],parent_document_ref=parent_ref,company_ref=review['company_ref'],
@@ -533,10 +548,24 @@ def verified_original(writer, review, row, limits, receipt_reader):
             'raw_media_type':manifest['raw_media_type'],'body_sha256':manifest['body_sha256'],
             'source_renderer':rendering['renderer'],'source_truncated':False,
             'annual_report_attachment':exact['binding']}
-    manifest = completed_acquisition_manifest(
-        launcher, ticket_ref=row["ticket_ref"], document_ref=document_ref)
     store = writer.store
     spool = acquisition_spool(writer, launcher, source_ref)
+    from .public_web_fetch_launcher import FetchLaunchRejected
+    try:
+        manifest = completed_acquisition_manifest(
+            launcher, ticket_ref=row["ticket_ref"], document_ref=document_ref)
+    except Exception as exc:
+        # A filing discovered later may name a page already fetched under its
+        # URL identity. Only the explicitly missing-completion path can use
+        # this alias; bad manifest/receipt/tamper errors remain refusals.
+        if (source_ref != SEC_EDGAR_SOURCE_REF or not document_ref.startswith('sec:filing:')
+                or not (isinstance(exc, FetchLaunchRejected)
+                        or isinstance(exc, ResearchVerificationError)
+                        and isinstance(exc.__cause__, FetchLaunchRejected))
+                or 'no completed acquisition ticket for this document' not in str(exc)):
+            raise
+        from .acquired_document_source_chain import completed_discovery_alias_manifest
+        manifest = completed_discovery_alias_manifest(writer,launcher,review,row,spool)
     if source_ref == ALPHAENGINE_SOURCE_REF:
         manifest, text = verified_source(
             store, spool, manifest, receipt_reader,
@@ -1828,7 +1857,29 @@ class DocumentExtractionService:
                 raise ResearchVerificationConflict(str(exc)) from exc
             if historical is not None:
                 return historical
+            historical = self._successful_policy_context(current, config, replay_builder or build_work)
+            if historical is not None:
+                return historical
         return current
+
+    def _successful_policy_context(self, current, config, builder):
+        from .document_numeric_extraction import TASK_REF as NUMERIC_TASK_REF
+        from .metric_discovery_extraction import TASK_REF as DISCOVERY_TASK_REF
+        from .extraction_successful_policy_replay import reusable_successful_context
+        from .model_router import ModelRouter
+        from .thesis_impact_budget import ThesisImpactBudgetStore
+        work = builder(current, model_config=config)
+        if self.writer._scheduler is None or self.writer._scheduler.work_order_authority(work.id) is not None:
+            return None
+        purpose = {TASK_REF: "document_extraction", NUMERIC_TASK_REF: "document_numeric_extraction",
+                   DISCOVERY_TASK_REF: "metric_discovery_extraction"}[work.metadata["task_ref"]]
+        try:
+            with ModelRouter(config["model_router_db"], read_only=True) as router, ThesisImpactBudgetStore(config["budget_db"], read_only=True) as budget:
+                policy = self.model_policy(router, config["routing_policy_ref"])
+                return reusable_successful_context(current, config, self.writer, router, budget,
+                                                    policy, purpose=purpose, builder=builder)
+        except ValueError as exc:
+            raise ResearchVerificationConflict(str(exc)) from exc
 
     def source_context(self, review_id, expected_review_hash, offset, actor_ref,
                        require_open=True, allow_superseded=False):
@@ -1932,19 +1983,28 @@ class DocumentExtractionService:
 
     def _task_context(self, context, config, builder):
         """Find only this task's exact legacy Work, never another pass's Work."""
-        if config is None:
+        if config is None or not context.get("model_binding"):
             return context
         from .extraction_execution_identity import (
             CONTRACT_REF, current_context, execution_config_binding, reusable_legacy_context)
+        # A prose replay can retain an older routing revision. Numeric and
+        # discovery must start again from their own current policy before
+        # considering their own exact historical Work.
+        from .extraction_successful_policy_replay import current_policy_context
+        from .model_router import ModelRouter
+        with ModelRouter(config["model_router_db"], read_only=True) as router:
+            policy = self.model_policy(router, config["routing_policy_ref"])
+        if context["model_binding"]["routing_policy_ref"] != policy["policy_version_ref"]:
+            context = current_policy_context(context, config, policy)
         if execution_config_binding(config).get("config_hash_contract_ref") != CONTRACT_REF:
-            return context  # Unshared and old-schema hosts retain their old path.
+            return self._successful_policy_context(context, config, builder) or context
         current = current_context(context, config)
         try:
             historical = reusable_legacy_context(
                 current, config, self.writer._scheduler, builder)
         except ValueError as exc:
             raise ResearchVerificationConflict(str(exc)) from exc
-        return historical or current
+        return historical or self._successful_policy_context(current, config, builder) or current
 
     def _suggestions(self, context):
         work = build_work(context, model_config=getattr(self.writer, "_document_extraction_model_config", None))

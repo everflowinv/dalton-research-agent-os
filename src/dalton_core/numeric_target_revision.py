@@ -8,7 +8,7 @@ from __future__ import annotations
 
 from typing import Any, Mapping
 from .directed_numeric_research import CONTRACT_REF, normalize_targets, pending_numeric_result
-from .document_inquiry_equivalence import inquiry_signature_for, signatures_equivalent
+from .document_inquiry_equivalence import inquiry_signature_for, signatures_equivalent, normalize_question
 from .store import content_hash
 
 RULE_REF = 'mission-document-numeric:zero-answer-target-revision:0.1'
@@ -58,14 +58,23 @@ def revision_source_candidate(connection, parent, result, numeric_result_hash) -
         and not _revision_consumers(connection, company_ref=parent['company_ref'],
             admission_ref=parent['id'], numeric_result_hash=numeric_result_hash))
 
-def _proof_for(authority, mission_ref: str, inquiry: Mapping[str, Any], admission_ref: str):
+def _proof_for(authority, mission_ref: str, inquiry: Mapping[str, Any], admission_ref: str,
+               *, _historical_signature=None):
     strategy = inquiry.get('directed_document') or {}
     if strategy.get('strategy_version') != CONTRACT_REF:
         return None
     parent = authority.admission(admission_ref)
+    # A new revision may narrow the executable targets of the same question,
+    # not borrow another question's one-use authority via a date/horizon token.
+    if _historical_signature is None:
+        same_question = bool(normalize_question(inquiry.get('question') or '')
+            and normalize_question(inquiry.get('question') or '')
+                == normalize_question(parent['planner_inquiry'].get('question') or ''))
+    else:
+        same_question = signatures_equivalent(_historical_signature(inquiry['company_ref'], inquiry),
+            _historical_signature(parent['company_ref'], parent['planner_inquiry'])) is not None
     if (parent['mission_ref'] != mission_ref or parent['company_ref'] != inquiry['company_ref']
-            or signatures_equivalent(inquiry_signature_for(inquiry['company_ref'], inquiry),
-                inquiry_signature_for(parent['company_ref'], parent['planner_inquiry'])) is None):
+            or not same_question):
         return None
     original = parent['request']['registration']
     if (strategy.get('document_ref') != original['document_ref']
@@ -135,9 +144,26 @@ def derive_revision_proof(authority, mission_ref: str, inquiry: Mapping[str, Any
 def verify_revision_proof(authority, mission_ref, inquiry, proof):
     from .mission_document_research import MissionDocumentResearchError
     if (not isinstance(proof, Mapping) or set(proof) != PROOF_FIELDS
-            or proof.get('rule_ref') != RULE_REF
-            or _proof_for(authority, mission_ref, inquiry, proof['admission_ref']) != dict(proof)):
+            or proof.get('rule_ref') != RULE_REF):
         raise MissionDocumentResearchError('numeric target revision proof differs')
+    if _proof_for(authority, mission_ref, inquiry, proof['admission_ref']) != dict(proof):
+        # A historical consumer may have been admitted when a Chinese-adjacent
+        # SEC form was mistakenly read as a shared figure. Preserve that exact
+        # immutable authority only; the legacy matcher never finds new parents.
+        from .document_inquiry_equivalence import _legacy_inquiry_signature_for
+        exact_stored = False
+        for row in _revision_consumers(authority.connection,
+                company_ref=inquiry['company_ref'], admission_ref=proof['admission_ref'],
+                numeric_result_hash=proof['numeric_result_hash']):
+            stored = authority.admission(row[0])
+            if (stored['mission_ref'] == mission_ref
+                    and stored['planner_inquiry'] == dict(inquiry)
+                    and stored.get('numeric_authority', {}).get('target_revision_proof') == dict(proof)):
+                exact_stored = True
+                break
+        if (not exact_stored or _proof_for(authority, mission_ref, inquiry,
+                proof['admission_ref'], _historical_signature=_legacy_inquiry_signature_for) != dict(proof)):
+            raise MissionDocumentResearchError('numeric target revision proof differs')
     return dict(proof)
 
 

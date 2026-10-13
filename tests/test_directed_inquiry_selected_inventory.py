@@ -57,6 +57,20 @@ class SelectedAdmissionInventoryTests(unittest.TestCase):
             self.assertEqual(selected_loader.call_args.kwargs['selected_document_refs'],(old['document_ref'],))
             self.assertEqual(required.call_args.kwargs['purpose'],config['purpose'])
 
+    def test_unselected_successor_filters_before_supersession_or_original_replay(self):
+        from dalton_core.document_research_feedback import read_document_research_feedback
+        f,a,_,_=self.fixture()
+        feedback=read_document_research_feedback(f.store,f.mission)
+        self.assertTrue(any(r.get('numeric_upgrade_supersession')
+            for rows in feedback['by_company'].values() for r in rows))
+        before=f.store.connection.total_changes
+        with patch('dalton_core.document_research_feedback.read_document_research_feedback',return_value=feedback), \
+             patch('dalton_core.numeric_capability_supersession.successor_for',side_effect=AssertionError('unselected supersession replay')), \
+             patch.object(a.registry,'_reresolve',side_effect=AssertionError('unselected original replay')):
+            self.assertEqual(inventory._required_numeric_originals(core=f.store,mission=f.mission,
+                registry=a.registry,purpose=PURPOSE,selected_document_refs=('document:other',)),([],[]))
+        self.assertEqual(f.store.connection.total_changes,before)
+
     def test_selected_sql_excludes_unrequested_document_before_materialization(self):
         h=inventory_fixture.DocumentInventoryTests(methodName='runTest');h.setUp();self.addCleanup(h.doCleanups)
         h.insert();h.insert('record:other')

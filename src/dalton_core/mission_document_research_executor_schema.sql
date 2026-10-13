@@ -163,3 +163,16 @@ BEGIN SELECT RAISE(ABORT,'numeric directed results are append-only'); END;
 CREATE TRIGGER IF NOT EXISTS mission_document_numeric_results_no_delete
 BEFORE DELETE ON mission_document_numeric_results
 BEGIN SELECT RAISE(ABORT,'numeric directed results are append-only'); END;
+
+CREATE TABLE IF NOT EXISTS mission_document_numeric_measure_results (
+ admission_ref TEXT PRIMARY KEY REFERENCES mission_document_research_admissions(admission_id),
+ admission_hash TEXT NOT NULL, work_order_ref TEXT NOT NULL,
+ record_json TEXT NOT NULL, content_hash TEXT NOT NULL, created_at TEXT NOT NULL
+);
+CREATE TRIGGER IF NOT EXISTS mission_document_numeric_measure_results_authorized_insert
+BEFORE INSERT ON mission_document_numeric_measure_results WHEN dalton_mission_document_research_executor_authorized()=0
+BEGIN SELECT RAISE(ABORT,'numeric measure reconciliation requires authority'); END;
+CREATE TRIGGER IF NOT EXISTS mission_document_numeric_measure_results_no_update BEFORE UPDATE ON mission_document_numeric_measure_results
+BEGIN SELECT RAISE(ABORT,'numeric measure reconciliation is append-only'); END;
+CREATE TRIGGER IF NOT EXISTS mission_document_numeric_measure_results_no_delete BEFORE DELETE ON mission_document_numeric_measure_results
+BEGIN SELECT RAISE(ABORT,'numeric measure reconciliation is append-only'); END;

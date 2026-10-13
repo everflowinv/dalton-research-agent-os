@@ -6,9 +6,13 @@ identity, filed arithmetic and assumption-source gates still decide admission.
 from __future__ import annotations
 from typing import Any, Mapping
 
+from .forecast_driver_retrieval import data_item as driver_data_item
+
 RULE_REF="rule:forecast-material-gaps:1"
 ROLE_NEEDS={
     "income_tax_expense":("normalised_tax_basis","effective income tax rate discrete tax items guidance"),
+    "noncontrolling_interest":("noncontrolling_interest_basis","noncontrolling interest attributable net income loss subsidiaries ownership guidance"),
+    "capital_expenditure":("capital_expenditure_basis","capital expenditure purchases property plant equipment cash flow investing"),
     "diluted_weighted_average_shares":("diluted_share_basis","quarter diluted weighted average shares buyback share count guidance"),
     "interest_expense":("debt_rate_basis","interest expense current noncurrent debt quarterly balance"),
     "depreciation_amortization":("asset_roll_basis","depreciation amortization property plant equipment capital expenditures"),
@@ -29,9 +33,15 @@ def gap_plans(spec: Mapping[str,Any], table: Mapping[str,Any], *, record=None, f
     drivers=(record or {}).get("execution_contract",{}).get("drivers",{})
     if (drivers.get("status")=="unexecuted" or
         any(d.get("kind")=="segment" and not d.get("basis_identity") for d in spec.get("revenue_drivers") or [])):
-        add("economic_driver_history","segment revenue classification comparable quarterly history quantity price bookings",
+        add("economic_driver_history",driver_data_item([str(d.get("kind")) for d in spec.get("revenue_drivers") or []]),
             "Find independently disclosed revenue drivers: full segment identity and at least four comparable fiscal quarters, or quantity×price / book-volume×yield. Obtain an explicit company source for taxonomy changes and the complete consolidation bridge; no residual or label-based allocation.",
             "Revenue mechanism lacks independently admitted driver history or a source-backed classification bridge.")
+        plans["economic_driver_history"]["need"]["doc_kinds"].insert(0, "sec_10q")
+        identities = [{key: driver.get(key) for key in
+                       ("ref", "kind", "label", "basis_concept", "basis_identity")}
+                      for driver in spec.get("revenue_drivers") or []]
+        if identities:
+            plans["economic_driver_history"]["acceptance"]["economic_driver_identities"] = identities
     filed={l.get("concept"):l for l in table.get("filed_lines") or []}
     for line in ((spec.get("financial_statement_structure") or {}).get("lines") or []) if "filed_lines" in table else []:
         source=filed.get(line.get("concept"))
@@ -43,6 +53,25 @@ def gap_plans(spec: Mapping[str,Any], table: Mapping[str,Any], *, record=None, f
     for result in (record or {}).get("results") or []:
         if result.get("status")!="unavailable":continue
         role=result.get("role")
+        if role == "diluted_weighted_average_shares":
+            held=[d for d in (record or {}).get("drivers") or [] if d.get("role")==role]
+            if (len(held)==1 and spec.get("spec_id") and spec.get("content_hash")
+                    and (record or {}).get("spec_ref")==spec["spec_id"]
+                    and (record or {}).get("spec_hash")==spec["content_hash"]):
+                driver=held[0]
+                expected=set((record or {}).get("history_periods") or table.get("periods") or [])
+                have={c["period_end"] for c in driver.get("history") or [] if c.get("period_start")}
+                for end in sorted(expected-have):
+                    key="diluted_share_history:"+end
+                    add(key,"quarter diluted weighted average shares "+end,
+                        "Obtain this exact quarter's filed diluted weighted-average shares, not year-to-date or annual shares: "+end+". Preserve original dates, unit and accession; do not infer Q4 by subtracting annual average shares.",
+                        "A declared historical quarter lacks a filed diluted-share base.")
+                    plans[key]["period"]="quarter_ending:"+end
+                    plans[key]["need"]["doc_kinds"]=["sec_10k","sec_10q"]
+                    plans[key]["acceptance"]["forecast_gap_identity"]={
+                        "spec_ref":spec.get("spec_id"),"spec_hash":spec.get("content_hash"),
+                        "role":role,"driver_ref":driver["ref"],"concept":driver.get("concept"),
+                        "period_end":end}
         if role in ROLE_NEEDS:
             key,item=ROLE_NEEDS[role]
             add(key,item,"Find source-backed assumptions and exact filed bases that resolve this financial gap: "+str(result.get("reason") or "missing inputs")+". Keep original concept, unit, dates, accession and provenance; do not substitute a proxy.",str(result.get("reason") or "missing inputs"))
@@ -54,10 +83,15 @@ def gap_plans(spec: Mapping[str,Any], table: Mapping[str,Any], *, record=None, f
             "Resolve this model publication refusal with original filed or documentary authority: "+str(failure)+". No fabricated actual, arbitrary rate or unproved earnings proxy is admissible.",str(failure))
     return list(plans.values())
 
-def open_gap_requests(state_dir, spec, table, *, record=None, failure=None, run_ref=None):
+def open_gap_requests(state_dir, spec, table, *, record=None, failure=None, run_ref=None,
+                      structure_failure=None, source_filings=None):
     from .material_requests import open_request
     output=[]
-    for plan in gap_plans(spec,table,record=record,failure=failure):
+    plans=gap_plans(spec,table,record=record,failure=failure)
+    if structure_failure is not None:
+        from .forecast_statement_history_gaps import plans as history_plans
+        plans += history_plans(spec, table, structure_failure, filings=source_filings or [])
+    for plan in plans:
         value=open_request(state_dir,requester={"lane":"company_model_forecast","product_ref":spec.get("spec_id"),
             "run_ref":run_ref,"section":plan["key"]},subject=spec["company_ref"],need=plan["need"],period=plan["period"],
             source_priority=plan["source_priority"],acceptance=plan["acceptance"])

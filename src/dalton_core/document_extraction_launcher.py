@@ -245,6 +245,28 @@ def _configuration_fingerprint(path: Path) -> str:
     return hashlib.sha256(canonical_json(value).encode("utf-8")).hexdigest()
 
 
+def _quiesced_child(record, summary_path, *, now):
+    """Adopt only this extraction's bound partial boundary receipt."""
+    from .extraction_quiesce import quiesced_summary_matches
+    try:
+        summary = json.loads(summary_path.read_text())
+        valid = quiesced_summary_matches(summary, record)
+    except (OSError, ValueError, KeyError, TypeError):
+        return False
+    if not valid:
+        return False
+    record.update(status="quiesced", exit_code=0, completed_at=now,
+                  adopted_from_summary=True)
+    return True
+
+
+def _exited_status(record, path, code):
+    if code == 0 and _quiesced_child(record, path.with_name("summary.json"),
+                                   now=record["completed_at"]):
+        return "quiesced"
+    return "succeeded" if code == 0 else "failed"
+
+
 class DocumentExtractionLauncher:
     def __init__(
         self,
@@ -393,11 +415,12 @@ class DocumentExtractionLauncher:
                     if code is not None:
                         record["exit_code"] = code
                         record["completed_at"] = _wire_time(self.clock())
-                        record["status"] = "succeeded" if code == 0 else "failed"
+                        record["status"] = _exited_status(record, path, code)
                         _write_owner_only(path, record)
                 elif not self._pid_alive(record.get("pid")):
                     now = _wire_time(self.clock())
-                    if not adopt_finished_child(record, path.with_name("summary.json"), now=now):
+                    if not (_quiesced_child(record, path.with_name("summary.json"), now=now)
+                            or adopt_finished_child(record, path.with_name("summary.json"), now=now)):
                         record["status"] = "orphaned"
                         record["completed_at"] = now
                     _write_owner_only(path, record)
@@ -442,7 +465,7 @@ class DocumentExtractionLauncher:
         if record.get("status") == "running":
             record["exit_code"] = code
             record["completed_at"] = _wire_time(self.clock())
-            record["status"] = "succeeded" if code == 0 else "failed"
+            record["status"] = _exited_status(record, path, code)
             _write_owner_only(path, record)
         self._current = None
         return [ticket_ref]
@@ -680,7 +703,8 @@ class DocumentExtractionCoordinator:
         deferred), the lane rests an hour, as a drained queue always has.
         """
 
-        if latest is not None and latest.get("settled"):
+        if (latest is not None and latest.get("settled")
+                and latest.get("stop_reason") != "cooperative_quiesce"):
             completed = latest.get("completed_at")
             hold = BUSY_HOLD if latest.get("support_progress") else IDLE_HOLD
             if completed and self.clock() - datetime.fromisoformat(completed) < hold:
@@ -708,8 +732,15 @@ class DocumentExtractionCoordinator:
         attachments = register_held_annual_attachments(
             self.missions, state_dir=self.launcher.state_dir,
             spool_dir=getattr(self.launcher, 'spool_dir', None))
+        from .sec_interim_attachments import register_held
+        interim_attachments = register_held(self.missions, state_dir=self.launcher.state_dir,
+            spool_dir=getattr(self.launcher, 'spool_dir', None))
         awaiting, awaiting_fingerprint = self._awaiting_state()
         result: dict[str, Any] = {"awaiting": awaiting}
+        if interim_attachments['registered']:
+            result['interim_attachments'] = interim_attachments['registered']
+        if interim_attachments['refused']:
+            result['interim_attachment_refusals'] = interim_attachments['refused']
         if attachments['registered']:
             result['annual_report_attachments'] = attachments['registered']
         if attachments['refused']:

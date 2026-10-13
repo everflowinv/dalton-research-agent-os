@@ -26,13 +26,42 @@ def read_document_research_feedback(core: Any, mission: Mapping[str, Any]) -> di
                     for item in observations if item.get('outcome') == 'numeric_targets_completed'
                     for binding in item.get('resolved_numeric_rejections') or ()}
         grouped = {ref: [] for ref in sorted(companies)}
+        from .directed_numeric_period_replacement import superseding_admission
+        from .mission_document_research import MissionDocumentResearchAuthority
+        replacements = {}
+        numeric_successors = {}
         for observation in observations:
+            ref=observation.get('admission_ref')
+            if ref and ref not in replacements:
+                row=core.connection.execute('SELECT * FROM mission_document_research_admissions WHERE admission_id=?',(ref,)).fetchone()
+                replacements[ref]=(superseding_admission(core.connection,
+                    MissionDocumentResearchAuthority._read_row(None,row)) if row is not None else None)
+            replacement=replacements.get(ref)
+            if replacement is not None:
+                observation={**observation,'original_outcome':observation['outcome'],
+                    'outcome':'numeric_period_replacement_admitted',
+                    'replacement_admission_ref':replacement,
+                    'meaning':'The original failed period task is superseded by one normal-plan admission; the new admission still requires complete execution and verification. Original results and fees are unchanged.'}
             from .directed_numeric_research import numeric_rejection
             rejection=numeric_rejection(core.connection,observation["admission_ref"]) if observation.get("admission_ref") else None
             if rejection is not None and (observation['company_ref'], content_hash(
                     {k:rejection[k] for k in ('admission_ref','admission_hash','rejection_ref','rejection_hash')})) not in resolved:
-                observation={**observation,"numeric_strategy_required":True,
-                    "replaces_numeric_rejection":{k:rejection[k] for k in ("admission_ref","admission_hash","rejection_ref","rejection_hash")}}
+                ref=rejection['admission_ref']
+                if ref not in numeric_successors:
+                    from .numeric_capability_supersession import successor_for
+                    try:numeric_successors[ref]=(successor_for(core.connection,rejection,mission=mission),None)
+                    except Exception as exc:numeric_successors[ref]=(None,type(exc).__name__)
+                successor,unproved=numeric_successors[ref]
+                if successor is None:
+                    observation={**observation,"numeric_strategy_required":True,
+                        "replaces_numeric_rejection":{k:rejection[k] for k in ("admission_ref","admission_hash","rejection_ref","rejection_hash")}}
+                    if unproved:
+                        observation={**observation,'numeric_upgrade_supersession_status':'unverified',
+                            'numeric_upgrade_supersession_reason':unproved}
+                else:
+                    observation={k:v for k,v in observation.items() if k not in ('numeric_strategy_required','replaces_numeric_rejection')}
+                    observation={**observation,'numeric_upgrade_status':'superseded_by_admitted_numeric_read',
+                        'numeric_upgrade_supersession':successor}
             if (observation.get("mission_version_ref") != mission["id"]
                     or observation.get("company_ref") not in companies):
                 raise ValueError("directed-reading feedback escaped its mission/company")
@@ -46,6 +75,28 @@ def read_document_research_feedback(core: Any, mission: Mapping[str, Any]) -> di
             # Keep the validated observation identity with all attempted terms
             # and missing evidence, rather than reducing it to a success count.
             grouped[observation["company_ref"]].append(dict(observation))
+        from .document_execution_failure import failure_from_observations
+        from .mission_document_research import MissionDocumentResearchAuthority
+        for ref in sorted({item['admission_ref'] for item in observations
+                           if item.get('outcome') == 'recovery_required'}):
+            if replacements.get(ref) is not None:
+                continue
+            row = core.connection.execute(
+                'SELECT * FROM mission_document_research_admissions WHERE admission_id=?', (ref,)).fetchone()
+            if row is None:
+                raise ValueError('document failure admission unavailable')
+            admission = MissionDocumentResearchAuthority._read_row(None, row)
+            failure = failure_from_observations(core.connection, admission, observations)
+            if failure is not None:
+                if failure.get('numeric_failure_diagnostics', {}).get('unexecutable_period_targets'):
+                    from .directed_numeric_period_replacement import binding_for, consumer
+                    binding = binding_for(core.connection, ref)
+                    if binding is not None and consumer(core.connection, binding) is None:
+                        failure = {**failure, 'replaces_numeric_contract_failure': binding}
+                grouped[admission['company_ref']].append(failure)
+        from .directed_numeric_period_replacement import historical_feedback
+        for failure in historical_feedback(core, mission):
+            grouped[failure['company_ref']].append(failure)
         body = {"status": "available", "by_company": grouped}
     except Exception as exc:
         body = {"status": "unavailable", "by_company": {}, "reason": type(exc).__name__}
@@ -75,7 +126,7 @@ def document_research_feedback_signature(core: Any) -> str:
             "ORDER BY v.mission_version_id")
         body = [read_document_research_feedback(core, json.loads(row["record_json"]))
                 for row in missions]
-        from .numeric_source_admission_feedback import OUTCOME, semantic_feedback
+        from .numeric_source_admission_feedback import ADMISSION_OUTCOMES, semantic_feedback
         for feedback in body:
             if "admission_source_feedback_status" not in feedback:
                 continue  # preserve the signature of historical feedback unchanged
@@ -84,7 +135,7 @@ def document_research_feedback_signature(core: Any) -> str:
             status["unverified"] = [semantic_feedback(item) for item in status["unverified"]]
             for company, rows in feedback.get("by_company", {}).items():
                 feedback["by_company"][company] = [semantic_feedback(item)
-                    if item.get("outcome") == OUTCOME else item for item in rows]
+                    if item.get("outcome") in ADMISSION_OUTCOMES else item for item in rows]
     except Exception as exc:
         body = {"status": "unavailable", "reason": type(exc).__name__}
     return content_hash(body)

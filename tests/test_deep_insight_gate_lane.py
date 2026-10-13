@@ -684,8 +684,27 @@ class RefusalTests(unittest.TestCase):
 
     def test_a_reply_that_leaves_its_contract_is_refused_whole(self):
         summary = self.harness.run(model_factory=lambda: FakeModel(break_contract=True))
-        self.assertEqual(summary["gate_status"], "nothing_drafted")
+        self.assertEqual(summary["gate_status"], "execution_incomplete")
         self.assertEqual(len(summary["refused"]), len(GROUPS))
+        self.assertEqual(self.harness.gates().versions(ACN), [])
+
+    def test_transport_failure_does_not_become_unknown_or_return_research(self):
+        from dalton_core.cockpit_model import CockpitModelError
+        class TransportFailure(FakeModel):
+            def call(self, **kwargs):
+                if "Part: market --" in kwargs["prompt"]:
+                    raise CockpitModelError("MODEL_CHAIN_EXHAUSTED: TIMEOUT")
+                return super().call(**kwargs)
+        verifier = FakeModel(route="route:verify")
+        summary = self.harness.run(model_factory=TransportFailure,
+                                   verifier_model_factory=lambda: verifier)
+        self.assertEqual(summary["gate_status"], "execution_incomplete")
+        self.assertEqual(summary["group_outcomes"]["market"], "unavailable")
+        self.assertEqual(summary["cost_status"], "unproved")
+        self.assertIsNone(summary["quality"])
+        self.assertEqual(summary["unknown"], 0)
+        self.assertTrue(summary["partial_answers"])
+        self.assertEqual(verifier.prompts, [])
         self.assertEqual(self.harness.gates().versions(ACN), [])
 
     def test_question_one_disagreeing_with_the_dossier_refuses_the_draft(self):
@@ -782,21 +801,14 @@ class RedraftTests(unittest.TestCase):
         self.move_the_file()
         summary = self.harness.run(
             model_factory=lambda: FakeModel(refuse_groups={"company"}))
-        self.assertEqual(summary["gate_status"], "submitted")
+        self.assertEqual(summary["gate_status"], "execution_incomplete")
         self.assertEqual([row["group"] for row in summary["refused"]], ["company"])
-        second = self.gates.gate(summary["version_ref"])
+        # Failed requested rewrites preserve the original version, without
+        # presenting its old answers as a newly completed review.
         first = self.gates.gate(self.first["version_ref"])
-        carried = {row["question_ref"]: row for row in second["answers"]
-                   if row["group"] == "company"}
-        held = {row["question_ref"]: row for row in first["answers"]
-                if row["group"] == "company"}
-        self.assertEqual(carried, held)
-        cited = {source["ref"] for row in carried.values()
-                 for source in row["sources"]}
-        self.assertTrue(any(ref.startswith("dossier-section:") for ref in cited))
-        self.assertTrue(any(first["bindings"]["dossier_version_ref"] in ref
-                            for ref in cited))
-        self.assertEqual(summary["demoted_questions"], [])
+        self.assertEqual(self.gates.latest(ACN)["id"], first["id"])
+        from dalton_core.deep_insight_gate_cli import unresolved_refs
+        self.assertEqual(unresolved_refs(self.harness.store.connection, first), [])
 
     def redraft(self, **kwargs):
         """Return the head, move the file, and run again."""
@@ -825,15 +837,10 @@ class RedraftTests(unittest.TestCase):
         # group next time, rather than the chain freezing on it for ever.
         third = self.redraft(
             model_factory=lambda: FakeModel(refuse_groups={"company"}))
-        self.assertEqual(third["gate_status"], "submitted")
-        record = self.gates.gate(third["version_ref"])
-        demoted = [row for row in record["answers"]
-                   if row["status"] == "unknown"
-                   and row["unknown"]["reason"] == "source_unavailable"]
-        self.assertTrue(demoted)
-        self.assertEqual(third["demoted_questions"],
-                         [row["question_ref"] for row in demoted])
-        self.assertTrue(third["demoted_refs"])
+        self.assertEqual(third["gate_status"], "execution_incomplete")
+        self.assertEqual(self.gates.latest(ACN)["id"], second["version_ref"])
+        self.assertEqual(third["unknown"], 0)
+        self.assertIsNone(third["quality"])
 
     def test_a_retired_claim_is_not_shown_so_a_fresh_answer_cannot_cite_it(self):
         # The dossier still names the Claim; the Ledger has retired it.  The

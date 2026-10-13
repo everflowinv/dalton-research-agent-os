@@ -131,7 +131,35 @@ WORK_ORDER_FOLD_COVER_INDEX = IndexSpec(
     columns="work_order_id, created_at, json_extract(work_order_json,'$.requested_capabilities')",
     reason="dashboard cold WorkOrder fold reads complete lightweight history without reading prompt bodies",
 )
-SCHEDULER_FOLD_COVER_INDEXES = (WORK_ORDER_FOLD_COVER_INDEX,)
+FORMAL_RESULT_FOLD_COVER_INDEX = IndexSpec(
+    name="scheduler_formal_results_projection_fold_cover",
+    table="scheduler_formal_results",
+    columns="work_order_id, result_record_id, attempt_number, result_envelope_id, terminal_state, created_at",
+    reason="dashboard cold formal fold reads complete terminal metadata without response JSON pages",
+)
+RESULT_ENVELOPE_FOLD_COVER_INDEX = IndexSpec(
+    name="scheduler_result_envelopes_projection_fold_cover",
+    table="scheduler_result_envelopes",
+    columns="result_envelope_id, work_order_id, attempt_number, created_at",
+    reason="dashboard cold receipt fold reads complete receipt metadata without response JSON pages",
+)
+ATTEMPT_EVENT_FOLD_COVER_INDEX = IndexSpec(
+    name="scheduler_attempt_events_projection_fold_cover",
+    table="scheduler_attempt_events",
+    columns="event_seq, work_order_id, state, attempt_number, event_id, created_at",
+    reason="dashboard cold event fold reads complete state metadata without reason or result authority columns",
+)
+LEASE_FOLD_COVER_INDEX = IndexSpec(
+    name="scheduler_leases_projection_fold_cover",
+    table="scheduler_leases",
+    columns="lease_revision_id, work_order_id, attempt_number, lease_version, expires_at, created_at",
+    reason="dashboard cold lease fold reads complete revision metadata without token or ownership columns",
+)
+SCHEDULER_FOLD_COVER_INDEXES = (
+    WORK_ORDER_FOLD_COVER_INDEX, FORMAL_RESULT_FOLD_COVER_INDEX,
+    RESULT_ENVELOPE_FOLD_COVER_INDEX, ATTEMPT_EVENT_FOLD_COVER_INDEX,
+    LEASE_FOLD_COVER_INDEX,
+)
 # Deliberately separate from SCHEDULER_PROJECTION_INDEXES used by worker opens.
 # apply_projection_indexes (also used by service startup) installs this index.
 # Its first CREATE reads every old JSON body and holds a write lock: large
@@ -158,6 +186,8 @@ CONNECTOR_FOLD_COVER_INDEXES: tuple[IndexSpec, ...] = (
 
 #: ``core.sqlite``.
 CORE_PROJECTION_INDEXES: tuple[IndexSpec, ...] = (
+    IndexSpec(name="idx_connector_call_query_hash", table="connector_call_specs",
+        columns="query_hash", reason="Legacy SEC archive parents seek the exact original query before invocation/envelope joins"),
     IndexSpec(
         name="model_invocations_created_at_invocation",
         table="model_invocations",
@@ -430,6 +460,13 @@ def _build_indexes(
                 report["deferred"][spec.name] = "table is absent"
                 continue
             if _index_exists(connection, spec.name):
+                if spec.name == "idx_connector_call_query_hash":
+                    owner = connection.execute("SELECT tbl_name,sql FROM sqlite_master WHERE type='index' AND name=?", (spec.name,)).fetchone()
+                    columns = tuple((row[2],row[3],row[4]) for row in connection.execute("PRAGMA index_xinfo(idx_connector_call_query_hash)") if row[5])
+                    flags = next((row for row in connection.execute("PRAGMA index_list(connector_call_specs)") if row[1] == spec.name), None)
+                    if flags is None or owner[0] != spec.table or columns != (("query_hash",0,"BINARY"),) or flags[2] or flags[4]:
+                        report["deferred"][spec.name] = "existing index has wrong shape; owner review required"
+                        continue
                 report["present"].append(spec.name)
                 continue
             if deadline is not None and time.monotonic() >= deadline:

@@ -156,7 +156,8 @@ class WorkspaceFirstMissionTests(unittest.TestCase):
         model = Model()
         draft = plan_first_mission_goal(
             model, self.workspace, goal="Compare ASML", method_foundation=self.foundation,
-            request_id="goal-1", created_at="2026-09-14T12:00:00+00:00")
+            request_id="goal-1", created_at="2026-09-14T12:00:00+00:00",
+            company_resolver=lambda ticker: {"ticker": ticker, "cik": "12345", "name": "ASML"})
         self.assertEqual(draft["mission_body"]["universe"][0]["ticker"], "ASML")
         context = model.calls[0]["planning_context"]
         self.assertEqual(context["budget"]["max_daily_paid_calls"], 6)
@@ -238,6 +239,7 @@ class WorkspaceFirstMissionTests(unittest.TestCase):
         from dalton_core.macos_launchagent import _sec_discovery_plan
         sec_plan = load_discovery_plan(_sec_discovery_plan(self.workspace.state_dir))
         self.assertEqual(sec_plan["companies"]["company:ticker:asml"]["cik"], "0001487729")
+        self.assertEqual(sec_plan["budget"]["max_calls_24h"], 200)
         from dalton_core.coverage_mission import CoverageMissionAuthority
         authority = CoverageMissionAuthority(store)
         self.assertEqual(authority.active_mission(mission["mission_ref"])["id"], mission["id"])

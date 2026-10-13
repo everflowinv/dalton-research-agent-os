@@ -604,7 +604,10 @@ def render_sensitivity(
         else:
             out.append("      当前假设：预测期内并非固定值")
         if impact.get("status") == "computed":
-            out.append(f"      该假设变动 1 个百分点时，"
+            move_label = ("首个预测季度的增速变动" if
+                          record.get("selection_rule_ref") in {"rule:swing-rank:2", "rule:swing-rank:3"}
+                          and driver.get("measure") == "quarterly_growth" else "该假设变动")
+            out.append(f"      {move_label} 1 个百分点时，"
                        f"{show(str(metric.get('label')))}变动 "
                        f"{_millions(impact['delta'])} 百万（基准值的 {impact.get('percent_of_base')}%）")
         else:
@@ -623,7 +626,9 @@ def render_sensitivity(
         out.append("      " + "".ljust(SENSITIVITY_LABEL_WIDTH)
                    + "".join(
                        (_percent(row["assumption_value"])
-                        if row.get("assumption_value") is not None else "--"
+                        if row.get("assumption_value") is not None else
+                        "逐季假设" if row.get("scenario_path") == "baseline"
+                        and row.get("status") == "computed" else "--"
                         ).rjust(SCENARIO_WIDTH) for row in rows))
         line_refs: list[tuple[str, str]] = []
         for row in rows:
@@ -702,8 +707,13 @@ def render_sensitivity(
     out.append("  当前假设列代表模型自身。")
     out.append("")
     out.append("")
-    out.append("  每个情景列在所示全部季度中保持同一假设水平。")
-    out.append("  情景列不是路径；低点列表示整个预测期均处于低点。")
+    if record.get("selection_rule_ref") in {"rule:swing-rank:2", "rule:swing-rank:3"}:
+        out.append("  季度增速情景只调整首个预测季度，此后恢复模型原有增速；")
+        out.append("  首季变化带来的金额差异会随模型延续。比例和金额假设在各季保持所选水平。")
+        out.append("  当前假设列保留模型原有的逐季预测路径。")
+    else:
+        out.append("  每个情景列在所示全部季度中保持同一假设水平。")
+        out.append("  情景列不是路径；低点列表示整个预测期均处于低点。")
     out.append("")
     out.append("  若极值与次高或次低值相距较远，极值可能只对应单一季度或事件；")
     out.append("  表中同时列出次高或次低值，便于判断这种差距。")

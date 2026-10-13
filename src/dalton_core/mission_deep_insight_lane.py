@@ -297,6 +297,8 @@ class MissionDeepInsightLaneCoordinator:
             "unknown": summary.get("unknown"),
             "cost_micros": summary.get("cost_micros"),
         }
+        if isinstance(summary.get("execution_recovery"),dict):
+            settled["execution_recovery"]=dict(summary["execution_recovery"])
         reason = summary.get("failure_reason")
         if reason:
             settled["failure_reason"] = str(reason)[:MAX_FAILURE_DETAIL_CHARS]
@@ -325,10 +327,19 @@ class MissionDeepInsightLaneCoordinator:
             # A submission, a duplicate, an idle tick or a gating status ends
             # it.  A submitted draft is the thing the cooldown was waiting for.
             self._cooldowns.pop(str(company or "-"), None)
-        if status in {"not_authorized", "no_checkpoint", "no_policy"} and signature:
+        if status == 'quiesced' and signature:
+            # Deployment progress is not a research outcome or a retry grant.
+            # Launcher validates the immutable request and all cost gates run
+            # again in the successor before any new paid request.
+            self.budget.clear(str(signature))
+        elif status in {"not_authorized", "no_checkpoint", "no_policy"} and signature:
             self.budget.record(
                 str(signature),
                 status="gated:not permitted", reason=f"gated:not permitted: {status}")
+        elif status == "execution_incomplete" and signature:
+            # Technical failure gets the existing bounded execution backoff,
+            # never a terminal verdict that the research content is deficient.
+            self.budget.record_settled(str(signature), {**settled, "status": "failed"})
         elif settled.get("status") not in ("succeeded", "orphaned"):
             if signature:
                 decision = self.budget.record_settled(str(signature), settled)

@@ -318,6 +318,8 @@ from .thesis_impact_control import (
     ResearchPlanThesisImpactPending,
 )
 from .writer_protocol import (
+    DISPATCH_REQUEST_TIMEOUT,
+    is_dispatch_operation,
     MAX_FRAME_BYTES,
     PROTOCOL_VERSION,
     ProtocolError,
@@ -471,6 +473,9 @@ class Principal:
 MAX_CONNECTIONS = 8
 CONNECTION_IDLE_TIMEOUT = 1.0
 STORE_REQUEST_TIMEOUT = 30.0
+# Opening all persisted authorities includes schema validation and cold reads.
+# Its lifetime is independent of the deadline for one ordinary client request.
+STORE_STARTUP_TIMEOUT = 300.0
 
 # B1-3: the writer gives up before the client does, on purpose.  Both ends
 # used to wait exactly 30 s, so they expired in the same instant: the client
@@ -2590,7 +2595,7 @@ class WriterServer:
         self._read_executor = concurrent.futures.ThreadPoolExecutor(
             max_workers=READ_EXECUTOR_WORKERS, thread_name_prefix="dalton-read")
         try:
-            self._store_executor.submit(self._open_store).result(timeout=STORE_REQUEST_TIMEOUT)
+            self._store_executor.submit(self._open_store).result(timeout=STORE_STARTUP_TIMEOUT)
         except BaseException:
             # `_open_store` is incremental.  If a later authority constructor
             # fails, close everything already opened on the same store thread
@@ -3154,7 +3159,9 @@ class WriterServer:
                     future = (urgent or executor.submit)(handler, request)
                     try:
                         result = future.result(
-                            timeout=OWNER_REQUEST_TIMEOUT if owner else STORE_REQUEST_TIMEOUT)
+                            timeout=(OWNER_REQUEST_TIMEOUT if owner else
+                                     DISPATCH_REQUEST_TIMEOUT if is_dispatch_operation(operation)
+                                     else STORE_REQUEST_TIMEOUT))
                     except concurrent.futures.TimeoutError as exc:
                         # A request that never started must not execute later,
                         # after the caller has received a terminal timeout.
@@ -5827,7 +5834,11 @@ class WriterServer:
             _monotonic, discovery_coordinator_order, discovery_coordinator_state,
         )
 
-        self._retry_pending_first_mission_sec_plan()
+        from .source_discovery_diagnostics import DiagnosticBudget, diagnostic_scope, phase
+
+        diagnostics = DiagnosticBudget()
+        with diagnostic_scope(diagnostics), phase(SEC_SOURCE_REF, "first_mission_preflight"):
+            self._retry_pending_first_mission_sec_plan()
 
         started = _monotonic()
         deadline = started + TICK_BUDGET_SECONDS
@@ -5864,7 +5875,8 @@ class WriterServer:
                     "source_ref": source_ref,
                 }
             else:
-                results[key] = coordinator.dispatch_once(min(deadline, now + share))
+                with diagnostic_scope(diagnostics), phase(source_ref, "coordinator"):
+                    results[key] = coordinator.dispatch_once(min(deadline, now + share))
             state = discovery_coordinator_state(results[key])
             state.update({
                 "position": position,

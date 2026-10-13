@@ -79,6 +79,7 @@ from dalton_core.research_auto_commit import (  # noqa: E402
     MISSION_VERIFIED_FIGURE_RULE_REF,
     RULE_REF as FILING_COUNT_RULE_REF,
     SEC_FY_MINUS_9M_RULE_REF,
+    SEC_FILED_QUARTER_GROWTH_RULE_REF,
     SEC_STATEMENT_LINE_RULE_REF,
 )
 from dalton_core.store import content_hash  # noqa: E402
@@ -94,6 +95,7 @@ SIGNABLE_RULE_REFS: tuple[str, ...] = (
     MISSION_VERIFIED_FIGURE_RULE_REF,
     SEC_STATEMENT_LINE_RULE_REF,
     SEC_FY_MINUS_9M_RULE_REF,
+    SEC_FILED_QUARTER_GROWTH_RULE_REF,
 )
 #: The closed shape ``research_auto_commit._policy_rule`` requires of a policy
 #: that never carried the block.  ``max_records`` is a per-window bound, not a

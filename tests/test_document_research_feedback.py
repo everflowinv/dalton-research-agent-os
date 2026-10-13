@@ -22,9 +22,9 @@ class DocumentFeedbackTests(unittest.TestCase):
                 "outcome": "query_miss", "tried_query_terms": ["收入确认"],
                 "question": "How is revenue recognized?", "document_authority_hash": "b" * 64,
                 "meaning": "This query found no matching excerpt, not proof the text has no answer."}
-        with patch("dalton_core.document_research_feedback._read_observations", return_value=[]):
+        with patch("dalton_core.directed_numeric_period_replacement.historical_feedback",return_value=[]), patch("dalton_core.document_research_feedback._read_observations", return_value=[]):
             before = read_document_research_feedback(self.core, self.mission)
-        with patch("dalton_core.document_research_feedback._read_observations", return_value=[miss]):
+        with patch("dalton_core.directed_numeric_period_replacement.historical_feedback",return_value=[]), patch("dalton_core.document_research_feedback._read_observations", return_value=[miss]):
             after = read_document_research_feedback(self.core, self.mission)
         self.assertNotEqual(before["content_hash"], after["content_hash"])
         prior_state = state(document_research_feedback=before)

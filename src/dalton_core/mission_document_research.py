@@ -119,12 +119,14 @@ def _exact_plan(
         "mission_version_ref": row["mission_version_ref"],
         "state_hash": row["state_hash"],
     })[:32]
+    from .operating_driver_source_plan import TASK_REF as OPERATING_TASK, SCHEMA_VERSION as OPERATING_SCHEMA
+    owner_derived = wire.get('task_ref') == OPERATING_TASK
     if (
         digest != content_hash(body)
         or row["content_hash"] != digest
         or row["plan_id"] != expected_ref
-        or wire.get("schema_version") != PLANNER_SCHEMA_VERSION
-        or wire.get("task_ref") != TASK_REF
+        or wire.get("schema_version") != (OPERATING_SCHEMA if owner_derived else PLANNER_SCHEMA_VERSION)
+        or wire.get("task_ref") != (OPERATING_TASK if owner_derived else TASK_REF)
         or wire.get("state_hash") != row["state_hash"]
         or wire.get("mission_version_ref") != row["mission_version_ref"]
         or wire.get("assessment") != row["assessment"]
@@ -215,6 +217,7 @@ def _settlement_instants(connection: sqlite3.Connection,
     wanted = set(admission_refs)
     for query in (
         "SELECT n.admission_ref, n.created_at FROM mission_document_numeric_results n JOIN scheduler_formal_results f ON f.work_order_id=n.work_order_ref WHERE f.terminal_state='succeeded' AND json_extract(n.record_json,'$.status')='completed'",
+        "SELECT n.admission_ref, n.created_at FROM mission_document_numeric_measure_results n JOIN scheduler_formal_results f ON f.work_order_id=n.work_order_ref WHERE f.terminal_state='succeeded' AND json_extract(n.record_json,'$.status')='completed'",
         "SELECT admission_ref, created_at FROM mission_document_research_outcomes",
         "SELECT admission_ref, created_at FROM mission_document_research_candidate_rejections",
         "SELECT admission_ref, created_at FROM mission_document_research_observations "
@@ -245,6 +248,7 @@ class MissionDocumentResearchAuthority:
         planner_scheduler_connection: sqlite3.Connection,
         planner_router_connection: sqlite3.Connection,
         clock: Callable[[], datetime] = _now,
+        model_source_plan_resolver: Callable[[Mapping[str, Any], Mapping[str, Any]], Mapping[str, Any]] | None = None,
     ) -> None:
         if not isinstance(store, DaltonStore):
             raise TypeError("store must be DaltonStore")
@@ -264,6 +268,7 @@ class MissionDocumentResearchAuthority:
         self.planner_scheduler_connection = planner_scheduler_connection
         self.planner_router_connection = planner_router_connection
         self.clock = clock
+        self.model_source_plan_resolver = model_source_plan_resolver
         self._authorization_flag = authorization_flag(
             self.connection, "dalton_mission_document_research_authorized"
         )
@@ -279,6 +284,17 @@ class MissionDocumentResearchAuthority:
         inquiry: Mapping[str, Any], mission: Mapping[str, Any],
     ) -> None:
         """Require the selected inquiry in the exact successful planner output."""
+
+        from .operating_driver_source_plan import TASK_REF as OPERATING_TASK
+        if plan.get('task_ref') == OPERATING_TASK:
+            if self.model_source_plan_resolver is None:
+                raise MissionDocumentResearchError('model source owner origin reader is unavailable')
+            expected = self.model_source_plan_resolver(plan, mission)
+            if (row.get('decided_by') != mission['autonomy']['automation_principal']
+                    or row.get('work_order_ref') is not None or row.get('model_profile_ref') is not None
+                    or canonical_json(expected) != canonical_json({k:v for k,v in plan.items() if k != 'plan_id'})):
+                raise MissionDocumentResearchError('model source owner plan origin differs')
+            return
 
         if (
             row.get("decided_by") != mission["autonomy"]["automation_principal"]
@@ -348,12 +364,20 @@ class MissionDocumentResearchAuthority:
             if candidate.get("repair_target_ref") is not None:
                 normalized["repair_target_ref"] = candidate["repair_target_ref"]
             if candidate.get("directed_document") is not None:
-                normalized["directed_document"] = candidate["directed_document"]
-                if candidate["directed_document"].get("numeric_targets") is not None:
-                    from .document_research_strategy import normalize_strategy
-                    normalized["directed_document"] = normalize_strategy(candidate["directed_document"],
-                        max_query_terms=self.registry.policy["max_query_terms"],
-                        max_query_term_chars=self.registry.policy["max_query_term_chars"])
+                from .document_research_strategy import normalize_strategy
+                directed=candidate["directed_document"]
+                if 'evidence_target_ref' in directed:
+                    from .planner_note_options import expand_formal_selection
+                    try:
+                        frozen_state=json.loads(work['question'].rsplit('\nRESEARCH_STATE=',1)[1])
+                        directed=expand_formal_selection(directed,company_ref=candidate.get('company_ref'),
+                            stored_strategy=inquiry.get('directed_document'),prompt_state=frozen_state,
+                            state_hash=plan['state_hash'])
+                    except (ValueError,TypeError,KeyError,IndexError):
+                        continue  # Not this exact saved inquiry; never infer an option.
+                normalized["directed_document"] = normalize_strategy(directed,
+                    max_query_terms=self.registry.policy["max_query_terms"],
+                    max_query_term_chars=self.registry.policy["max_query_term_chars"])
             projected = {
                 key: value for key, value in inquiry.items()
                 if key not in {"rank", "repair_target_hash"}
@@ -559,9 +583,16 @@ class MissionDocumentResearchAuthority:
             raise MissionDocumentResearchError("inquiry is absent or ambiguous in the exact plan")
         ordinal, inquiry, inquiry_hash = matches[0]
         strategy = inquiry.get("directed_document")
+        from .operating_driver_source_plan import TASK_REF as OPERATING_TASK
+        from .operating_driver_units import CONTRACT_REF as OPERATING_REF
+        if (isinstance(strategy, Mapping) and strategy.get('strategy_version') == OPERATING_REF
+                and plan.get('task_ref') != OPERATING_TASK):
+            raise MissionDocumentResearchError('operating numeric strategy needs its exact owner-derived source plan')
         if isinstance(strategy, Mapping) and strategy.get("numeric_targets") is not None:
             from .directed_numeric_research import normalize_targets
-            if normalize_targets(strategy.get("numeric_targets")) != strategy.get("numeric_targets"):
+            from .operating_driver_units import CONTRACT_REF as OPERATING_REF
+            numeric_contract = OPERATING_REF if strategy['strategy_version'] == OPERATING_REF else 'directed-document-numeric:0.1'
+            if normalize_targets(strategy.get("numeric_targets"), contract_ref=numeric_contract) != strategy.get("numeric_targets"):
                 raise MissionDocumentResearchError("stored numeric target normalization differs")
         if not isinstance(strategy, Mapping):
             raise MissionDocumentResearchError("planner inquiry has no directed document strategy")
@@ -622,6 +653,7 @@ class MissionDocumentResearchAuthority:
         self, *, plan_ref: str, inquiry_ref: str, question_version_ref: str,
         document_authority_ref: str, frozen_numeric_upgrades: list[dict[str, Any]] | None = None,
         frozen_target_revision: Any = _AUTO_TARGET_REVISION,
+        frozen_period_replacement: Any = None,
     ) -> dict[str, Any]:
         origin = self.question_origin_from_plan(
             plan_ref=plan_ref, inquiry_ref=inquiry_ref,
@@ -669,7 +701,15 @@ class MissionDocumentResearchAuthority:
             if proof is None or any(proof[k]!=selected_upgrade[k] for k in selected_upgrade):
                 raise MissionDocumentResearchError("numeric capability upgrade lacks exact numeric rejection")
             old=self.admission(proof["admission_ref"])
-            if old["company_ref"]!=inquiry["company_ref"] or signatures_equivalent(inquiry_signature_for(inquiry["company_ref"],inquiry),inquiry_signature_for(inquiry["company_ref"],old["planner_inquiry"])) is None:
+            from .document_numeric_inquiry_equivalence import admission_match
+            def upgrade_matches(prior):
+                if frozen_numeric_upgrades is not None:
+                    # Replay only the exact immutable upgrades already granted
+                    # by v1, never infer that authority for a new inquiry.
+                    return signatures_equivalent(inquiry_signature_for(inquiry['company_ref'],inquiry),
+                        inquiry_signature_for(inquiry['company_ref'],prior['planner_inquiry']))
+                return admission_match(inquiry['company_ref'],inquiry,prior['planner_inquiry'])
+            if old["company_ref"]!=inquiry["company_ref"] or upgrade_matches(old) is None:
                 raise MissionDocumentResearchError("numeric capability upgrade belongs to another question/company")
             numeric_upgrades.append(proof)
             # Freeze every existing equivalent capability rejection on admission;
@@ -690,9 +730,7 @@ class MissionDocumentResearchAuthority:
                 if actual != item:
                     raise MissionDocumentResearchError("numeric equivalent rejection proof drifted")
                 prior = self.admission(item["admission_ref"])
-                equivalent = prior["company_ref"] == inquiry["company_ref"] and signatures_equivalent(
-                    inquiry_signature_for(inquiry["company_ref"], inquiry),
-                    inquiry_signature_for(inquiry["company_ref"], prior["planner_inquiry"])) is not None
+                equivalent = prior["company_ref"] == inquiry["company_ref"] and upgrade_matches(prior) is not None
                 if equivalent:
                     numeric_upgrades.append(item)
                 elif frozen_numeric_upgrades is not None:
@@ -715,6 +753,9 @@ class MissionDocumentResearchAuthority:
                 raise MissionDocumentResearchError("numeric resume needs the same question and complete required targets")
             numeric_resume_proof=dict(selected_resume)
         from .numeric_target_revision import derive_revision_proof, verify_revision_proof
+        from .directed_numeric_period_replacement import derive as derive_period_replacement
+        period_replacement = derive_period_replacement(self, mission['mission_ref'], inquiry,
+            frozen=frozen_period_replacement)
         if frozen_target_revision is _AUTO_TARGET_REVISION:
             target_revision = derive_revision_proof(self, mission["mission_ref"], inquiry)
         elif frozen_target_revision is None:
@@ -788,12 +829,13 @@ class MissionDocumentResearchAuthority:
             "model_execution": executions,
             "model_authority": model_authority,
             **({"numeric_authority": {
-                "contract_ref": "directed-document-numeric:0.1",
+                "contract_ref": (strategy['strategy_version'] if strategy['strategy_version'] == 'directed-document-operating-numeric:0.1' else "directed-document-numeric:0.1"),
                 **({"answer_contract_ref": SPOKEN_CONTRACT_REF}
                    if strategy["strategy_version"] == SPOKEN_CONTRACT_REF else {}),
                 "capability_upgrade_proofs":numeric_upgrades,
                 "resume_proof":numeric_resume_proof,
                 **({"target_revision_proof": target_revision} if target_revision else {}),
+                **({"period_replacement_proof": period_replacement} if period_replacement else {}),
                 "targets": strategy["numeric_targets"],
                 "source_binding": source_binding(
                     self.connection, registration, inquiry["company_ref"],
@@ -808,6 +850,7 @@ class MissionDocumentResearchAuthority:
 
     def admit_from_plan(self, **kwargs: Any) -> dict[str, Any]:
         from .mission_document_research_withdrawal import read_withdrawals
+
 
         identity = self._derive(**kwargs)
         # 2026-10-06: no new admission for a company the owner paused, nor any
@@ -839,6 +882,11 @@ class MissionDocumentResearchAuthority:
             stored = self._read_row(row)
             self.resolve_for_execution(stored["id"])
             return {"status_marker": "duplicate", **stored}
+        # New admissions must be executable by the existing Figure period gate.
+        # Historical identities/replay remain governed by their original rules.
+        if identity.get("numeric_authority") is not None:
+            from .directed_numeric_research import assert_executable_target_periods
+            assert_executable_target_periods(identity["numeric_authority"]["targets"], contract_ref=identity["numeric_authority"]["contract_ref"])
         equivalent = self.equivalent_open_admission(identity)
         if equivalent is not None:
             raise MissionDocumentResearchEquivalentPending(equivalent)
@@ -847,6 +895,14 @@ class MissionDocumentResearchAuthority:
                 "identity_hash": identity_hash}
         wire["content_hash"] = content_hash(wire)
         with self._transaction() as cursor:
+            replacement = identity.get('numeric_authority', {}).get('period_replacement_proof')
+            if replacement is not None:
+                from .directed_numeric_period_replacement import consumer as period_consumer
+                used = period_consumer(self.connection, replacement)
+                if used is not None:
+                    raise MissionDocumentResearchEquivalentPending({'admission_ref': used,
+                        'state': 'numeric_period_replacement_already_admitted',
+                        'rule_ref': replacement['contract_ref']})
             # BEGIN IMMEDIATE serializes this one-result revision allowance.
             # Withdrawals remain in the immutable admission table and count as
             # having consumed it; neither a new plan nor owner closure resets it.
@@ -873,7 +929,9 @@ class MissionDocumentResearchAuthority:
     ) -> dict[str, Any] | None:
         """An earlier admission asking the same thing that is not done with yet.
 
-        The governed rule ``EQUIVALENT_INQUIRY_RULE_REF`` (2026-09-30).  Every
+        New-write numeric scopes use admission-equivalence:v2; immutable
+        historical v1 revision/upgrade permissions keep their original reader.
+        The original text rule (2026-09-30) remains for untyped inquiries. Every
         new plan rephrases its inquiries, so the exact identity never matched
         and the same question was bought again and again: legacy DXC "970 /
         9.7 亿" about 17 times, CTSH 15.8% about 9, ws-7d GOOGL RPO 15.  Two
@@ -890,6 +948,7 @@ class MissionDocumentResearchAuthority:
             signatures_equivalent,
         )
         from .mission_document_research_withdrawal import read_withdrawals
+        from .document_numeric_inquiry_equivalence import admission_match, RULE_REF
 
         inquiry = identity.get("planner_inquiry")
         company_ref = identity.get("company_ref")
@@ -908,13 +967,18 @@ class MissionDocumentResearchAuthority:
             proof = numeric_rejection(self.connection, selected.get("admission_ref"))
             if proof is not None and all(selected.get(k) == proof[k] for k in selected):
                 parent = self.admission(proof["admission_ref"])
-                selected_upgrade_valid = parent["company_ref"] == company_ref and signatures_equivalent(
-                    mine, inquiry_signature_for(company_ref, parent["planner_inquiry"])) is not None
+                selected_upgrade_valid = parent["company_ref"] == company_ref and admission_match(
+                    company_ref, inquiry, parent["planner_inquiry"]) is not None
         from .numeric_target_revision import derive_revision_proof, revision_consumer
         revision = identity.get("numeric_authority", {}).get("target_revision_proof")
         if "numeric_authority" not in identity and identity.get("mission_ref"):
             revision = derive_revision_proof(self, identity["mission_ref"], inquiry)
         consumer = revision_consumer(self, revision, company_ref=company_ref) if revision else None
+        from .directed_numeric_period_replacement import derive as derive_period_replacement, consumer as period_consumer
+        replacement = identity.get('numeric_authority', {}).get('period_replacement_proof')
+        if 'numeric_authority' not in identity and identity.get('mission_ref'):
+            replacement = derive_period_replacement(self, identity['mission_ref'], inquiry)
+        replacement_consumer = period_consumer(self.connection, replacement) if replacement else None
         withdrawn = read_withdrawals(self.connection)
         rows = self.connection.execute(
             "SELECT admission_id, record_json, created_at "
@@ -933,8 +997,16 @@ class MissionDocumentResearchAuthority:
                 continue
             if exclude_inquiry_ref is not None and record.get("inquiry_ref") == exclude_inquiry_ref:
                 continue
-            matched = signatures_equivalent(mine, inquiry_signature_for(company_ref, other))
-            if inquiry.get("canonical_question") is not None:
+            matched = admission_match(company_ref, inquiry, other)
+            # A source-bound zero-answer revision has its own fixed, strongly
+            # verified one-use permission. Its targets intentionally differ;
+            # keep that permission path and historical replay, not a numeric
+            # coincidence fallback for ordinary inquiries.
+            if revision and revision['admission_ref'] == admission_id:
+                matched = 'target_revision'
+            if replacement and replacement['admission_ref'] == admission_id:
+                matched = 'period_replacement'
+            if inquiry.get("canonical_question") is not None and 'numeric_targets' not in strategy:
                 from .canonical_document_questions import binding_for
                 verified_other = self.admission(admission_id)
                 if (inquiry["canonical_question"] == binding_for(verified_other)
@@ -943,6 +1015,13 @@ class MissionDocumentResearchAuthority:
                             for k in ("document_ref", "document_version_hash"))):
                     matched = "canonical_question"
             if matched is not None:
+                self.admission(admission_id)  # immutable identity/row/hash parity
+                if replacement and replacement['admission_ref'] == admission_id:
+                    if replacement_consumer is None:
+                        continue
+                    return {'admission_ref': replacement_consumer,
+                        'state': 'numeric_period_replacement_already_admitted',
+                        'rule_ref': replacement['contract_ref']}
                 from .directed_numeric_research import numeric_rejection, CONTRACT_REF
                 from .directed_numeric_source_capabilities import NUMERIC_STRATEGIES
                 rejection = numeric_rejection(self.connection, admission_id)
@@ -971,7 +1050,7 @@ class MissionDocumentResearchAuthority:
                             continue
                         return {"admission_ref": admission_id, "state": "waiting_evidence",
                                 "matched_on": matched, "numeric_result_hash": pending["numeric_result_hash"],
-                                "rule_ref": EQUIVALENT_INQUIRY_RULE_REF}
+                                "rule_ref": RULE_REF}
                 if rejection is not None:
                     return {"admission_ref": admission_id, "state":"numeric_strategy_required",
                             "matched_on":matched,"rejection_proof":rejection,
@@ -983,7 +1062,19 @@ class MissionDocumentResearchAuthority:
         now = self.clock().astimezone(timezone.utc)
         for admission_id, created_at, matched in candidates:
             at = settled.get(admission_id)
+            if at is not None and 'numeric_targets' in strategy:
+                prior = self.admission(admission_id)
+                if prior.get('numeric_authority'):
+                    from .document_numeric_completion import completed_numeric_admission
+                    if not completed_numeric_admission(self.connection, admission_id):
+                        at = None  # no complete, exact formal answer proof
             if at is None:
+                from .document_execution_failure import read_execution_failure
+                failure = read_execution_failure(self.connection, admission_id)
+                if failure is not None:
+                    return {"admission_ref": admission_id, "state": failure["execution_state"],
+                            "matched_on": matched, "rule_ref": RULE_REF,
+                            "execution_failure": failure}
                 state = "in_flight"
             else:
                 moment = datetime.fromisoformat(at)
@@ -994,7 +1085,7 @@ class MissionDocumentResearchAuthority:
                 state = "recently_answered"
             return {"admission_ref": admission_id, "state": state,
                     "matched_on": matched, "settled_at": at,
-                    "admitted_at": created_at, "rule_ref": EQUIVALENT_INQUIRY_RULE_REF}
+                    "admitted_at": created_at, "rule_ref": RULE_REF}
         return None
 
     def _read_row(self, row: sqlite3.Row) -> dict[str, Any]:
@@ -1088,6 +1179,7 @@ class MissionDocumentResearchAuthority:
             document_authority_ref=wire["document_authority_ref"],
             frozen_numeric_upgrades=wire.get("numeric_authority", {}).get("capability_upgrade_proofs"),
             frozen_target_revision=wire.get("numeric_authority", {}).get("target_revision_proof"),
+            frozen_period_replacement=wire.get('numeric_authority', {}).get('period_replacement_proof'),
         )
         stored_identity = {
             key: wire[key] for key in wire

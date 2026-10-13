@@ -196,14 +196,14 @@ FEED_CHILD_MIN_TIMEOUT_SECONDS = 6.0
 
 
 def feed_child_timeout_seconds(remaining: float | None) -> float:
-    """The child cap for a tick with ``remaining`` seconds of budget left."""
+    """Give an admitted read its full deadline, independent of tick admission.
 
-    if remaining is None:
-        return FEED_CHILD_TIMEOUT_SECONDS
-    return min(
-        FEED_CHILD_TIMEOUT_SECONDS,
-        max(FEED_CHILD_MIN_TIMEOUT_SECONDS, float(remaining)),
-    )
+    The coordinator still checks the tick budget before starting work. Once
+    started, a healthy read must not be killed merely because that scheduling
+    slice was short; its durable result is collected before another starts.
+    """
+
+    return FEED_CHILD_TIMEOUT_SECONDS
 ACQUISITION_RETRY_INTERVAL = timedelta(hours=1)
 # The queue reader's own maximum page. One query per status stays far
 # under it; a status bucket that reaches it is reported, not truncated.
@@ -1970,6 +1970,13 @@ class FeedDiscoveryCoordinator:
                     enumerated += len(headers)
                     if budget <= 0:
                         continue
+                    # The child already admitted may finish beyond this
+                    # scheduling slice. Its listing is retained above, but
+                    # overrunning is never permission to start another child.
+                    if time.monotonic() >= deadline:
+                        results["out_of_time"] = True
+                        deferred = True
+                        break
                     # I2: a read that cannot start inside the budget the
                     # writer gave this lane.  There are two honest answers and
                     # which one is right depends on whether this tick's work

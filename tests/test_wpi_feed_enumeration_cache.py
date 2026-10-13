@@ -310,6 +310,39 @@ class LaneCacheTests(unittest.TestCase):
         self.assertGreaterEqual(len(result["launched"]), 15)
         self.assertEqual(result["enumeration_seconds"], 0.0)
 
+    def test_slow_listing_finishes_and_is_reused_before_a_slow_read(self) -> None:
+        first = self.lane(enumeration_seconds=19.0, read_seconds=19.0)
+        started = self.monotonic.monotonic()
+        result = self.tick(first)
+        self.assertEqual(first.enumerator_calls, 1)
+        self.assertEqual(first.documents_read, [])
+        self.assertEqual(result["enumerated"], self.NOTES)
+        self.assertTrue(result["out_of_time"])
+        self.assertTrue(result["read_deferred"])
+        self.assertEqual(self.monotonic.monotonic() - started, 19.0)
+
+        # The next operation uses the paid listing, lets one admitted read
+        # finish, records its result/cursor, and opens no second slow child.
+        second = self.lane(enumeration_seconds=19.0, read_seconds=19.0)
+        again = self.tick(second)
+        self.assertEqual(second.enumerator_calls, 0)
+        self.assertEqual(again["cache_hits"], 1)
+        self.assertEqual(len(second.documents_read), 1)
+        self.assertEqual(again["read"]["read"], 1)
+        self.assertEqual(len(again["launched"]), 1)
+        self.assertEqual(second.body_read_cursor_ref, second.documents_read[0])
+
+    def test_expired_slice_never_opens_second_child_without_a_cache(self) -> None:
+        lane = self.lane(cache=False, enumeration_seconds=19.0, read_seconds=19.0)
+        started = self.monotonic.monotonic()
+        result = self.tick(lane)
+        self.assertEqual(lane.enumerator_calls, 1)
+        self.assertEqual(lane.documents_read, [])
+        self.assertEqual(result["enumerated"], self.NOTES)
+        self.assertTrue(result["out_of_time"])
+        self.assertTrue(result["read_deferred"])
+        self.assertEqual(self.monotonic.monotonic() - started, 19.0)
+
     def test_without_a_cache_the_lane_still_reads_rather_than_starving(self) -> None:
         # The fallback matters: deferring is only safe because the next tick
         # is cheaper.  With nowhere to keep the listing it never would be, so

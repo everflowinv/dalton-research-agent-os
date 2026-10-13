@@ -153,6 +153,10 @@ class DocumentFigureResolver:
     def figure(self, figure_id: str) -> dict[str, Any]:
         """The Core row for one figure, as a plain mapping."""
 
+        from .directed_numeric_source_unit import PREFIX, TABLE, read
+        if figure_id.startswith(PREFIX) and self._table(TABLE):
+            return read(self.connection, figure_id)
+
         if not self._table("coverage_mission_document_figures"):
             raise FigureNotFound("this Core holds no document figures")
         row = self.connection.execute(
@@ -250,9 +254,15 @@ class DocumentFigureResolver:
         # with the same deterministic verifier the write path used.
         recheck_error: str | None = None
         try:
+            native_proof = None
+            from .operating_driver_units import FIGURE_VERIFIER_REF as OPERATING_VERIFIER
+            if held['verified_by'] == OPERATING_VERIFIER:
+                from .operating_figure_source import read as read_operating_source
+                native_proof = read_operating_source(self.connection, held)
             verify_numeric_candidate(
                 _numeric_candidate(held), {held["quote_id"]: held["citation_text"]},
-                numeric_contract_ref=figure_numeric_contract(held["verified_by"]))
+                numeric_contract_ref=figure_numeric_contract(held["verified_by"]),
+                operating_source_proof=native_proof)
         except (NumericCandidateError, ValueError) as exc:
             recheck_error = str(exc)
         findings.append(_finding(
@@ -261,6 +271,11 @@ class DocumentFigureResolver:
             observed=recheck_error or "present",
             message="figure's digits and as-reported label are in the bytes it cited",
         ))
+        if recheck_error is None and native_proof is not None:
+            findings.append(_finding('operating_native_source', ok=True,
+                path='figure.operating_source_proof', expected=native_proof['content_hash'],
+                observed=native_proof['content_hash'],
+                message='same original raw column/clause and reported unit reverified under current source access'))
 
         supplied = dict(candidate)
         exact = canonical_json(supplied) == canonical_json(held)
@@ -591,14 +606,23 @@ class MissionFigureAuthorityResolver(DocumentFigureResolver):
               "figure.source_grade",
               "figure is a company-filed document, not an earnings call")
         try:
+            native_proof = None
+            from .operating_driver_units import FIGURE_VERIFIER_REF as OPERATING_VERIFIER
+            if figure['verified_by'] == OPERATING_VERIFIER:
+                from .operating_figure_source import read as read_operating_source
+                native_proof = read_operating_source(self.connection, figure)
             verify_numeric_candidate(
                 _numeric_candidate(figure), {figure["quote_id"]: figure["citation_text"]},
-                numeric_contract_ref=figure_numeric_contract(figure["verified_by"]))
+                numeric_contract_ref=figure_numeric_contract(figure["verified_by"]),
+                operating_source_proof=native_proof)
             digits = "present"
         except (NumericCandidateError, ValueError) as exc:
             digits = str(exc)
         check("citation_digits_and_label", digits, "present", "figure.citation_text",
               "figure's digits and as-reported label are in the bytes it cited")
+        if digits == 'present' and native_proof is not None:
+            check('operating_native_source',native_proof['content_hash'],native_proof['content_hash'],
+                'figure.operating_source_proof','same original raw column/clause and unit reverified')
         check("quote_names_a_span", quote_span(figure["quote_id"]) is not None, True,
               "figure.quote_id", "the quote id names a span of the original")
         check("citation_hash", material_wire["normalized_payload"].get("citation_hash"),

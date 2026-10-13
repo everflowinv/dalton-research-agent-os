@@ -16,7 +16,7 @@ from .company_model_series import (
 )
 from .contracts import ModelInvocation, ResultEnvelope, WorkOrder
 from .document_research import DocumentResearchRegistry, validate_registration
-from .document_research_inventory import financial_note_targets_for_registration
+from .document_research_inventory import financial_note_targets_for_registration, financial_note_source_mission
 from .document_research_strategy import (
     FINANCIAL_NOTE_TARGET_REF, FINANCIAL_NOTE_TARGET_SCHEMA_VERSION,
     validate_financial_note_target as _validate_financial_note_target,
@@ -90,7 +90,8 @@ def _period_kind(period_start: str, period_end: str) -> str | None:
 
 
 def _statement_filing(connection: Any, target: Mapping[str, Any],
-                      *, company_ref: str, registration: Mapping[str, Any]) -> dict[str, Any]:
+                      *, company_ref: str, registration: Mapping[str, Any],
+                      mission: Mapping[str, Any] | None = None) -> dict[str, Any]:
     row = connection.execute(
         "SELECT * FROM coverage_mission_statement_filings WHERE ingest_id=?",
         (target["statement_ingest_ref"],),
@@ -109,13 +110,36 @@ def _statement_filing(connection: Any, target: Mapping[str, Any],
           and row["form"] == target["form"]
           and registration["document_ref"] == f"sec:filing:{row['accession']}",
           "statement filing and registered original disagree")
-    lines = connection.execute(
-        "SELECT * FROM coverage_mission_statement_lines WHERE ingest_id=?",
-        (row["ingest_id"],),
-    ).fetchall()
+    if target["schema_version"] == "financial-note-target-0.3":
+        from .financial_note_source_lineage import derive_binding
+        _need(mission is not None, "financial note lineage needs the admitted mission")
+        try:
+            binding = derive_binding(connection=connection, mission=mission,
+                company_ref=company_ref, registration=registration, filing=dict(row))
+        except (ValueError, RuntimeError, KeyError, TypeError) as exc:
+            raise FinancialNoteEvidenceError("financial note source lineage drifted") from exc
+        _need(binding == target["source_lineage_binding"], "financial note source lineage differs")
+    if target["schema_version"] in {"financial-note-target-0.2", "financial-note-target-0.3"}:
+        from .statement_context import statement_rows, context_record
+        try:
+            lines = statement_rows(connection, row["ingest_id"],
+                                   version_id=target["statement_context_ref"], latest=False)
+            context_hash = (None if target["statement_context_ref"] is None else
+                            context_record(connection, target["statement_context_ref"])["content_hash"])
+            _need(context_hash == target["statement_context_hash"], "financial note context hash differs")
+        except ValueError as exc:
+            raise FinancialNoteEvidenceError(str(exc)) from exc
+    else:
+        lines = [dict(line) for line in connection.execute(
+            "SELECT * FROM coverage_mission_statement_lines WHERE ingest_id=?",
+            (row["ingest_id"],),
+        ).fetchall()]
     for item in target["periods"]:
         selected = [line for line in lines
-                    if line["period_start"] == item["period_start"]
+                    if (target["schema_version"] == "financial-note-target-0.1"
+                        or (line["dimension_axis"] is None and line["dimension_member"] is None
+                            and line.get("dimension_count", 0) == 0 and not line.get("dimensions")))
+                    and line["period_start"] == item["period_start"]
                     and line["period_end"] == item["period_end"]]
         eps_rows = [line for line in selected if not bool(line["is_breakdown"])
                     and str(line["concept"]).split(":")[-1]
@@ -363,8 +387,6 @@ def resolve_financial_note_evidence(
           and registration["content_hash"] == admission["document_authority_hash"]
           and registration["source_authority"]["kind"]
               == "coverage-mission-acquired-document"
-          and registration["source_authority"]["mission_version_ref"]
-              == admission["mission_version_ref"]
           and registration["source_authority"]["company_ref"]
               == admission["company_ref"],
           "directed admission registration authority disagrees")
@@ -377,15 +399,24 @@ def resolve_financial_note_evidence(
     _need(mission_row["mission_version_id"] == mission["id"]
           and mission["content_hash"] == admission["mission_version_hash"],
           "coverage mission differs from the directed admission")
+    if target["schema_version"] == FINANCIAL_NOTE_TARGET_SCHEMA_VERSION:
+        _need(registration["source_authority"]["mission_version_ref"] == mission["id"],
+              "directed admission registration authority disagrees")
+    else:
+        _need(financial_note_source_mission(connection=core_connection, mission=mission,
+                  company_ref=admission["company_ref"], registration=registration) is not None,
+              "directed admission original is outside its current mission authority")
     derived_targets = financial_note_targets_for_registration(
         connection=core_connection, mission=mission,
         company_ref=admission["company_ref"], registration=registration,
+        target_schema_version=target["schema_version"],
+        context_version_ref=target.get("statement_context_ref"), latest_context=False,
     )
     _need(sum(item == target for item in derived_targets) == 1,
           "financial note target differs from current filing authority")
     filing = _statement_filing(core_connection, target,
                                company_ref=admission["company_ref"],
-                               registration=registration)
+                               registration=registration, mission=mission)
 
     promotion_row = core_connection.execute(
         "SELECT * FROM mission_document_research_promotions WHERE admission_ref=?",
@@ -518,6 +549,12 @@ def resolve_financial_note_evidence(
           "registered note passage proof differs from the promoted execution")
     candidate = payload["draft_proof"]["output"]["candidate"]
     _need(isinstance(candidate, Mapping), "promoted financial note has no candidate")
+    if target["schema_version"] in {"financial-note-target-0.2", "financial-note-target-0.3"}:
+        from .document_research_strategy import validate_history_note_candidate
+        try:
+            validate_history_note_candidate(target, candidate)
+        except ValueError as exc:
+            raise FinancialNoteEvidenceError(str(exc)) from exc
     indexes = candidate.get("cited_match_indexes")
     _need(isinstance(indexes, list) and indexes,
           "promoted financial note has no cited passages")
@@ -531,6 +568,11 @@ def resolve_financial_note_evidence(
     body = {
         "schema_version": EVIDENCE_SCHEMA_VERSION,
         "target_ref": target["target_ref"], "company_ref": admission["company_ref"],
+        **({"source_lineage_binding": target["source_lineage_binding"]}
+           if target["schema_version"] == "financial-note-target-0.3" else {}),
+        **({"statement_context_ref": target["statement_context_ref"],
+            "statement_context_hash": target["statement_context_hash"]}
+           if target["schema_version"] in {"financial-note-target-0.2", "financial-note-target-0.3"} else {}),
         "mission_version_ref": admission["mission_version_ref"],
         "mission_version_hash": admission["mission_version_hash"],
         "admission_ref": admission["id"], "admission_hash": admission["content_hash"],

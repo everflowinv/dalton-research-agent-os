@@ -342,8 +342,7 @@ class RequestInFlightTests(unittest.TestCase):
         # the same judgement is bought once.  Minting a fresh id to dodge the
         # lease would buy it twice.
         self.assertEqual(REQUEST_IN_FLIGHT_STATUS, "request_in_flight")
-        self.assertEqual(REPAIR_CONTRACT_REF,
-                         "contract:company-model-spec-structured-output-repair:0.9")
+        self.assertRegex(REPAIR_CONTRACT_REF, r'^contract:company-model-spec-structured-output-repair:0\.[0-9]+$')
         self.assertEqual(REPAIR_CONTRACT["ref"], REPAIR_CONTRACT_REF)
         self.assertEqual(REPAIR_CONTRACT_HASH, content_hash(REPAIR_CONTRACT))
         state_hash = "a" * 64

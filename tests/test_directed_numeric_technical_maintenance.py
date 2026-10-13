@@ -83,7 +83,7 @@ class NumericTechnicalMaintenanceTests(unittest.TestCase):
     def test_new_template_failure_is_not_another_technical_generation(self):
         f,authority,admission,executor,producer,verifier=self.fixture()
         producer.candidate_wire['targets'][0]['figure']['period']='FY2024'
-        result=self.drive(executor,admission,'contract_failed_after_automatic_retry')
+        result=self.drive(executor,admission,'numeric_repeated_contract_failure')
         self.assertEqual(f.store.connection.execute(
             "SELECT count(*) FROM mission_document_research_controlled_recovery_authorizations WHERE json_extract(record_json,'$.kind')=?",(CLASSIFICATION,)).fetchone()[0],0)
 

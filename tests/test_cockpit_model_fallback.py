@@ -29,6 +29,7 @@ from dalton_core.cockpit_model import (
     register_purpose,
 )
 from dalton_core.contracts import ModelInvocation, ResultEnvelope, WorkOrder
+from dalton_core.company_model_spec import MAX_ASSESSMENT_CHARS
 from dalton_core.model_fallback_chain import register_purpose_tier, tier_chain
 from dalton_core.model_router import ModelRouter
 from dalton_core.openclaw_catalog_reconcile import sync_openclaw_model_catalog
@@ -667,9 +668,9 @@ class CockpitChainTests(unittest.TestCase):
         )
         from tests.test_company_model_spec import STATE, _spec
 
-        initial_body = _spec(assessment="x" * 1201)
+        initial_body = _spec(assessment="x" * (MAX_ASSESSMENT_CHARS + 1))
         repaired_body = copy.deepcopy(initial_body)
-        repaired_body["assessment"] = "x" * 1199
+        repaired_body["assessment"] = "x" * (MAX_ASSESSMENT_CHARS - 1)
 
         class SequenceAdapter(ChainAdapter):
             def __init__(inner):
@@ -945,7 +946,7 @@ class CockpitChainTests(unittest.TestCase):
         )
         from tests.test_company_model_spec import STATE, _spec
 
-        overlong = _spec(assessment="x" * 1201)
+        overlong = _spec(assessment="x" * (MAX_ASSESSMENT_CHARS + 1))
 
         class TextAdapter(ChainAdapter):
             def execute(inner, work, route, profile):
@@ -990,7 +991,7 @@ class CockpitChainTests(unittest.TestCase):
         from dalton_core.company_model_cli import _validated_spec_with_repair
         from tests.test_company_model_spec import STATE, _spec
 
-        overlong = _spec(assessment="x" * 1201)
+        overlong = _spec(assessment="x" * (MAX_ASSESSMENT_CHARS + 1))
 
         class TextAdapter(ChainAdapter):
             def execute(inner, work, route, profile):
@@ -1027,8 +1028,8 @@ class CockpitChainTests(unittest.TestCase):
         )
         from tests.test_company_model_spec import STATE, _spec
 
-        overlong = _spec(assessment="x" * 1201)
-        repaired = _spec(assessment="x" * 1199)
+        overlong = _spec(assessment="x" * (MAX_ASSESSMENT_CHARS + 1))
+        repaired = _spec(assessment="x" * (MAX_ASSESSMENT_CHARS - 1))
 
         class BusyRepairAdapter(ChainAdapter):
             def __init__(inner):
@@ -1100,7 +1101,7 @@ class CockpitChainTests(unittest.TestCase):
         )
         from tests.test_company_model_spec import STATE, _spec
 
-        bodies = [_spec(assessment="x" * 1201), _spec(assessment="x" * 1199)]
+        bodies = [_spec(assessment="x" * (MAX_ASSESSMENT_CHARS + 1)), _spec(assessment="x" * (MAX_ASSESSMENT_CHARS - 1))]
 
         class TextAdapter(ChainAdapter):
             def execute(inner, work, route, profile):
@@ -1134,7 +1135,7 @@ class CockpitChainTests(unittest.TestCase):
         with self.assertRaisesRegex(CockpitModelError, "route"):
             _validated_spec_with_repair(model=bad, **args)
         spec, repairs, _ = _validated_spec_with_repair(model=good, **args)
-        self.assertEqual(spec["assessment"], "x" * 1199)
+        self.assertEqual(spec["assessment"], "x" * (MAX_ASSESSMENT_CHARS - 1))
         self.assertEqual(len(adapter.served), 2)
         with Scheduler(self.root / "scheduler.sqlite") as scheduler:
             repaired_work = scheduler.work_order_authority(

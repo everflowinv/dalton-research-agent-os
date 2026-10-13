@@ -15,6 +15,16 @@ from typing import Any, Mapping
 PROTOCOL_VERSION = "0.1"
 MAX_FRAME_BYTES = 1024 * 1024
 
+# A dispatch may verify several persisted source/Work chains before returning.
+# This is a transport wait, not a larger lane, model, retry or spending budget.
+DISPATCH_REQUEST_TIMEOUT = 90.0
+DISPATCH_CLIENT_TIMEOUT = 120.0
+
+
+def is_dispatch_operation(operation: str | None) -> bool:
+    return isinstance(operation, str) and operation.startswith("dispatch_")
+
+
 
 class ProtocolError(ValueError):
     """A malformed, unsupported, or over-sized protocol frame."""

@@ -117,7 +117,7 @@ def _core(path: Path) -> sqlite3.Connection:
         "CREATE TABLE mission_deliverable_pointer(deliverable_ref TEXT PRIMARY KEY, "
         "version_id TEXT);"
         "CREATE TABLE research_quality_score_versions(version_id TEXT PRIMARY KEY, "
-        "target_ref TEXT, target_hash TEXT, rubric_ref TEXT, rubric_hash TEXT DEFAULT 'f5645dc5bc0513a6dfdfefe573979b6c150b7f60c6206dca23826aad4ec36f0c', judge_status TEXT);")
+        "target_ref TEXT, target_hash TEXT, rubric_ref TEXT, rubric_hash TEXT DEFAULT 'f5645dc5bc0513a6dfdfefe573979b6c150b7f60c6206dca23826aad4ec36f0c', judge_status TEXT, scorer_version TEXT DEFAULT '0.5');")
     return connection
 
 

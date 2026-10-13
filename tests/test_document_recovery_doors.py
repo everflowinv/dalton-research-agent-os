@@ -90,7 +90,12 @@ class HoldReasonCauseTests(unittest.TestCase):
         self.assertIn("回复为空", hold_reason_label(reason))
         self.assertIn("发送前", hold_reason_label(
             unproved_send_hold_reason(UNPROVED, "HOST_CONTROL_PROOF_MISSING", GEMINI)))
-        fake = SimpleNamespace(_started=lambda _ref: True)
+        from dalton_core.store import DaltonStore
+        from dalton_core.mission_document_research import _SCHEMA_PATH
+        store = DaltonStore(":memory:")
+        self.addCleanup(store.close)
+        store.connection.executescript(_SCHEMA_PATH.read_text())
+        fake = SimpleNamespace(store=store, _started=lambda _ref: True)
         detail = MissionDocumentResearchCoordinator._hold_detail(
             fake, {"mission-document-research-admission:" + "1" * 32: {
                 "disposition": "recovery_required", "reason": reason,

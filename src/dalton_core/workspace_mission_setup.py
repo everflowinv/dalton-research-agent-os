@@ -25,10 +25,11 @@ from .cockpit_model import (
     validate_setup_planning_context,
 )
 from .store import content_hash
-from .sec_plan_specs import generator_specs
+from .sec_plan_specs import DEFAULT_SEC_CALLS_24H, generator_specs
 from .research_constitution import ResearchConstitutionAuthority
 from .research_playbook import read_exact_playbook_version
-from .workspace import WorkspacePaths
+from .workspace import WorkspaceError, WorkspacePaths
+from .workspace_goal_binding import stable_binding, verify_binding
 
 SCHEMA_VERSION = "workspace-first-mission-draft-0.1"
 _SHA = re.compile(r"^[0-9a-f]{64}$")
@@ -186,6 +187,7 @@ def draft_first_mission(
     proposal_body = {
         "schema_version": SCHEMA_VERSION, "workspace_id": workspace.workspace_id,
         "workspace_manifest_hash": workspace.content_hash,
+        "workspace_identity_binding": stable_binding(workspace),
         "method_foundation_hash": foundation["content_hash"],
         "setup_state": "review_required" if issues else "ready_for_confirmation",
         "review_issues": issues, "mission_body": body,
@@ -233,21 +235,115 @@ def first_mission_goal_prompt(goal: str) -> str:
     """The structured output contract shared by blank-workspace onboarding."""
     return "\n".join([
         "You plan the first mission for a blank autonomous equity research workspace.",
-        "Extract the industry and companies from the owner's words. Do not invent a ticker.",
+        "Infer the research industry from the owner's objective. For a sufficiently clear industry goal, recommend up to 8 publicly listed companies across useful industry roles, even when no company was named. These are preliminary business judgments, not verified business facts.",
+        "If the owner names specific companies or restricts coverage to named companies, choose named_only and quote every named company exactly in owner_company_mentions, including plain tickers and Chinese names; bind each suggestion owner_mention to that list. Preserve missing identities as named companies awaiting checks; do not add other companies. Do not invent a ticker. Suggested identities will be checked independently against SEC issuer records before inclusion.",
         "Turn the goal into 3 to 8 answerable research questions and concrete subtasks.",
         "Keep the owner's language. Return raw JSON only, without a markdown fence:",
         '{"summary":"...","title":"...","objective":"...",',
         ' "industry":{"name":"...","reason":"..."},',
         ' "research_questions":["..."],"subtasks":["..."],',
-        ' "suggested_companies":[{"ticker":"XYZ","name":"...","reason":"..."}]}',
-        "Use an empty suggested_companies list or empty industry name when the owner did not supply enough information.",
+        ' "company_selection":"industry_recommendation","owner_company_mentions":["exact company names or tickers quoted from the owner, or empty"],',
+        ' "suggested_companies":[{"ticker":"XYZ","name":"...","industry_role":"...","reason":"...","owner_mention":"exact owner company mention, or null"}]}',
+        "Use an empty company list only when the objective is too vague to justify a useful coverage recommendation; missing owner-supplied tickers alone is not a reason to leave it empty. Give each suggestion a concise industry role and coverage reason in the owner's language.",
         "Owner's research goal: " + _text(goal, "goal"),
     ])
 
 
+
+
+def _goal_named_companies(goal, mentions=None):
+    rows = _companies_from_goal(goal)
+    quoted = []
+    for mention in mentions if isinstance(mentions, list) else []:
+        if (not isinstance(mention, str) or not mention.strip() or len(mention) > 120
+                or mention not in goal):
+            raise WorkspaceMissionSetupError("named company mention must quote the owner's exact words")
+        if mention not in quoted:
+            quoted.append(mention)
+    return rows, quoted
+
+def goal_company_candidates(raw, *, goal, workspace, sec_resolver_identity=None,
+                            company_resolver=None, selection_mode=None, owner_mentions=None):
+    """Finite issuer checks; no business proof, mission publication or model call."""
+    from concurrent.futures import ThreadPoolExecutor
+    import time
+    if selection_mode not in (None, "named_only", "industry_recommendation"):
+        raise WorkspaceMissionSetupError("company_selection must use named_only or industry_recommendation")
+    if owner_mentions is not None and not isinstance(owner_mentions, list):
+        raise WorkspaceMissionSetupError("owner_company_mentions must be a list of exact quotes")
+    named, mentions = _goal_named_companies(goal, owner_mentions)
+    explicit = {row["ticker"] for row in named}
+    named_only = bool(explicit or mentions or selection_mode == "named_only")
+    rows = []
+    seen = set()
+    for item in raw if isinstance(raw, list) else []:
+        if not isinstance(item, Mapping):
+            continue
+        ticker = str(item.get("ticker") or "").strip().upper()
+        if (not re.fullmatch(r"[A-Z][A-Z0-9.-]{0,9}", ticker)
+                or ticker in seen):
+            continue
+        mention = item.get("owner_mention")
+        if named_only and ticker not in explicit and (mention not in mentions or not mention):
+            continue
+        seen.add(ticker)
+        rows.append({"ticker": ticker, "suggested_name": str(item.get("name") or "")[:120],
+                     "industry_role": str(item.get("industry_role") or "")[:120],
+                     "reason": str(item.get("reason") or "")[:600],
+                     "identity_status": "unverified", "included": False,
+                     "requested": named_only, "owner_mention": mention if mention in mentions else (ticker if ticker in explicit else None),
+                     "company_ref": f"company:ticker:{ticker.lower()}",
+                     "identity_source": None, "identity_error": None})
+        if len(rows) == 8:
+            break
+    missing = [{"ticker": r["ticker"], "owner_mention": r["ticker"]} for r in named if r["ticker"] not in seen]
+    missing += [{"ticker": "", "owner_mention": m} for m in mentions
+                if m not in {r["owner_mention"] for r in rows} and m not in explicit]
+    for item in missing:
+        rows.append({"ticker": item["ticker"], "owner_mention": item["owner_mention"],
+                     "suggested_name": item["owner_mention"], "industry_role": "", "reason": "用户指定的研究公司",
+                     "identity_status": "unverified", "included": False, "requested": True,
+                     "company_ref": (f"company:ticker:{item['ticker'].lower()}" if item["ticker"] else None), "identity_source": None,
+                     "identity_error": "指定公司尚未完成身份核对"})
+    deadline = time.monotonic() + 35.0
+    def check(row):
+        if not row["ticker"] or row in rows[8:]:
+            return None, "指定公司尚未完成身份核对"
+        if company_resolver is None and not sec_resolver_identity:
+            return None, "本环境尚未配置公司身份核对"
+        try:
+            remaining = deadline - time.monotonic()
+            if remaining <= 0:
+                return None, "公司身份核对已达到本次等待上限"
+            result = (company_resolver(row["ticker"]) if company_resolver is not None else
+                      resolve_sec_ticker(row["ticker"], state_dir=workspace.state_dir,
+                                         identity=sec_resolver_identity,
+                                         timeout_seconds=min(15.0, remaining)))
+            if (not isinstance(result, Mapping) or result.get("ticker", row["ticker"]) != row["ticker"]
+                    or not re.fullmatch(r"[0-9]{1,10}", str(result.get("cik") or ""))
+                    or not isinstance(result.get("name"), str) or not result["name"].strip()):
+                raise ValueError("issuer identity does not match")
+            return {"ticker":row["ticker"],"cik":str(result["cik"]).zfill(10),
+                    "name":result["name"].strip()}, None
+        except Exception as exc:  # One failed identity check never erases the goal.
+            return None, "公开股票资料暂未核对成功"
+    if rows:
+        with ThreadPoolExecutor(max_workers=min(3, len(rows))) as pool:
+            answers = list(pool.map(check, rows))
+        for row, (identity, error) in zip(rows, answers):
+            if identity is not None:
+                row.update(identity_status="verified", included=True, name=identity["name"],
+                           cik=identity["cik"], identity_source="SEC issuer identity",
+                           identity_hash=content_hash(identity), identity_error=None)
+            else:
+                row["identity_error"] = error
+    return rows
+
 def plan_first_mission_goal(
     model: Any, workspace: WorkspacePaths, *, goal: str,
     method_foundation: Mapping[str, Any], request_id: str, created_at: str,
+    sec_resolver_identity: str | None = None,
+    company_resolver: Callable[[str], Mapping[str, Any]] | None = None,
 ) -> dict[str, Any]:
     """Make the one production model call, then normalize it into a safe draft."""
     context = setup_planning_context(
@@ -262,16 +358,15 @@ def plan_first_mission_goal(
     industry_value = parsed.get("industry")
     industry = (industry_value.get("name") if isinstance(industry_value, Mapping)
                 and isinstance(industry_value.get("name"), str) else None)
-    companies = []
-    for item in parsed.get("suggested_companies", []):
-        if isinstance(item, Mapping) and isinstance(item.get("ticker"), str) \
-                and item["ticker"].strip():
-            ticker = item["ticker"].strip().upper()[:12]
-            companies.append({"company_ref": f"company:ticker:{ticker.lower()}",
-                              "ticker": ticker})
+    candidates = goal_company_candidates(
+        parsed.get("suggested_companies"), goal=goal, workspace=workspace,
+        sec_resolver_identity=sec_resolver_identity, company_resolver=company_resolver,
+        selection_mode=parsed.get("company_selection"), owner_mentions=parsed.get("owner_company_mentions"))
+    companies = [{"company_ref": row["company_ref"], "ticker": row["ticker"]}
+                 for row in candidates if row["identity_status"] == "verified"]
     questions = [item for item in parsed.get("research_questions", [])
                  if isinstance(item, str) and item.strip()][:12]
-    return draft_first_mission(
+    draft = draft_first_mission(
         workspace, goal=goal, method_foundation=method_foundation,
         industry=industry, companies=companies,
         research_questions=questions or None,
@@ -279,6 +374,17 @@ def plan_first_mission_goal(
         objective=(parsed.get("objective")
                    if isinstance(parsed.get("objective"), str) else None),
     )
+    explicit = {row["ticker"] for row in _companies_from_goal(goal)}
+    if (explicit - {row["ticker"] for row in companies}
+            or any(row["requested"] and not row["included"] for row in candidates)
+            or (parsed.get("company_selection") == "named_only" and not candidates)):
+        draft["review_issues"].append("named company identities require verification")
+        draft["setup_state"] = "review_required"
+    draft["company_recommendations"] = candidates
+    draft["company_recommendation_status"] = "preliminary_business_judgment"
+    draft["content_hash"] = content_hash({k:v for k,v in draft.items() if k != "content_hash"})
+    return draft
+
 
 
 def publish_first_mission(
@@ -297,9 +403,12 @@ def publish_first_mission(
     asserted = wire.pop("content_hash", None)
     if asserted != proposal_hash or asserted != content_hash(wire):
         raise WorkspaceMissionSetupError("proposal confirmation hash differs")
-    if wire.get("schema_version") != SCHEMA_VERSION or wire.get("workspace_id") != workspace.workspace_id \
-            or wire.get("workspace_manifest_hash") != workspace.content_hash:
+    if wire.get("schema_version") != SCHEMA_VERSION or wire.get("workspace_id") != workspace.workspace_id:
         raise WorkspaceMissionSetupError("proposal belongs to another workspace")
+    try:
+        verify_binding(workspace, wire)
+    except (WorkspaceError, ValueError, OSError, KeyError, TypeError) as exc:
+        raise WorkspaceMissionSetupError("proposal workspace binding cannot be verified: " + str(exc)) from exc
     if wire.get("setup_state") != "ready_for_confirmation" or wire.get("review_issues") != []:
         raise WorkspaceMissionSetupError("proposal still requires review")
     actor_ref = _text(actor_ref, "actor_ref")
@@ -720,7 +829,9 @@ def materialize_first_mission_discovery_plans(
                 # Code-owned (``sec_plan_specs``): the 10-K and the Item
                 # 2.02 8-K, the same set every environment renders.
                 "specs": generator_specs(),
-                "budget": {"max_calls_24h": max(1, min(paid_calls, 50))},
+                # Public SEC reads have their own bounded plan window; the
+                # model-call allowance does not determine their capacity.
+                "budget": {"max_calls_24h": DEFAULT_SEC_CALLS_24H},
             }
             sec_plan = validate_discovery_plan(
                 {**sec_base, "content_hash": content_hash(sec_base)})

@@ -84,7 +84,7 @@ def figure_support(*, connection, registry, admission, target, figure,
     from .document_research import READ_REQUEST_SCHEMA_VERSION, READ_OPERATION
     from .model_router import independent_families
 
-    targets = normalize_targets(admission['numeric_authority']['targets'])
+    targets = normalize_targets(admission['numeric_authority']['targets'],contract_ref=admission['numeric_authority']['contract_ref'])
     matching = [t for t in targets if t['target_ref'] == target['target_ref']]
     if len(matching) != 1 or canonical_json(matching[0]) != canonical_json(target):
         raise DirectedNumericError('numeric Figure support target identity differs')
@@ -104,7 +104,14 @@ def figure_support(*, connection, registry, admission, target, figure,
     if any(candidate.get(k) != target[k] for k in ('metric_ref', 'period', 'unit', 'currency', 'basis')):
         raise DirectedNumericError('numeric Figure support answer differs from admitted definition')
     quote_map = quotes(proof)
-    expected = verify_numeric_candidate(candidate, quote_map, numeric_contract_ref=CONTRACT_REF)
+    native_proof = None
+    if admission['numeric_authority']['contract_ref'] == 'directed-document-operating-numeric:0.1':
+        from .operating_source_measurements import registered_measurements
+        native_proof = registered_measurements(registry,admission['request']['registration'],
+            purpose=admission['request']['purpose'],search_proof=proof,
+                periods=list(dict.fromkeys(t['period'] for t in admission['numeric_authority']['targets'])))
+    expected = verify_numeric_candidate(candidate, quote_map, numeric_contract_ref=admission['numeric_authority']['contract_ref'],
+        operating_source_proof=native_proof)
     resolver = MissionFigureAuthorityResolver(connection)
     held, _ = resolver.verify_figure(figure)
     registration = admission['request']['registration']
@@ -129,8 +136,14 @@ def figure_support(*, connection, registry, admission, target, figure,
     # diagnostic only after the old fact also binds true original bytes.
     from .claim_index_figures import _numeric_candidate
     from .document_numeric_unit_contracts import figure_numeric_contract
+    held_native_proof = None
+    from .operating_driver_units import FIGURE_VERIFIER_REF as OPERATING_VERIFIER
+    if held['verified_by'] == OPERATING_VERIFIER:
+        from .operating_figure_source import read as read_operating_source
+        held_native_proof = read_operating_source(connection, held, registry=registry)
     verify_numeric_candidate(_numeric_candidate(held), {held['quote_id']: old_text},
-                             numeric_contract_ref=figure_numeric_contract(held['verified_by']))
+                             numeric_contract_ref=figure_numeric_contract(held['verified_by']),
+                             operating_source_proof=held_native_proof)
     current_text = quote_map[expected['quote_id']]
     body = {
         'schema_version': REGISTERED_RENDER_SUPPORT_CONTRACT if held_registration else SUPPORT_CONTRACT,

@@ -550,9 +550,11 @@
                                  describe: describeModel(models, info), ariaLabel: `${card.label}的 AI 服务选择顺序` });
     const cov = card.capability_coverage || {};
     const separate = (models.purposes || []).filter(p => p.tier === card.tier && p.mode === "explicit" && !p.retired_by);
+    const following = (models.purposes || []).filter(p => p.tier === card.tier && p.mode === "tier" && !p.retired_by && !p.configuration_error);
     return h("div", { class: "adm-row", dataset: { tier: card.tier } }, h("div", { class: "grow" },
       h("h3", null, card.label, " ", cov.status === "missing" ? pill("err", "能力缺口") : cov.status === "partial" ? pill("warn", "部分覆盖") : pill("ok", "可用")),
       h("div", { class: "adm-meta" }, `本档位的共用默认顺序${card.requires_restart ? " · 含常驻服务固定的环节，保存后需重启才完全生效" : ""} · 范围：本机全部研究项目共用`),
+      h("div", { class: "adm-meta" }, following.length ? `当前使用这套默认顺序：${following.map(p => p.label).join("、")}。` : "当前没有环节使用这套默认顺序。"),
       separate.length ? h("div", { class: "adm-meta" }, `单独指定、不随档位默认更新：${separate.map(p => p.label).join("、")}。要重新跟随默认，请在「各环节设置」中选择对应环节，再使用档位默认顺序。`) : null,
       cov.note ? h("div", { class: "adm-meta" }, cov.note) : null,
       card.cooldown_note ? h("div", { class: "adm-meta" }, card.cooldown_note) : null,
@@ -1116,8 +1118,12 @@
 
   // ---------- 预算与费用 ---------------------------------------------------------------
   function budgetCapsForm(mission, poolsNote, host) {
-    if (!mission) return empty("还没有发布研究目标：发布后才有研究预算。");
+    if (!mission) {
+      const effective = host && host.material_acquisition_effective;
+      return h("div", null, empty("还没有发布研究目标：发布后才可编辑研究预算。"), effective ? h("p", { class: "adm-explain" }, `材料获取当前有效上限：每天 ${count(effective.calls_per_day)} 次、${usd(effective.usd_micros_per_day / 1000000)}。${effective.explicit_override ? "本项目使用单独设置的额度。" : "新建项目也采用共用设置；尚未保存时使用系统默认。"}`) : null);
+    }
     const b = mission.budget || {};
+    const material = (host && host.material_acquisition) || (host && host.material_acquisition_effective && { calls_per_day: host.material_acquisition_effective.calls_per_day, usd_per_day: host.material_acquisition_effective.usd_micros_per_day / 1000000 }) || { calls_per_day: 180, usd_per_day: 6 };
     /* Review M10: every field checked here by the server's rule -- money a
        positive amount, counts whole numbers, blank only where it means 不限. */
     const fields = [["max_daily_paid_calls", "模型调用上限（次 / 天，整数）", "1", "count"],
@@ -1127,9 +1133,18 @@
     const inputs = {};
     const extra = fields.map(([key, label, step]) => { inputs[key] = h("input", { type: "number", min: "0", step, value: b[key] ?? "", "aria-label": label });
       return h("label", { class: "adm-field" }, h("span", null, label), inputs[key]); });
+    const materialCalls = h("input", { type: "number", min: "0", step: "1", value: material.calls_per_day, "aria-label": "材料获取上限（次 / 天）" });
+    const materialUsd = h("input", { type: "number", min: "0", step: "0.01", value: material.usd_per_day, "aria-label": "材料获取上限（美元 / 天）" });
+    if (host) {
+      extra.push(h("label", { class: "adm-field" }, h("span", null, "材料获取上限（次 / 天，全部项目共用设置，各项目分别计数）"), materialCalls));
+      extra.push(h("label", { class: "adm-field" }, h("span", null, "材料获取上限（美元 / 天，各项目分别计数）"), materialUsd));
+      if (host.material_acquisition_effective && host.material_acquisition_effective.explicit_override) extra.push(h("p", { class: "adm-explain" }, `本项目使用单独设置的额度：每天 ${count(host.material_acquisition_effective.calls_per_day)} 次、${usd(host.material_acquisition_effective.usd_micros_per_day / 1000000)}。此处保存的共用额度适用于其余项目和新项目。`));
+    }
     const pools = h("input", { type: "checkbox", checked: b.pools_enforcement === "off" || null });
-    extra.push(h("label", { class: "adm-field" }, h("span", null, "分项预算池（按流程分配的额度）"), h("span", null, pools, " 只统计、不拦截")));
+    extra.push(h("label", { class: "adm-field" }, h("span", null, "各研究环节的模型费用额度"), h("span", null, pools, " 只统计，不按环节额度暂停调用")));
+    extra.push(h("p", { class: "adm-explain" }, "勾选后，模型调用仍计入各研究环节的费用，但不因该环节额度用完而暂停。材料获取额度、每天总费用和其他次数上限继续生效。"));
     const check = () => {
+      if (host && (!materialCalls.value.trim() || !materialUsd.value.trim() || !Number.isInteger(Number(materialCalls.value)) || Number(materialCalls.value) < 0 || !isFinite(Number(materialUsd.value)) || Number(materialUsd.value) < 0)) return "材料获取次数需为零或正整数，美元额度需为零或正数";
       for (const [key, label, , kind] of fields) {
         const raw = (inputs[key].value || "").trim();
         if (kind === "optional" && raw === "") continue;
@@ -1146,6 +1161,7 @@
         validate: check,
         payload: () => { const budget = { max_daily_paid_calls: Number(inputs.max_daily_paid_calls.value), max_daily_cost_usd: Number(inputs.max_daily_cost_usd.value || 0),
           max_alphaengine_calls_24h: Number(inputs.max_alphaengine_calls_24h.value || "0"), pools_enforcement: pools.checked ? "off" : "on" };
+          if (host) budget.material_acquisition = { calls_per_day: Number(materialCalls.value), usd_per_day: materialUsd.value };
           const reads = inputs.max_daily_document_reads.value.trim(); if (reads !== "") budget.max_daily_document_reads = Number(reads);
           return { mission_ref: mission.mission_ref, budget, expected_mission_hash: mission.hash, ...(host ? { expected_host_settings_hash: host.desired_hash } : {}) }; },
         after: () => reload("budget") }));
@@ -1201,6 +1217,27 @@
           return { purpose: p.purpose, kind: "call", budget: { max_cost_usd: Number(cost.value) }, expected_shared_policy_hash: p.call_budget.shared_call_cost.policy_hash }; },
         after: () => reload("budget") }));
   }
+  function memoContentRepairPolicy(models) {
+    const memo = (models.purposes || []).find(p => p.purpose === "investment_memo");
+    const view = memo && memo.run_budget;
+    const shared = view && view.shared_call_cost;
+    if (!view || !view.effective || !shared || !shared.policy_hash)
+      return empty("备忘录正文修正策略尚未绑定全部研究项目的共用设置。");
+    const field = "max_content_maintenance_rounds_per_group";
+    const rounds = Number(view.effective[field] || 1);
+    const pick = h("select", { "aria-label": "每组正文自动修正次数" },
+      [1, 2].map(n => h("option", { value: String(n) }, `${n} 次`)));
+    pick.value = String(rounds);
+    return h("div", null,
+      h("p", { class: "adm-explain" }, `系统会根据核验结果修正引用、数字和表述。备忘录分四部分起草，每部分最多追加 ${rounds} 次自动修正；整篇费用上限为 ${usd(view.effective.max_cost_usd)}。缺少资料的问题交回研究计划继续补充。`),
+      writeForm({ action: "model_budget", label: "保存正文修正次数（全部研究项目）", danger: true,
+        extra: h("label", { class: "adm-field" }, h("span", null, "每组正文自动修正次数"), pick),
+        confirmText: "这会同步全部现有和新建研究项目。已发生的费用和已用修正次数保留；增加一次修正仍需通过原资料核验、每轮及每日预算。每次修正仍按当前单次调用费用上限计费。",
+        validate: () => ([1, 2].includes(Number(pick.value)) ? null : "请选择 1 或 2 次"),
+        payload: () => ({ purpose: "investment_memo", kind: "run",
+          budget: { [field]: Number(pick.value) }, expected_shared_policy_hash: shared.policy_hash }),
+        after: () => reload("budget") }));
+  }
   function budgetIssues(costs) {
     const out = [];
     if (!costs.mission) out.push({ level: "info", problem: "还没有发布研究目标，因此没有研究预算",
@@ -1223,6 +1260,7 @@
       section("研究预算上限", "全部研究项目与新建项目共用；达到上限暂停相应调用，次日按日额度恢复。",
         costs.host_settings ? h("p", { class: "adm-explain" }, costs.host_settings.note) : null,
         budgetCapsForm(costs.mission, null, costs.host_settings)),
+      section("备忘录正文自动修正", "正文核验发现问题后，系统可以继续修订并重新检查。", memoContentRepairPolicy(models)),
       section("费用：今天与近 7 天", txt(costs.note, ""), costTables(costs)),
       section("各环节调用上限（技术参数）", "每次 AI 调用的费用、回答长度与超时上限；与上面的业务预算分开，一般不需要调整。",
         h("details", { class: "adm-more" }, h("summary", null, "展开各环节调用上限"), purposeCaps(models))));

@@ -581,7 +581,10 @@ class SecPlanSpecTests(unittest.TestCase):
 
         plan = self.legacy_plan()
         rendered = effective_discovery_plan(plan)
+        from dalton_core.sec_plan_specs import SEC_PLAN_SPECS
         self.assertEqual([spec["spec_ref"] for spec in rendered["specs"]],
+                         [spec["spec_ref"] for spec in SEC_PLAN_SPECS])
+        self.assertEqual([spec["spec_ref"] for spec in rendered["specs"][:2]],
                          ["annual-report-10k", "current-report-8k"])
         self.assertEqual(rendered["specs"][0]["lookback_days"], 400)  # owner-governed, kept
         self.assertEqual(rendered["specs"][1]["form"], "8-K")

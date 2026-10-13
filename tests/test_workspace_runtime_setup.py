@@ -147,12 +147,12 @@ class WorkspaceRuntimeSetupTests(unittest.TestCase):
             records, unsupported = _connector_records(load_workspace_manifest(self.manifest), 'human:workspace-owner')
         self.assertEqual(unsupported, [])
         self.assertEqual(set(records), {'alphaengine-search-library-v1.json', 'alphaengine-get-document-v1.json',
-            'sec-filings-index-v1.json', 'sec-company-facts-v3.json', 'sec-financial-statements-v4.json'})
+            'sec-filings-index-v1.json', 'sec-company-facts-v3.json', 'sec-financial-statements-v6.json'})
         from dalton_core.connector_governance import ConnectorGovernance
         from dalton_core.sec_financials_core import sec_financials_schema_hash
-        record = json.loads((self.state / 'connector-governance/sec-financial-statements-v4.json').read_text())
+        record = json.loads((self.state / 'connector-governance/sec-financial-statements-v6.json').read_text())
         self.assertTrue(ConnectorGovernance(record).approved)
-        self.assertEqual(record['expected_schema_hash'], sec_financials_schema_hash(version=4))
+        self.assertEqual(record['expected_schema_hash'], sec_financials_schema_hash(version=6))
         self.assertFalse((self.state / 'connector-governance/yfinance-daily-prices-v1.json').exists())
 
     def test_cockpit_first_goal_plans_once_and_publishes_existing_authorities(self):
@@ -182,15 +182,16 @@ class WorkspaceRuntimeSetupTests(unittest.TestCase):
                     actor_ref=actor_ref, method_foundation=params["method_foundation"])
         config = CockpitConfig(core_db=self.state / 'core.sqlite', state_dir=self.state,
             heartbeat_path=self.state / 'run/heartbeat.json', scheduler_db=self.state / 'scheduler.sqlite',
-            journal_path=self.state / 'cockpit/journal.sqlite')
+            journal_path=self.state / 'cockpit/journal.sqlite', sec_resolver_identity='Synthetic SEC identity')
         with patch.dict(os.environ, DALTON_WORKSPACE_MANIFEST=str(self.manifest)):
             plane = CockpitPlane(config, writer_socket=workspace.writer_socket,
                 token_config=self.state / 'writer-tokens.json', governance_call=governance)
             try:
-                with patch.object(plane, '_model_instance', return_value=Model()):
+                with patch.object(plane, '_model_instance', return_value=Model()), patch('dalton_core.workspace_mission_setup.resolve_sec_ticker', return_value={'ticker': 'ASML', 'cik': '937966', 'name': 'ASML Holding'}) as identity_lookup:
                     first = plane._initial_goal_draft('owner@example.com', 'Research ASML', 'first-goal')
                     repeated = plane._initial_goal_draft('owner@example.com', 'Research ASML', 'first-goal')
                 self.assertEqual(len(model_calls), 1)
+                self.assertEqual(identity_lookup.call_count, 1)
                 self.assertTrue(repeated['replayed'])
                 self.assertEqual(first['cost_usd'], .0025)
                 self.assertEqual(plane.overview()['initial_goal']['status'], 'open')

@@ -46,6 +46,8 @@ from datetime import date, datetime, timedelta, timezone
 from pathlib import Path
 from typing import Any, Sequence
 
+from .source_discovery_read_budget import SourceReadDeadline, bounded_rows
+
 from .alphaengine_core_search import (
     SEARCH_DOCUMENT_TYPES,
     SearchConnectorGovernance,
@@ -75,7 +77,7 @@ from .public_web_core_fetch import (
     url_authority_from_discovery,
     count_recent_public_web_fetch_calls,
 )
-from .raw_spool import RawSpool, RawSpoolReader
+from .raw_spool import RawSpool, RawSpoolReader, RawSpoolError
 from .public_web_core_search import (
     OPERATION as WEB_SEARCH_OPERATION,
     WebSearchConnectorGovernance,
@@ -722,6 +724,19 @@ def build_discovery_parameters(
     })
 
 
+def _configured_search_spool(launcher):
+    value=getattr(launcher,'spool_dir',None)
+    return value if isinstance(value,(str,Path)) else None
+
+
+def _targeted_parameters(state_dir, *, plan, **kwargs):
+    if plan["source_ref"] == SEC_SOURCE_REF:
+        from .material_targeted_sec import targeted_sec_parameters
+        return targeted_sec_parameters(state_dir, plan=plan, **kwargs)
+    from .material_targeted_web import targeted_web_parameters
+    return targeted_web_parameters(state_dir, plan=plan, **kwargs)
+
+
 def discovery_query_hash(plan: Mapping[str, Any], parameters: Mapping[str, Any]) -> str:
     """Query hash of compiled parameters under the plan's source operation."""
 
@@ -936,6 +951,7 @@ class _SearchLauncherBase:
         variant_index: int | None = None,
         missing_periods: Sequence[str] = (),
         targeted_binding: Mapping[str, Any] | None = None,
+        reporting_profile: Mapping[str, Any] | None = None,
     ) -> list[str]:
         command = [
             self.python_executable, "-m", self.CHILD_MODULE,
@@ -961,6 +977,8 @@ class _SearchLauncherBase:
             command += ["--missing-period", period]
         if targeted_binding is not None:
             command += ["--targeted-binding", canonical_json(dict(targeted_binding))]
+        if reporting_profile is not None:
+            command += ["--reporting-profile", canonical_json(dict(reporting_profile))]
         command += self._extra_command_args()
         command += list(self.mode_args)
         return command
@@ -975,6 +993,7 @@ class _SearchLauncherBase:
         variant_index: int | None = None,
         missing_periods: Sequence[str] = (),
         targeted_binding: Mapping[str, Any] | None = None,
+        reporting_profile: Mapping[str, Any] | None = None,
     ) -> dict[str, Any]:
         """Spawn one discovery child bound to an exact mission authorization."""
 
@@ -1012,27 +1031,63 @@ class _SearchLauncherBase:
         as_of_date = as_of or self.clock().date()
         if not isinstance(as_of_date, date) or isinstance(as_of_date, datetime):
             raise DiscoveryLaunchRejected("as_of must be a calendar date")
-        if targeted_binding is not None:
-            from .material_targeted_web import targeted_web_parameters, TargetedWebError
+        from .sec_issuer_reporting_profile import FOREIGN_SPECS
+        if (self.SOURCE_REF == SEC_SOURCE_REF and spec_ref in FOREIGN_SPECS) or reporting_profile is not None:
+            if self.SOURCE_REF != SEC_SOURCE_REF or spec_ref not in FOREIGN_SPECS:
+                raise DiscoveryLaunchRejected("reporting profile is only for a foreign SEC query")
             try:
-                _, targeted_binding = targeted_web_parameters(self.state_dir, plan=plan,
+                from contextlib import closing
+                from .readonly_sqlite import connect_read_only
+                from .raw_spool import RawSpoolReader
+                from .sec_issuer_reporting_profile import verify_profile, current_profile, allows_form
+                with closing(connect_read_only(self.state_dir / 'core.sqlite')) as reader:
+                    reader.row_factory = sqlite3.Row
+                    spool = RawSpoolReader(self.spool_dir or self.state_dir / 'connector-spool')
+                    reporting_profile = verify_profile(reader, spool, reporting_profile,
+                        company_ref=authorization['company_ref'], issuer=plan['companies'][authorization['company_ref']]['cik'], as_of=as_of_date)
+                    latest = current_profile(reader, spool, mission_version_ref=authorization['mission_version_ref'],
+                        company_ref=authorization['company_ref'], issuer=reporting_profile['issuer'], as_of=as_of_date,
+                        requested_by=authorization['requested_by'])
+                    if latest != reporting_profile or not allows_form(reporting_profile, plan_spec(plan, spec_ref)['form']):
+                        raise ValueError('foreign reporting profile is no longer current or form is not applicable')
+            except (ValueError, OSError, sqlite3.Error, RawSpoolError) as exc:
+                raise DiscoveryLaunchRejected(str(exc)) from exc
+        if targeted_binding is not None:
+            try:
+                _, targeted_binding = _targeted_parameters(self.state_dir, plan=plan,
                     company_ref=authorization["company_ref"], spec_ref=spec_ref, as_of=as_of_date,
                     mission_version_ref=authorization["mission_version_ref"],
-                    mission_version_hash=authorization["mission_version_hash"], binding=targeted_binding)
-            except TargetedWebError as exc:
+                    mission_version_hash=authorization["mission_version_hash"], binding=targeted_binding,
+                    **({"cursor":cursor,"spool_dir":self.spool_dir} if plan["source_ref"]==SEC_SOURCE_REF else {}))
+            except ValueError as exc:
                 raise DiscoveryLaunchRejected(str(exc)) from exc
         with self._lock:
             if self._current is not None and self._current[1].poll() is None:
                 raise DiscoveryLaunchConflict(f"discovery {self._current[0]} is still running")
             started_at = _wire_time(self.clock())
+            routing_identity = None
+            if reporting_profile is not None:
+                from .sec_issuer_reporting_profile import routing_query_hash
+                routing_parameters = build_discovery_parameters(plan,
+                    spec_ref=spec_ref, company_ref=authorization['company_ref'], as_of=as_of_date)
+                if targeted_binding is not None:
+                    routing_parameters, _ = _targeted_parameters(self.state_dir, plan=plan,
+                        company_ref=authorization['company_ref'], spec_ref=spec_ref, as_of=as_of_date,
+                        mission_version_ref=authorization['mission_version_ref'],
+                        mission_version_hash=authorization['mission_version_hash'], binding=targeted_binding,
+                        **({'cursor': cursor,'spool_dir':self.spool_dir} if self.SOURCE_REF == SEC_SOURCE_REF else {}))
+                routing_identity = routing_query_hash(routing_parameters, reporting_profile)
             digest = hashlib.sha256(
                 canonical_json({
                     "authorization": dict(authorization), "spec_ref": spec_ref,
                     "as_of": as_of_date.isoformat(), "started_at": started_at,
+                    **({"cursor":cursor} if plan["source_ref"]==SEC_SOURCE_REF else {}),
                     "variant_index": variant_index, "missing_periods": list(missing_periods),
                     "governance_hash": governance.content_hash,
                     "plan_hash": plan["content_hash"],
                     **({"targeted_binding":dict(targeted_binding)} if targeted_binding else {}),
+                    **({"reporting_profile":dict(reporting_profile)} if reporting_profile else {}),
+                    **({"reporting_query_hash":routing_identity} if reporting_profile else {}),
                 }).encode("utf-8")
             ).hexdigest()[:24]
             ticket_id = f"{self.TICKET_PREFIX}:{digest}"
@@ -1045,6 +1100,7 @@ class _SearchLauncherBase:
                 as_of=as_of_date.isoformat(), ticket_dir=ticket_dir, cursor=cursor,
                 variant_index=variant_index, missing_periods=missing_periods,
                 **({"targeted_binding":targeted_binding} if targeted_binding else {}),
+                **({"reporting_profile":reporting_profile} if reporting_profile else {}),
             )
             log_path = ticket_dir / "run.log"
             log_fd = os.open(str(log_path), os.O_WRONLY | os.O_CREAT | os.O_TRUNC, 0o600)
@@ -1075,6 +1131,7 @@ class _SearchLauncherBase:
                 os.close(log_fd)
             record = {
                 "schema_version": TICKET_SCHEMA_VERSION,
+                **({"cursor":cursor} if plan["source_ref"]==SEC_SOURCE_REF else {}),
                 "id": ticket_id,
                 "company_ref": authorization["company_ref"],
                 "spec_ref": spec_ref,
@@ -1094,6 +1151,8 @@ class _SearchLauncherBase:
                 "exit_code": None,
                 "completed_at": None,
                 **({"targeted_binding":dict(targeted_binding)} if targeted_binding else {}),
+                **({"reporting_profile":dict(reporting_profile)} if reporting_profile else {}),
+                **({"reporting_query_hash":routing_identity} if reporting_profile else {}),
             }
             _write_owner_only(self._ticket_path(ticket_id), record)
             self._current = (ticket_id, process)
@@ -1712,6 +1771,8 @@ class MissionSourceDiscoveryCoordinator:
             return self.missions.carry_forward_superseded_documents(
                 self.plan["mission_ref"], source_ref=self.source_ref, deadline=deadline,
             )
+        except SourceReadDeadline:
+            raise
         except Exception as exc:  # maintenance must never take the tick down
             return [{"status": "error", "reason": f"{type(exc).__name__}: {exc}"}]
 
@@ -1727,14 +1788,13 @@ class MissionSourceDiscoveryCoordinator:
         settled: list[dict[str, Any]] = []
         if deadline is not None and _monotonic() >= deadline:
             return settled
-        documents = self.missions.already_held_documents(source_ref=self.source_ref)
+        documents = self.missions.already_held_documents(source_ref=self.source_ref, deadline=deadline)
         if self.source_ref == ALPHAENGINE_SOURCE_REF:
             # Select the authority-backed rows in SQL.  Taking the first N
             # generic candidates and testing them one by one permanently
             # starves a completed fetch sitting behind a large search result.
-            documents = [dict(row) for row in self.store.connection.execute(
-                ALPHAENGINE_ALREADY_HELD_SQL, (self.source_ref,),
-            ).fetchall()]
+            documents = [dict(row) for row in bounded_rows(self.store.connection,
+                ALPHAENGINE_ALREADY_HELD_SQL, (self.source_ref,), deadline=deadline)]
         for document in documents:
             if deadline is not None and _monotonic() >= deadline:
                 break
@@ -1773,7 +1833,7 @@ class MissionSourceDiscoveryCoordinator:
             return {"status": "not_applicable"}
         if deadline is not None and _monotonic() >= deadline:
             return {"status": "deferred", "filled": 0, "failures": []}
-        rows = self.missions.documents_without_host(source_ref=self.source_ref, limit=limit)
+        rows = self.missions.documents_without_host(source_ref=self.source_ref, limit=limit, deadline=deadline)
         if not rows:
             return {"status": "complete", "filled": 0}
         if self.spool_dir is None:
@@ -1809,7 +1869,7 @@ class MissionSourceDiscoveryCoordinator:
             return settled
         if deadline is not None and _monotonic() >= deadline:
             return settled
-        for dispatch in self.missions.open_discovery_dispatches(source_ref=self.source_ref):
+        for dispatch in self.missions.open_discovery_dispatches(source_ref=self.source_ref, deadline=deadline):
             if deadline is not None and _monotonic() >= deadline:
                 break
             try:
@@ -1823,15 +1883,45 @@ class MissionSourceDiscoveryCoordinator:
             if ticket["status"] == "running":
                 continue
             summary = ticket.get("summary") or {}
+            if ticket.get('reporting_profile') is not None and ticket['status'] == 'succeeded':
+                try:
+                    from .sec_issuer_reporting_profile import verify_profile, routing_query_hash, allows_form
+                    from .raw_spool import RawSpoolReader
+                    params = build_discovery_parameters(self.plan, spec_ref=dispatch['spec_ref'],
+                        company_ref=dispatch['company_ref'], as_of=date.fromisoformat(ticket['as_of']))
+                    if ticket.get('targeted_binding') is not None:
+                        params, _ = _targeted_parameters(self.search_launcher.state_dir,
+                            plan=self.plan, company_ref=dispatch['company_ref'], spec_ref=dispatch['spec_ref'],
+                            as_of=date.fromisoformat(ticket['as_of']), mission_version_ref=dispatch['mission_version_ref'],
+                            mission_version_hash=dispatch['mission_version_hash'], binding=ticket['targeted_binding'],
+                            allow_closed=True, cursor=ticket.get('cursor'),
+                            spool_dir=_configured_search_spool(self.search_launcher))
+                    profile = verify_profile(self.store.connection, RawSpoolReader(self.spool_dir),
+                        ticket['reporting_profile'], company_ref=dispatch['company_ref'],
+                        issuer=params['issuer'], as_of=date.fromisoformat(ticket['as_of']))
+                    stamp = routing_query_hash(params, profile)
+                    if (not allows_form(profile, params['form']) or summary.get('parameters') != params
+                            or summary.get('reporting_profile') != profile
+                            or summary.get('reporting_query_hash') != stamp
+                            or ticket.get('reporting_query_hash') != stamp
+                            or summary.get('query_hash') != discovery_query_hash(self.plan, params)
+                            or dispatch['query_hash'] != discovery_query_hash(self.plan, params)):
+                        raise ValueError('foreign child routing identity differs')
+                except (ValueError, KeyError, TypeError, OSError, sqlite3.Error, RawSpoolError) as exc:
+                    result = self.missions.settle_discovery_dispatch(dispatch['dispatch_id'], status='failed',
+                        reason='foreign routing binding refused: '+str(exc)[:400])
+                    settled.append({'dispatch_ref': dispatch['dispatch_id'], 'status': result['status'],
+                                    'reason': result.get('failure_reason')})
+                    continue
             if ticket.get("targeted_binding") is not None and ticket["status"] == "succeeded":
                 try:
-                    from .material_targeted_web import targeted_web_parameters
-                    parameters, bound = targeted_web_parameters(self.search_launcher.state_dir,
+                    parameters, bound = _targeted_parameters(self.search_launcher.state_dir,
                         plan=self.plan, company_ref=dispatch["company_ref"], spec_ref=dispatch["spec_ref"],
                         as_of=date.fromisoformat(ticket["as_of"]),
                         mission_version_ref=dispatch["mission_version_ref"],
                         mission_version_hash=dispatch["mission_version_hash"],
-                        binding=ticket["targeted_binding"], allow_closed=True)
+                        binding=ticket["targeted_binding"], allow_closed=True,
+                        **({"cursor":ticket.get("cursor"),"spool_dir":_configured_search_spool(self.search_launcher)} if self.source_ref==SEC_SOURCE_REF else {}))
                     if (summary.get("targeted_binding")!=bound or summary.get("parameters")!=parameters
                             or summary.get("query_hash")!=discovery_query_hash(self.plan,parameters)
                             or dispatch["query_hash"]!=discovery_query_hash(self.plan,parameters)):
@@ -1843,6 +1933,12 @@ class MissionSourceDiscoveryCoordinator:
                         "reason":result.get("failure_reason")})
                     continue
             if ticket["status"] == "succeeded" and summary.get("discovery_ref"):
+                if (self.source_ref==SEC_SOURCE_REF and ticket.get("targeted_binding") is not None
+                        and ticket.get("cursor") is None and summary.get("next_cursor")):
+                    from .material_acquisition import record_targeted_event
+                    record_targeted_event(self.search_launcher.state_dir,ticket["targeted_binding"]["query_ref"],
+                        status="launched",kind="archive_ready",dispatch_ref=dispatch["dispatch_id"],ticket_ref=ticket["id"],
+                        extra={"targeted_binding":ticket["targeted_binding"],"next_cursor":summary["next_cursor"]})
                 result = self.missions.settle_discovery_dispatch(
                     dispatch["dispatch_id"], status="succeeded"
                 )
@@ -2202,7 +2298,7 @@ class MissionSourceDiscoveryCoordinator:
             return settled
         if deadline is not None and _monotonic() >= deadline:
             return settled
-        for document in self.missions.launched_discovered_documents(source_ref=self.source_ref):
+        for document in self.missions.launched_discovered_documents(source_ref=self.source_ref, deadline=deadline):
             if deadline is not None and _monotonic() >= deadline:
                 break
             try:
@@ -2395,12 +2491,17 @@ class MissionSourceDiscoveryCoordinator:
         # says -- an unreadable sufficiency must not put the last missing
         # quarter on the seven-day rediscovery interval.
         missing, candidate_periods = self._period_state(mission, company_ref, spec)
+        search_periods = tuple(p for p in missing if p not in candidate_periods)
+        if missing and not search_periods:
+            return "所缺季度已有候选资料，等待选取和获取" + missing_periods_note(
+                missing, candidate_periods,
+                step=self._candidate_step(company_ref, spec_ref))
         shortfall = bool(missing) or self._checklist_shortfall(
             mission, company_ref, spec_ref)
         cadence = self._cadence_block(
             mission["id"], company_ref, spec,
             use_retry_interval=shortfall,
-            missing_periods=tuple(p for p in missing if p not in candidate_periods),
+            missing_periods=search_periods,
         )
         if not cadence or cadence == "previous discovery still open":
             return cadence
@@ -2412,7 +2513,7 @@ class MissionSourceDiscoveryCoordinator:
         if (shortfall and cadence.startswith("rediscovered")
                 and self._continuation_page(
                 mission["id"], company_ref, spec_ref,
-                missing_periods=missing)):
+                missing_periods=missing, search_periods=search_periods)):
             return None
         return cadence + missing_periods_note(
             missing, candidate_periods,
@@ -2428,6 +2529,8 @@ class MissionSourceDiscoveryCoordinator:
 
         try:
             item = self._period_item(mission, company_ref, spec)
+        except SourceReadDeadline:
+            raise
         except Exception:  # noqa: BLE001 - an unreadable checklist names no period
             return (), frozenset()
         if item is None:
@@ -2439,6 +2542,27 @@ class MissionSourceDiscoveryCoordinator:
                          spec: Mapping[str,Any]) -> tuple[str,...]:
         item = self._period_item(mission, company_ref, spec)
         return () if item is None else tuple(item.get('missing_periods') or ())
+
+    def _stage_snapshot(self, mission: Mapping[str, Any], *, industry: bool = False):
+        """Reuse validated stage inputs only within this operation's read epoch."""
+        from .mission_stage import evaluate_industry, evaluate_mission
+        from .source_discovery_read_budget import bounded_read_view
+        connection = self.store.connection
+        cache = getattr(self, '_tick_stage_cache', None)
+        deadline = getattr(self, '_tick_read_deadline', None)
+        if deadline is not None and _monotonic() >= deadline:
+            raise SourceReadDeadline('source stage decision deadline exhausted')
+        if cache is None and deadline is None:
+            return (evaluate_industry if industry else evaluate_mission)(connection, mission)
+        key = (content_hash(mission), industry, connection.total_changes,
+               connection.execute('PRAGMA data_version').fetchone()[0])
+        if cache is not None and key in cache:
+            return cache[key]
+        with bounded_read_view(connection, deadline=deadline) as reader:
+            value = (evaluate_industry if industry else evaluate_mission)(reader, mission)
+        if cache is not None:
+            cache[key] = value
+        return value
 
     def _period_item(self, mission: Mapping[str, Any], company_ref: str,
                      spec: Mapping[str, Any]) -> dict[str, Any] | None:
@@ -2454,14 +2578,14 @@ class MissionSourceDiscoveryCoordinator:
         if not any("{quarter" in str(variant.get("query_template") or "")
                    for variant in spec.get("query_variants") or ()):
             return None
-        from .mission_stage import SOURCE_BASE_ITEMS, evaluate_mission
+        from .mission_stage import SOURCE_BASE_ITEMS
 
         spec_ref = spec['spec_ref']
         declared = next((row for row in SOURCE_BASE_ITEMS
                          if spec_ref in row['spec_refs']), None)
         if declared is None:
             return None
-        stage = next((row for row in evaluate_mission(self.store.connection, mission)
+        stage = next((row for row in self._stage_snapshot(mission)
                       if row['company_ref'] == company_ref), None)
         if stage is None:
             return None
@@ -2496,15 +2620,14 @@ class MissionSourceDiscoveryCoordinator:
         if item is None:
             return False
         try:
-            from .mission_stage import evaluate_industry, evaluate_mission
-
             if item in INDUSTRY_BASE_ITEMS:
-                items = evaluate_industry(self.store.connection, mission)["items"]
+                items = self._stage_snapshot(mission, industry=True)["items"]
             else:
-                company = next((row for row in evaluate_mission(
-                    self.store.connection, mission)
+                company = next((row for row in self._stage_snapshot(mission)
                     if row["company_ref"] == company_ref), None)
                 items = [] if company is None else company["items"]
+        except SourceReadDeadline:
+            raise
         except Exception:
             return False
         held = next((row for row in items if row["item_ref"] == item["item_ref"]), None)
@@ -2518,8 +2641,10 @@ class MissionSourceDiscoveryCoordinator:
         return int(held["have"]) < floor
 
     def _continuation_page(self, mission_version_ref: str, company_ref: str,
-                           spec_ref: str, *, missing_periods: Sequence[str] = ()) -> dict[str, Any] | None:
-        """Return an exact prior search binding with its next opaque cursor."""
+                           spec_ref: str, *, missing_periods: Sequence[str] = (),
+                           search_periods: Sequence[str] | None = None) -> dict[str, Any] | None:
+        """Keep selection tied to all gaps, and paging tied to the actual query target."""
+        targets = missing_periods if search_periods is None else search_periods
         if self.source_ref != ALPHAENGINE_SOURCE_REF:
             return None
         discoveries = self.missions.source_discoveries(
@@ -2553,13 +2678,29 @@ class MissionSourceDiscoveryCoordinator:
         ):
             return None
         continuation=_next_page_binding(discoveries[0], envelope, self.plan)
+        def fresh_cursor(binding):
+            if binding is None:
+                return None
+            from .alphaengine_cursor_recovery import CURSOR_LIFETIME
+            try:
+                cursor_age = self.clock() - _parse_wire_time(envelope['created_at'])
+            except (KeyError, TypeError, ValueError):
+                return None
+            if cursor_age < timedelta(0):
+                return None
+            if cursor_age >= CURSOR_LIFETIME:
+                # The exact page is still evidence, but its opaque provider
+                # cursor is not reusable after selection consumed its TTL.
+                # The existing selection gate below still has to finish.
+                return {**binding, 'cursor': None}
+            return binding
         if self.plan['schema_version'] != DISCOVERY_PLAN_SCHEMA_VERSION_V6:
-            return continuation
+            return fresh_cursor(continuation)
         prior=discoveries[0]['parameters']; as_of=date.fromisoformat(prior['filters']['date_to'])
         spec=plan_spec(self.plan,spec_ref); variant_index=None
         for index in range(len(spec['query_variants'])):
             compiled=build_discovery_parameters(self.plan,spec_ref=spec_ref,company_ref=company_ref,
-                as_of=as_of,variant_index=index,missing_periods=missing_periods,cursor=prior.get('cursor'))
+                as_of=as_of,variant_index=index,missing_periods=targets,cursor=prior.get('cursor'))
             if compiled == prior:
                 variant_index=index; break
         if variant_index is None:
@@ -2568,7 +2709,7 @@ class MissionSourceDiscoveryCoordinator:
             continued = build_discovery_parameters(
                 self.plan, spec_ref=spec_ref, company_ref=company_ref,
                 as_of=as_of, variant_index=variant_index,
-                missing_periods=missing_periods, cursor=continuation["cursor"],
+                missing_periods=targets, cursor=continuation["cursor"],
             )
             if _failed_cursor_dispatch_exists(
                 self.store.connection,
@@ -2593,6 +2734,9 @@ class MissionSourceDiscoveryCoordinator:
             finished={*current,*self._quarantined_discoveries()}
             if discoveries[0]['id'] not in finished and envelope.get('source_record_refs'):
                 return None
+        # Selection can itself take time: recheck the exact source's age
+        # after it finishes, rather than freezing freshness before the wait.
+        continuation = fresh_cursor(continuation)
         if continuation is not None:
             return {**continuation,'variant_index':variant_index}
         # A page without a cursor advances only after candidate selection has
@@ -2604,7 +2748,7 @@ class MissionSourceDiscoveryCoordinator:
         searched={canonical_json({**prior,'cursor':None})}
         for index in range(variant_index+1,len(spec['query_variants'])):
             candidate=build_discovery_parameters(self.plan,spec_ref=spec_ref,company_ref=company_ref,
-                as_of=as_of,variant_index=index,missing_periods=missing_periods)
+                as_of=as_of,variant_index=index,missing_periods=targets)
             if canonical_json(candidate) not in searched:
                 return {'cursor':None,'as_of':as_of.isoformat(),'variant_index':index}
         return None
@@ -2629,15 +2773,15 @@ class MissionSourceDiscoveryCoordinator:
             # the cadence remains its only bound.
             return None
         try:
-            from .mission_stage import evaluate_industry, evaluate_mission
-
             if item in INDUSTRY_BASE_ITEMS:
-                entry = evaluate_industry(self.store.connection, mission)
+                entry = self._stage_snapshot(mission, industry=True)
                 items = entry["items"]
             else:
-                rows = evaluate_mission(self.store.connection, mission)
+                rows = self._stage_snapshot(mission)
                 row = next((r for r in rows if r["company_ref"] == company_ref), None)
                 items = row["items"] if row else []
+        except SourceReadDeadline:
+            raise
         except Exception:  # noqa: BLE001 - an unreadable checklist is not a block
             return None
         held = next((i for i in items if i["item_ref"] == item["item_ref"]), None)
@@ -2747,6 +2891,19 @@ class MissionSourceDiscoveryCoordinator:
             verdict = self._login_failure_block(row, age)
             if verdict is not _NOT_A_LOGIN_FAILURE:
                 return verdict
+        if row['status'] == 'failed' and self.source_ref == ALPHAENGINE_SOURCE_REF:
+            from .alphaengine_cursor_recovery import expired_cursor_restart_available
+            from .alphaengine_desktop_recovery import desktop_module_recovered
+            from .alphaengine_shared_quota import quota_increase_recovered
+            if quota_increase_recovered(self, row):
+                return None
+            if desktop_module_recovered(self, row):
+                return None
+            if expired_cursor_restart_available(self, row):
+                # Only the latest exact cursor-bound terminal refusal gets
+                # this exception. The new cursor-free dispatch owns normal
+                # cadence, authorization, selection and budget thereafter.
+                return None
         if age < timedelta(days=retry_days):
             recover = getattr(self.search_launcher, "provider_recovery_available", None)
             if self.source_ref == WEB_SEARCH_SOURCE_REF and callable(recover):
@@ -2808,7 +2965,8 @@ class MissionSourceDiscoveryCoordinator:
             if (self.plan["schema_version"] == DISCOVERY_PLAN_SCHEMA_VERSION_V6
                     and spec.get("document_type") == "meeting_minutes"):
                 mission = self.missions.mission(mission_version_ref)
-                missing = self._missing_periods(mission, company_ref, spec)
+                missing, candidates = self._period_state(mission, company_ref, spec)
+                missing = tuple(p for p in missing if p not in candidates)
             return dict(build_discovery_parameters(
                 self.plan, spec_ref=spec["spec_ref"], company_ref=company_ref,
                 as_of=as_of, missing_periods=missing,
@@ -2955,7 +3113,38 @@ class MissionSourceDiscoveryCoordinator:
             if company_ref not in self.plan["companies"]:
                 skipped.append({"company_ref": company_ref, "reason": "not in discovery plan"})
                 continue
+            reporting_profile = None
+            if self.source_ref == SEC_SOURCE_REF and self.spool_dir is not None:
+                try:
+                    from .sec_issuer_reporting_profile import current_profile, SecReportingProfileUnavailable
+                    from .raw_spool import RawSpoolReader
+                    from .source_discovery_read_budget import bounded_read_view
+                    with bounded_read_view(self.store.connection,
+                            deadline=getattr(self, '_tick_read_deadline', None)) as reader:
+                        reporting_profile = current_profile(reader, lambda: RawSpoolReader(self.spool_dir),
+                            mission_version_ref=mission['id'], company_ref=company_ref,
+                            issuer=self.plan['companies'][company_ref]['cik'], as_of=self.clock().date(),
+                            deadline=getattr(self, '_tick_read_deadline', None))
+                except SourceReadDeadline:
+                    raise
+                except SecReportingProfileUnavailable as exc:
+                    # Missing/pruned/stale evidence never authorizes a foreign
+                    # form, but must not prevent the existing index bootstrap
+                    # from obtaining a new root under unchanged gates.
+                    skipped.append({'company_ref': company_ref, 'reason': 'reporting_profile_missing: '+str(exc)[:200]})
+                except (ValueError, OSError, sqlite3.Error) as exc:
+                    skipped.append({'company_ref': company_ref, 'reason': 'reporting_profile_unavailable: '+str(exc)[:200]})
+                    continue
             for spec in self.plan["specs"]:
+                deadline = getattr(self, '_tick_read_deadline', None)
+                if deadline is not None and _monotonic() >= deadline:
+                    raise SourceReadDeadline('source discovery decision deadline exhausted')
+                if self.source_ref == SEC_SOURCE_REF:
+                    from .sec_issuer_reporting_profile import allows_form, FOREIGN_SPECS
+                    if (spec['spec_ref'] in FOREIGN_SPECS or spec['spec_ref'] in {'annual-report-10k', 'current-report-8k'}) and not allows_form(reporting_profile, spec['form']):
+                        skipped.append({'company_ref': company_ref, 'spec_ref': spec['spec_ref'],
+                            'reason': 'reporting_profile_missing' if reporting_profile is None else 'form_not_in_current_reporting_family'})
+                        continue
                 if (self.plan.get("schema_version") == DISCOVERY_PLAN_SCHEMA_VERSION_V6
                         and self.source_ref == ALPHAENGINE_SOURCE_REF
                         and spec.get("document_type") in SELECTED_DOCUMENT_TYPES
@@ -2969,6 +3158,8 @@ class MissionSourceDiscoveryCoordinator:
                         "company_ref": company_ref, "spec_ref": spec["spec_ref"], "reason": block,
                     })
                     continue
+                if deadline is not None and _monotonic() >= deadline:
+                    raise SourceReadDeadline('source discovery decision deadline exhausted')
                 try:
                     authorization = self.missions.authorize_source_discovery(
                         company_ref=company_ref,
@@ -2989,9 +3180,11 @@ class MissionSourceDiscoveryCoordinator:
                 budget = self._budget(authorization["max_alphaengine_calls_24h"])
                 if budget["remaining"] < 1:
                     return {"status": "budget_exhausted", "budget": budget, "skipped": skipped}
-                missing_periods=self._missing_periods(mission,company_ref,spec)
+                missing_periods, candidates = self._period_state(mission, company_ref, spec)
+                search_periods = tuple(p for p in missing_periods if p not in candidates)
                 continuation = self._continuation_page(
-                    mission["id"], company_ref, spec["spec_ref"],missing_periods=missing_periods)
+                    mission["id"], company_ref, spec["spec_ref"],
+                    missing_periods=missing_periods, search_periods=search_periods)
                 request_date = (
                     date.fromisoformat(continuation["as_of"])
                     if continuation else self.clock().date()
@@ -3001,15 +3194,19 @@ class MissionSourceDiscoveryCoordinator:
                     as_of=request_date,
                     cursor=None if continuation is None else continuation["cursor"],
                     variant_index=0 if continuation is None else continuation.get('variant_index',0),
-                    missing_periods=missing_periods,
+                    missing_periods=search_periods,
                 )
+                if deadline is not None and _monotonic() >= deadline:
+                    raise SourceReadDeadline('source discovery decision deadline exhausted')
                 try:
                     # Only AlphaEngine continuation adds a cursor. Initial
                     # pages and other search launchers keep their contract.
                     page_options = {"cursor": parameters["cursor"]} if parameters.get("cursor") else {}
                     if self.plan['schema_version'] == DISCOVERY_PLAN_SCHEMA_VERSION_V6:
                         page_options.update(variant_index=0 if continuation is None else continuation.get('variant_index',0),
-                                            missing_periods=missing_periods)
+                                            missing_periods=search_periods)
+                    if self.source_ref == SEC_SOURCE_REF and spec['spec_ref'] in FOREIGN_SPECS:
+                        page_options['reporting_profile'] = reporting_profile
                     ticket = self.search_launcher.start(
                         authorization=authorization, spec_ref=spec["spec_ref"],
                         as_of=request_date,
@@ -3043,7 +3240,7 @@ class MissionSourceDiscoveryCoordinator:
         return {"status": "idle", "skipped": skipped}
 
     # -- batch E: a targeted query on behalf of a MaterialRequest -------------
-    def launch_targeted_discovery(self) -> dict[str, Any] | None:
+    def launch_targeted_discovery(self, deadline: float | None = None) -> dict[str, Any] | None:
         """Run the oldest targeted query the material acquisition service queued.
 
         The service asks "search this company on this spec now" for a request
@@ -3063,7 +3260,13 @@ class MissionSourceDiscoveryCoordinator:
             return None
         try:
             from .material_acquisition import pending_targeted_queries, record_targeted_event
-            pending = pending_targeted_queries(state_dir, self.source_ref, limit=1)
+            pending = pending_targeted_queries(state_dir, self.source_ref, limit=1, deadline=deadline)
+            if self.source_ref==SEC_SOURCE_REF and getattr(self,"store",None) is not None:
+                from .material_targeted_sec import pending_archive_query
+                archive=pending_archive_query(state_dir,self.store.connection,self.plan,self.search_launcher,deadline=deadline)
+                if archive is not None:pending=[archive]
+        except SourceReadDeadline:
+            raise
         except Exception:  # noqa: BLE001 - a missing or locked ledger is nothing queued
             return None
         if not pending:
@@ -3131,17 +3334,22 @@ class MissionSourceDiscoveryCoordinator:
         page_options: dict[str, Any] = {}
         if self.plan["schema_version"] == DISCOVERY_PLAN_SCHEMA_VERSION_V6:
             page_options.update(variant_index=0, missing_periods=missing_periods)
-        if self.source_ref == WEB_SEARCH_SOURCE_REF:
-            from .material_targeted_web import targeted_web_parameters, TargetedWebError
+        if self.source_ref in (WEB_SEARCH_SOURCE_REF, SEC_SOURCE_REF):
             try:
-                parameters, bound = targeted_web_parameters(state_dir, plan=self.plan,
+                parameters, bound = _targeted_parameters(state_dir, plan=self.plan,
                     company_ref=company_ref, spec_ref=spec["spec_ref"], as_of=request_date,
                     mission_version_ref=mission["id"], mission_version_hash=mission["content_hash"],
-                    query_ref=query["query_id"])
+                    query_ref=query["query_id"],
+                    **({"cursor":query.get("archive_cursor"),"archive_parent":query.get("archive_parent"),
+                       "spool_dir":_configured_search_spool(self.search_launcher)} if self.source_ref==SEC_SOURCE_REF else {}))
                 page_options["targeted_binding"] = bound
-            except TargetedWebError as exc:
+                if self.source_ref==SEC_SOURCE_REF and query.get("archive_cursor") is not None:
+                    page_options["cursor"]=query["archive_cursor"]
+            except ValueError as exc:
                 answer("refused", "request_binding", str(exc))
                 return {**base, "status":"targeted_refused", "reason":"request_binding"}
+        if deadline is not None and _monotonic() >= deadline:
+            raise SourceReadDeadline('source targeted decision deadline exhausted')
         try:
             ticket = self.search_launcher.start(
                 authorization=authorization, spec_ref=spec["spec_ref"], as_of=request_date,
@@ -3179,13 +3387,21 @@ class MissionSourceDiscoveryCoordinator:
         try:
             from .mission_stage import MissionStageDriver, planned_spec_refs
 
-            driver = MissionStageDriver(
-                self.missions, planned_specs=planned_spec_refs([self.plan])
-            )
+            from copy import copy
+            from .source_discovery_read_budget import bounded_read_view
+            with bounded_read_view(self.store.connection,
+                    deadline=getattr(self, '_tick_read_deadline', None)) as reader:
+                missions = copy(self.missions)
+                missions.connection = reader
+                driver = MissionStageDriver(
+                    missions, planned_specs=planned_spec_refs([self.plan]))
+                needs = driver.needs(source_ref=self.source_ref)
             return ([
                 {"company_ref": need["company_ref"], "spec_ref": need["spec_ref"]}
-                for need in driver.needs(source_ref=self.source_ref)
+                for need in needs
             ], None)
+        except SourceReadDeadline:
+            raise
         except Exception as exc:  # noqa: BLE001 - ordering is an optimisation, not a gate
             return ([], f"{type(exc).__name__}: {exc}")
 
@@ -3376,8 +3592,11 @@ class MissionSourceDiscoveryCoordinator:
         return result
 
     def _launch_acquisition(self) -> dict[str, Any]:
+        deadline = getattr(self, '_tick_read_deadline', None)
+        if deadline is not None and _monotonic() >= deadline:
+            raise SourceReadDeadline('source acquisition decision deadline exhausted')
         if self.acquisition_launcher is None:
-            queued = self.missions.next_discovered_document(source_ref=self.source_ref)
+            queued = self.missions.next_discovered_document(deadline=deadline, source_ref=self.source_ref)
             return {
                 "status": "unconfigured",
                 "reason": (
@@ -3387,7 +3606,7 @@ class MissionSourceDiscoveryCoordinator:
                 ),
                 "queued": queued is not None,
             }
-        if self.missions.launched_discovered_documents(limit=1, source_ref=self.source_ref):
+        if self.missions.launched_discovered_documents(deadline=deadline, limit=1, source_ref=self.source_ref):
             return {"status": "busy", "reason": "a discovered-document acquisition is still open"}
         hold = self._health_hold()
         if hold is not None:
@@ -3428,12 +3647,11 @@ class MissionSourceDiscoveryCoordinator:
         if selection_required:
             current_selection_refs = ()
         if self.selection_launcher is not None and self.source_ref == ALPHAENGINE_SOURCE_REF:
-            from .mission_stage import evaluate_mission
             periods_by_company={}
             if mission is not None:
                 # Read once: the selection step below needs the same rows, and
                 # the checklist is the slowest read of the acquire step.
-                stage_rows = evaluate_mission(self.store.connection, mission)
+                stage_rows = self._stage_snapshot(mission)
                 for company_stage in stage_rows:
                     calls=next((item for item in company_stage['items']
                                 if item['item_ref']=='earnings_calls'),None)
@@ -3464,7 +3682,7 @@ class MissionSourceDiscoveryCoordinator:
             abandoned = ()
         if abandoned:
             ineligible_refs = tuple(dict.fromkeys((*ineligible_refs, *abandoned)))
-        document = self.missions.next_discovered_document(
+        document = self.missions.next_discovered_document(deadline=deadline,
             source_ref=self.source_ref,
             preferred_hosts=self.preferred_hosts,
             skip_hosts=tuple(dict.fromkeys((*self.skip_hosts, *cooldown_hosts))),
@@ -3502,17 +3720,20 @@ class MissionSourceDiscoveryCoordinator:
                     member=next(x for x in mission["universe"] if x["company_ref"]==document["company_ref"])
                     company_plan=self.plan["companies"][document["company_ref"]]
                     terms=company_plan.get("name",company_plan.get("search_terms"))
-                    from .mission_stage import evaluate_mission
                     if stage_rows is None:
-                        stage_rows = evaluate_mission(self.store.connection, mission)
+                        stage_rows = self._stage_snapshot(mission)
                     stage=next(x for x in stage_rows if x["company_ref"]==document["company_ref"])
                     item=next(x for x in stage["items"] if x["item_ref"]=="earnings_calls")
+                    if deadline is not None and _monotonic() >= deadline:
+                        raise SourceReadDeadline('source selection decision deadline exhausted')
                     ticket=self.selection_launcher.start(discovery_ref=document["discovery_ref"],view=view,
                         mission_ref=mission["id"],company={"company_ref":document["company_ref"],"name":terms,
                         "ticker":member["ticker"],"aliases":list(company_plan.get("aliases") or [member["ticker"]])},
                         missing_periods=(list(item.get("missing_periods") or ())
                                          if spec["document_type"] == "meeting_minutes" else []),
                         selection_context=self._selection_context(mission, spec))
+                except SourceReadDeadline:
+                    raise
                 except CandidateSelectionError as exc:
                     # The same bytes, plan and mission refuse the same way on
                     # every tick: set this one discovery aside and let the
@@ -3533,7 +3754,7 @@ class MissionSourceDiscoveryCoordinator:
                 if not selected:
                     self.selection_launcher.mark_consumed(ticket)
                     return {"status":"completed_empty","ticket_ref":ticket["id"],"discovery_ref":document["discovery_ref"]}
-                document=self.missions.next_discovered_document(source_ref=self.source_ref,
+                document=self.missions.next_discovered_document(deadline=deadline, source_ref=self.source_ref,
                     preferred_hosts=self.preferred_hosts,skip_hosts=tuple(dict.fromkeys((*self.skip_hosts,*cooldown_hosts))),
                     preferred_needs=needs,excluded_needs=stopped_needs,excluded_mission_version_ref=mission["id"],
                     included_document_refs=selected,included_discovery_ref=document["discovery_ref"])
@@ -3549,9 +3770,9 @@ class MissionSourceDiscoveryCoordinator:
             # row -- they rest for FETCH_FAILURE_COOLDOWN instead of being
             # fetched again every hour.  The one immediate pass after a
             # restart still offers them: new code is the likeliest fix.
-            capped = self.missions.capped_failed_documents(
+            capped = self.missions.capped_failed_documents(deadline=deadline,
                 as_of=self.clock(), source_ref=self.source_ref)
-            document = self.missions.retryable_failed_document(
+            document = self.missions.retryable_failed_document(deadline=deadline,
                 older_than=(
                     _IMMEDIATE_RETRY if self._retry_failures_now
                     else ACQUISITION_RETRY_INTERVAL
@@ -3577,13 +3798,13 @@ class MissionSourceDiscoveryCoordinator:
             probe_hosts = [row["host"] for row in cooldowns
                            if row.get("state") == "probe_due" and row["host"] not in self.skip_hosts]
             if probe_hosts:
-                document = self.missions.next_discovered_document(
+                document = self.missions.next_discovered_document(deadline=deadline,
                     source_ref=self.source_ref, included_hosts=probe_hosts,
                     preferred_needs=needs, excluded_needs=stopped_needs,
                     excluded_mission_version_ref=None if mission is None else mission["id"],
                     excluded_document_refs=ineligible_refs)
                 if document is None:
-                    document = self.missions.retryable_failed_document(
+                    document = self.missions.retryable_failed_document(deadline=deadline,
                         older_than=_IMMEDIATE_RETRY, as_of=self.clock(),
                         source_ref=self.source_ref, recovery_probe_hosts=probe_hosts,
                         excluded_needs=stopped_needs,
@@ -3638,6 +3859,9 @@ class MissionSourceDiscoveryCoordinator:
             except CoverageMissionError as exc:
                 entry["review_status"] = f"not_registered:{type(exc).__name__}"
             return entry
+        deadline = getattr(self, '_tick_read_deadline', None)
+        if deadline is not None and _monotonic() >= deadline:
+            raise SourceReadDeadline('source acquisition decision deadline exhausted')
         try:
             authorization = self.missions.authorize_source_discovery(
                 company_ref=document["company_ref"],
@@ -3661,6 +3885,8 @@ class MissionSourceDiscoveryCoordinator:
                     budget["frees_at"] = frees_at
             return {"status": "budget_exhausted", "budget": budget,
                     "document_ref": document["document_ref"], "stage_order": stage_order}
+        if deadline is not None and _monotonic() >= deadline:
+            raise SourceReadDeadline('source acquisition decision deadline exhausted')
         try:
             ticket = self.acquisition_launcher.start_bounded_probe(
                 document_ref=document["document_ref"],
@@ -3799,18 +4025,28 @@ class MissionSourceDiscoveryCoordinator:
         # ws-7d starvation had to be reconstructed from sampled timings.
         steps = {"settle": 0.0, "carry": 0.0, "held": 0.0, "acquire": 0.0, "search": 0.0}
 
+        active_step = None
+        from .source_discovery_diagnostics import phase
+
         def timed(step: str, call: Callable[[], Any]) -> Any:
+            nonlocal active_step
+            active_step = step
             started = _monotonic()
             try:
-                return call()
+                with phase(self.source_ref, step):
+                    return call()
             finally:
                 steps[step] += max(0.0, _monotonic() - started)
 
+        targeted_checked = False
+
         def search() -> dict[str, Any]:
+            nonlocal targeted_checked
             if deadline is not None and _monotonic() >= deadline:
                 return {"status": "deferred", "reason": DISCOVERY_DEFERRED_REASON}
             # Batch E: a MaterialRequest's targeted query takes the slot first.
-            targeted = timed("search", self.launch_targeted_discovery)
+            targeted = None if targeted_checked else timed("search", lambda: self.launch_targeted_discovery(deadline))
+            targeted_checked = True
             if targeted is not None and targeted.get("status") in ("launched", "health_hold"):
                 return targeted
             return timed("search", self.launch_discovery)
@@ -3820,13 +4056,28 @@ class MissionSourceDiscoveryCoordinator:
         # open dispatch is what tells it a search is still running).
         search_first = self._search_deferred_ticks >= SEARCH_STARVATION_TICKS
         self._tick_shared_view = _TICK_CACHE_UNREAD
+        self._tick_stage_cache = {}
+        self._tick_read_deadline = deadline
+        settled_dispatches, recovered_dispatches, settled_documents = [], [], []
+        carried_forward, already_held, review_backfill, acquisitions = [], [], [], []
+        host_backfill, discovery, out_of_time = {}, None, False
+        deferred_read_step = None
         try:
             settled_dispatches = timed("settle", lambda: self.settle_dispatches(deadline))
-            discovery = search() if search_first else None
+            discovery = search() if search_first and self.source_ref != SEC_SOURCE_REF else None
             recovered_dispatches = timed(
                 "settle", lambda: self.recover_local_web_discoveries(deadline=deadline))
             settled_documents = timed("settle", lambda: self.settle_documents(deadline))
-            # P9d-12/13 maintenance, all before any new spend: documents stranded
+            if self.source_ref == SEC_SOURCE_REF and discovery is None and _monotonic() < deadline:
+                # Exact governed MaterialRequests must not wait behind an
+                # unbounded historical carry/backfill. Own children settle
+                # first; the ordinary authorization, quota and strong binding
+                # in launch_targeted_discovery are unchanged.
+                targeted = timed("search", lambda: self.launch_targeted_discovery(deadline))
+                targeted_checked = True
+                if targeted is not None and targeted.get("status") in ("launched", "health_hold"):
+                    discovery = targeted
+            # P9d-12/13 maintenance, all before ordinary acquisition spend: documents stranded
             # by a mission version change come back under the current grant,
             # pre-ledger rows learn their host, and documents already held owe a
             # review rather than a fetch.
@@ -3854,8 +4105,15 @@ class MissionSourceDiscoveryCoordinator:
                 "acquire", lambda: self._acquire_within_budget(settled_documents, deadline))
             if discovery is None:
                 discovery = search()
+        except SourceReadDeadline as exc:
+            out_of_time = True
+            deferred_read_step = {"step": active_step, "reason": str(exc)}
+            if discovery is None:
+                discovery = {"status": "deferred", "reason": DISCOVERY_DEFERRED_REASON}
         finally:
             self._tick_shared_view = _NO_TICK_CACHE
+            self._tick_stage_cache = None
+            self._tick_read_deadline = None
         if discovery.get("status") == "deferred":
             self._search_deferred_ticks += 1
         else:
@@ -3905,6 +4163,7 @@ class MissionSourceDiscoveryCoordinator:
             # real work and stopped early, which is a different thing from a
             # tick that found nothing to do.
             "tick_budget_exhausted": out_of_time,
+            **({"candidate_read_deferred": deferred_read_step} if deferred_read_step else {}),
             "retried_after_restart": retried_after_restart,
             # Nested, so the lane's own bounded counts (capped at twelve keys)
             # keep what they kept; the coordinator state flattens it.

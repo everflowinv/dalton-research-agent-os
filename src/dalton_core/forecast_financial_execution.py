@@ -16,6 +16,8 @@ from .forecast_seasonality import seasonal_profile, year_ago
 
 RULE_REF = "rule:financial-driver-execution:1"
 SCHEMA_VERSION = "financial-execution:1"
+ASSUMPTION_EXECUTION_REF = "rule:filed-tax-recurring-execution:0.1"
+DERIVED_HISTORY_UNIT_RULE_REF = "rule:filed-derived-history-unit-case:0.1"
 
 
 def execution_spec(spec: Mapping[str, Any]) -> dict[str, Any]:
@@ -63,6 +65,13 @@ def additional_drivers(spec: Mapping[str, Any], table: Mapping[str, Any],
                       for c in (spec.get("fcf_definition") or {}).get("components") or []
                       if c["role"] not in {"operating_cash_flow", "capital_expenditure"}]
     for declared in declared_rows:
+        if declared.get('basis_operating_metric_ref') is not None:
+            from .operating_driver_model import driver
+            matches=[r for r in table.get('operating_driver_lines') or [] if r['driver_ref']==declared['ref']]
+            if len(matches)!=1:
+                raise ValueError('economic operating driver lacks its freshly verified input series')
+            out.append(driver(declared=declared,series=matches[0]))
+            continue
         concept = declared.get("basis_concept")
         source = next((s for s in table.get("filed_identity_lines") or [] if s["driver_ref"]==declared["ref"] and s.get("status")=="filed"),None) if declared.get("basis_identity") else sources.get(concept)
         if source is None or (concept in concepts and (not spec.get("driver_formulas") or declared["ref"].startswith("fcf-"))):
@@ -71,12 +80,24 @@ def additional_drivers(spec: Mapping[str, Any], table: Mapping[str, Any],
         units = {str(c.get("unit")).casefold() for c in (source.get("cells") or {}).values() if c.get("unit")}
         if not history or len(units) != 1:
             continue
+        unit = next(iter(units))
+        # The driver already uses the case-folded filed unit. Its cumulative
+        # operands must use that same spelling, without changing the held
+        # source, amount, period or evidence. Other units remain mismatches
+        # for the strict arithmetic/source validator; this converts no units.
+        for cell in history:
+            for operand in cell.get("derived_from") or []:
+                source_unit = operand.get("unit")
+                if isinstance(source_unit, str) and source_unit.casefold() == unit:
+                    operand["unit"] = unit
         driver_ref = ("fcf-input:" if declared["ref"].startswith("fcf-") else "economic:") + declared["ref"]
         out.append({"ref": driver_ref, "kind": "statement_line",
-                    "concept": concept, "statement": source.get("statement"), "unit": next(iter(units)),
+                    "concept": concept, "statement": source.get("statement"), "unit": unit,
                     "status": "filed", "role": None, "spec_rows": [declared["ref"]], "note": None,
                     "label": declared["label"], "history": history,
                     **({"statement_identity":source["statement_identity"]} if source.get("statement_identity") is not None else {}),
+                    **({"statement_period_family_bindings":source["statement_period_family_bindings"]}
+                       if source.get("statement_period_family_bindings") is not None else {}),
                     "structure_line_ref": driver_ref,
                     "forecast_method": "year_over_year_growth" if (seasonal_profile(history) or {}).get("significant") else "quarterly_growth", "forecast_base_ref": None})
         concepts.add(concept)
@@ -134,13 +155,63 @@ def _project(driver: Mapping[str, Any], periods: Sequence[Mapping[str, Any]], as
     return out
 
 
-def driver_execution(body: Mapping[str, Any], spec: Mapping[str, Any]) -> tuple[dict[str, Any], list[dict[str, Any]]]:
+def _recurring_expense_proof(body, expense, source, assumptions):
+    """Recheck the completion's filed recurring classification, never its prose."""
+    from .forecast_coverage import ONE_OFF_CONCEPTS, MIN_HISTORY_QUARTERS
+    from .model_forecast_driver import quarterly_history
+    structure = body.get("financial_statement_structure") or {}
+    line = next((l for l in structure.get("lines") or []
+                 if source and l["ref"] == source.get("structure_line_ref")), None)
+    if (source is None or line is None or source.get("status") != "filed"
+            or line.get("kind") != "filed" or line.get("statement") != "income"
+            or source.get("statement") != "income"
+            or line.get("concept") != expense.get("basis_concept")
+            or source.get("concept") != line.get("concept")
+            or line["concept"] in ONE_OFF_CONCEPTS
+            or line.get("forecast_method") not in {"share_of_line", "carry_forward_mean"}
+            or (source.get("forecast_method"),source.get("forecast_base_ref")) !=
+               (line["forecast_method"],line.get("forecast_base_ref"))):
+        return None
+    history = quarterly_history(source)
+    if (len(history) < MIN_HISTORY_QUARTERS
+            or len({c["period_end"] for c in history}) != len(history)
+            or sum(Decimal(c["value"]) != 0 for c in history) * 4 < len(history) * 3):
+        return None
+    active = [a for a in assumptions if not a.get("superseded_by")]
+    ends = {p["end"] for p in body["forecast_periods"]}
+    if (len(active) != len(ends) or {a["period"]["end"] for a in active} != ends
+            or any(a.get("measure") != line["forecast_method"] or not a.get("refs") for a in active)):
+        return None
+    from .model_forecast_driver import _structure_result_refs
+    result_ref = _structure_result_refs(structure)[line["ref"]]
+    if set(_live(body["results"],result_ref)) != ends:
+        return None
+    proof = {"contract_ref":ASSUMPTION_EXECUTION_REF,"expense_ref":expense["ref"],
+             "concept":line["concept"],"driver_ref":source["ref"],"line_ref":line["ref"],
+             "method":line["forecast_method"],"forecast_base_ref":line.get("forecast_base_ref"),
+             "source_history_hash":content_hash(history),
+             "assumption_refs":sorted(a["ref"] for a in active)}
+    return {**proof,"content_hash":content_hash(proof)}
+
+
+def driver_execution(body: Mapping[str, Any], spec: Mapping[str, Any], *, assumption_policy=None, source_accuracy=None) -> tuple[dict[str, Any], list[dict[str, Any]]]:
     from .model_forecast_driver import _assumption, _cell_ref, _structure_historical_values
+    if source_accuracy is None:
+        source_accuracy = (body.get("execution_contract") or {}).get("source_accuracy")
+    if source_accuracy is not None:
+        from .forecast_source_accuracy import validate_shape
+        validate_shape(source_accuracy, body["company_ref"])
     structure = body.get("financial_statement_structure") or {}
     lines = {l["ref"]: l for l in structure.get("lines") or []}
     drivers = list(body["drivers"])
     declarations = {d["ref"]: d for d in spec.get("revenue_drivers") or []}
-    by_concept = {d.get("concept"): d for d in drivers if d.get("concept")}
+    # A cash historical denominator is evidence, not a new economic driver.
+    # In particular it must not replace a declared filed leaf with the same
+    # concept when resolving an executed revenue formula.
+    from .cash_flow_filed_tie_base import drivers as filed_cash_history_drivers
+    historical_only = {d["ref"] for d in filed_cash_history_drivers(body.get("cash_flow_companion") or {})}
+    by_concept = {d.get("concept"): d for d in drivers
+                  if d.get("concept") and d.get("ref") not in historical_only}
     by_line = {d.get("structure_line_ref"): d for d in drivers}
     plans = copy.deepcopy(spec.get("driver_formulas") or [])
     # A legacy specification with exactly one total/mix identity has no
@@ -202,9 +273,24 @@ def driver_execution(body: Mapping[str, Any], spec: Mapping[str, Any]) -> tuple[
                 if plan["operator"] == "sum": return sum(values)
                 if plan["operator"] == "product": return values[0] * values[1]
                 return None if conversion is None else values[0] * conversion
+            accuracy_checks = []
+            def period_ties(end):
+                delta = calculate([h[end] for h in histories]) - target_history[end]
+                if abs(delta) <= max(Decimal("0.01"), abs(target_history[end]) * Decimal("0.000001")):
+                    return True
+                if plan["operator"] != "sum" or source_accuracy is None:
+                    return False
+                from .forecast_source_accuracy import history_assessment
+                assessment = history_assessment(source_accuracy, inputs, target, end)
+                if assessment is not None:
+                    # The proof must compare the exact output used by this DAG,
+                    # not a different reported output from the same period.
+                    if Decimal(assessment["reported_delta"]) != delta:
+                        return False
+                    accuracy_checks.append(assessment)
+                return assessment is not None and assessment["status"] == "within_disclosed_accuracy"
             tied = (len(common) >= 4 and (plan["operator"] == "contract_conversion" and conversion is not None
-                    or all(abs(calculate([h[end] for h in histories]) - target_history[end]) <=
-                           max(Decimal("0.01"), abs(target_history[end]) * Decimal("0.000001")) for end in common)))
+                    or all(period_ties(end) for end in common)))
             projected = [_project(d, body["forecast_periods"], body["assumptions"]) for d in inputs]
             ends = [p["end"] for p in body["forecast_periods"]]
             if not tied or any(not set(ends) <= set(v) for v in projected):
@@ -239,7 +325,12 @@ def driver_execution(body: Mapping[str, Any], spec: Mapping[str, Any]) -> tuple[
                     refs=evidence, decided_by=body["actor_ref"], rule_ref=RULE_REF))
             for ref in refs: statuses[ref].update(status="executed", reason=None)
             executed.append({**plan, "status": "executed", "reason": None,
-                             "historical_periods": common, "conversion_rate": None if conversion is None else str(conversion)})
+                             "historical_periods": common, "conversion_rate": None if conversion is None else str(conversion),
+                             **({"reported_accuracy_checks": accuracy_checks} if accuracy_checks else {})})
+    if assumption_policy is None:
+        assumption_policy = (body.get("execution_contract") or {}).get("assumption_execution_ref")
+    if assumption_policy not in (None, ASSUMPTION_EXECUTION_REF):
+        raise ValueError("forecast assumption execution contract is unsupported")
     one_offs = []
     for expense in spec.get("expense_lines") or []:
         if expense.get("behaviour") != "one_off": continue
@@ -247,12 +338,44 @@ def driver_execution(body: Mapping[str, Any], spec: Mapping[str, Any]) -> tuple[
         assumptions = [a for a in body["assumptions"] if source and a["driver_ref"] == source["ref"] and a.get("kind") != "actual"]
         executed_one_off = bool(source and assumptions and all(
             a.get("measure") == "zero_one_off" or "normalis" in a.get("because", "").lower() for a in assumptions))
-        one_offs.append({"ref": expense["ref"], "status": "executed" if executed_one_off else "unexecuted",
+        recurring = (_recurring_expense_proof(body,expense,source,assumptions)
+                     if assumption_policy == ASSUMPTION_EXECUTION_REF else None)
+        executed_one_off |= recurring is not None
+        one_offs.append({**({"recurring_source_proof":recurring} if recurring is not None else {}),
+                        "ref": expense["ref"], "status": "executed" if executed_one_off else "unexecuted",
                         "reason": None if executed_one_off else "驱动计划未执行：一次性项未归零或剔除基期"})
     rows = list(statuses.values()) + one_offs
     return {"rule_ref": RULE_REF, "drivers": rows, "formulas": executed,
             "status": "executed" if all(r["status"] == "executed" for r in rows) else "unexecuted",
             "publication_blockers": [r["reason"] for r in rows if r["status"] != "executed"]}, overrides
+
+
+def _income_depreciation_policy(body: Mapping[str, Any]) -> Mapping[str, Any] | None:
+    policy = (body.get("financial_statement_structure") or {}).get("income_depreciation_forecast_policy")
+    if policy is None:
+        return None
+    from .forecast_coverage import INCOME_DEPRECIATION_POLICY_REF, INCOME_DEPRECIATION_METHODS, COVERAGE_CONCEPTS, MIN_HISTORY_QUARTERS
+    from .model_forecast_driver import ForecastModelValidationError
+    base = {k:v for k,v in policy.items() if k!="content_hash"}
+    if (policy.get("contract_ref") != INCOME_DEPRECIATION_POLICY_REF
+            or policy.get("content_hash") != content_hash(base)):
+        raise ForecastModelValidationError("income depreciation policy hash/contract differs")
+    seen = set()
+    for held in policy.get("lines", []):
+        driver = next((d for d in body["drivers"] if d.get("structure_line_ref") == held["line_ref"]), None)
+        if (held["line_ref"] in seen or driver is None or driver.get("statement") != "income"
+                or driver.get("concept") != held["concept"]
+                or held["concept"] not in COVERAGE_CONCEPTS["depreciation_amortization"]
+                or held["method"] not in INCOME_DEPRECIATION_METHODS
+                or driver.get("forecast_method") != held["method"]
+                or driver.get("forecast_base_ref") != held["forecast_base_ref"]
+                or len(_history(driver)) < MIN_HISTORY_QUARTERS
+                or content_hash({end:str(value) for end,value in _history(driver).items()}) != held["source_history_hash"]):
+            raise ForecastModelValidationError("income depreciation policy differs from filed driver history")
+        seen.add(held["line_ref"])
+    if not seen:
+        raise ForecastModelValidationError("income depreciation policy contains no exact income line")
+    return policy
 
 
 def financial_mechanisms(body: Mapping[str, Any]) -> tuple[dict[str, Any], list[dict[str, Any]]]:
@@ -269,6 +392,7 @@ def financial_mechanisms(body: Mapping[str, Any]) -> tuple[dict[str, Any], list[
     da = [d for d in drivers if d.get("concept") in COVERAGE_CONCEPTS["depreciation_amortization"]]
     primary_da = next((d for d in da if d.get("role") == "depreciation_amortization"), da[0] if da else None)
     closing_assets = {}
+    income_da_policy = _income_depreciation_policy(body)
     def amount(driver, period, value, because, refs):
         out.append(_assumption(driver_ref=driver["ref"], period=period, measure="mechanism_amount",
             value=value, unit=driver.get("unit") or "usd", because=because, refs=refs,
@@ -276,6 +400,19 @@ def financial_mechanisms(body: Mapping[str, Any]) -> tuple[dict[str, Any], list[
     with localcontext() as ctx:
         ctx.prec = 60
         for driver in da:
+            policy = income_da_policy
+            if policy is not None:
+                from .forecast_coverage import INCOME_DEPRECIATION_POLICY_REF
+                held = next((x for x in policy["lines"] if x["line_ref"] == driver.get("structure_line_ref")), None)
+                if (policy.get("contract_ref") == INCOME_DEPRECIATION_POLICY_REF and held is not None
+                        and driver.get("statement") == "income" and driver.get("forecast_method") == held["method"]):
+                    projected = _live(body["results"], result_refs.get(driver.get("structure_line_ref"), ""))
+                    ready = set(p["end"] for p in periods) <= set(projected)
+                    reports.append({"line_ref":driver.get("structure_line_ref"), "method":held["method"],
+                        "status":"computed" if ready else "unavailable",
+                        "reason":None if ready else "利润表折旧的明确预测假设缺少可执行历史或收入基底",
+                        "periods":[], "policy_hash":policy["content_hash"]})
+                    continue
             common = set(_history(driver))
             for asset in assets: common &= set(_history(asset))
             common = sorted(common)[-4:]
@@ -385,7 +522,13 @@ def execute_financial_model(body: dict[str, Any], spec: Mapping[str, Any]) -> di
     from .model_forecast_driver import _structure_result_refs
     # The stored contract freezes the exact declarations for pure replay.
     declaration = execution_spec(spec)
-    report, overrides = driver_execution(body, declaration)
+    prior_contract = body.get("execution_contract")
+    assumption_policy = (prior_contract.get("assumption_execution_ref")
+                         if isinstance(prior_contract, Mapping) else ASSUMPTION_EXECUTION_REF)
+    source_accuracy = (prior_contract or {}).get("source_accuracy") if isinstance(prior_contract, Mapping) else None
+    if source_accuracy is None:
+        source_accuracy = spec.get("source_accuracy")
+    report, overrides = driver_execution(body, declaration, assumption_policy=assumption_policy, source_accuracy=source_accuracy)
     if overrides: _apply_overrides(body, overrides)
     append_company_fcf(body, spec.get("fcf_definition"))
     mechanisms, financial_overrides = financial_mechanisms(body)
@@ -405,6 +548,10 @@ def execute_financial_model(body: dict[str, Any], spec: Mapping[str, Any]) -> di
     contract = {"schema_version": SCHEMA_VERSION, "specification": declaration,
                 "fcf_definition": copy.deepcopy(spec.get("fcf_definition")),
                 "drivers": report, "financial_mechanisms": mechanisms, "fcf_bridge": fcf}
+    if assumption_policy is not None:
+        contract["assumption_execution_ref"] = assumption_policy
+    if source_accuracy is not None:
+        contract["source_accuracy"] = copy.deepcopy(source_accuracy)
     contract["content_hash"] = content_hash(contract)
     body["execution_contract"] = contract
     return body
@@ -422,6 +569,11 @@ def validate_execution_contract(record: Mapping[str, Any], *, publishing: bool =
     asserted = original.pop("content_hash", None)
     if content_hash(original) != asserted:
         raise ForecastModelValidationError("financial execution contract hash differs")
+    if contract.get("source_accuracy") is not None:
+        from .forecast_source_accuracy import validate_shape
+        validate_shape(contract["source_accuracy"], record["company_ref"])
+    if contract.get("assumption_execution_ref") not in (None, ASSUMPTION_EXECUTION_REF):
+        raise ForecastModelValidationError("forecast assumption execution rule is unsupported")
     if publishing:
         # A caller cannot forge an executed report and re-hash it. Re-run the
         # frozen specification and compare every formula amount with its cell.
@@ -442,7 +594,11 @@ def validate_execution_contract(record: Mapping[str, Any], *, publishing: bool =
             raise ForecastModelValidationError("financial forecast results do not replay")
         for driver in record["drivers"]:
             from .forecast_coverage import COVERAGE_CONCEPTS
-            if driver.get("concept") in COVERAGE_CONCEPTS["depreciation_amortization"] and driver.get("forecast_method") != "roll_forward" and not (driver.get("forecast_method") == "unavailable" and any(r["line_ref"] == driver.get("structure_line_ref") and r["status"] == "unavailable" for r in mechanisms["lines"])):
+            policy = _income_depreciation_policy(record)
+            income_policy = policy is not None and driver.get("statement") == "income" and any(
+                x["line_ref"] == driver.get("structure_line_ref") and x["concept"] == driver.get("concept")
+                and x["method"] == driver.get("forecast_method") for x in policy.get("lines", []))
+            if driver.get("concept") in COVERAGE_CONCEPTS["depreciation_amortization"] and driver.get("forecast_method") != "roll_forward" and not income_policy and not (driver.get("forecast_method") == "unavailable" and any(r["line_ref"] == driver.get("structure_line_ref") and r["status"] == "unavailable" for r in mechanisms["lines"])):
                 raise ForecastModelValidationError("depreciation requires asset roll_forward")
             if driver.get("role") == "interest_expense" and driver.get("forecast_method") != "rate_times_balance" and not (driver.get("forecast_method") == "unavailable" and any(r["line_ref"] == driver.get("structure_line_ref") and r["status"] == "unavailable" for r in mechanisms["lines"])):
                 raise ForecastModelValidationError("interest requires debt balance × rate")

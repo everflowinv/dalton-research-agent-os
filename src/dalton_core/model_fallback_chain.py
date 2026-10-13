@@ -885,6 +885,12 @@ def _observe_provider_outcome(
     health row, never the answer the call just produced.
     """
 
+    # A worker may retain a returned failed envelope for durable accounting.
+    # Its chain transport is "served" (stop dispatching), while the endpoint
+    # did not answer. Keep the health observation separate from paid flow.
+    outcome = outcome.get("provider_health_outcome", outcome)
+    if not isinstance(outcome, Mapping):
+        return None
     served = outcome.get("outcome") == "served"
     failure_class = str(outcome.get("failure_class") or "")
     code = outcome.get("error_code")

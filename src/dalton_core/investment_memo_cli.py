@@ -315,6 +315,8 @@ def collect_frozen_input(store: DaltonStore, *, company_ref: str | None = None,
     market = market_block_row(store.connection, company_ref)
     if market is not None:
         rows.append(market)
+    from .investment_memo_market_history import rows_from
+    rows.extend(rows_from(store.connection, company_ref))
     pack_rows, pack_reason, pack_record = material_pack_bound(store, company_ref)
     rows.extend(pack_rows)
     from .investment_memo_material import bound_material
@@ -355,6 +357,8 @@ def cited_refs(sections: Sequence[Mapping[str, Any]],
     refs: set[str] = set()
     for section in sections:
         refs.update(str(ref) for ref in section.get("claim_refs") or ())
+        refs.update(str(row["ref"]) for row in section.get("source_refs") or ()
+                    if isinstance(row, Mapping) and isinstance(row.get("ref"), str))
         for number in section.get("numbers") or ():
             if not isinstance(number, Mapping):
                 continue
@@ -432,6 +436,8 @@ def source_kinds_for(section: Mapping[str, Any], material: Sequence[Mapping[str,
     rows = {str(row.get("ref")): row for row in material}
     kinds: set[str] = set()
     cited = [str(ref) for ref in section.get("claim_refs") or ()]
+    cited.extend(str(row["ref"]) for row in section.get("source_refs") or ()
+                 if isinstance(row, Mapping) and isinstance(row.get("ref"), str))
     for number in section.get("numbers") or ():
         for key in ("number_ref", "passage_ref", "claim_version_ref"):
             if number.get(key):
@@ -488,11 +494,66 @@ def _checks(sections: Sequence[Mapping[str, Any]], questions: Sequence[Mapping[s
              "evidence_refs": refs} for ref, (passed, reason) in zip(CHECK_REFS_V2, values)]
 
 
+def _validated_group(store, outcome, material, *, company_ref=None):
+    """Check every section before buying another group; no new repair slot."""
+    parse_refused = (outcome.get('status') == 'refused' and outcome.get('failure_class') == 'content'
+                     and bool(outcome.get('diagnostic_sections')))
+    if outcome.get('status') != 'drafted' and not parse_refused:return outcome
+    candidate_sections = outcome['diagnostic_sections'] if parse_refused else outcome['sections']
+    from .product_passage_validation import checked_rendered_passages
+    index=citation_index(material)
+    path=str(getattr(store,'path',':memory:'))
+    try:
+        from .investment_memo_market_history import checked_material
+        checked_material(store,material,company_ref)
+        passages=checked_rendered_passages(Path(path).parent if path!=':memory:' else ':memory:',
+                                           candidate_sections,index['passages'])
+    except (ValueError,OSError) as exc:
+        return {**outcome,'status':'refused','repairable':False,
+                'failure_class':'source_unavailable',
+                'reason':'memo_source_proof_unavailable: '+str(exc)}
+    from .mission_deliverable import pack_passage_resolver
+    checked=[];findings=list(outcome.get('findings') or []) if parse_refused else []
+    from .investment_memo_number_diagnostics import findings as number_findings
+    for section in candidate_sections:
+        numeric_findings=number_findings(section,live_claim_refs=index['claims'],
+            resolve_cell=lambda cell:index['cells'].get(str(cell.get('ref')))==dict(cell),
+            resolve_passage=pack_passage_resolver(None,passages),resolve_number=index['numbers'].get)
+        try:
+            checked.append(validate_section(section,live_claim_refs=index['claims'],
+                resolve_cell=lambda cell:index['cells'].get(str(cell.get('ref')))==dict(cell),
+                resolve_passage=pack_passage_resolver(None,passages),
+                resolve_number=index['numbers'].get,strict=True))
+        except MissionDeliverableError as exc:
+            findings.append({'section':section['title'],'code':'section_authority',
+                             'detail':str(exc)[:700]})
+        findings.extend(f for f in numeric_findings if f not in findings)
+    if findings:
+        if len(findings)>128:
+            return {**outcome,'status':'refused','repairable':False,'failure_class':'diagnostic_overflow',
+                'reason':'memo complete validator diagnostics exceed the fixed correction proof bound',
+                'findings':findings[:128],'findings_count':len(findings),
+                'omitted_findings_hash':content_hash(findings[128:])}
+        return {**outcome,'status':'refused','repairable':True,'failure_class':'content','findings':findings,
+                'reason':((outcome['reason']+'; complete diagnostics: ') if parse_refused else
+                          'section authority rejected: ')+json.dumps(findings,ensure_ascii=False),
+                'refs':list(outcome.get('refs') or []) if parse_refused else []}
+    return {**outcome,'sections':checked}
+
+
 def run_memo(*, store: DaltonStore, frozen: Mapping[str, Any], model: Any, verifier_model: Any,
-             max_units: int = 4, max_repairs: int = 0) -> dict[str, Any]:
+             max_units: int = 4, max_repairs: int = 0, quiesce: Any = None,
+             repair_budget: Any = None) -> dict[str, Any]:
     if frozen.get("status") != "ready":
         return dict(frozen)
     mission, playbook, company = frozen["mission"], frozen["playbook"], frozen["company"]
+    company_ref=company['company_ref']
+    try:
+        from .investment_memo_market_history import checked_material
+        checked_material(store,frozen['material'],company_ref)
+    except (ValueError,OSError) as exc:
+        return {'status':'held','memo_status':'source_unavailable',
+                'reason':'memo_source_proof_unavailable: '+str(exc),'cost_micros':0}
     titles = playbook["deliverable_templates"]["investment_memo"]
     questions = [{"question_ref": f"memo_q{i:02d}", "question": text}
                  for i, text in enumerate(playbook["key_questions"], 1)]
@@ -500,28 +561,83 @@ def run_memo(*, store: DaltonStore, frozen: Mapping[str, Any], model: Any, verif
         return {"status": "held", "reason": "the bound Playbook does not have 12 memo sections and 12 key questions"}
     if max_units < len(GROUPS):
         return {"status": "held", "reason": "run max_units cannot cover the atomic four-group memo"}
+    from .investment_memo_repair_budget import MemoRepairBudget, MemoMacroVerifier
+    if isinstance(repair_budget, MemoRepairBudget):
+        from .investment_memo_draft import build_group_prompt
+        prompts = [build_group_prompt(group=group,
+            section_titles=[titles[i] for i in section_indexes],
+            questions=[questions[i] for i in question_indexes],
+            material=frozen['material'], company=company)
+            for group, section_indexes, question_indexes in GROUPS]
+        repair_budget.bind_macro(prompts, mission,allow_maintenance=max_repairs>0)
+        verifier_model = MemoMacroVerifier(verifier_model, repair_budget)
+        # A complete fee census is a free accounting operation, not a
+        # refused answer and not a paid retry generation. Stop before drafting
+        # while its next bounded page is pending.
+        if repair_budget.macro is not None:
+            if repair_budget.macro.complete:
+                repair_budget._refresh_macro()
+            if repair_budget.macro.pending is not None:
+                return {"status":"held","memo_status":"macro_accounting_pending",
+                        "reason":"完整历史费用索引仍在核对，系统会继续处理。",
+                        "macro_progress":repair_budget.macro.pending,"cost_micros":0}
     sections, answers, calls = [], [], []
     cost_micros = 0
     repairs_left = max(0, int(max_repairs))
     repaired: list[dict[str, Any]] = []
-    for group, section_indexes, question_indexes in GROUPS:
+    for group_index, (group, section_indexes, question_indexes) in enumerate(GROUPS):
         kwargs = dict(group=group, section_titles=[titles[i] for i in section_indexes],
                       questions=[questions[i] for i in question_indexes],
                       material=frozen["material"], company=company, mission=mission)
-        outcome = draft_group(model, **kwargs)
+        if quiesce is not None:
+            kwargs["quiesce"] = quiesce
+        if repair_budget is not None:
+            repair_budget.begin_stage(max_units=max_units, allow_technical=bool(repairs_left), quiesce=quiesce)
+        outcome = _validated_group(store,draft_group(model, **kwargs),frozen['material'],company_ref=company_ref)
         cost_micros += int(outcome.get("model", {}).get("cost_micros") or outcome.get("cost_micros") or 0)
-        if outcome["status"] != "drafted" and outcome.get("repairable") and repairs_left:
+        first = {"group": group, "reason": outcome.get("reason"), "refs": outcome.get("refs") or []}
+        if isinstance(repair_budget, MemoRepairBudget) and outcome['status'] != 'drafted' and outcome.get('repairable'):
+            from .investment_memo_macro_accounting import request_id
+            prompt = build_group_prompt(**{key: kwargs[key] for key in ('group','section_titles','questions','material','company')}, repair=first)
+            repair_budget.prepare_repair({'purpose': 'investment_memo', 'request_id': request_id(group,prompt),
+                                         'prompt': prompt, 'mission': mission})
+        if (outcome["status"] != "drafted" and outcome.get("repairable") and repairs_left
+                and (repair_budget is None or repair_budget.can_repair(
+                    remaining_groups=len(GROUPS) - group_index - 1))):
             # One paid redo, told exactly which refs were refused and why.
             repairs_left -= 1
-            first = {"group": group, "reason": outcome["reason"], "refs": outcome.get("refs") or []}
-            outcome = draft_group(model, **kwargs, repair=first)
+            if repair_budget is not None:
+                repair_budget.begin_stage(max_units=max_units, allow_technical=False, quiesce=quiesce, repair=True)
+            outcome = _validated_group(store,draft_group(model, **kwargs, repair=first),frozen['material'],company_ref=company_ref)
             cost_micros += int(outcome.get("model", {}).get("cost_micros") or outcome.get("cost_micros") or 0)
             repaired.append(first)
+        for _maintenance_round in range(2):
+            if not (max_repairs > 0 and isinstance(repair_budget,MemoRepairBudget)
+                and outcome.get('status') != 'drafted' and outcome.get('failure_class') == 'content'):
+                break
+            context = {key:kwargs[key] for key in ('group','section_titles','questions','material','company')}
+            maintenance = repair_budget.prepare_maintenance(context=context,outcome=outcome,
+                remaining_groups=len(GROUPS)-group_index-1)
+            if maintenance is None:
+                break
+            if maintenance is not None:
+                repair_budget.begin_stage(max_units=max_units,allow_technical=False,quiesce=quiesce,
+                                          maintenance=maintenance)
+                outcome = _validated_group(store,draft_group(model,**kwargs,maintenance=maintenance),
+                                           frozen['material'],company_ref=company_ref)
+                cost_micros += int(outcome.get('model',{}).get('cost_micros') or outcome.get('cost_micros') or 0)
+                repaired.append({'group':group,'maintenance_permission_ref':maintenance['permission_ref'],
+                                 'parent_work_order_ref':maintenance['parent']['work_order_ref'],
+                                 'findings':maintenance['diagnostics']['findings']})
         if outcome["status"] != "drafted":
             refused = {"status": "refused", "memo_status": "draft_refused", "reason": outcome["reason"],
                        "cost_micros": cost_micros}
             if outcome.get("refs"):
                 refused["offending_refs"] = list(outcome["refs"])
+            if outcome.get('findings'):
+                refused['findings']=list(outcome['findings'])
+            if isinstance(repair_budget,MemoRepairBudget) and repair_budget.maintenance_hold is not None:
+                refused["maintenance_hold"] = repair_budget.maintenance_hold
             if repaired:
                 refused["repairs"] = repaired
             return refused
@@ -535,20 +651,38 @@ def run_memo(*, store: DaltonStore, frozen: Mapping[str, Any], model: Any, verif
     cells = index["cells"]
     from .mission_deliverable import pack_passage_resolver
 
-    resolve_passage = pack_passage_resolver(None, index["passages"])
     try:
+        from .investment_memo_market_history import checked_material
+        checked_material(store,frozen['material'],company_ref)
+        from .product_passage_validation import checked_rendered_passages
+        path = str(getattr(store,'path',':memory:'))
+        passages = checked_rendered_passages(Path(path).parent if path != ':memory:'
+                                            else ':memory:', sections, index['passages'])
+        resolve_passage = pack_passage_resolver(None, passages)
         sections = [validate_section(section, live_claim_refs=live_claims,
                                      resolve_cell=lambda cell: cells.get(str(cell.get("ref"))) == dict(cell),
                                      resolve_passage=resolve_passage,
                                      resolve_number=index["numbers"].get, strict=True)
                     for section in sections]
-    except MissionDeliverableError as exc:
+    except (MissionDeliverableError, ValueError, OSError) as exc:
         return {"status": "refused", "memo_status": "authority_validation_failed",
                 "reason": str(exc), "cost_micros": cost_micros}
     checks = _checks(sections, answers, frozen["material"])
     if any(check["status"] != "pass" for check in checks):
-        return {"status": "refused", "memo_status": "deterministic_gate_failed", "checks": checks,
-                "cost_micros": cost_micros}
+        from .investment_memo_question_gaps import CONTRACT_REF as gap_contract, build as question_gaps
+        refused = {"status": "refused", "memo_status": "deterministic_gate_failed", "checks": checks,
+                   "cost_micros": cost_micros}
+        try:
+            refused["key_question_gaps"] = question_gaps(frozen, answers, calls)
+        except (ValueError, KeyError, TypeError) as exc:
+            # Older valid group answers can omit an unknown's research action.
+            # Summary enrichment cannot change the original refusal, purchase
+            # a correction, or promote incomplete evidence to an available gap.
+            refused["key_question_gaps_unavailable"] = {
+                "contract_ref": gap_contract, "reason": str(exc)[:300],
+                "unknown_question_refs": [str(answer.get("question_ref")) for answer in answers
+                    if isinstance(answer, Mapping) and answer.get("unknown") is True][:12]}
+        return refused
     summary = "Investment Memo candidate; human approval is still required."
     fields = {"kind": "investment_memo", "subject_ref": company["company_ref"],
               "mission_version_ref": mission["id"], "mission_version_hash": mission["content_hash"],
@@ -565,7 +699,7 @@ def run_memo(*, store: DaltonStore, frozen: Mapping[str, Any], model: Any, verif
         or list(frozen["material"])
     verdict = verify_memo(verifier_model, sections=sections, questions=answers,
         material=verifier_material, material_hash=digest, mission=mission,
-        producer_route_decision_refs=routes)
+        producer_route_decision_refs=routes, **({"quiesce": quiesce} if quiesce is not None else {}))
     cost_micros += int(verdict.get("model", {}).get("cost_micros") or verdict.get("cost_micros") or 0)
     if verdict.get("status") != "verified" or verdict.get("verdict") != "pass":
         return {"status": "refused", "memo_status": "verification_failed", "verification": verdict,
@@ -604,7 +738,8 @@ def run_memo(*, store: DaltonStore, frozen: Mapping[str, Any], model: Any, verif
 def run(*, state_dir: Path, model_config_path: Path | None, verifier_model_config_path: Path | None,
         scheduler_db: Path | None = None, company_ref: str | None = None,
         model_factory: Callable[[], Any] | None = None,
-        verifier_model_factory: Callable[[], Any] | None = None) -> dict[str, Any]:
+        verifier_model_factory: Callable[[], Any] | None = None,
+        summary_dir: Path | None = None) -> dict[str, Any]:
     store = DaltonStore(str(state_dir / "core.sqlite"))
     frozen = collect_frozen_input(store, company_ref=company_ref)
     if frozen.get("status") != "ready":
@@ -612,8 +747,9 @@ def run(*, state_dir: Path, model_config_path: Path | None, verifier_model_confi
     if model_config_path is None or verifier_model_config_path is None:
         return {"schema_version": SUMMARY_SCHEMA_VERSION, "status": "held", "memo_status": "no_model_pair",
                 "reason": "memo producer and independent verifier configurations are both required"}
-    config = freeze_shared_budget_policy(json.loads(model_config_path.read_text(encoding="utf-8")))
-    verifier_config = freeze_shared_budget_policy(json.loads(verifier_model_config_path.read_text(encoding="utf-8")))
+    producer_bytes, verifier_bytes = model_config_path.read_bytes(), verifier_model_config_path.read_bytes()
+    config = freeze_shared_budget_policy(json.loads(producer_bytes))
+    verifier_config = freeze_shared_budget_policy(json.loads(verifier_bytes))
     producer_budget = resolve_call_budget(config, "investment_memo", defaults={
         "max_input_tokens": MAX_INPUT_TOKENS, "max_output_tokens": MAX_OUTPUT_TOKENS,
         "max_cost_usd": MAX_COST_USD, "timeout_seconds": TIMEOUT_SECONDS})
@@ -628,17 +764,52 @@ def run(*, state_dir: Path, model_config_path: Path | None, verifier_model_confi
         return CockpitModel(settings, scheduler_db=str(scheduler_db or state_dir / "scheduler.sqlite"),
                             max_input_tokens=MAX_INPUT_TOKENS, max_output_tokens=MAX_OUTPUT_TOKENS,
                             max_cost_usd=MAX_COST_USD, timeout_seconds=TIMEOUT_SECONDS)
-    # A repair is one more producer call; it is offered only when the run
-    # budget can still reserve it on top of the four drafts and the verifier.
-    headroom = float(run_budget["max_cost_usd"]) - (
-        4 * float(producer_budget["max_cost_usd"]) + float(verifier_budget["max_cost_usd"]))
-    repairs = min(MAX_REPAIRS, max(0, int(headroom // float(producer_budget["max_cost_usd"]))))
-    result = run_memo(store=store, frozen=frozen, model=(model_factory or (lambda: build(config)))(),
-                      verifier_model=(verifier_model_factory or (lambda: build(verifier_config)))(),
-                      max_units=int(run_budget["max_units"]), max_repairs=repairs)
+    # One repair may use savings from calls whose exact fees have settled.
+    # All remaining groups and the verifier retain their full reservations.
+    repairs = MAX_REPAIRS
+    from .investment_memo_repair_budget import MemoRepairBudget
+    from .investment_memo_failure_cost import MemoFailureCostReporter, with_failure_costs
+    failure_cost_watermarks = {}
+    producer_report = MemoFailureCostReporter((model_factory or (lambda: build(config)))(), watermarks=failure_cost_watermarks)
+    verifier_report = MemoFailureCostReporter((verifier_model_factory or (lambda: build(verifier_config)))(), watermarks=failure_cost_watermarks)
+    repair_budget = MemoRepairBudget(
+        producer_report,
+        run_micros=int(float(run_budget["max_cost_usd"]) * 1_000_000),
+        producer_micros=int(float(producer_budget["max_cost_usd"]) * 1_000_000),
+        verifier_micros=int(float(verifier_budget["max_cost_usd"]) * 1_000_000))
+    from .investment_memo_quiesce import RunQuiesce, MemoQuiesced, MemoQuiesceUnproved
+    quiesce = (RunQuiesce(summary_dir, model_config_path, verifier_model_config_path,
+                         producer_bytes=producer_bytes, verifier_bytes=verifier_bytes)
+               if summary_dir is not None else None)
+    try:
+        result = run_memo(store=store, frozen=frozen, model=repair_budget,
+                          verifier_model=verifier_report,
+                          max_units=int(run_budget["max_units"]), max_repairs=repairs, quiesce=quiesce,
+                          repair_budget=repair_budget)
+    except MemoQuiesced as stopped:
+        result = {"status": "quiesced", "memo_status": "quiesced", "resumable": True,
+                  "stop_reason": "cooperative_quiesce", "quiesce": stopped.request,
+                  "completed_calls": stopped.completed, "frozen_input_hash": content_hash(frozen),
+                  "cost_micros": sum(int(call.get("cost_micros") or 0)
+                                     for _, call, _, _ in quiesce.calls)}
+    except MemoQuiesceUnproved as exc:
+        result = {"status": "held", "memo_status": "quiesce_boundary_unproved", "resumable": False,
+                  "reason": str(exc), "cost_status": "unproved",
+                  "completed_work_refs": [call.get("work_order_ref") for _, call, _, _ in quiesce.calls]}
+    result = with_failure_costs(result, producer_report, verifier_report)
+    if result.get('memo_status')=='macro_accounting_pending':
+        from types import SimpleNamespace
+        from .mission_investment_memo_lane import company_signature
+        result['memo_input_signature']=company_signature(frozen,SimpleNamespace(
+            model_config_path=model_config_path,verifier_model_config_path=verifier_model_config_path))
     return {"schema_version": SUMMARY_SCHEMA_VERSION, **result,
             "budget": {"run": run_budget, "producer": producer_budget,
-                       "verifier": verifier_budget, "max_repairs": repairs}}
+                       "verifier": verifier_budget, "max_repairs": repairs,
+                       "repair_accounted_micros": repair_budget.accounted_micros,
+                       **({} if repair_budget.macro is None and repair_budget.macro_error is None else {
+                           'macro_accounting': (repair_budget.macro.last if repair_budget.macro else None),
+                           'macro_fee_audit_reason': repair_budget.macro_error or
+                            ('legacy_fee_audit_required' if repair_budget.macro and not repair_budget.macro.complete else None)})}}
 
 
 def main(argv: Sequence[str] | None = None) -> int:
@@ -653,11 +824,26 @@ def main(argv: Sequence[str] | None = None) -> int:
     args = parser.parse_args(argv)
     result = run(state_dir=args.state_dir, model_config_path=args.model_config,
                  verifier_model_config_path=args.verifier_model_config,
-                 scheduler_db=args.scheduler_db, company_ref=args.company_ref)
+                 scheduler_db=args.scheduler_db, company_ref=args.company_ref, summary_dir=args.summary_dir)
     text = json.dumps(result, ensure_ascii=False, sort_keys=True)
     if args.summary_dir:
+        # A deployment may close the writer as soon as it sees a paused child.
+        # Publish its receipt atomically and durably, not as a partial file.
+        import os
+        import tempfile
         args.summary_dir.mkdir(parents=True, exist_ok=True)
-        (args.summary_dir / "summary.json").write_text(text + "\n", encoding="utf-8")
+        fd, temporary = tempfile.mkstemp(prefix=".memo-summary-", dir=args.summary_dir)
+        try:
+            with os.fdopen(fd, "w", encoding="utf-8") as stream:
+                stream.write(text + "\n"); stream.flush(); os.fsync(stream.fileno())
+            os.replace(temporary, args.summary_dir / "summary.json")
+            fd = os.open(args.summary_dir, os.O_RDONLY)
+            try:
+                os.fsync(fd)
+            finally:
+                os.close(fd)
+        finally:
+            Path(temporary).unlink(missing_ok=True)
     if not args.quiet:
         print(text)
     return 0

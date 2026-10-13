@@ -23,7 +23,12 @@ from typing import Any, Callable, Mapping, Sequence
 from urllib.parse import quote
 
 from .dashboard import ProjectionWriter, SCHEMA_VERSION
-from .migrations.projection_indexes import WORK_ORDER_FOLD_COVER_INDEX
+from .projection_stage_diagnostics import stage_timing
+from .migrations.projection_indexes import (
+    WORK_ORDER_FOLD_COVER_INDEX, FORMAL_RESULT_FOLD_COVER_INDEX,
+    RESULT_ENVELOPE_FOLD_COVER_INDEX, ATTEMPT_EVENT_FOLD_COVER_INDEX,
+    LEASE_FOLD_COVER_INDEX,
+)
 from .projection_cancellation import check_cancelled, install_cancel_handler
 from .projection_folds import (
     _REGISTRY as _FOLD_REGISTRY,
@@ -296,12 +301,14 @@ _ATTEMPT_EVENT_FOLD = AppendOnlyFold(
     "scheduler.latest_events", "scheduler_attempt_events",
     "event_seq, work_order_id, state, attempt_number, event_id, created_at",
     key="event_id", init=dict, reduce=_keyed(lambda row: row["work_order_id"]),
+    cold_cover_index=ATTEMPT_EVENT_FOLD_COVER_INDEX.name,
 )
 _FORMAL_RESULT_FOLD = AppendOnlyFold(
     "scheduler.formal_results", "scheduler_formal_results",
     "work_order_id, result_record_id, attempt_number, result_envelope_id,"
     " terminal_state, created_at",
     key="result_record_id", init=dict, reduce=_keyed(lambda row: row["work_order_id"]),
+    cold_cover_index=FORMAL_RESULT_FOLD_COVER_INDEX.name,
 )
 _RESULT_ENVELOPE_FOLD = AppendOnlyFold(
     "scheduler.latest_receipts", "scheduler_result_envelopes",
@@ -309,6 +316,7 @@ _RESULT_ENVELOPE_FOLD = AppendOnlyFold(
     key="result_envelope_id", init=dict,
     reduce=_keyed_max(lambda row: row["work_order_id"],
                       lambda row: (row["attempt_number"], row["created_at"])),
+    cold_cover_index=RESULT_ENVELOPE_FOLD_COVER_INDEX.name,
 )
 _LEASE_FOLD = AppendOnlyFold(
     "scheduler.latest_leases", "scheduler_leases",
@@ -317,6 +325,7 @@ _LEASE_FOLD = AppendOnlyFold(
     key="lease_revision_id", init=dict,
     reduce=_keyed_max(lambda row: (row["work_order_id"], row["attempt_number"]),
                       lambda row: (row["lease_version"], row["created_at"])),
+    cold_cover_index=LEASE_FOLD_COVER_INDEX.name,
 )
 
 _INVOCATION_FOLD = AppendOnlyFold(
@@ -597,41 +606,43 @@ class DashboardProjector:
         # after the alias check.  Build a private sibling and atomically replace
         # the directory entry; this unlinks a hostile link instead of writing
         # through it.
-        destination.parent.mkdir(parents=True, exist_ok=True)
-        fd, temporary_name = tempfile.mkstemp(
-            prefix=f".{destination.name}.", suffix=".tmp", dir=destination.parent
-        )
-        os.close(fd)
-        temporary = Path(temporary_name)
-        try:
-            with ProjectionWriter(temporary, cancel_requested=self.cancel_requested) as writer:
-                writer.replace(snapshot)
-            sync_fd = os.open(temporary, os.O_RDONLY)
+        with stage_timing('projection_write'):
+            destination.parent.mkdir(parents=True, exist_ok=True)
+            fd, temporary_name = tempfile.mkstemp(
+                prefix=f".{destination.name}.", suffix=".tmp", dir=destination.parent
+            )
+            os.close(fd)
+            temporary = Path(temporary_name)
             try:
-                os.fsync(sync_fd)
+                with ProjectionWriter(temporary, cancel_requested=self.cancel_requested) as writer:
+                    writer.replace(snapshot)
+                sync_fd = os.open(temporary, os.O_RDONLY)
+                try:
+                    os.fsync(sync_fd)
+                finally:
+                    os.close(sync_fd)
+                check_cancelled(self.cancel_requested)
+                os.replace(temporary, destination)
+                directory_fd = os.open(destination.parent, os.O_RDONLY)
+                try:
+                    os.fsync(directory_fd)
+                finally:
+                    os.close(directory_fd)
             finally:
-                os.close(sync_fd)
-            check_cancelled(self.cancel_requested)
-            os.replace(temporary, destination)
-            directory_fd = os.open(destination.parent, os.O_RDONLY)
-            try:
-                os.fsync(directory_fd)
-            finally:
-                os.close(directory_fd)
-        finally:
-            if temporary.exists():
-                temporary.unlink()
-            for suffix in ("-journal", "-wal", "-shm"):
-                temporary.with_name(temporary.name + suffix).unlink(missing_ok=True)
+                if temporary.exists():
+                    temporary.unlink()
+                for suffix in ("-journal", "-wal", "-shm"):
+                    temporary.with_name(temporary.name + suffix).unlink(missing_ok=True)
         return snapshot
 
     def build_snapshot(self) -> dict[str, Any]:
-        check_cancelled(self.cancel_requested)
-        try:
-            return self._build_snapshot()
-        except sqlite3.Error:
+        with stage_timing('build_snapshot'):
             check_cancelled(self.cancel_requested)
-            raise
+            try:
+                return self._build_snapshot()
+            except sqlite3.Error:
+                check_cancelled(self.cancel_requested)
+                raise
 
     def _build_snapshot(self) -> dict[str, Any]:
         as_of_dt = self.clock()
@@ -830,28 +841,37 @@ class DashboardProjector:
             )
 
         def fill(state: dict) -> None:
-            # Only versions that became the latest since the last round are
-            # read, by primary key.
-            for artifact_ref, entry in state.items():
-                if entry[3] is not None:
-                    continue
-                table = (
-                    "observability_artifact_versions"
-                    if entry[2] == "0.1"
-                    else "observability_artifact_versions_v2"
-                )
-                record = core.execute(
-                    f"SELECT record_json FROM {table} WHERE version_id=?",
-                    (entry[1],),
-                ).fetchone()
-                if record is None:
-                    raise ProjectionSourceError(
-                        "artifact generation index points to a missing authority row"
+            # Keep the complete latest set and its original processing order.
+            # One cold snapshot can contain >100k artifacts. Read their exact
+            # immutable PKs in bounded batches instead of one query per row.
+            pending = [(ref, entry) for ref, entry in state.items() if entry[3] is None]
+            for offset in range(0, len(pending), 256):
+                batch = pending[offset:offset + 256]
+                records = {}
+                for schema, table in (
+                    (True, "observability_artifact_versions"),
+                    (False, "observability_artifact_versions_v2"),
+                ):
+                    refs = list(dict.fromkeys(entry[1] for _, entry in batch
+                                             if (entry[2] == "0.1") == schema))
+                    if not refs:
+                        continue
+                    placeholders = ",".join("?" for _ in refs)
+                    rows = core.execute(
+                        f"SELECT version_id,record_json FROM {table} "
+                        f"WHERE version_id IN ({placeholders})", refs,
+                    ).fetchall()
+                    records[schema] = {row["version_id"]: row for row in rows}
+                for artifact_ref, entry in batch:
+                    record = records.get(entry[2] == "0.1", {}).get(entry[1])
+                    if record is None:
+                        raise ProjectionSourceError(
+                            "artifact generation index points to a missing authority row"
+                        )
+                    wire = _json(record["record_json"], "artifact version")
+                    state[artifact_ref] = entry[:3] + (
+                        {name: wire[name] for name in _ARTIFACT_FIELDS if name in wire},
                     )
-                wire = _json(record["record_json"], "artifact version")
-                state[artifact_ref] = entry[:3] + (
-                    {name: wire[name] for name in _ARTIFACT_FIELDS if name in wire},
-                )
 
         read = _ARTIFACT_FOLD.read(core, identity, finish=fill)
         return [read.state[ref][3] for ref in sorted(read.state)]

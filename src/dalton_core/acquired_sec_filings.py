@@ -39,6 +39,7 @@ from pathlib import Path
 from typing import Any
 
 from .raw_spool import RawSpoolError, RawSpoolReader
+from .store import content_hash
 
 SOURCE_REF = "source:sec-edgar"
 DOCUMENT_REF_PREFIX = "sec:filing:"
@@ -46,6 +47,8 @@ SPOOL_ROOTS = ("transcript-spool", "connector-spool", "raw-spool")
 #: The forms the disclosure parsers read.  Anything else the discovery lane
 #: fetched (a proxy statement, an S-8) is not returned.
 READABLE_FORMS: tuple[str, ...] = ("10-Q", "10-K", "10-Q/A", "10-K/A", "8-K")
+from .sec_issuer_reporting_profile import FOREIGN_FORMS
+READABLE_FORMS += tuple(sorted(FOREIGN_FORMS))
 #: A Microsoft 10-K is 8.6 MB of inline XBRL.  Bounded so a malformed spool
 #: object cannot be decoded into memory without limit.
 MAX_FILING_BYTES = 16_000_000
@@ -90,6 +93,11 @@ def _submissions_row(state_dir: Path, connection: sqlite3.Connection,
         return None
     try:
         payload = json.loads(raw)
+        if "filings" not in payload:
+            from .sec_submissions_pages import submissions_payload,envelope_parameters,_record
+            discovery=_record(connection,"coverage_mission_source_discoveries","record_id",discovery_ref)
+            envelope=_record(connection,"connector_source_envelopes","source_envelope_id",discovery["source_envelope_ref"])
+            payload=submissions_payload(payload,envelope_parameters(connection,envelope))
         recent = payload["filings"]["recent"]
         accessions = recent["accessionNumber"]
         index = accessions.index(accession)
@@ -99,11 +107,37 @@ def _submissions_row(state_dir: Path, connection: sqlite3.Connection,
         return None
     if not isinstance(form, str) or not isinstance(filed, str) or len(filed) != 10:
         return None
+    if form in FOREIGN_FORMS:
+        # New foreign documents require the full existing source/query chain.
+        # A matching form in an unrelated raw root is not an acquired filing.
+        try:
+            from .sec_submissions_pages import _record, envelope_parameters
+            from .sec_filings_index import build_sec_filing_url_authorities, SecFilingsIndexError
+            d = _record(connection, 'coverage_mission_source_discoveries', 'record_id', discovery_ref)
+            e = _record(connection, 'connector_source_envelopes', 'source_envelope_id', d['source_envelope_ref'])
+            inv = _record(connection, 'connector_invocations', 'connector_invocation_id', d['connector_invocation_ref'])
+            params = envelope_parameters(connection, e)
+            ref = 'sec:filing:' + accession
+            if (d['source_ref'] != SOURCE_REF or e['source'] != SOURCE_REF or e['operation'] != 'list_filings'
+                    or e['content_hash'] != d['source_envelope_hash']
+                    or inv['content_hash'] != d['connector_invocation_hash']
+                    or inv['id'] != e['connector_invocation_ref']
+                    or d['parameters'] != params
+                    or d['query_hash'] != content_hash({'operation': 'list_filings', 'parameters': params})
+                    or ref not in d['document_refs'] or params['form'] != form
+                    or str(payload.get('cik', '')).zfill(10) != params['issuer']):
+                return None
+            authorities = build_sec_filing_url_authorities(raw, e, parameters=params)
+            if ref not in authorities:
+                return None
+        except (ValueError, KeyError, TypeError, sqlite3.Error, SecFilingsIndexError):
+            return None
     primary = None
     documents = recent.get("primaryDocument")
     if isinstance(documents, list) and index < len(documents):
         primary = documents[index]
     return {"form": form, "filing_date": filed,
+            **({'foreign_company_ref': d['company_ref'], 'foreign_canonical_url': authorities[ref]['canonical_url']} if form in FOREIGN_FORMS else {}),
             "issuer_name": payload.get("name") if isinstance(payload.get("name"), str) else None,
             "primary_document": primary if isinstance(primary, str) else None,
             "basis": "sec_submissions_artifact"}
@@ -183,14 +217,14 @@ def acquired_filing_documents(
                 tuple((row["document_ref"], row["ticket_ref"]) for row in candidates))
     if cache is not None and memo_key in cache:
         return cache[memo_key]
-    result = _read_candidates(connection, state, company_ref, candidates, limit)
+    result = _read_candidates(connection, state, company_ref, candidates, limit, allowed_company_refs=refs)
     if cache is not None:
         cache[memo_key] = result
     return result
 
 
 def _read_candidates(connection: sqlite3.Connection, state: Path, company_ref: str,
-                     candidates: list[Any], limit: int) -> dict[str, Any]:
+                     candidates: list[Any], limit: int, *, allowed_company_refs=None) -> dict[str, Any]:
     reader = _manifest_reader(state)
     if reader is None:
         return {"documents": [], "reports": [{
@@ -234,6 +268,10 @@ def _read_candidates(connection: sqlite3.Connection, state: Path, company_ref: s
             refuse("抓取的文件不是该申报的主文件（可能是附件）")
             continue
         form = str(identity["form"]).upper()
+        if form in FOREIGN_FORMS and (identity.get('foreign_company_ref') not in (allowed_company_refs or (company_ref,))
+                or identity.get('foreign_canonical_url') != url):
+            refuse('外国申报缺少当前公司的完整原文查询归属证明')
+            continue
         if form not in READABLE_FORMS:
             reports.append({"document_ref": document_ref, "accession": accession,
                             "status": "skipped", "reason": f"{form} 表格不在本解析范围内"})

@@ -18,7 +18,7 @@ import unittest
 from pathlib import Path
 
 from dalton_core.company_model_spec import (
-    MAX_FORECAST_QUARTERS,
+    MAX_ASSESSMENT_CHARS, MAX_FORECAST_QUARTERS,
     MAX_REVENUE_DRIVERS,
     TASK_HASH,
     CompanyModelSpecError,
@@ -250,8 +250,8 @@ class CompanyModelSpecTests(unittest.TestCase):
         self.assertEqual(json.loads(pretty), json.loads(compact))
         self.assertEqual(
             TASK_HASH,
-            # The accounting/EPS bridge guidance changes the task; historical specs remain readable.
-            "497833a7b632a3e195fc16c60c20c99315c5ba5630d2292b33feee894cc3b0ea",
+            # The assessment-only length widening changes the task; historical specs remain readable.
+            "608338bcd6cf70cbe6e012acd5f579b99d34f9d990d5bc846c4059a198eda9af",
         )
         self.assertNotEqual(
             TASK_HASH,
@@ -263,7 +263,7 @@ class CompanyModelSpecTests(unittest.TestCase):
             self.verify("not json")
         self.assertEqual(malformed.exception.code, "format")
 
-        overlong = _spec(assessment="x" * 1201)
+        overlong = _spec(assessment="x" * (MAX_ASSESSMENT_CHARS + 1))
         with self.assertRaises(CompanyModelSpecError) as length:
             self.verify(overlong)
         self.assertEqual(length.exception.code, "text_length")

@@ -321,7 +321,7 @@ class RankingTests(unittest.TestCase):
         picked = select_drivers(model())
         self.assertEqual(picked["selection"]["status"], "available")
         order = [item["driver"]["ref"] for item in picked["ranked"]]
-        self.assertEqual(order[:2], [REVENUE_DRIVER, COST_DRIVER])
+        self.assertEqual(order[:2], [COST_DRIVER, REVENUE_DRIVER])
         # SG&A and tax both swing exactly nothing; the tie is broken by ref, so
         # income tax sorts before selling, general and administrative.
         self.assertEqual(order[2:], [TAX_DRIVER, SGA_DRIVER])
@@ -366,6 +366,24 @@ class RankingTests(unittest.TestCase):
         self.assertNotIn(TAX_DRIVER,
                          [item["driver_ref"] for item in projection["drivers"]])
 
+    def test_typed_tax_share_does_not_reuse_a_historical_benefit_as_a_rate(self):
+        band = {"status": "available", "measure": "share_of_line", "count": 12,
+                "trough": {"value": "-0.23"}, "mean": {"value": "0.16"},
+                "peak": {"value": "0.87"}, "latest": {"value": "0.15"}}
+        original = json.loads(json.dumps(band))
+        for measure in ("share_of_line", "revenue_share", "operating_income_share"):
+            actual = fs._scenario_band({"role": "income_tax_expense"}, measure, band)
+            self.assertEqual(actual["status"], "unavailable")
+            self.assertIsNone(actual["trough"])
+        self.assertEqual(band, original)
+        self.assertEqual(fs._scenario_band({"role": "operating_expense"},
+                                          "share_of_line", band), original)
+        self.assertEqual(fs._scenario_band({"role": "income_tax_expense"},
+                                          "quarterly_growth", band), original)
+        safe = {**band, "trough": {"value": "0"}, "peak": {"value": "1"}}
+        self.assertEqual(fs._scenario_band({"role": "income_tax_expense"},
+                                          "share_of_line", safe), safe)
+
     def test_no_more_than_five_drivers_are_named(self):
         self.assertLessEqual(len(select_drivers(model())["ranked"]), MAX_DRIVERS)
 
@@ -373,7 +391,7 @@ class RankingTests(unittest.TestCase):
         # The ref says what the rule ranks by. It is not "elasticity-rank":
         # a projection computed under a rule that ranked by elasticity must
         # never be mistakable for one computed under this rule.
-        self.assertEqual(SELECTION_RULE_REF, "rule:swing-rank:1")
+        self.assertEqual(SELECTION_RULE_REF, "rule:swing-rank:3")
         self.assertEqual(SELECTION_RULE["ref"], SELECTION_RULE_REF)
         self.assertEqual(SELECTION_RULE_HASH, content_hash(SELECTION_RULE))
         self.assertEqual(SELECTION_RULE["unit_move"], "0.01")
@@ -387,7 +405,7 @@ class RankingTests(unittest.TestCase):
         # The rule states that every column is a flat hold, not a path, and
         # that a driver without a band is demoted rather than dropped.
         self.assertIn("held", SELECTION_RULE["measure"])
-        self.assertIn("none of them is a path", SELECTION_RULE["held_flat"])
+        self.assertIn("first open quarter", SELECTION_RULE["held_flat"])
         self.assertIn("demoted, not excluded", SELECTION_RULE["rank_fallback"])
 
 
@@ -485,9 +503,8 @@ class WhatIfTests(unittest.TestCase):
         self.assertIsNone(total["value"])
 
     def test_every_computed_column_says_it_holds_its_level_flat(self):
-        # "The trough" is not the trough quarter happening once; it is the
-        # whole horizon spent there. A reader who does not know that reads a
-        # far milder table than the one in front of them.
+        # Growth is a first-quarter shock; share assumptions span the horizon.
+        # Metadata must tell the reader which path each column uses.
         record = model()
         projection = build_projection(record)
         quarters = len(open_periods(record))
@@ -497,10 +514,27 @@ class WhatIfTests(unittest.TestCase):
                     self.assertFalse(row["held_flat"])
                     self.assertEqual(row["quarters_held"], 0)
                     continue
-                self.assertTrue(row["held_flat"])
-                self.assertEqual(row["quarters_held"], quarters)
+                shock = driver["measure"] == "quarterly_growth" and row["scenario"] != "ours"
+                self.assertEqual(row["held_flat"], not shock)
+                self.assertEqual(row["quarters_held"], 1 if shock else quarters)
                 for line in row["lines"]:
                     self.assertEqual(len(line["cells"]), quarters)
+
+    def test_growth_shock_matches_one_quarter_revision_not_repeated_growth(self):
+        from dalton_core.forecast_sensitivity import scenario_recompute
+        record = model()
+        first = min(str(p["end"]) for p in open_periods(record))
+        shocked, refs = scenario_recompute(record, REVENUE_DRIVER, Decimal("1.99"))
+        expected, expected_refs = recompute(record, REVENUE_DRIVER, Decimal("1.99"),
+                                            period_ends={first})
+        repeated, all_refs = recompute(record, REVENUE_DRIVER, Decimal("1.99"))
+        self.assertEqual(shocked, expected)
+        self.assertEqual(refs, expected_refs)
+        self.assertEqual(len(refs), 1)
+        self.assertGreater(len(all_refs), len(refs))
+        self.assertNotEqual(shocked, repeated)
+        # Recomputing the baseline after a shock proves no source mutation.
+        self.assertEqual(recompute(record, None, None)[0], recompute(model(), None, None)[0])
 
     def test_the_four_lines_are_the_four_the_rule_names(self):
         projection = build_projection(model())
@@ -576,8 +610,14 @@ class HorizonTests(unittest.TestCase):
         self.assertIsNone(cost["ours"]["value"])
         self.assertTrue(cost["ours"]["varies"])
         ours = next(row for row in cost["what_if"] if row["scenario"] == "ours")
-        self.assertEqual(ours["status"], "unavailable")
-        self.assertIn("not one number", ours["reason"])
+        self.assertEqual(ours["status"], "computed")
+        self.assertEqual(ours["scenario_path"], "baseline")
+        self.assertFalse(ours["held_flat"])
+        self.assertEqual(ours["replaced_assumption_refs"], [])
+        from dalton_core.forecast_sensitivity import scenario_lines
+        expected, _ = recompute(revised, None, None)
+        self.assertEqual(ours["lines"], scenario_lines(revised, expected,
+            [str(p["end"]) for p in open_periods(revised)]))
         # The band is unaffected: it is filed history, not our view of it.
         self.assertEqual(cost["band"]["peak"]["value"], "0.820000000000")
 
@@ -806,7 +846,7 @@ class RenderTests(unittest.TestCase):
         self.assertNotIn("not_material", text)
         self.assertIn("驱动因素按此排序", text)
         # The reader is told the columns are flat holds, not paths.
-        self.assertIn("每个情景列在所示全部季度中保持同一假设水平", text)
+        self.assertIn("季度增速情景只调整首个预测季度", text)
         self.assertIn("次历史高点：", text)
 
     def test_the_view_says_where_our_estimate_sits_in_the_band(self):

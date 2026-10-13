@@ -70,6 +70,12 @@ def dispatch(server: Any, params: Mapping[str, Any] | None = None, *,
     for key in ("open", "served", "found", "partial", "exhausted", "timeout", "waiting", "deferred",
                 "budget_blocked", "converted", "reopened"):
         out[key] = int(summary.get(key) or 0)
+    # Bounded refs and safe reason labels only; no question, text or error body.
+    out["selection"] = summary.get("results", [])[:MAX_REQUESTS_PER_TICK]
+    out["priority"] = summary.get("priority")
+    for key in ("out_of_time", "scheduling_busy"):
+        if summary.get(key):
+            out[key] = True
     return out
 
 

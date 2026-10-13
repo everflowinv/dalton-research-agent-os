@@ -977,7 +977,7 @@ test("an empty completion with the wrong attribution is still an attribution mis
 
 test("C2 long-context profile admits a 900-second request before dispatch", async () => {
   let called = 0;
-  const runtime = fakeRuntime();
+  const runtime = fakeRuntime(async () => result());
   const prior = runtime.llm.complete;
   runtime.llm.complete = async (...args) => { called++; return prior(...args); };
   const broker = new ModelBroker(runtime, config({ profiles: [{ id: "profile:research",
@@ -986,4 +986,64 @@ test("C2 long-context profile admits a 900-second request before dispatch", asyn
   assert.notEqual(result.error?.code, "PROFILE_LIMIT_EXCEEDED");
   assert.equal(called, 1);
   broker.close();
+});
+
+test("bounded 1800-second completion is admitted and replayed without a second dispatch", async () => {
+  let called = 0;
+  const runtime = fakeRuntime(async () => result());
+  const prior = runtime.llm.complete;
+  runtime.llm.complete = async (...args) => { called++; assert.ok(args[0].signal); return prior(...args); };
+  const broker = new ModelBroker(runtime, config({ profiles: [{ id: "profile:research",
+    model: "openai/gpt-5.6", maxTokens: 1000, timeoutMs: 1800000 }] }));
+  const input = request({ invocationId: "invocation:bounded-long", timeoutMs: 1800000 });
+  const completion = await broker.handle(input);
+  assert.equal(completion.ok, true);
+  const replay = await broker.handle(input);
+  assert.equal(replay.ok, true);
+  assert.equal(replay.idempotencyStatus, "duplicate");
+  assert.equal(called, 1);
+  broker.close();
+});
+
+test("timeout contract rejects overflow and preserves shorter explicit profiles before dispatch", async () => {
+  assert.throws(() => new ModelBroker(fakeRuntime(async () => result()), config({ profiles: [{ id: "profile:research",
+    model: "openai/gpt-5.6", maxTokens: 1000, timeoutMs: 1800001 }] })), /allowed range/);
+  assert.throws(() => validateRequest(request({ timeoutMs: 1800001 })), /completion maximum/);
+  for (const timeoutMs of [0, -1, 1800000.5, true]) {
+    assert.throws(() => validateRequest(request({ timeoutMs })));
+  }
+  let called = 0;
+  const runtime = fakeRuntime(async () => result());
+  runtime.llm.complete = async () => { called++; return result(); };
+  const broker = new ModelBroker(runtime, config({ profiles: [{ id: "profile:research",
+    model: "openai/gpt-5.6", maxTokens: 1000, timeoutMs: 900000 }] }));
+  const refused = await broker.handle(request({ invocationId: "invocation:short-explicit", timeoutMs: 1800000 }));
+  assert.equal(refused.error.code, "PROFILE_LIMIT_EXCEEDED");
+  assert.equal(called, 0);
+  broker.close();
+});
+
+test("plugin JSON timeout schema equals the request and runtime bound", async () => {
+  const { readFile } = await import("node:fs/promises");
+  const { MAX_COMPLETION_TIMEOUT_MS } = await import("../src/protocol.mjs");
+  const plugin = JSON.parse(await readFile(new URL("../openclaw.plugin.json", import.meta.url), "utf8"));
+  const schema = plugin.configSchema.properties.profiles.items.properties.timeoutMs;
+  assert.equal(schema.minimum, 1);
+  assert.equal(schema.maximum, MAX_COMPLETION_TIMEOUT_MS);
+});
+
+test("active profile limits read has no journal, capacity or provider side effect", async () => {
+  let calls = 0;
+  const journal = { get() { throw new Error("journal read forbidden"); }, claim() { throw new Error("journal claim forbidden"); } };
+  const broker = new ModelBroker({version:"test",llm:{complete(){calls++;throw new Error("provider forbidden");}}},config(),{journal});
+  const input=request({readProfileLimits:true});
+  const result=await broker.handle(input);
+  assert.equal(result.available,true);
+  assert.deepEqual(result.limits,{maxTokens:1000,timeoutMs:500});
+  assert.equal(result.requestHash,contentHash(validateRequest(input,4096)));
+  const {contentHash:hash,...body}=result;
+  assert.equal(hash,contentHash(body));
+  assert.equal(calls,0);assert.equal(broker.inFlight.size,0);
+  const absent=await broker.handle(request({readProfileLimits:true,model:"other/model"}));
+  assert.equal(absent.available,false);assert.equal(absent.limits,null);assert.equal(calls,0);
 });

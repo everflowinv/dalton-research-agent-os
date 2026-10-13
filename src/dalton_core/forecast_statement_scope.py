@@ -13,8 +13,9 @@ from .store import content_hash
 RULE_REF = "rule:forecast-statement-scope:1"
 
 
-def statement_scope(record: Mapping[str, Any], rows: Sequence[Mapping[str, Any]],
-                    connection: Any = None) -> tuple[list[Mapping[str, Any]], dict[str, Any] | None]:
+def _legacy_statement_scope(record: Mapping[str, Any], rows: Sequence[Mapping[str, Any]],
+                    connection: Any = None, *, frozen_scope: Mapping[str, Any] | None = None,
+                    period_bound: bool = False) -> tuple[list[Mapping[str, Any]], dict[str, Any] | None]:
     from .model_forecast_driver import ForecastModelValidationError
     declarations = {d["ref"]: d for d in (record.get("execution_contract") or {}).get("specification", {}).get("revenue_drivers") or []}
     plans = (record.get("execution_contract") or {}).get("specification", {}).get("driver_formulas") or []
@@ -23,6 +24,10 @@ def statement_scope(record: Mapping[str, Any], rows: Sequence[Mapping[str, Any]]
     manifests = []
     for plan in plans:
         members = [declarations.get(ref) for ref in plan.get("driver_refs") or []]
+        if period_bound and any(d and d.get("basis_period_family_bindings") for d in members):
+            # Only a new explicit period-bound proof uses the v4 path below.
+            # Stored static v1/v2/v3 scopes keep their exact original algorithm.
+            continue
         if plan.get("operator") != "sum" or not members or not all(d and d.get("basis_identity") for d in members):
             continue
         identities = [d["basis_identity"] for d in members]
@@ -74,8 +79,39 @@ def statement_scope(record: Mapping[str, Any], rows: Sequence[Mapping[str, Any]]
                 full.extend(statement_rows(connection, ingest, version_id=next(iter(bindings))))
         current = [r for r in full if in_family(r) and r.get("period_end") == latest]
         current_members = {(r.get("dimensions") or {})[axis] for r in current}
+        presentation_proofs = []
         if current_members != expected:
-            raise ForecastModelValidationError("segment scope must declare every current filed member; missing=" + str(sorted(current_members - expected)) + "; unknown=" + str(sorted(expected - current_members)))
+            refusal = "segment scope must declare every current filed member; missing=" + str(sorted(current_members - expected)) + "; unknown=" + str(sorted(expected - current_members))
+            if connection is None or not filing_map or not expected < current_members:
+                raise ForecastModelValidationError(refusal)
+            from .forecast_presentation_partition import presentation_partition
+            from .sec_filing_units import FilingUnitError
+            try:
+                for ingest in sorted(current_ingests):
+                    filing = dict(connection.execute("SELECT * FROM coverage_mission_statement_filings WHERE ingest_id=?", (ingest,)).fetchone())
+                    source_rows = [r for r in current if str(r.get("ingest_id")) == ingest]
+                    source = None
+                    if frozen_scope is not None:
+                        if frozen_scope.get("content_hash") != content_hash({k: v for k, v in frozen_scope.items() if k != "content_hash"}):
+                            raise FilingUnitError("frozen presentation scope hash drifted")
+                        partitions = [p for p in frozen_scope.get("partitions") or []
+                                      if p.get("output_ref") == plan["output_ref"] and p.get("concept") == concept
+                                      and p.get("statement") == statement and p.get("axis") == axis
+                                      and p.get("fixed_dimensions") == fixed and p.get("members") == sorted(expected)]
+                        if len(partitions) != 1:
+                            raise FilingUnitError("frozen presentation scope identity differs")
+                        originals = [p.get("source") for p in partitions[0].get("presentation_partitions") or []
+                                     if (p.get("source") or {}).get("document_ref") == "sec:filing:" + filing["accession"]]
+                        if len(originals) != 1:
+                            raise FilingUnitError("frozen presentation scope lacks one exact original receipt")
+                        source = originals[0]
+                    presentation_proofs.append(presentation_partition(
+                        connection, filing, source_rows, expected,
+                        concept=concept, axis=axis, fixed=fixed, source=source))
+            except (FilingUnitError, ValueError, KeyError, TypeError, OSError) as exc:
+                raise ForecastModelValidationError(refusal + "; presentation proof refused: " + str(exc)) from exc
+            if not presentation_proofs:
+                raise ForecastModelValidationError(refusal)
         scoped = [r for r in rows if in_family(r) and (r.get("dimensions") or {})[axis] in expected
                   and ((str((filing_map.get(str(r.get("ingest_id"))) or {}).get("accession") or r.get("accession")), str(r.get("period_end"))) in requested
                        if filing_map else r.get("period_end") in common)]
@@ -92,7 +128,8 @@ def statement_scope(record: Mapping[str, Any], rows: Sequence[Mapping[str, Any]]
                           "historical_quarters": common, "periods": [list(k) for k in sorted(groups, key=str)],
                           "context_refs": sorted({str(r["statement_context_ref"]) for r in scoped if r.get("statement_context_ref")}),
                           "statement_line_refs": sorted({str(r["line_id"]) for r in scoped if r.get("line_id")}),
-                          "current_membership_rows_hash": content_hash(current)})
+                          "current_membership_rows_hash": content_hash(current),
+                          **({"presentation_partitions": presentation_proofs} if presentation_proofs else {})})
     if not manifests:
         return list(rows), None
     # Consolidated leaves are still checked. Dimensional data from other
@@ -105,3 +142,72 @@ def statement_scope(record: Mapping[str, Any], rows: Sequence[Mapping[str, Any]]
                 "unmodeled_partitions_reason": "Other filed dimensions remain source data; only the specification's complete identity partitions enter this model's segment-sum assertion."}
     manifest["content_hash"] = content_hash(manifest)
     return scoped_rows, manifest
+
+
+def statement_scope(record: Mapping[str, Any], rows: Sequence[Mapping[str, Any]],
+                    connection: Any = None, *, frozen_scope: Mapping[str, Any] | None = None,
+                    source_groups: Mapping[str, Any] | None = None):
+    """New source-bound executions use every declared branch's exact family.
+
+    Existing v1 and unmarked proofs retain their algorithm and immutable bytes.
+    The original explicit-partition validator still checks all declared members
+    and source presentation proofs before a new execution scope is constructed.
+    """
+    from .forecast_execution_statement_scope import SUPPORTED_RULE_REFS, PERIOD_RULE_REF, TIMING_RULE_REF, execution_scope
+    from .model_forecast_driver import ForecastModelValidationError
+    period_bound = any(d.get("statement_period_family_bindings") for d in record.get("drivers") or [])
+    from .forecast_revenue_timing_partition import consumed
+    recognition_timing = consumed(record)
+    if recognition_timing and (frozen_scope is None or frozen_scope.get("rule_ref") == TIMING_RULE_REF):
+        declarations = {d["ref"]: d for d in (record.get("execution_contract") or {}).get("specification", {}).get("revenue_drivers") or []}
+        plans = (record.get("execution_contract") or {}).get("specification", {}).get("driver_formulas") or []
+        executed = {d["ref"]: d for d in record.get("drivers") or []}
+        from .forecast_revenue_timing_partition import AXIS
+        for plan in plans:
+            refs = plan.get("driver_refs") or []
+            if not any(AXIS in ((declarations.get(ref, {}).get("basis_identity") or {}).get("dimensions") or {}) for ref in refs):
+                continue
+            histories = [{c["period_end"] for c in executed.get("economic:" + ref, {}).get("history") or []}
+                         for ref in refs]
+            if (not histories or len(histories[0]) < 4
+                    or any(h != histories[0] for h in histories)):
+                raise ForecastModelValidationError("recognition timing requires all historical quarters without dropping a declared member")
+    if frozen_scope is not None and period_bound and frozen_scope.get("rule_ref") not in {PERIOD_RULE_REF, TIMING_RULE_REF}:
+        raise ForecastModelValidationError("explicit period-family execution requires its v4 source rule")
+    if frozen_scope is not None and frozen_scope.get("rule_ref") == RULE_REF:
+        return _legacy_statement_scope(record, rows, connection, frozen_scope=frozen_scope)
+    if frozen_scope is not None and frozen_scope.get("rule_ref") not in SUPPORTED_RULE_REFS:
+        raise ForecastModelValidationError("unknown frozen forecast statement scope")
+    if frozen_scope is not None and frozen_scope.get("content_hash") != content_hash({
+            k: v for k, v in frozen_scope.items() if k != "content_hash"}):
+        raise ForecastModelValidationError("frozen execution statement scope hash differs")
+    if source_groups is None:
+        if period_bound:
+            raise ForecastModelValidationError("explicit period-family execution lacks complete source-group authority")
+        if frozen_scope is not None:
+            raise ForecastModelValidationError("execution scope lacks its exact source-group proof")
+        return _legacy_statement_scope(record, rows, connection)
+    # Presentation receipts, when present, must be rechecked from the original
+    # exact source during durable replay, never replaced by today's receipt.
+    legacy_frozen = None
+    if frozen_scope is not None and frozen_scope.get("partitions"):
+        legacy_frozen = {"partitions": frozen_scope["partitions"]}
+        legacy_frozen["content_hash"] = content_hash(legacy_frozen)
+    _, prior_partition_scope = _legacy_statement_scope(
+        record, rows, connection, frozen_scope=legacy_frozen, period_bound=period_bound)
+    if period_bound:
+        plans = (record.get("execution_contract") or {}).get("specification", {}).get("driver_formulas") or []
+        executed = {d["ref"]: d for d in record.get("drivers") or []}
+        for plan in plans:
+            members = [executed.get("economic:" + ref) for ref in plan.get("driver_refs") or []]
+            if not any(d and d.get("statement_period_family_bindings") for d in members):
+                continue
+            histories = [{c["period_end"] for c in d.get("history") or []} for d in members if d]
+            if (len(histories) != len(members) or not histories or len(histories[0]) < 4
+                    or any(h != histories[0] for h in histories)):
+                raise ForecastModelValidationError("explicit period-family execution requires all common historical quarters without dropping members")
+    return execution_scope(record, rows, source_groups,
+                           prior_partition_scope=prior_partition_scope,
+                           **({"rule_ref": frozen_scope["rule_ref"]} if frozen_scope is not None
+                              else {"rule_ref": TIMING_RULE_REF} if recognition_timing
+                              else {"rule_ref": PERIOD_RULE_REF} if period_bound else {}))

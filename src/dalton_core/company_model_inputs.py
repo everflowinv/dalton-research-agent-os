@@ -84,6 +84,7 @@ NET_INCOME_CONCEPTS: tuple[str, ...] = (
 # cannot produce a table nobody can read.
 MAX_PERIODS = 24
 MIN_CASH_FLOW_QUARTERS = 4
+STATEMENT_IDENTITY_RULE_REF = "filed-input:declared-statement-source-identity:0.1"
 
 
 class ModelInputError(ValueError):
@@ -139,6 +140,7 @@ def _rows_of(spec: Mapping[str, Any]) -> list[dict[str, Any]]:
             "basis_concept": item.get("basis_concept"),
             "driver_kind": item.get("kind"), "unit": item.get("unit"),
             "because": item.get("because"),
+            **({k:item[k] for k in ("basis_operating_metric_ref","basis_operating_context_hash","basis_operating_context_evidence_refs")} if "basis_operating_metric_ref" in item else {}),
         })
     for item in spec.get("expense_lines") or []:
         row = {
@@ -194,24 +196,60 @@ def _statement_structure_concepts(spec: Mapping[str, Any]) -> set[str]:
     return concepts
 
 
+def _declared_statement_hints(spec: Mapping[str, Any]) -> dict[str, str]:
+    """Only an exact, unambiguous statement already declared by the spec.
+
+    A financial concept may be separately disclosed on income and cash. Do
+    not choose by its label, value, source age or financial role. Conflicting
+    declarations retain the old ambiguity rather than silently select a table.
+    """
+    structure = spec.get("financial_statement_structure")
+    if not isinstance(structure, Mapping):
+        return {}
+    by_ref = {line.get("ref"): line for line in structure.get("lines") or []
+              if isinstance(line, Mapping)}
+    declarations: dict[str, set[str]] = {}
+    for line in by_ref.values():
+        concept, statement = line.get("concept"), line.get("statement")
+        if line.get("kind") == "filed" and concept and statement in {"income", "cash", "balance"}:
+            declarations.setdefault(str(concept), set()).add(statement)
+    for formula in structure.get("formulas") or []:
+        if not isinstance(formula, Mapping):
+            continue
+        concept = formula.get("tie_out_concept")
+        output = by_ref.get(formula.get("output_ref")) or {}
+        statement = output.get("statement")
+        if concept and statement in {"income", "cash", "balance"}:
+            declarations.setdefault(str(concept), set()).add(statement)
+    return {concept: next(iter(statements)) for concept, statements in declarations.items()
+            if len(statements) == 1}
+
+
 def _series_for(
     missions: Any, company_ref: str, concept: str, *, legacy_replay: bool = False,
     non_additive_duration_policy: bool = True,
+    ifrs_non_additive_duration_policy: bool = False,
+    statement_hint: str | None = None,
 ) -> dict[str, Any]:
     """The filed series for one concept, and which statement it came from.
 
-    No statement is passed to the query. Across every company held, a concept
-    appears in exactly one statement, so filtering by a guessed statement could
-    only ever exclude the right answer; and when that stops being true the
-    ambiguity is reported rather than resolved by preference.
+    Legacy callers retain cross-statement ambiguity. A new calculation may
+    use the exact unique statement declared by its already verified structure;
+    every original line/context/value/unit binding and series gate still runs.
     """
 
     lines = missions.statement_series_lines(company_ref, concept)
     if not lines:
         return {"status": NOT_FOUND, "statement": None, "series": None}
     statements = sorted({str(row["statement"]) for row in lines})
+    statement_scope = None
     if len(statements) > 1:
-        return {"status": AMBIGUOUS, "statement": statements, "series": None}
+        if statement_hint not in statements:
+            return {"status": AMBIGUOUS, "statement": statements, "series": None}
+        statement_scope = {"rule_ref": STATEMENT_IDENTITY_RULE_REF,
+                           "statement": statement_hint, "observed_statements": statements}
+        lines = [line for line in lines if line["statement"] == statement_hint]
+        statements = [statement_hint]
     # The label must come from a row that is not a breakdown. Taking the last
     # row of any kind put "EMEA" on Accenture's total revenue -- the figures
     # were the totals and the name was a geography, which is worse than an
@@ -224,6 +262,7 @@ def _series_for(
     series = quarterly_series(
         lines, legacy_replay=legacy_replay,
         non_additive_duration_policy=non_additive_duration_policy,
+        ifrs_non_additive_duration_policy=ifrs_non_additive_duration_policy,
     )
     if not legacy_replay:
         for kind in ("quarters", "instants", "durations"):
@@ -239,6 +278,7 @@ def _series_for(
                            "content_hash": content_hash(evidence_rows)}
     return {
         **({"source_evidence": source_evidence} if source_evidence is not None else {}),
+        **({"statement_scope": statement_scope} if statement_scope is not None else {}),
         "status": FILED, "statement": statements[0],
         "label": (reported[-1]["label"] if reported else concept),
         "series": series,
@@ -454,9 +494,11 @@ def _input_statement_reader(missions: Any) -> Any:
 
 def build_model_inputs(
     missions: Any, spec: Mapping[str, Any], *, max_periods: int = MAX_PERIODS,
+    operating_driver_context: Mapping[str, Any] | None = None,
 ) -> dict[str, Any]:
     """One company's model rows, its filed history, and what still has to be estimated."""
 
+    source_authority = missions
     missions = _input_statement_reader(missions)
     company_ref = spec.get("company_ref")
     if not isinstance(company_ref, str) or not company_ref:
@@ -507,7 +549,7 @@ def build_model_inputs(
     structure_definition = spec.get("financial_statement_structure")
     non_additive_duration_policy = (
         isinstance(structure_definition, Mapping)
-        and structure_definition.get("schema_version") in {"0.4", "0.5", "0.6"}
+        and structure_definition.get("schema_version") in {"0.4", "0.5", "0.6", "0.7"}
     )
     for concept in statement_structure_concepts:
         concepts.setdefault(concept, [])
@@ -525,6 +567,7 @@ def build_model_inputs(
         if structure_definition.get("schema_version") in UPGRADEABLE_STRUCTURE_VERSIONS:
             coverage_candidates = set(coverage_concepts()) - set(concepts)
 
+    statement_hints = _declared_statement_hints(spec)
     filed: dict[str, dict[str, Any]] = {}
     for concept in sorted(concepts):
         filed[concept] = _series_for(
@@ -534,11 +577,14 @@ def build_model_inputs(
             # Outer company specs already reached 0.4 while their structures
             # were still 0.3, so only inner 0.4 and later opt into this correction.
             non_additive_duration_policy=non_additive_duration_policy,
+            ifrs_non_additive_duration_policy=(isinstance(structure_definition, Mapping) and structure_definition.get("schema_version") == "0.7"),
+            statement_hint=statement_hints.get(concept),
         )
     for concept in sorted(coverage_candidates):
         entry = _series_for(
             missions, company_ref, concept, legacy_replay=legacy_series,
             non_additive_duration_policy=non_additive_duration_policy,
+            ifrs_non_additive_duration_policy=(isinstance(structure_definition, Mapping) and structure_definition.get("schema_version") == "0.7"),
         )
         if entry["status"] == FILED and entry.get("series"):
             filed[concept] = entry
@@ -588,6 +634,8 @@ def build_model_inputs(
             "cells": {},
             "gaps": [],
         }
+        if entry.get("statement_scope") is not None:
+            line["statement_scope"] = entry["statement_scope"]
         if statement_structure_bound:
             line.update({"duration_facts": [], "ambiguous_periods": []})
             if entry.get("source_evidence") is not None:
@@ -678,10 +726,37 @@ def build_model_inputs(
                 missions, company_ref, set(concepts)),
         },
     }
+    operating_rows = [r for r in rows if r.get('basis_operating_metric_ref')]
+    if operating_rows:
+        from .operating_driver_context import OperatingDriverReadContext, metric_history
+        from pathlib import Path
+        if operating_driver_context is None:
+            database = source_authority.connection.execute('PRAGMA database_list').fetchall()
+            core_path = next(r[2] for r in database if r[1] == 'main')
+            with OperatingDriverReadContext(store=source_authority.store, state_dir=Path(core_path).parent) as reader:
+                bindings={r['ref']:r for row in operating_rows for r in row['basis_operating_context_evidence_refs']}
+                operating_driver_context = reader.projection(company_ref,evidence_bindings=list(bindings.values()))
+        lines = []
+        for row in operating_rows:
+            from .operating_driver_context import selected_context
+            selected=selected_context(operating_driver_context,row['basis_operating_context_evidence_refs'],row['basis_operating_context_hash'])
+            series = metric_history(selected, company_ref=company_ref, metric_ref=row['basis_operating_metric_ref'], expected_hash=row['basis_operating_context_hash'])
+            if series['unit'] != row['unit']:
+                raise ModelInputError('operating model unit differs from source history')
+            row.update(status='verified_reported', reason='Independent reported operating source; not a filed statement line.')
+            lines.append({**series,'driver_ref':row['ref'],'status':'verified_reported'})
+        result['operating_driver_lines'] = lines
+        result['readiness'].update(readiness(rows, filed_lines, periods))
+    if any(line.get("statement_scope") for line in filed_lines):
+        result["statement_identity_rule_ref"] = STATEMENT_IDENTITY_RULE_REF
     if cost_template is not None:
         result["cost_driver_template"] = dict(cost_template)
     identities=identity_input_lines(missions,spec)
     if identities: result["filed_identity_lines"]=identities
+    from .filed_period_composition import collect
+    composition = collect(source_authority, spec, result)
+    if composition is not None:
+        result["historical_income_composition"] = composition
     return result
 
 
@@ -766,12 +841,56 @@ def validate_statement_identity(value):
 def identity_input_lines(missions,spec):
     """Independent dimension-specific series; never reuse the consolidated selector."""
     result=[]
+    period_originals = {}
     for driver in spec.get("revenue_drivers") or []:
         if driver.get("basis_identity") is None:continue
         identity=validate_statement_identity(driver["basis_identity"]);concept=driver.get("basis_concept")
         if not concept:continue
-        rows=[r for r in missions.statement_series_lines(spec["company_ref"],concept,statement=identity["statement"])
-            if r.get("dimensions")==identity["dimensions"]]
+        period_proof = driver.get("basis_period_family_bindings")
+        if period_proof is None:
+            rows=[r for r in missions.statement_series_lines(spec["company_ref"],concept,statement=identity["statement"])
+                if r.get("dimensions")==identity["dimensions"]]
+        else:
+            from .period_source_family import verify_driver_bindings, identity_for_row
+            executed = {"statement_identity": identity, "statement_period_family_bindings": period_proof}
+            try:
+                identity_for_row(executed, {})
+            except ValueError as exc:
+                raise ModelInputError(str(exc)) from exc
+            filings = missions.statement_filings(spec["company_ref"])
+            scopes = period_proof["source_read_scopes"]
+            required = {s["ingest_id"]: s["context_refs"] for s in scopes}
+            if len(required) != len(scopes):
+                raise ModelInputError("period-family original read scope repeats a filing")
+            filing_map = {f["ingest_id"]: f for f in filings}
+            if not set(required).issubset(filing_map):
+                raise ModelInputError("period-family original filing authority is missing")
+            held = [filing_map[s["ingest_id"]] for s in scopes]
+            originals = []
+            for filing in held:
+                ingest = filing["ingest_id"]
+                for context_ref in required[ingest]:
+                    key = (ingest, context_ref)
+                    if key not in period_originals:
+                        period_originals[key] = missions.statement_lines(ingest,
+                            context_version_ref=context_ref, latest_context=False)
+                    originals.extend(period_originals[key])
+            try:
+                verify_driver_bindings(period_proof, driver=driver, company_ref=spec["company_ref"],
+                                       filings=held, rows=originals)
+            except ValueError as exc:
+                raise ModelInputError(str(exc)) from exc
+            filing_by_ingest = {f["ingest_id"]: f for f in held}
+            rows=[]
+            for row in originals:
+                selected = identity_for_row(executed, row)
+                if (row.get("concept") != concept or selected is None
+                        or row.get("statement") != selected["statement"]
+                        or row.get("dimensions") != selected["dimensions"]):
+                    continue
+                filing=filing_by_ingest[row["ingest_id"]]
+                rows.append({**row,"accession":filing["accession"],"filed":filing["filed"],
+                    "report_date":filing["report_date"],"filing_form":filing["form"]})
         evidence_fields=("line_id","ingest_id","ordinal","statement","concept","period_start","period_end","value","unit","accession","filed","dimensions","statement_context_ref")
         evidence=[{k:r[k] for k in evidence_fields if k in r} for r in rows]
         # Once exact identity is selected, the quarterly arithmetic has no mix of segments.
@@ -779,7 +898,9 @@ def identity_input_lines(missions,spec):
         units={_model_unit(c.get("unit")) for c in series["quarters"] if c.get("unit")}
         cells={c["period_end"]:{**c,"unit":_model_unit(c["unit"])} for c in series["quarters"]}
         result.append({"driver_ref":driver["ref"],"concept":concept,"statement":identity["statement"],"statement_identity":identity,
+            **({"statement_period_family_bindings":period_proof} if period_proof is not None else {}),
             "label":driver["label"],"status":FILED if cells and len(units)==1 else NOT_FOUND,"cells":cells,
-            "source_evidence":{"rule_ref":"filed-input-evidence:exact-dimensional-context:1","rows":evidence,"content_hash":content_hash(evidence)},
+            "source_evidence":{"rule_ref":("filed-input-evidence:period-source-family:1" if period_proof is not None
+                else "filed-input-evidence:exact-dimensional-context:1"),"rows":evidence,"content_hash":content_hash(evidence)},
             "gaps":series.get("ambiguous_periods") or []})
     return result

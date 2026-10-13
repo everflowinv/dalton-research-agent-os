@@ -150,6 +150,12 @@ def iter_candidates(state_dir: str | Path) -> Iterator[Candidate]:
                         state / FETCH_DIR / name / "exhibit-manifest.json")
         yield Candidate(f"fetch-annual-exhibit:{name}", "fetch_annual_report_exhibit",
                         state / FETCH_DIR / name / "annual-report-exhibit-manifest.json")
+        # Fixed bounded per-ticket attachment paths; full membership is re-proved
+        # before any body can enter the corpus.
+        for ordinal in range(8):
+            path = state / FETCH_DIR / name / f'interim-attachment-{ordinal:03d}-manifest.json'
+            if path.is_file():
+                yield Candidate(f'fetch-interim:{name}:{ordinal}', 'fetch_interim_attachment', path)
 
 
 # ---------------------------------------------------------------------------
@@ -618,12 +624,14 @@ def _guidepoint(ctx: CorpusContext, manifest: Mapping[str, Any]) -> DocumentBody
 
 
 _FORM_KINDS = {"10-K": "sec_10k", "10-K/A": "sec_10k", "10-Q": "sec_10q", "10-Q/A": "sec_10q",
-               "8-K": "sec_8k", "8-K/A": "sec_8k"}
+               "8-K": "sec_8k", "8-K/A": "sec_8k", "6-K": "sec_6k", "6-K/A": "sec_6k",
+               "20-F": "sec_20f", "20-F/A": "sec_20f", "40-F": "sec_40f", "40-F/A": "sec_40f"}
 
 
 def _fetch(ctx: CorpusContext, candidate: Candidate, manifest: Mapping[str, Any]) -> DocumentBody:
     annual = candidate.family == "fetch_annual_report_exhibit"
-    exhibit = candidate.family in {"fetch_exhibit", "fetch_annual_report_exhibit"}
+    interim = candidate.family == 'fetch_interim_attachment'
+    exhibit = candidate.family in {"fetch_exhibit", "fetch_annual_report_exhibit", 'fetch_interim_attachment'}
     ticket_ref = "public-web-fetch:" + candidate.path.parent.name
     attachment = None
     if annual:
@@ -645,6 +653,27 @@ def _fetch(ctx: CorpusContext, candidate: Candidate, manifest: Mapping[str, Any]
                 attachment = exact
         except Exception as exc:
             raise CorpusSkip('年报附件来源无法复核：'+str(exc)) from exc
+    if interim:
+        from types import SimpleNamespace
+        from .connector_authority_port import ReadOnlyConnectorReceiptReader
+        from .sec_interim_attachments import verified_sources
+        parents = [r for r in ctx.discovered_by_ticket(ticket_ref)
+                   if r['source_ref'] == 'source:sec-edgar' and r['status'] == 'acquired'
+                   and str(r['document_ref']).startswith('sec:filing:')]
+        if not parents or ctx.core is None:
+            raise CorpusSkip('外国披露附件没有已取得的原申报')
+        exacts = []
+        try:
+            for parent in parents:
+                sources = verified_sources(SimpleNamespace(connection=ctx.core), ctx.spool, ctx.state,
+                    ticket_ref=ticket_ref, parent_document_ref=parent['document_ref'], company_ref=parent['company_ref'],
+                    receipt_reader=ReadOnlyConnectorReceiptReader(ctx.core), max_source_chars=MAX_TEXT_CHARS)
+                choices = [item for item in sources if item['manifest'] == manifest]
+                if len(choices) != 1: raise CorpusSkip('外国披露附件清单不属于完整原件集合')
+                exacts.append(choices[0])
+        except Exception as exc:
+            raise CorpusSkip('外国披露附件来源无法复核：' + str(exc)) from exc
+        attachment = exacts[0]
     if int(manifest.get("body_bytes") or 0) > MAX_RAW_BYTES:
         raise CorpusSkip("网页正文超过索引读取上限")
     digest = manifest.get("body_sha256")
@@ -654,7 +683,7 @@ def _fetch(ctx: CorpusContext, candidate: Candidate, manifest: Mapping[str, Any]
         raise CorpusSkip("网页渲染后没有可读文字")
     url = str(manifest.get("canonical_url") or manifest.get("final_url") or "") or None
     rows = ctx.discovered_by_ticket(ticket_ref)
-    if annual: rows = parents
+    if annual or interim: rows = parents
     filed = sorted({row["company_ref"] for row in rows})
     mission_ref = next((row["document_ref"] for row in rows), None)
     host = str(manifest.get("host") or "")
@@ -672,12 +701,12 @@ def _fetch(ctx: CorpusContext, candidate: Candidate, manifest: Mapping[str, Any]
         filed_date = identity.get("filing_date")
         if exhibit:
             release_period = ctx.release_exhibit_urls().get(url or "")
-            exhibit_no = "13" if annual else ("99.1" if release_period is not None or re.search(r"ex[-_]?99|exhibit99|99-?1", filename, re.I) else None)
-            document_ref = f"sec:exhibit:{accession}:{filename}"
-            kind = "sec_exhibit"
+            exhibit_no = None if interim else "13" if annual else ("99.1" if release_period is not None or re.search(r"ex[-_]?99|exhibit99|99-?1", filename, re.I) else None)
+            document_ref = attachment['document_ref'] if interim else f"sec:exhibit:{accession}:{filename}"
+            kind = 'sec_6k' if interim else "sec_exhibit"
             title = " ".join(part for part in (issuer, form or "8-K", f"Exhibit {exhibit_no}" if exhibit_no else "exhibit",
                                                 filed_date) if part)
-            period = (f"PE{identity['report_date']}" if annual and identity.get('report_date') else release_period or period_label(text[:3000]))
+            period = None if interim else (f"PE{identity['report_date']}" if annual and identity.get('report_date') else release_period or period_label(text[:3000]))
         else:
             primary = identity.get("primary_document")
             document_ref = (f"sec:filing:{accession}" if not primary or primary == filename
@@ -696,7 +725,8 @@ def _fetch(ctx: CorpusContext, candidate: Candidate, manifest: Mapping[str, Any]
             metadata={"accession": accession, "form": form or None, "filename": filename,
                       "body_sha256": digest, "fetch_document_ref": manifest.get("document_ref"),
                       "mission_document_ref": mission_ref, "exhibit": exhibit,
-                      **({'annual_report_attachment': attachment['binding']} if attachment else {})},
+                      **({('interim_attachment' if interim else 'annual_report_attachment'): attachment['binding']} if attachment else {}),
+                      **({'financial_periods_inferred': False} if interim else {})},
         )
     document_ref = mission_ref or str(manifest.get("document_ref") or "")
     if not document_ref:
@@ -730,7 +760,7 @@ def load_document(ctx: CorpusContext, candidate: Candidate) -> DocumentBody:
         body = _feed(ctx, candidate, manifest)
     elif candidate.family == "guidepoint":
         body = _guidepoint(ctx, manifest)
-    elif candidate.family in ("fetch", "fetch_exhibit", "fetch_annual_report_exhibit"):
+    elif candidate.family in ("fetch", "fetch_exhibit", "fetch_annual_report_exhibit", 'fetch_interim_attachment'):
         body = _fetch(ctx, candidate, manifest)
     else:
         raise CorpusSkip(f"未知的资料类型 {candidate.family}")

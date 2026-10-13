@@ -115,6 +115,51 @@ class PlanChangeCadenceTests(unittest.TestCase):
         coordinator.settle_dispatches()
         return search
 
+    def test_found_quarter_advances_real_request_and_does_not_repeat_next_tick(self):
+        for company in self.mission["universe"][:2]:
+            with self.subTest(company=company["company_ref"]):
+                self.company = company["company_ref"]
+                plan = self.plan("discovery-plan:targets:" + company["ticker"].lower(),
+                                 [V3_VARIANTS[0]])
+                coordinator, search = self.coordinator(plan)
+                gaps = ("FY2026-Q1", "FY2026-Q2")
+                with patch.object(coordinator, "_period_state", return_value=(gaps, frozenset())):
+                    self.assertEqual(coordinator.launch_discovery()["status"], "launched")
+                    coordinator.settle_dispatches()
+                self.clock.advance(hours=1)
+                with patch.object(coordinator, "_period_state", return_value=(gaps, frozenset({gaps[0]}))):
+                    moved = coordinator.launch_discovery()
+                    self.assertEqual(moved["status"], "launched", moved)
+                    self.assertEqual(search.starts[-1]["missing_periods"], [gaps[1]])
+                    self.assertIsNone(search.starts[-1]["cursor"])
+                    coordinator.settle_dispatches()
+                    discoveries = self.missions.source_discoveries(
+                        self.mission["id"], company_ref=self.company, spec_ref=SPEC)
+                    self.assertEqual(discoveries[0]["parameters"]["query"], "Alphabet Q2 2026")
+                    with patch.object(coordinator.selection_launcher, "currently_consumed", return_value=[]) as selected:
+                        held = coordinator.launch_discovery()
+                    self.assertEqual(held["status"], "idle", held)
+                    self.assertEqual(len(search.starts), 2)
+                    self.assertEqual(selected.call_args.kwargs["missing_periods_by_company"],
+                                     {self.company: list(gaps)})
+                    restarted, restarted_search = self.coordinator(plan)
+                    with patch.object(restarted, "_period_state", return_value=(gaps, frozenset({gaps[0]}))):
+                        self.assertEqual(restarted.launch_discovery()["status"], "idle")
+                        self.assertEqual(restarted_search.starts, [])
+
+    def test_all_missing_quarters_wait_for_candidates_without_bare_name_search(self):
+        coordinator, search = self.coordinator(self.plan("discovery-plan:all-candidates", V3_VARIANTS))
+        gaps = ("FY2026-Q1", "FY2026-Q2")
+        with patch.object(coordinator, "_period_state", return_value=(gaps, frozenset(gaps))):
+            held = coordinator.launch_discovery()
+            self.assertEqual(held["status"], "idle", held)
+            self.assertIn("候选资料", held["skipped"][0]["reason"])
+            self.assertEqual(search.starts, [])
+        # A failed acquisition stops being a candidate in the stage projection.
+        with patch.object(coordinator, "_period_state", return_value=(gaps, frozenset({gaps[1]}))):
+            self.assertEqual(coordinator.launch_discovery()["status"], "launched")
+            self.assertEqual(search.starts[-1]["missing_periods"], [gaps[0]])
+
     def test_a_new_plan_with_a_new_first_query_is_searched_at_once(self) -> None:
         v2 = self.plan("discovery-plan:ws:alphaengine:2", V2_VARIANTS)
         v3 = self.plan("discovery-plan:ws:alphaengine:3", V3_VARIANTS)

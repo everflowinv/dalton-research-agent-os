@@ -572,7 +572,7 @@ class CompanyAndOverviewTests(unittest.TestCase):
         f = fixtures(**{"/v2/data/charts/model": {"kind": "model", "status": "empty", "empty_reason": "该公司还没有预测模型：还没有确定模型规格。"}})
         out = run({"c": "#/company/ACN/model"}, fixtures=f)
         text = out["results"]["c"]["text"]
-        self.assertIn("尚未生成完整财务模型：当前缺少关键财务假设，无法导出有效 Excel 测算底稿。", text)
+        self.assertIn("预测结果尚未生成，暂时无法导出 Excel 底稿。", text)
         self.assertIn("该公司还没有预测模型", text)
 
     def test_export_stays_when_a_chart_module_replaces_the_model_table(self):

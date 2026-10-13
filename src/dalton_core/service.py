@@ -28,7 +28,7 @@ from .dashboard_projector import project_dashboard
 from .projection_cancellation import ProjectionCancelled, check_cancelled
 from .agenda_coordinator import AgendaCoordinator, AgendaCoordinatorConfig
 from .agenda_control import AgendaControlConfig
-from .backup import DatabaseBackupManager
+from .backup import BackupCancelled, DatabaseBackupManager
 from .openclaw_agenda_bridge import OpenClawAgendaBridge, OpenClawAgendaBridgeConfig
 from .plugins.static_dashboard import StaticDashboardPlugin
 from .scheduler import Scheduler
@@ -677,6 +677,7 @@ class DaltonService:
                 **({"model-router": config.model_router_db} if config.model_router_db else {}),
             },
             keep_latest=config.backup_keep_latest,
+            cancel_requested=self._stop.is_set,
         )
         self._backup_executor: concurrent.futures.ThreadPoolExecutor | None = None
         self._backup_future: concurrent.futures.Future[dict[str, Any]] | None = None
@@ -822,9 +823,8 @@ class DaltonService:
         self._sweep_future = None
         backup_executor, self._backup_executor = self._backup_executor, None
         if backup_executor is not None:
-            # An interrupted SQLite backup is not useful. A controlled stop
-            # therefore drains the one admitted backup before the controller
-            # closes its own authority connections.
+            # A requested stop cancels backup work only at safe checkpoints,
+            # cleans partial hidden output, then closes authority connections.
             backup_executor.shutdown(wait=True, cancel_futures=True)
             self._poll_backup(allow_launch=False)
         projection_executor, self._projection_executor = self._projection_executor, None
@@ -1122,6 +1122,11 @@ class DaltonService:
             self._backup_state["last_completed_at"] = _utc_now()
             try:
                 result = future.result()
+            except (BackupCancelled, concurrent.futures.CancelledError):
+                self._backup_state.update(
+                    state="cancelled", last_error=None,
+                    stop_reason="cooperative_backup_stop")
+                return
             except Exception as exc:
                 self._last_backup_monotonic = time.monotonic()
                 self._backup_state.update(

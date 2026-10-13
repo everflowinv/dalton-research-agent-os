@@ -5,6 +5,7 @@ import fcntl
 import json
 import math
 import os
+import sqlite3
 import tempfile
 from pathlib import Path
 from typing import Any
@@ -90,9 +91,19 @@ def synchronize_day_budget_policy(state_dir: str | Path,
                 raise ValueError("service budget ledger differs from model ledger")
     # Dry-run never creates an authority, a lock, or a revision receipt.
     if dry_run:
-        with ThesisImpactBudgetStore(db, read_only=True) as budget:
+        try:
+            reader = ThesisImpactBudgetStore(db, read_only=True)
+        except sqlite3.OperationalError:
+            # An idle ledger can have checkpointed away its WAL/SHM. Only
+            # immutable policy rows are needed here; the guarded reader
+            # rejects live pages or a changing file and creates no sidecars.
+            from .budget_policy_snapshot import read_checkpointed_budget_policy
             for ref in refs:
-                budget.policy(ref)
+                read_checkpointed_budget_policy(db, ref)
+        else:
+            with reader as budget:
+                for ref in refs:
+                    budget.policy(ref)
         return {"status": "planned", "day_cap_micros": micros, "config_count": len(models)}
 
     lock_path = state / ".day-budget-configuration.lock"

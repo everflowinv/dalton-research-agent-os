@@ -395,7 +395,10 @@ def coverage_structure_assumptions(
                 if samples:
                     window = samples[-_TRAILING:]
                     used = [end for _value, end in window]
-                    if len({base_values[end] > 0 for end in used}) == 1:
+                    # Tax has its own bounded, discrete-item-aware rule. A
+                    # loss quarter must not prevent that rule from inspecting
+                    # the complete held history. Other shares keep their sign gate.
+                    if role == "income_tax_expense" or len({base_values[end] > 0 for end in used}) == 1:
                         if role == "income_tax_expense":
                             trailing_value, used = _effective_rate(values, base_values, ends)
                             skipped = [end for end in discrete_tax_quarters(

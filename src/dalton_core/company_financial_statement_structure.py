@@ -31,9 +31,12 @@ REVENUE_PRETAX_SCHEMA_VERSION = "0.5"
 # cash and balance statements are open for leaf lines, and the code completes
 # and repairs a drafted structure (``forecast_coverage``) before it binds.
 COVERAGE_SCHEMA_VERSION = "0.6"
+ANNUAL_CASH_SCHEMA_VERSION = "0.7"
+ANNUAL_CASH_VALIDATION_REF = "filed-annual-cash-leaf-semantics:0.1"
 SCHEMA_VERSION = COVERAGE_SCHEMA_VERSION
 STRUCTURE_AUTHORITY_REF = "company-financial-statement-structure:0.6"
 NET_INCOME_SOURCE_CARRY_VALIDATION_REF = "filed-net-income-source-carry:0.1"
+CASH_LEAF_DURATION_UNIT_VALIDATION_REF = "filed-cash-leaf-duration-unit-proof:0.1"
 _STRUCTURE_AUTHORITY_REFS = {
     LEGACY_SCHEMA_VERSION: "company-financial-statement-structure:0.1",
     ANNUAL_SCHEMA_VERSION: "company-financial-statement-structure:0.2",
@@ -41,6 +44,7 @@ _STRUCTURE_AUTHORITY_REFS = {
     DIRECT_GROSS_PRETAX_SCHEMA_VERSION: "company-financial-statement-structure:0.4",
     REVENUE_PRETAX_SCHEMA_VERSION: "company-financial-statement-structure:0.5",
     COVERAGE_SCHEMA_VERSION: STRUCTURE_AUTHORITY_REF,
+    ANNUAL_CASH_SCHEMA_VERSION: "company-financial-statement-structure:0.7",
 }
 
 STATEMENTS = ("income", "balance", "cash")
@@ -122,17 +126,17 @@ DILUTED_EPS_NUMERATOR_NOTE_TARGET = "financial_note:diluted_eps_numerator:0.1"
 _ANNUAL_STRUCTURE_VERSIONS = {
     ANNUAL_SCHEMA_VERSION, TYPED_NOTE_SCHEMA_VERSION,
     DIRECT_GROSS_PRETAX_SCHEMA_VERSION, REVENUE_PRETAX_SCHEMA_VERSION,
-    COVERAGE_SCHEMA_VERSION,
+    COVERAGE_SCHEMA_VERSION, ANNUAL_CASH_SCHEMA_VERSION,
 }
 _TYPED_NOTE_STRUCTURE_VERSIONS = {
     TYPED_NOTE_SCHEMA_VERSION, DIRECT_GROSS_PRETAX_SCHEMA_VERSION,
-    REVENUE_PRETAX_SCHEMA_VERSION, COVERAGE_SCHEMA_VERSION,
+    REVENUE_PRETAX_SCHEMA_VERSION, COVERAGE_SCHEMA_VERSION, ANNUAL_CASH_SCHEMA_VERSION,
 }
-_REVENUE_PRETAX_VERSIONS = {REVENUE_PRETAX_SCHEMA_VERSION, COVERAGE_SCHEMA_VERSION}
+_REVENUE_PRETAX_VERSIONS = {REVENUE_PRETAX_SCHEMA_VERSION, COVERAGE_SCHEMA_VERSION, ANNUAL_CASH_SCHEMA_VERSION}
 
 
 def is_coverage_structure(value: Any) -> bool:
-    return value == COVERAGE_SCHEMA_VERSION
+    return value in (COVERAGE_SCHEMA_VERSION, ANNUAL_CASH_SCHEMA_VERSION)
 
 
 def _schema_object(properties: Mapping[str, Any], required: Sequence[str]) -> dict[str, Any]:
@@ -367,6 +371,19 @@ class FinancialStatementStructureError(ValueError):
     pass
 
 
+class FinancialStatementStructureNotReady(FinancialStatementStructureError):
+    """An exact validated replay with insufficient execution inputs.
+
+    This is diagnostic authority only: it does not permit publishing or
+    changing the specification. Callers can reconstruct the original replay
+    before asking the ordinary material lane for missing history.
+    """
+    def __init__(self, structure, replay):
+        self.structure = dict(structure)
+        self.replay = dict(replay)
+        super().__init__("statement structure is not ready for forecast")
+
+
 def _closed(value: Any, fields: set[str], name: str) -> dict[str, Any]:
     if not isinstance(value, Mapping) or set(value) != fields:
         raise FinancialStatementStructureError(f"{name} has an invalid closed shape")
@@ -411,6 +428,9 @@ def financial_input_authority(value: Mapping[str, Any]) -> dict[str, Any]:
         "filed_lines": lines,
         "cash_flow_inputs": list(value.get("cash_flow_inputs") or []),
     }
+    if "historical_income_composition" in value:
+        projection["schema_version"] = "financial-input-authority-0.3"
+        projection["historical_income_composition"] = value["historical_income_composition"]
     return {**projection, "content_hash": content_hash(projection)}
 
 
@@ -641,7 +661,7 @@ def _normalize_line(
         if line[field] not in allowed:
             raise FinancialStatementStructureError(f"lines[{index}].{field} is invalid")
     if line["role"] in STATEMENT_LEAF_ROLES:
-        _normalize_statement_leaf(line, index, filed)
+        _normalize_statement_leaf(line, index, filed, schema_version=schema_version, validate_values=validate_values)
         return line
     if line["statement"] != "income" or line["period_kind"] != "duration":
         raise FinancialStatementStructureError(
@@ -780,12 +800,14 @@ def _normalize_line(
 
 
 def _normalize_statement_leaf(
-    line: dict[str, Any], index: int, filed: Mapping[str, Mapping[str, Any]],
+    line: dict[str, Any], index: int, filed: Mapping[str, Mapping[str, Any]], *,
+    schema_version: str = SCHEMA_VERSION, validate_values: bool = True,
 ) -> None:
     """A 0.6 cash-flow or balance-sheet leaf: filed, method-forecast, no formula."""
 
     cash = line["role"] in CASH_LEAF_ROLES
-    expected = ("cash", "duration", "sum_quarters") if cash else (
+    annual_cash = cash and schema_version == ANNUAL_CASH_SCHEMA_VERSION and line["annual_semantics"] == "direct_annual"
+    expected = ("cash", "duration", "direct_annual" if annual_cash else "sum_quarters") if cash else (
         "balance", "instant", "not_applicable")
     if (line["statement"], line["period_kind"], line["annual_semantics"]) != expected:
         raise FinancialStatementStructureError(
@@ -829,9 +851,14 @@ def _normalize_statement_leaf(
         raise FinancialStatementStructureError("filed line statement differs from authority")
     if source.get("period_basis") != line["period_kind"]:
         raise FinancialStatementStructureError("filed line period kind differs from authority")
-    units = _units(source)
+    # Duration authority proves a unit even when no standalone quarter exists.
+    # This does not create quarter cells or authorize cumulative-as-quarter values.
+    units = _units(source, include_duration=schema_version in _TYPED_NOTE_STRUCTURE_VERSIONS)
     if units != {line["unit"]} or not _is_currency_unit(line["unit"]):
         raise FinancialStatementStructureError("filed line unit differs or is ambiguous")
+    if annual_cash and validate_values:
+        from .annual_cash_statement_leaf import validate_source
+        validate_source(source, unit=line["unit"], concept=concept)
     line["concept"] = concept
 
 
@@ -906,9 +933,13 @@ def _normalize_formula(
             or is_coverage_structure(schema_version)
         )
     ):
-        raise FinancialStatementStructureError(
-            "every derived formula must tie to an exact filed concept"
-        )
+        error = FinancialStatementStructureError(
+            "every derived formula must tie to an exact filed concept")
+        from .model_spec_filed_tie_repair import DIAGNOSTIC_REF
+        diagnostic = {'contract_ref':DIAGNOSTIC_REF,'formula_index':index,'output_ref':output,
+            'output_line':{k:lines[output][k] for k in ('ref','role','statement','unit','period_kind')}}
+        error.diagnostics = {**diagnostic,'content_hash':content_hash(diagnostic)}
+        raise error
     result: dict[str, Any] = {
         "output_ref": output, "operator": operator,
         "tie_out_concept": tie, "evidence_refs": list(refs),
@@ -1389,7 +1420,8 @@ def _validate_forecast_bases(lines: Sequence[Mapping[str, Any]]) -> None:
             )
 
 
-def _presentation_filed(state: Mapping[str, Any]) -> tuple[dict[str, dict[str, Any]], set[str]]:
+def _presentation_filed(state: Mapping[str, Any], *,
+                        statement_hints: Mapping[str, str] | None = None) -> tuple[dict[str, dict[str, Any]], set[str]]:
     filings = state.get("filings")
     if not isinstance(filings, list) or not filings:
         raise FinancialStatementStructureError("company presentation has no filing authority")
@@ -1429,6 +1461,12 @@ def _presentation_filed(state: Mapping[str, Any]) -> tuple[dict[str, dict[str, A
         }
         previous = filed.get(concept)
         if previous is not None and previous != candidate:
+            requested = (statement_hints or {}).get(concept)
+            if requested == statement and previous['statement'] != requested:
+                filed[concept] = candidate
+                continue
+            if requested == previous['statement'] and statement != requested:
+                continue
             if statement != "income":
                 # A cash or balance concept that is ambiguous is simply not
                 # offered as a leaf; the income presentation stays strict.
@@ -1492,6 +1530,13 @@ def validate_structure_proposal(
     body = _closed(proposal, {"schema_version", "lines", "formulas"},
                    "financial statement structure proposal")
     schema_version = body["schema_version"]
+    # This previously invalid 0.6 answer has an explicit annual cash intent.
+    # Persist the new semantic version; never change a stored valid 0.6 model.
+    if schema_version == COVERAGE_SCHEMA_VERSION and isinstance(body["lines"], list) and any(
+        isinstance(line, Mapping) and line.get("role") in CASH_LEAF_ROLES
+        and line.get("annual_semantics") == "direct_annual" for line in body["lines"]):
+        body = {**body, "schema_version": ANNUAL_CASH_SCHEMA_VERSION}
+        schema_version = ANNUAL_CASH_SCHEMA_VERSION
     if schema_version not in _STRUCTURE_AUTHORITY_REFS:
         raise FinancialStatementStructureError("unsupported structure proposal version")
     if is_coverage_structure(schema_version) and isinstance(body["lines"], list):
@@ -1512,7 +1557,9 @@ def validate_structure_proposal(
         or not 1 <= len(raw_formulas) <= MAX_STRUCTURE_FORMULAS
     ):
         raise FinancialStatementStructureError("structure proposal exceeds its bounded shape")
-    filed, accessions = _presentation_filed(state)
+    from .company_model_inputs import _declared_statement_hints
+    filed, accessions = _presentation_filed(state, statement_hints=_declared_statement_hints(
+        {'financial_statement_structure': body}))
     lines = [
         _normalize_line(
             raw, index, filed, validate_values=False, schema_version=schema_version,
@@ -1636,6 +1683,15 @@ def replay_historical_structure(
                     if divisor == 0:
                         continue
                     calculated[period] = values[formula["numerator_ref"]][period] / divisor
+            composition = structure.get("historical_income_composition")
+            if composition is not None and composition["output_ref"] == output:
+                if content_hash(formula) != composition["formula_hash"]:
+                    raise FinancialStatementStructureError("historical composition formula drifted")
+                exact_values = {(p["period_start"], p["period_end"]): _decimal(p["value"], "composition amount")
+                                for p in composition["periods"]}
+                if set(exact_values) != set(calculated):
+                    raise FinancialStatementStructureError("historical composition cannot drop or add formula periods")
+                calculated = exact_values
             candidate_periods = set(calculated)
             note_report = note_reports_by_output.get(output)
             note_quarters = {
@@ -1703,9 +1759,24 @@ def replay_historical_structure(
                 for period in tested if not matches(period)
             ]
             if mismatches:
-                raise FinancialStatementStructureError(
+                failure = FinancialStatementStructureError(
                     f"formula {output} does not tie to filed history"
                 )
+                # Keep the historical message stable for versioned repair
+                # matching, but retain the actual discrepancies for planning.
+                # These describe a refused calculation, not accepted figures.
+                detail = {
+                    "contract_ref": "model-history-tie-diagnostics:0.1",
+                    "output_ref": output, "tie_out_concept": tie,
+                    "operator": formula["operator"],
+                    "formula_hash": content_hash(formula),
+                    "mismatches": mismatches[:12],
+                    "omitted_mismatches": max(0, len(mismatches) - 12),
+                    "all_mismatches_hash": content_hash(mismatches),
+                    "financial_evidence": False, "retry_authority": False,
+                }
+                failure.diagnostics = {**detail, "content_hash": content_hash(detail)}
+                raise failure
             reports.append({
                 "output_ref": output,
                 **({"tie_mode": ("presentation_rounding" if rounded_periods & set(tested)
@@ -1885,7 +1956,9 @@ def replay_historical_structure(
                 annual_ready = annual_report["status"] == "validated"
     result = {
         "schema_version": (
-            "financial-statement-structure-replay-0.6"
+            "financial-statement-structure-replay-0.7"
+            if structure.get("schema_version") == ANNUAL_CASH_SCHEMA_VERSION
+            else "financial-statement-structure-replay-0.6"
             if structure.get("schema_version") == COVERAGE_SCHEMA_VERSION
             else "financial-statement-structure-replay-0.5"
             if structure.get("schema_version") == REVENUE_PRETAX_SCHEMA_VERSION
@@ -1906,6 +1979,13 @@ def replay_historical_structure(
     }
     if structure.get("schema_version") in _TYPED_NOTE_STRUCTURE_VERSIONS:
         result["note_formula_periods"] = note_formula_reports
+    if structure.get("historical_income_composition") is not None:
+        result["historical_income_composition"] = {
+            "contract_ref": structure["historical_income_composition"]["contract_ref"],
+            "content_hash": structure["historical_income_composition"]["content_hash"],
+            "tested_period_count": len(structure["historical_income_composition"]["periods"]),
+            "future_assumption": structure["historical_income_composition"]["future_assumption"],
+        }
     if is_coverage_structure(structure.get("schema_version")):
         from .forecast_coverage import forecast_computability
 
@@ -1933,6 +2013,16 @@ def validate_financial_statement_structure(
         if not any(name in proposal for name in _COVERAGE_STRUCTURE_FIELDS):
             proposal = {**dict(proposal), "auto_repairs": [], "coverage": None}
         fields = fields | _COVERAGE_STRUCTURE_FIELDS
+    composition = proposal.get("historical_income_composition") if isinstance(proposal, Mapping) else None
+    if composition is not None:
+        if not is_coverage_structure(proposal.get("schema_version")):
+            raise FinancialStatementStructureError("historical composition requires coverage structure")
+        fields |= {"historical_income_composition"}
+    income_da_policy = proposal.get("income_depreciation_forecast_policy") if isinstance(proposal, Mapping) else None
+    if income_da_policy is not None:
+        if not is_coverage_structure(proposal.get("schema_version")):
+            raise FinancialStatementStructureError("income depreciation policy requires coverage structure")
+        fields |= {"income_depreciation_forecast_policy"}
     body = _closed(proposal, fields, "financial statement structure")
     authority = financial_input_authority(financial_inputs)
     spec_authority = _spec_authority(company_spec)
@@ -2042,6 +2132,28 @@ def validate_financial_statement_structure(
                 line["ref"] for line in lines]:
             raise FinancialStatementStructureError(
                 "structure coverage must describe every line in order")
+    if composition is not None:
+        from .filed_period_composition import verify, FiledCompositionError
+        try:
+            checked_composition = verify(composition, company_spec, financial_inputs)
+        except FiledCompositionError as exc:
+            raise FinancialStatementStructureError(str(exc)) from exc
+        if composition != financial_inputs.get("historical_income_composition"):
+            raise FinancialStatementStructureError("structure composition differs from input authority")
+        original_formula = next((f for f in formulas if f["output_ref"] == composition["output_ref"]), None)
+        if content_hash(original_formula) != composition["formula_hash"]:
+            raise FinancialStatementStructureError("composition formula differs from drafted ordinary formula")
+        normalized["historical_income_composition"] = checked_composition
+    if income_da_policy is not None:
+        from .forecast_coverage import income_depreciation_policy
+        expected = income_depreciation_policy(company_spec, financial_inputs)
+        if income_da_policy != expected:
+            raise FinancialStatementStructureError("income depreciation policy differs from exact declaration/history")
+        for item in income_da_policy["lines"]:
+            line = by_ref.get(item["line_ref"])
+            if line is None or (line["forecast_method"], line["forecast_base_ref"]) != (item["method"], item["forecast_base_ref"]):
+                raise FinancialStatementStructureError("income depreciation method differs from frozen policy")
+        normalized["income_depreciation_forecast_policy"] = income_da_policy
     normalized["content_hash"] = content_hash(normalized)
     replay = replay_historical_structure(normalized, financial_inputs)
     return normalized, replay
@@ -2140,6 +2252,18 @@ def _materialize_definition(
     if completed is not None:
         proposal["auto_repairs"] = completed["auto_repairs"]
         proposal["coverage"] = completed["coverage"]
+        if "income_depreciation_forecast_policy" in completed:
+            proposal["income_depreciation_forecast_policy"] = completed["income_depreciation_forecast_policy"]
+    composition = financial_inputs.get("historical_income_composition")
+    if composition is not None:
+        proposal["historical_income_composition"] = composition
+        proposal.setdefault("auto_repairs", [])
+        proposal.setdefault("coverage", None)
+        proposal["auto_repairs"] = list(proposal["auto_repairs"]) + [{
+            "kind": "filed_period_income_composition", "line_ref": composition["output_ref"],
+            "tie_out_concept": composition["tie_out_concept"],
+            "detail": "历史使用各期完整原申报组成，未披露项目不补零。未假设未来继续发生已披露的一次性损失或收益；这是系统建模假设而非公司指引，新证据需要重评。",
+        }]
     return validate_financial_statement_structure(
         proposal, company_spec, financial_inputs,
         note_evidence=effective_note_evidence,
@@ -2455,10 +2579,12 @@ def forecast_structure_binding(
     if replay.get("structure_hash") != structure.get("content_hash"):
         raise FinancialStatementStructureError("historical replay is for another structure")
     if replay.get("ready_for_forecast") is not True:
-        raise FinancialStatementStructureError("statement structure is not ready for forecast")
+        raise FinancialStatementStructureNotReady(structure, replay)
     projection = {
         "schema_version": (
-            "forecast-statement-structure-binding-0.6"
+            "forecast-statement-structure-binding-0.7"
+            if structure.get("schema_version") == ANNUAL_CASH_SCHEMA_VERSION
+            else "forecast-statement-structure-binding-0.6"
             if structure.get("schema_version") == COVERAGE_SCHEMA_VERSION
             else "forecast-statement-structure-binding-0.5"
             if structure.get("schema_version") == REVENUE_PRETAX_SCHEMA_VERSION

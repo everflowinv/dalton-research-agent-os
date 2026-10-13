@@ -30,11 +30,9 @@ This slice answers three questions and refuses to answer anything else:
 3. **What the model says at each of those.** The income chain recomputed at the
    historical trough, the mean, the peak, and at our own estimate, so the four
    numbers sit beside each other and the reader can see whether our estimate is
-   near an edge of the range the company has actually lived in. Each column
-   **holds that one level across every open quarter** and says so; none of them
-   is a path. "The trough" is not the trough quarter happening once, it is the
-   whole horizon at that level -- a harsher question, and one the reader has to
-   know is being asked.
+   near an edge of the range the company has actually lived in. Quarterly
+   growth extremes apply once, followed by baseline growth; share and level
+   extremes are held across the horizon. The baseline retains its own path.
 
 Plus a bridge from those numbers to the street's, which is
 :mod:`consensus_bridge`.
@@ -144,7 +142,7 @@ WHAT_IF_LINES: tuple[str, ...] = (
     "result:free_cash_flow",
 )
 
-SELECTION_RULE_REF = "rule:swing-rank:1"
+SELECTION_RULE_REF = "rule:swing-rank:3"
 BAND_RULE_REF = "rule:historical-band:2"
 
 #: The rule itself, hashed into every projection. Changing any word of this
@@ -156,23 +154,21 @@ SELECTION_RULE: dict[str, Any] = {
     "unit_move": format(UNIT_MOVE, "f"),
     "metric_precedence": [ref for ref, _ in IMPACT_PRECEDENCE],
     "horizon": "the forecast quarters this model has not yet had filed",
-    "measure": "the absolute change in the metric summed over the horizon, "
-               "with the driver's assumption held at one level in every quarter "
-               "of that horizon",
-    "held_flat": "every scenario and every elasticity holds one level across "
-                 "all open quarters; none of them is a path. A driver whose "
-                 "live assumption already differs quarter to quarter therefore "
-                 "gets no elasticity, because there is no single level to add a "
-                 "point to",
-    "rank_by": "swing: the metric with this driver held flat at its historical "
-               "peak, against the metric with it held flat at its historical "
-               "trough",
+    "measure": "the absolute change in the metric summed over the horizon; "
+               "quarterly growth is shocked in the first open quarter only, "
+               "then returns to the model's baseline growth path; share and "
+               "level assumptions are held across all open quarters",
+    "held_flat": "share and level scenarios hold one level across all open "
+                 "quarters; quarterly growth scenarios change only the first "
+                 "open quarter; ours retains the complete baseline path",
+    "rank_by": "swing: the metric at the historical peak against its trough, "
+               "using the same scenario path as the displayed what-if columns",
     "rank_fallback": "a driver with no historical band is demoted, not excluded: "
                      "it ranks below every driver that has one, and among those "
                      "by its unit-move elasticity. A driver with neither a swing "
                      "nor an elasticity is the only one dropped",
     "rate_domain": "a historical tax-rate band containing a value outside [0, 1] "
-                   "is retained as history but is unavailable as a forecast "
+                   "including a typed share_of_line tax assumption, is retained as history but is unavailable as a forecast "
                    "scenario; it is never clamped or carried forward",
     "order": "largest swing first; ties broken by driver ref",
     "why_not_elasticity": "a one-point move ranks every share driver identically, "
@@ -575,6 +571,7 @@ def live_assumptions(record: Mapping[str, Any]) -> list[dict[str, Any]]:
 
 def recompute(
     record: Mapping[str, Any], driver_ref: str | None, value: Decimal | None,
+    *, period_ends: set[str] | None = None,
 ) -> tuple[list[dict[str, Any]], list[str]]:
     """The model's own arithmetic, with one driver's assumption replaced.
 
@@ -595,7 +592,8 @@ def recompute(
     replaced: list[str] = []
     for item in live_assumptions(record):
         if driver_ref is not None and value is not None \
-                and str(item["driver_ref"]) == driver_ref:
+                and str(item["driver_ref"]) == driver_ref \
+                and (period_ends is None or str(item["period"]["end"]) in period_ends):
             replaced.append(str(item["ref"]))
             item = {**item, "value": _rate(value)}
         assumptions.append(item)
@@ -733,14 +731,14 @@ def driver_impact(
                 "metric_ref": metric["result_ref"], "unit_move": _rate(UNIT_MOVE),
                 "base_total": base_value, "moved_total": None, "delta": None,
                 "delta_per_unit": None, "percent_of_base": None}
-    # An elasticity is "the answer moves this much when *this* assumption moves
-    # one point". A scenario column holds one level flat across the horizon,
-    # which is fine for a scenario -- it is a stated hypothetical -- but a
-    # driver whose live assumption differs quarter to quarter has no single
-    # level to add a point to. Taking the first quarter's would flatten the
-    # other quarters onto it and report the flattening as elasticity: on a
-    # driver revised for one quarter only, most of the "delta" would be the
-    # revision being undone. The same guard the ``ours`` column already makes.
+    # Growth sensitivity changes the first open quarter only. Share/level
+    # elasticity still needs one baseline level across the horizon; flattening
+    # a varying path would mix the scenario change with reversing revisions.
+    if _measure_of(record, driver_ref) == "quarterly_growth":
+        first = min(ends)
+        live = [item for item in live if str(item["period"]["end"]) == first]
+        if not live:
+            raise SensitivityUnavailable("growth driver has no first-quarter assumption")
     values = {str(item["value"]) for item in live}
     if len(values) > 1:
         return {"status": "unavailable",
@@ -753,7 +751,7 @@ def driver_impact(
     with localcontext() as ctx:
         ctx.prec = _PRECISION
         moved_value = _decimal(live[0]["value"], "assumption value") + UNIT_MOVE
-    results, replaced = recompute(record, driver_ref, moved_value)
+    results, replaced = scenario_recompute(record, driver_ref, moved_value)
     moved = horizon_total(results, metric["result_ref"], ends)
     if moved["status"] != "computed":
         return {"status": "unavailable",
@@ -814,7 +812,7 @@ def driver_swing(
                 "percent_of_base": None}
     totals: dict[str, dict[str, Any]] = {}
     for edge in ("trough", "peak"):
-        results, _ = recompute(
+        results, _ = scenario_recompute(
             record, driver_ref, _decimal(band[edge]["value"], f"band.{edge}"))
         totals[edge] = horizon_total(results, metric["result_ref"], ends)
         if totals[edge]["status"] != "computed":
@@ -847,6 +845,20 @@ def _measure_of(record: Mapping[str, Any], driver_ref: str) -> str | None:
     return None
 
 
+def scenario_recompute(
+    record: Mapping[str, Any], driver_ref: str, value: Decimal | None,
+) -> tuple[list[dict[str, Any]], list[str]]:
+    """Apply one growth shock, or a full-horizon share/level assumption.
+
+    The subsequent growth rates remain the model's baseline rates; the level
+    effect of the initial shock propagates through its own arithmetic.
+    """
+    ends = sorted(str(item["end"]) for item in open_periods(record))
+    selected = ({ends[0]} if ends and _measure_of(record, driver_ref) == "quarterly_growth"
+                else set(ends))
+    return recompute(record, driver_ref, value, period_ends=selected)
+
+
 def _scenario_band(
     driver: Mapping[str, Any], measure: str | None, band: Mapping[str, Any],
 ) -> dict[str, Any]:
@@ -863,7 +875,7 @@ def _scenario_band(
     wire = dict(band)
     if (wire.get("status") != "available"
             or driver.get("role") != "income_tax_expense"
-            or measure != "operating_income_share"):
+            or measure not in {"operating_income_share", "share_of_line", "revenue_share"}):
         return wire
     values = []
     for name in ("trough", "mean", "peak"):
@@ -1050,12 +1062,9 @@ def what_if(
     be measured against a baseline that is not the model -- and the difference
     would be invisible, because the number printed would still be ours.
 
-    **Every column holds one level flat across every open quarter**, which each
-    row states (``held_flat``, ``quarters_held``). None of them is a path. "The
-    trough" is not what would happen if the trough quarter repeated once; it is
-    what the model says if this driver sat at that level for the whole horizon,
-    which is a harsher and more useful question, and one the reader has to know
-    is being asked.
+    Quarterly growth extremes apply once in the first open quarter, followed
+    by the baseline growth path. Share and level scenarios hold their value
+    throughout the horizon. ``ours`` preserves every baseline assumption.
     """
 
     rows: list[dict[str, Any]] = []
@@ -1065,17 +1074,6 @@ def what_if(
             source_refs = list(ours.get("refs") or [])
             shown = ours.get("value")
             period = None
-            if ours.get("value") is None:
-                rows.append({
-                    "scenario": scenario, "status": "unavailable",
-                    "reason": "this driver's assumption is not one number across "
-                              "the horizon, so it has no single column here",
-                    "assumption_value": None, "from_period": None,
-                    "held_flat": False, "quarters_held": 0,
-                    "replaced_assumption_refs": [], "input_refs": source_refs,
-                    "lines": [],
-                })
-                continue
         else:
             if band.get("status") != "available":
                 rows.append({
@@ -1091,14 +1089,18 @@ def what_if(
             shown = point["value"]
             period = point.get("period_end")
             source_refs = list(point.get("refs") or [])
-        results, replaced = recompute(record, driver_ref, value)
+        results, replaced = scenario_recompute(record, driver_ref, value)
         rows.append({
             "scenario": scenario, "status": "computed", "reason": None,
             "assumption_value": shown, "from_period": period,
-            # True for ``ours`` as well: our own assumption is one number across
-            # the horizon whenever this row computes at all, so that column is
-            # a flat hold too, and saying so keeps the four columns comparable.
-            "held_flat": True, "quarters_held": len(ends),
+            "held_flat": (not bool(ours.get("varies")) if scenario == "ours"
+                          else _measure_of(record, driver_ref) != "quarterly_growth"),
+            "quarters_held": (0 if scenario == "ours" and ours.get("varies")
+                              else 1 if scenario != "ours" and _measure_of(record, driver_ref) == "quarterly_growth"
+                              else len(ends)),
+            "scenario_path": ("baseline" if scenario == "ours" else
+                              "first_quarter_growth_shock" if _measure_of(record, driver_ref) == "quarterly_growth"
+                              else "constant_level"),
             "replaced_assumption_refs": replaced,
             "input_refs": source_refs,
             "lines": scenario_lines(record, results, ends),

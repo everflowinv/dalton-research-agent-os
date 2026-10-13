@@ -178,7 +178,8 @@ def build_filing_url_authorities(
         raise SecFilingsIndexError("submissions artifact is not JSON") from exc
     normalized = normalize_sec_submissions(payload, parameters, provider_status=200)
     issuer = str(parameters["issuer"])
-    recent = payload["filings"]["recent"]
+    from .sec_submissions_pages import submissions_payload
+    recent = submissions_payload(payload,parameters)["filings"]["recent"]
     accessions = recent["accessionNumber"]
     revisions = recent.get("amendmentOf") or [None] * len(accessions)
     by_accession = {
@@ -212,13 +213,16 @@ def build_filing_url_authorities(
     return authorities
 
 
-def filings_by_record_ref(raw_response: bytes) -> tuple[str, dict[str, dict[str, Any]]]:
+def filings_by_record_ref(raw_response: bytes, *, parameters: Mapping[str, Any] | None = None) -> tuple[str, dict[str, dict[str, Any]]]:
     """The issuer and every filing in the raw block, keyed by its record ref."""
 
     try:
         payload = json.loads(raw_response.decode("utf-8"))
     except (UnicodeDecodeError, json.JSONDecodeError) as exc:
         raise SecFilingsIndexError("submissions artifact is not JSON") from exc
+    if parameters is not None:
+        from .sec_submissions_pages import submissions_payload
+        payload=submissions_payload(payload,parameters)
     issuer = payload.get("cik")
     if not isinstance(issuer, str) or not issuer.isdigit():
         raise SecFilingsIndexError("submissions artifact does not name its issuer")
@@ -241,7 +245,7 @@ def filings_by_record_ref(raw_response: bytes) -> tuple[str, dict[str, dict[str,
 
 
 def build_sec_filing_url_authorities(
-    raw_response: bytes, source_envelope: Mapping[str, Any]
+    raw_response: bytes, source_envelope: Mapping[str, Any], *, parameters: Mapping[str, Any] | None = None
 ) -> dict[str, dict[str, Any]]:
     """Fetchable URL authorities for one completed filings-index envelope.
 
@@ -273,7 +277,7 @@ def build_sec_filing_url_authorities(
     record_refs = source_envelope.get("source_record_refs")
     if not isinstance(record_refs, list):
         raise SecFilingsIndexError("filings-index envelope lacks its source records")
-    issuer, filings_by_ref = filings_by_record_ref(raw_response)
+    issuer, filings_by_ref = filings_by_record_ref(raw_response,parameters=parameters)
     created_at = source_envelope.get("retrieved_at")
     artifact_ref = source_envelope.get("raw_artifact_version_ref")
     envelope_hash = source_envelope.get("content_hash")

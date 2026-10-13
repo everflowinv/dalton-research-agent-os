@@ -44,6 +44,7 @@ something needs to be delivered, not the place the thinking lives.
 
 from __future__ import annotations
 
+import copy
 import json
 import re
 from typing import Any, Mapping, Sequence
@@ -67,6 +68,10 @@ from .company_financial_statement_structure import (
 SCHEMA_VERSION = "0.4"
 LEGACY_SCHEMA_VERSION = "0.3"
 TASK_REF = "task:company-model-spec:0.9"
+
+MAX_ASSESSMENT_CHARS = 2400
+PRIOR_ASSESSMENT_CHARS = 1200
+ASSESSMENT_COMPATIBILITY_REF = "model-spec-assessment-length-compatible-replay:0.1"
 
 MAX_REVENUE_DRIVERS = 8
 MAX_EXPENSE_LINES = 14
@@ -155,7 +160,7 @@ OUTPUT_SCHEMA = {
             ),
         },
         "assessment": {
-            "type": "string", "minLength": 1, "maxLength": 1200,
+            "type": "string", "minLength": 1, "maxLength": MAX_ASSESSMENT_CHARS,
             "description": (
                 "What this company's economics actually turn on, and therefore "
                 "what this model has to get right."
@@ -330,7 +335,7 @@ EPS_NUMERATOR_BRIDGE_GUIDANCE = (
     "Missing dilution evidence remains unavailable, never zero."
 )
 
-TASK_HASH = content_hash({
+_TASK_IDENTITY = {
     "task": TASK_REF,
     "output": OUTPUT_SCHEMA,
     "authority": "describes_one_company_using_only_concepts_that_company_filed",
@@ -351,7 +356,31 @@ TASK_HASH = content_hash({
         "guidance": EPS_NUMERATOR_BRIDGE_GUIDANCE,
     },
     "structured_output_repair": "company-model-spec-repair:0.1",
-})
+}
+TASK_HASH = content_hash(_TASK_IDENTITY)
+PRIOR_ASSESSMENT_TASK_HASH = "497833a7b632a3e195fc16c60c20c99315c5ba5630d2292b33feee894cc3b0ea"
+
+
+def assessment_compatibility_contract() -> dict[str, Any]:
+    """Exactly one published task change, never a generic old-answer bridge."""
+    prior = copy.deepcopy(_TASK_IDENTITY)
+    prior["output"]["properties"]["assessment"]["maxLength"] = PRIOR_ASSESSMENT_CHARS
+    if content_hash(prior) != PRIOR_ASSESSMENT_TASK_HASH:
+        raise CompanyModelSpecError("assessment-compatible prior task contract drifted")
+    return {
+        "ref": ASSESSMENT_COMPATIBILITY_REF,
+        "prior_task_hash": PRIOR_ASSESSMENT_TASK_HASH,
+        "current_task_hash": TASK_HASH,
+        "only_change": {"path": "output.properties.assessment.maxLength",
+                        "old": PRIOR_ASSESSMENT_CHARS, "new": MAX_ASSESSMENT_CHARS},
+    }
+
+
+def prior_assessment_output_schema() -> dict[str, Any]:
+    assessment_compatibility_contract()
+    schema = copy.deepcopy(OUTPUT_SCHEMA)
+    schema["properties"]["assessment"]["maxLength"] = PRIOR_ASSESSMENT_CHARS
+    return schema
 
 
 CASH_FLOW_OPERATING_BASE_SHAPE_CODE = "cash_flow_operating_base_shape"
@@ -360,9 +389,11 @@ CASH_FLOW_OPERATING_BASE_SHAPE_CODE = "cash_flow_operating_base_shape"
 class CompanyModelSpecError(ValueError):
     """The specification is malformed, or rests on something not in the filings."""
 
-    def __init__(self, message: str, *, code: str = "semantic") -> None:
+    def __init__(self, message: str, *, code: str = "semantic", proof: Any = None) -> None:
         super().__init__(message)
         self.code = code
+        if proof is not None:
+            self.proof = proof
 
 
 # The structure rules a model may be asked to reconsider once, as a closed
@@ -469,17 +500,32 @@ _NUMERIC_PERIOD_FIELDS = (
 )
 
 
-def _numeric_period_cell_line(cell: Mapping[str, Any]) -> str:
+def _numeric_period_cell_line(cell: Mapping[str, Any], *, catalog: bool = False) -> str:
     row="\t".join(
         json.dumps(cell.get(field), ensure_ascii=False, separators=(",", ":"))
         for field in _NUMERIC_PERIOD_FIELDS
     )
     if "dimensions" in cell:
-        row+="\tSOURCE_IDENTITY="+json.dumps({k:cell[k] for k in ("dimensions","statement_context_ref","source_unit_ref","unit_definition_hash") if k in cell},ensure_ascii=False,sort_keys=True,separators=(",",":"))
+        source = {k:cell[k] for k in ("dimensions","statement_context_ref","source_unit_ref","unit_definition_hash") if k in cell}
+        if catalog and cell.get("status") == "filed":
+            from .company_model_identity_catalog import cell_identity_ref
+            source["catalog_ref"] = cell_identity_ref(cell)
+        row+="\tSOURCE_IDENTITY="+json.dumps(source,ensure_ascii=False,sort_keys=True,separators=(",",":"))
     return row
 
 
 def _numeric_period_table_header(context: Mapping[str, Any]) -> str:
+    from .model_revenue_group_candidates import CONTRACT_REF as GROUP_CHOICES_REF
+    group_choices = context.get("revenue_group_candidates")
+    typed_guidance = (
+        "FIELD REQUIREMENTS: operating_metrics.periodicity is exactly quarterly or annual, never quarterly_or_annual. "
+        "An acquisitions cash line cannot use zero_one_off; select a supported cash forecast method and its exact base, "
+        "or unavailable with null base. A segment driver with a filed basis must select a distinct complete "
+        "basis_identity from one coherent disclosed revenue group. Do not bind independent segments to the same "
+        "group total, mix groups, or invent a residual. If no exact dimensional source is provided, keep that base "
+        "explicitly unavailable instead of using consolidated revenue.\n\n"
+        if isinstance(group_choices, Mapping) and group_choices.get("contract_ref") == GROUP_CHOICES_REF else ""
+    )
     metadata = {
         key: context.get(key) for key in (
             "schema_version", "policy", "available_cells",
@@ -490,7 +536,14 @@ def _numeric_period_table_header(context: Mapping[str, Any]) -> str:
             "content_hash",
         )
     }
+    for key in ("identity_catalog_contract", "selection_contract", "revenue_group_candidates"):
+        if key in context:
+            metadata[key] = context[key]
+    if context.get("period_source_family_catalog"):
+        from .period_source_family import prompt_catalog
+        metadata["period_source_family_catalog"] = prompt_catalog(context["period_source_family_catalog"])
     return "\n".join([
+        *([typed_guidance.rstrip()] if typed_guidance else []),
         "CONTEXT=" + json.dumps(metadata, ensure_ascii=False, sort_keys=True),
         "FILINGS=" + json.dumps(
             context.get("filing_authorities") or [],
@@ -501,6 +554,9 @@ def _numeric_period_table_header(context: Mapping[str, Any]) -> str:
         "balance\taccession\tfiling_form\tline_content_hash\tstatus\t"
         "ambiguity_ref",
         *(["SOURCE_IDENTITY suffix, when present, binds complete dimensions and exact context version; never infer missing axes from labels or amounts."] if any("dimensions" in c for c in context.get("cells") or []) else []),
+        *(["For a dimensional revenue driver, select the row's catalog_ref as basis_identity={statement:<that row's statement>,dimensions:{catalog_ref:<exact ref>}}. The system binds all original axes; do not hand-copy a subset. A ref must belong to the selected basis_concept in this input."] if context.get("identity_catalog_contract") else []),
+        *(["Revenue group candidates are exact-source disclosure choices, not an automatic modeling choice. Select and explain one coherent group using its member identity refs; a not_closed result requires original reconciliation evidence. Do not invent a residual member or mix totals from different groups or filings."] if context.get("revenue_group_candidates") else []),
+        *(["PERIOD SOURCE FAMILIES: groups use the declared group_fields columns; source_index and composition_index are zero-based positions in sources and compositions. If complete fixed dimensions change by original period, explicitly select basis_period_family_refs for every duration, including cumulative operands; every driver in a sum must choose every member of the same complete family for each duration. Keep the full latest basis_identity. These are already source-proven choices, not permission to splice disclosures or manufacture a missing member."] if context.get("period_source_family_catalog") else []),
     ])
 
 
@@ -510,7 +566,7 @@ def _numeric_period_table(state: Mapping[str, Any]) -> str:
         return "NUMERIC CONTEXT UNAVAILABLE"
     lines = [_numeric_period_table_header(context)]
     for cell in context.get("cells") or []:
-        lines.append(_numeric_period_cell_line(cell))
+        lines.append(_numeric_period_cell_line(cell, catalog=bool(context.get("identity_catalog_contract"))))
     return "\n".join(lines)
 
 
@@ -526,7 +582,54 @@ def _financial_note_table(state: Mapping[str, Any]) -> str:
     return canonical_json(held)
 
 
-def build_prompt(state: Mapping[str, Any]) -> str:
+def output_schema_for_state(state: Mapping[str, Any], *, output_schema=None) -> dict[str, Any]:
+    """The finite schema actually requested for this exact model input.
+
+    No-context callers retain the original object/serialization. Optional
+    source choices remain closed fields; their refs are independently bound
+    by the parser and current source owners, never inferred from this schema.
+    """
+    schema=OUTPUT_SCHEMA if output_schema is None else output_schema
+    operating=state.get('operating_driver_context') is not None
+    families=bool((state.get('numeric_context') or {}).get('period_source_family_catalog'))
+    if not operating and not families:
+        return schema
+    schema=copy.deepcopy(schema)
+    properties=schema['properties']['revenue_drivers']['items']['properties']
+    if operating:
+        properties['basis_operating_metric_ref']={'type':'string','minLength':1}
+    if families:
+        properties['basis_period_family_refs']={
+            'type':'array','minItems':1,'maxItems':256,
+            'items':{'type':'string','minLength':1},
+            'description':'Explicit complete source-family refs for every original duration in this basis concept, including cumulative operands. Select the same complete families for every member in one sum; do not splice peers or omit old periods. Current basis_identity remains complete and explicit.'}
+    return schema
+
+
+def checked_current_output_schema(schema):
+    """Reject arbitrary JSON-schema relaxation supplied inside a proof."""
+    for operating in (False,True):
+        for families in (False,True):
+            state={'numeric_context':{'period_source_family_catalog':[{}]} if families else {}}
+            if operating:state['operating_driver_context']={}
+            if schema==output_schema_for_state(state):
+                return copy.deepcopy(schema)
+    raise CompanyModelSpecError('model output schema differs from its finite current source contracts')
+
+
+def repair_output_schema_from_prompt(prompt):
+    """Current repair shape from an authenticated root, old shapes unchanged."""
+    try:
+        schema=json.JSONDecoder().raw_decode(prompt.split('OUTPUT_SCHEMA:\n',1)[1])[0]
+    except (IndexError,ValueError,TypeError) as exc:
+        raise CompanyModelSpecError('original model output schema is unavailable') from exc
+    if schema==prior_assessment_output_schema():
+        return OUTPUT_SCHEMA  # The original repair used the current shape.
+    return checked_current_output_schema(schema)
+
+
+def build_prompt(state: Mapping[str, Any], *,
+                 output_schema: Mapping[str, Any] | None = None) -> str:
     """The four questions, plus the driver template this kind of company gets.
 
     W4 / Chem retrospective §7.1: a commodity producer and a contracted
@@ -539,6 +642,7 @@ def build_prompt(state: Mapping[str, Any]) -> str:
     considered one is worse than no frame.
     """
 
+    output_schema = output_schema_for_state(state,output_schema=output_schema)
     company = {
         key: state.get(key)
         for key in ("company_ref", "ticker", "entity_name", "cik", "filings")
@@ -727,7 +831,7 @@ def build_prompt(state: Mapping[str, Any]) -> str:
         "* Keep each because field, including horizon.because, within "
         f"{_BECAUSE['maxLength']} characters: give the specific reason for that line or horizon. "
         "Use assessment for the overall modelling judgement, within "
-        f"{OUTPUT_SCHEMA['properties']['assessment']['maxLength']} characters. The output is "
+        f"{output_schema['properties']['assessment']['maxLength']} characters. The output is "
         "a modelling specification; investment scenarios and tracking tasks have their own "
         "downstream consumers. Do not squeeze a full scenario discussion into every because.\n"
         "* Return compact JSON matching OUTPUT_SCHEMA and nothing else. Do not "
@@ -736,7 +840,7 @@ def build_prompt(state: Mapping[str, Any]) -> str:
         "the output-token limit.\n\n"
         f"{template}\n\n"
         f"{cost_prompt_block(state.get('industry_classification'), state.get('concepts') or ())}\n\n"
-        f"OUTPUT_SCHEMA:\n{json.dumps(OUTPUT_SCHEMA, ensure_ascii=False)}\n\n"
+        f"OUTPUT_SCHEMA:\n{json.dumps(output_schema, ensure_ascii=False)}\n\n"
         f"COMPANY:\n{json.dumps(company, ensure_ascii=False, sort_keys=True)}\n\n"
         "MARKET PROXIES (never company actuals; preserve each proxy_gap when "
         "citing one):\n"
@@ -744,6 +848,7 @@ def build_prompt(state: Mapping[str, Any]) -> str:
         f"STATEMENTS:\n{_statement_table(state)}\n"
         f"\nNUMERIC_PERIODS:\n{_numeric_period_table(state)}\n"
         f"\nFINANCIAL_NOTE_EVIDENCE:\n{_financial_note_table(state)}\n"
+        + ("\nOPERATING_DRIVER_EVIDENCE=" + canonical_json(state["operating_driver_context"]) + "\nSelect basis_operating_metric_ref only from this verified reported context, with basis_concept null and the exact displayed unit; this is a separate reported source, not a filed GAAP concept. Preserve physical units, dates, scope and currency. Formulas are still your explicit economic choice and must pass full historical financial checks.\n" if state.get("operating_driver_context") is not None else "")
         + ("\nMATERIAL FORECAST DEVIATION REVIEW (frozen forecasts remain unchanged):\n"
            "Reassess the affected methods and assumptions using the exact comparison sources below. "
            "Do not copy a newer model as proof of correction, invent missing evidence, or change old forecasts. "
@@ -883,8 +988,8 @@ def financial_line_gaps(state: Mapping[str, Any]) -> list[dict[str, str]]:
             gaps.append({
                 "company_ref": company_ref, "statement": statement,
                 "line": needle,
-                "detail": f"{company_ref} 的{statement}报表里找不到「{chinese}」"
-                          f"（匹配词 {needle!r}）；这一行缺失时，依赖它的结构规则只能拒绝",
+                "detail": f"{company_ref} 的{statement}报表中尚未识别出单独列示的「{chinese}」"
+                          f"（匹配词 {needle!r}）；可检查原报表是否采用其他列示方式",
             })
     return gaps
 
@@ -1029,10 +1134,13 @@ def _cash_flow_companion(
                 raise CompanyModelSpecError(
                     f"cash_flow_companion {role} base names no income structure line")
             base_line = structure_lines[base_ref]
-            if (base_line.get("kind") != "filed"
-                    or base_line.get("forecast_method") not in {
-                        "quarterly_growth", "year_over_year_growth", "seasonal_factor", "share_of_line",
-                    }):
+            from .cash_flow_derived_base import derived_base_is_forecastable
+            filed_base = (base_line.get("kind") == "filed"
+                          and base_line.get("forecast_method") in {
+                              "quarterly_growth", "year_over_year_growth",
+                              "seasonal_factor", "share_of_line",
+                          })
+            if not filed_base and not derived_base_is_forecastable(structure, base_ref):
                 raise CompanyModelSpecError(
                     f"cash_flow_companion {role} base is not a forecastable filed line",
                     code=(CASH_FLOW_OPERATING_BASE_SHAPE_CODE
@@ -1074,7 +1182,15 @@ def _cash_flow_companion(
     if formula != expected_formula:
         raise CompanyModelSpecError(
             "cash_flow_companion formula must define operating cash flow minus capex")
-    return {"schema_version": "0.1", "lines": lines, "formula": expected_formula}
+    derived_base = any(
+        item["forecast_method"] == "share_of_line"
+        and structure_lines[str(item["forecast_base_ref"])].get("kind") == "derived"
+        for item in lines)
+    # Raw model answers and task/prompt schema stay unchanged. The stored
+    # definition binds the new derived execution semantics; old definitions
+    # retain their exact historical behavior when read or replayed.
+    return {"schema_version": "0.2" if derived_base else "0.1",
+            "lines": lines, "formula": expected_formula}
 
 
 def spec_from_response(
@@ -1123,18 +1239,38 @@ def spec_from_response(
     if len(raw_drivers) > MAX_REVENUE_DRIVERS:
         raise CompanyModelSpecError(
             f"a model may name at most {MAX_REVENUE_DRIVERS} revenue drivers")
+    from .model_spec_typed_field_repair import revenue_identity_scope, IDENTITY_CODE
+    try:
+        identity_scope = revenue_identity_scope(state, body)
+    except ValueError as exc:
+        raise CompanyModelSpecError(str(exc)) from exc
+    if identity_scope is not None:
+        raise CompanyModelSpecError(
+            "dimensional revenue drivers must select distinct exact source-bound member identities",
+            code=IDENTITY_CODE, proof=identity_scope)
     for index, item in enumerate(raw_drivers):
         if not isinstance(item, Mapping):
             raise CompanyModelSpecError(f"revenue_drivers[{index}] must be an object")
         if item.get("basis_identity") is not None:
-            from .company_model_inputs import validate_statement_identity
+            from .company_model_identity_catalog import resolve_identity
             try:
-                identity=validate_statement_identity(item["basis_identity"])
-                if not any(c.get("concept")==item.get("basis_concept") and c.get("statement")==identity["statement"] and c.get("dimensions")==identity["dimensions"] for c in (state.get("numeric_context") or {}).get("cells") or []):
-                    raise ValueError("economic driver identity is not in the admitted exact numeric context")
+                identity=resolve_identity(state, item.get("basis_concept"), item["basis_identity"])
             except ValueError as exc: raise CompanyModelSpecError(str(exc)) from exc
+        operating = {}
+        if 'basis_operating_metric_ref' in item:
+            if item.get('basis_concept') is not None or item.get('basis_identity') is not None:
+                raise CompanyModelSpecError('an operating source cannot also claim a filed concept or dimensional identity')
+            from .operating_driver_context import metric_history
+            try:
+                series = metric_history(state.get('operating_driver_context'), company_ref=state['company_ref'], metric_ref=item['basis_operating_metric_ref'])
+            except (ValueError,TypeError,KeyError) as exc: raise CompanyModelSpecError(str(exc)) from exc
+            if item.get('unit') != series['unit']:
+                raise CompanyModelSpecError('operating driver unit differs from its exact source-reported unit')
+            operating = {'basis_operating_metric_ref':series['metric_ref'], 'basis_operating_context_hash':series['context_hash'],
+                'basis_operating_context_evidence_refs':series['context_evidence_refs']}
         drivers.append({
-            **({"basis_identity":dict(item["basis_identity"])} if item.get("basis_identity") is not None else {}),
+            **operating,
+            **({"basis_identity":identity} if item.get("basis_identity") is not None else {}),
             "ref": _ref(item.get("ref"), f"revenue_drivers[{index}].ref", driver_refs),
             "label": _text(item.get("label"), f"revenue_drivers[{index}].label", limit=120),
             "kind": _one_of(item.get("kind"), DRIVER_KINDS, f"revenue_drivers[{index}].kind"),
@@ -1145,6 +1281,14 @@ def spec_from_response(
             "because": _text(item.get("because"), f"revenue_drivers[{index}].because",
                              limit=400, repairable_length=True),
         })
+        if "basis_period_family_refs" in item:
+            from .period_source_family import driver_bindings
+            drivers[-1]["basis_period_family_refs"] = item["basis_period_family_refs"]
+            try:
+                drivers[-1]["basis_period_family_bindings"] = driver_bindings(
+                    state.get("numeric_context"), drivers[-1])
+            except ValueError as exc:
+                raise CompanyModelSpecError(str(exc)) from exc
 
     expenses: list[dict[str, Any]] = []
     expense_refs: set[str] = set()
@@ -1191,9 +1335,12 @@ def spec_from_response(
                         f"expense_lines[{index}].cost_driver_slot {slot!r} is not in "
                         "this classification's cost template")
                 if reason is not None:
+                    from .model_spec_typed_field_repair import COST_SLOT_PAIR_CODE, cost_slot_pair_scope
+                    scope = cost_slot_pair_scope(state, body, index)
                     raise CompanyModelSpecError(
                         f"expense_lines[{index}] binds a cost slot and cannot carry "
-                        "cost_driver_unbound_reason")
+                        "cost_driver_unbound_reason",
+                        **({'code': COST_SLOT_PAIR_CODE, 'proof': scope} if scope is not None else {}))
                 expense["cost_driver_slot"] = slot
         elif "cost_driver_unbound_reason" in item:
             raise CompanyModelSpecError(
@@ -1244,6 +1391,13 @@ def spec_from_response(
         if not isinstance(disclosed, bool):
             raise CompanyModelSpecError(
                 f"operating_metrics[{index}].disclosed must be true or false")
+        if item.get("periodicity") not in PERIODICITY:
+            from .model_spec_typed_field_repair import proof, PERIODICITY_CODE
+            raise CompanyModelSpecError(
+                f"operating_metrics[{index}].periodicity must be quarterly or annual",
+                code=PERIODICITY_CODE, proof=proof(body, PERIODICITY_CODE,
+                    [["operating_metrics", index, "periodicity"]],
+                    detail="Correct this temporal enum only; do not change metric, source, period, or any other field."))
         metrics.append({
             "ref": _ref(item.get("ref"), f"operating_metrics[{index}].ref", metric_refs),
             "label": _text(item.get("label"), f"operating_metrics[{index}].label", limit=120),
@@ -1312,6 +1466,22 @@ def spec_from_response(
             note_evidence_resolver=note_evidence_resolver,
         )
     except (FinancialStatementStructureError, FinancialNoteContextError) as exc:
+        if isinstance(exc, FinancialStatementStructureError):
+            from .model_spec_filed_tie_repair import proof as filed_tie_proof, ERROR_CODE as FILED_TIE_CODE
+            held = filed_tie_proof(body,state,getattr(exc,'diagnostics',None))
+            if held is not None:
+                raise CompanyModelSpecError(f"financial_statement_structure is invalid: {exc}",
+                    code=FILED_TIE_CODE,proof=held) from exc
+        import re
+        match = re.fullmatch(r"lines\[(\d+)\] acquisitions cannot use zero_one_off", str(exc))
+        if isinstance(exc, FinancialStatementStructureError) and match:
+            from .model_spec_typed_field_repair import proof, ACQUISITIONS_CODE
+            index = int(match.group(1))
+            raise CompanyModelSpecError(str(exc), code=ACQUISITIONS_CODE,
+                proof=proof(body, ACQUISITIONS_CODE,
+                    [["financial_statement_structure", "lines", index, field]
+                     for field in ("forecast_method", "forecast_base_ref")],
+                    detail="Choose a supported cash-line method and base, or unavailable with null base; preserve every filed authority and amount.")) from exc
         raise CompanyModelSpecError(
             f"financial_statement_structure is invalid: {exc}",
             code=structure_error_code(str(exc)),
@@ -1332,7 +1502,7 @@ def spec_from_response(
         "schema_version": SCHEMA_VERSION,
         "company_ref": company_ref,
         "state_hash": state.get("state_hash"),
-        "assessment": _text(body.get("assessment"), "assessment", limit=1200,
+        "assessment": _text(body.get("assessment"), "assessment", limit=MAX_ASSESSMENT_CHARS,
                             repairable_length=True),
         "revenue_anchor_concept": revenue_anchor,
         "revenue_drivers": drivers,
@@ -1358,6 +1528,8 @@ def spec_from_response(
         from .forecast_financial_execution import validate_driver_formulas
         try:
             spec["driver_formulas"] = validate_driver_formulas(body["driver_formulas"], drivers, statement_structure)
+            from .period_source_family import validate_sum_bindings
+            validate_sum_bindings(drivers, spec["driver_formulas"])
             used = {ref for formula in spec["driver_formulas"] for ref in formula["driver_refs"]}
             missing = sorted({driver["ref"] for driver in drivers} - used)
             if missing:

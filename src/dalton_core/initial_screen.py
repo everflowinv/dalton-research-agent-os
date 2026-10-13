@@ -1392,11 +1392,27 @@ def parse_document_output(
             if entry["kind"] == "passage":
                 quote = str(number.get("quote") or "").strip()
                 passage = str(entry.get("text") or "")
-                if quote and _normalise_space(quote) not in _normalise_space(passage):
+                from .product_contract import passage_quote_matches
+                if quote and not passage_quote_matches(quote, passage):
                     findings.append({"code": "quote_not_in_passage", "section": title,
                                      "detail": f"{tag}: {quote[:60]}"})
                     continue
-                numbers.append({"text": quote or passage[:1000], "passage_ref": entry["ref"], **meta})
+                from .mission_deliverable import value_tokens, validate_passage_number, MissionDeliverableError
+                cited_text = figure or quote or passage[:1000]
+                if not value_tokens(cited_text, include_small=True):
+                    # A verbatim qualitative quotation belongs to source_refs,
+                    # already bound above. Keep the prose and original source;
+                    # it cannot supply any number used elsewhere in the body.
+                    continue
+                cited = {"text": cited_text, "passage_ref": entry["ref"], **meta}
+                if figure:
+                    try:
+                        validate_passage_number(cited, lambda _ref: quote or passage)
+                    except MissionDeliverableError as exc:
+                        findings.append({"code": "passage_figure_invalid", "section": title,
+                                         "detail": str(exc)[:200]})
+                        continue
+                numbers.append(cited)
             elif entry["kind"] == "number":
                 text = figure if displayed else str(entry.get("text") or "")
                 if entry.get("cell"):
@@ -1512,7 +1528,7 @@ def source_kinds_of(section: Mapping[str, Any]) -> set[str]:
 def verify_document(
     sections: Sequence[Mapping[str, Any]], *, worksheet: Mapping[str, Any] | None,
     pack: Mapping[str, Any], live_claim_refs: set[str] | None = None,
-    resolve_cell: Any = None, resolve_passage: Any = None,
+    resolve_cell: Any = None, resolve_passage: Any = None, resolve_request: Any = None,
 ) -> dict[str, Any]:
     """The deterministic verifier: citations, arithmetic, presence, lint.
 
@@ -1542,7 +1558,7 @@ def verify_document(
                                               "gap_items") if key in section}
         try:
             validate_section(wire, live_claim_refs=live_claim_refs, resolve_cell=resolve_cell,
-                             resolve_passage=resolver, resolve_number=numbers_by_ref.get,
+                             resolve_passage=resolver, resolve_number=numbers_by_ref.get, resolve_request=resolve_request,
                              strict=True)
         except MissionDeliverableError as exc:
             findings.append({"code": "citation_or_contract", "section": title, "detail": str(exc)[:300]})

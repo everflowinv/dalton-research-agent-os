@@ -1522,11 +1522,10 @@ def run_worker(config_path):
                     stable_window_seconds=int(cfg.get('stable_window_seconds',
                                                       DEFAULT_STABLE_WINDOW_SECONDS)))
                 from .ui_text_discovery import (
-                    DEFAULT_BATCHES_PER_RUN, DEFAULT_MAX_ATTEMPTS, poll_ui_texts)
-                from .research_localization_store import load_ui_texts
-                ui_result=poll_ui_texts(connection,mission,state_dir=root/'ui-text-products',
+                    DEFAULT_BATCHES_PER_RUN, DEFAULT_MAX_ATTEMPTS, poll_ui_texts_from_store)
+                ui_result=poll_ui_texts_from_store(connection,mission,
+                    database=core,state_dir=root/'ui-text-products',
                     stop_requested=quiesce.requested,
-                    mapping=load_ui_texts(core),
                     # UI text is Claim display backlog: always low priority.
                     prepare=lambda product,redraft_generation=0:prepare_ui_batch(
                         with_spend_gate(args,gate,PRIORITY_LOW),mission,product,

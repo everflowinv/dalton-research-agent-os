@@ -136,17 +136,24 @@ class ResearchTaskCoordinator:
                 return 0
 
         from .document_research_inventory import document_inventory_signature
+        from .document_numeric_inquiry_equivalence import RULE_REF
+        from .planner_note_options import FORMAL_SELECTION_CONTRACT
 
         state_dir = getattr(self.launcher, "state_dir", None)
         document_signature = (
             None if state_dir is None
             else document_inventory_signature(self.store, Path(state_dir))
         )
+        from .operating_driver_source_plan import wake_signature
+        operating_signature = None if state_dir is None else wake_signature(state_dir,self.store.connection,now=self.clock())
         return {
             "plan_ref": plan_ref,
+            "inquiry_equivalence": RULE_REF,
+            "formal_note_selection": FORMAL_SELECTION_CONTRACT,
             "configuration": (self.launcher.configuration_signature()
                               if hasattr(self.launcher, "configuration_signature") else None),
             "document_inventory": document_signature,
+            **({'operating_source_handoff': operating_signature} if operating_signature is not None else {}),
             "tasks": count(
                 "SELECT COUNT(*) FROM bounded_planner_loop_versions "
                 "WHERE json_extract(record_json,'$.admission.source')='inquiry'"),
@@ -197,9 +204,17 @@ class ResearchTaskCoordinator:
         from .coverage_mission import CoverageMissionAuthority
 
         plan = CoverageMissionAuthority(self.store).latest_research_plan(mission["id"])
+        from .operating_driver_source_plan import wake_signature, TASK_REF
+        from .store import content_hash
+        state_dir=getattr(self.launcher,'state_dir',None)
+        operating_signature=None if state_dir is None else wake_signature(state_dir,self.store.connection,now=self.clock())
+        if plan is None and operating_signature is not None:
+            # A launch identity, never a synthetic paid plan or Ledger FK.
+            # The child creates a real owner plan only after exact qualification.
+            plan={'plan_id':TASK_REF+':wake:'+content_hash(operating_signature), 'inquiries':[]}
         if plan is None:
             return {"status": "idle", "reason": "no research plan yet", **settled}
-        has_directed = any(
+        has_directed = operating_signature is not None or any(
             isinstance(inquiry, Mapping) and "directed_document" in inquiry
             for inquiry in plan.get("inquiries", ())
         )

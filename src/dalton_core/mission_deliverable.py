@@ -94,6 +94,8 @@ def deliverable_change_reasons() -> tuple[str, ...]:
     return (*CHANGE_REASONS, IMPORT_CHANGE_REASON)
 MAX_SECTIONS = 24
 MAX_BODY_CHARS = 6000
+MAX_SECTION_NUMBERS = 128
+SECTION_NUMBERS_VALIDATION_CONTRACT = "section-numbers-capacity:128:v1"
 GAP_MARKER = "缺来源"
 
 # A year, quarter, half or fiscal-year label is a period, not a figure.  Same
@@ -112,7 +114,7 @@ _PERIOD_TOKEN_RE = re.compile(
     # Batch D: a rolling-window label is a period, not a figure -- 「30 日 ADV」,
     # 「52 周区间」, "30-day ADV". Narrow on purpose: only when a window noun
     # follows, so 「30 日内上涨 5%」's 30 is still a figure to source.
-    r"|\d{1,3}\s?(?:日|天|周|个交易日)(?=\s?(?:ADV|均量|成交|区间|高点|低点|滚动|移动|平均|波动))"
+    r"|\d{1,3}\s?(?:日|天|周|个交易日)(?=\s?(?:ADV|(?:日|周|月)均(?:成交|交易|量|价|额)|均量|成交|区间|高点|低点|滚动|移动|平均|波动))"
     r"|\d{1,3}[-\s]?(?:day|week)(?=\s?(?:ADV|average|moving|volume|range|high|low))",
     re.IGNORECASE,
 )
@@ -125,7 +127,7 @@ _BARE_SMALL_INTEGER = 12
 # The longest rendering of one cited figure. A Claim's normalized_statement has
 # no ceiling in its own contract, so this is generous on purpose: it exists to
 # stop a single statement becoming a document, not to police wording. The
-# document's real bound is the 60-entry cap on a section's numbers.
+# document's real bound is MAX_SECTION_NUMBERS on a section's numbers.
 MAX_NUMBER_TEXT = 1000
 _VALUE_TOKEN_RE = re.compile(r"[$€£¥]\s?\d[\d,.]*|\d[\d,.]*\s?%|\d[\d,.]*")
 _ISO_DATE_RE = re.compile(r"(?<!\d)((?:19|20)\d{2}-\d{2}-\d{2})(?!\d)")
@@ -154,7 +156,7 @@ _DAY_MONTH_RE = re.compile(
     r"Apr(?:il)?|May|Jun(?:e)?|Jul(?:y)?|Aug(?:ust)?|Sep(?:t|tember)?|Oct(?:ober)?|"
     r"Nov(?:ember)?|Dec(?:ember)?)(?![A-Za-z])(?:,?\s+((?:19|20)\d{2})(?!\d))?",
 )
-NUMBER_SOURCE_CONTRACT_VERSION = "number-source-contract:0.8"
+NUMBER_SOURCE_CONTRACT_VERSION = "number-source-contract:0.11"
 
 
 def number_source_contract_fingerprint() -> str:
@@ -176,6 +178,8 @@ def number_source_contract_fingerprint() -> str:
             "+read-from-period-and-text"),
         "print_equivalence": (
             "percent-word+english-number-words-exact+currency-symbol-as-word"),
+        "year_amount_disambiguation": "four-digit-year-with-explicit-money-or-percent-unit-is-a-value",
+        "product_identifier_rule": "number-source-product-identifiers:1",
     })
 
 
@@ -231,7 +235,19 @@ def value_tokens(text: str, *, include_small: bool = False) -> list[str]:
     """Every figure the text asserts, with period labels and citation tags removed."""
 
     without_tags = _CITATION_TAG_RE.sub(" ", text or "")
-    without_periods = _PERIOD_TOKEN_RE.sub(" ", without_tags)
+    def period_or_amount(match: re.Match[str]) -> str:
+        # Only a standalone bare year is ambiguous. FY labels, full dates,
+        # quarters and explicit 年/财年 remain periods, even next to money.
+        if re.fullmatch(r"(?:19|20)\d{2}", match.group()):
+            before = without_tags[:match.start()]
+            after = without_tags[match.end():]
+            if (re.search(r"[\d.,]$", before) or re.match(r"(?:\d|[.,]\d)", after)
+                    or re.search(r"[$€£¥]\s*$", before)
+                    or re.match(r"\s*(?:(?:万亿|十亿|百万|千万|亿|万|千)\s*)?(?:美元|人民币|欧元|英镑|日元|港元|USD\b|EUR\b|GBP\b|JPY\b|dollars?\b|euros?\b|%)", after, re.I)
+                    or re.match(r"\s*(?:billion|million|trillion)\s+(?:USD\b|EUR\b|dollars?\b|euros?\b)", after, re.I)):
+                return match.group()
+        return " "
+    without_periods = _PERIOD_TOKEN_RE.sub(period_or_amount, without_tags)
     tokens = []
     for match in _VALUE_TOKEN_RE.finditer(without_periods):
         token = match.group(0).strip()
@@ -761,6 +777,54 @@ def _evaluate(node: Any) -> float:
     raise MissionDeliverableValidationError("a derivation is arithmetic over numbers only (+ - * / and parentheses)")
 
 
+def _bound_scale_constants(tree: Any, sourced: set[Decimal]) -> set[int]:
+    """Powers of ten are operators on proved operands, never new facts.
+
+    The expression's AST supplies the operation type. A scale is accepted
+    only as a multiplication/division factor whose other branch recursively
+    consists of cited inputs and valid arithmetic. Additive amounts and a
+    bare scale-as-result remain subject to the source requirement.
+    """
+    import ast
+    constants: set[int] = set()
+    def scalar(node):
+        return Decimal(str(node.value)) if isinstance(node, ast.Constant) and type(node.value) in (int,float) else None
+    def scale(node):
+        value=scalar(node)
+        return value is not None and value in {Decimal(10) ** n for n in range(1,13)}
+    def bound(node):
+        if isinstance(node,ast.Expression):return bound(node.body)
+        value=scalar(node)
+        if value is not None:return value in sourced
+        if isinstance(node,ast.UnaryOp) and isinstance(node.op,(ast.USub,ast.UAdd)):return bound(node.operand)
+        if not isinstance(node,ast.BinOp):return False
+        if isinstance(node.op,(ast.Mult,ast.Div)):
+            if scale(node.right) and bound(node.left):
+                constants.add(id(node.right));return True
+            if isinstance(node.op,ast.Mult) and scale(node.left) and bound(node.right):
+                constants.add(id(node.left));return True
+        if isinstance(node.op,(ast.Add,ast.Sub,ast.Mult,ast.Div)):
+            # A ratio minus one is the dimensionless growth/return operation.
+            if (isinstance(node.op,ast.Sub) and scalar(node.right)==1
+                    and isinstance(node.left,ast.BinOp) and isinstance(node.left.op,ast.Div)
+                    and bound(node.left.left) and bound(node.left.right)):
+                constants.add(id(node.right));return True
+            return bound(node.left) and bound(node.right)
+        return False
+    bound(tree)
+    return constants
+
+
+def _without_verified_expression(text: str, expression: str) -> str:
+    """Remove only the exact checked formula, including typographic operators.
+
+    A prose claim that happens to contain 1 or 100 is still checked as a fact.
+    """
+    translated=text.translate(str.maketrans({'−':'-','×':'*','÷':'/','（':'(','）':')'}))
+    pattern=r'\s*'.join(re.escape(char) for char in re.sub(r'\s+','',expression))
+    return re.sub(r'(?<![\d.+*/(-])'+pattern+r'(?!\s*[\d.+*/)-])',' ',translated)
+
+
 def validate_derived_number(item: Mapping[str, Any], cited: Sequence[Mapping[str, Any]], *, check_stray: bool = True) -> dict[str, Any]:
     """A figure computed from figures this section cites, re-computed here."""
 
@@ -792,15 +856,22 @@ def validate_derived_number(item: Mapping[str, Any], cited: Sequence[Mapping[str
             exact_operands.add(Decimal(token))
         except InvalidOperation:
             continue
-    for literal in re.findall(r"\d+(?:\.\d+)?", expression):
+    try:
+        tree=ast.parse(expression,mode='eval')
+    except SyntaxError as exc:
+        raise MissionDeliverableValidationError('a derivation must be a valid arithmetic expression') from exc
+    scale_constants=_bound_scale_constants(tree,exact_operands)
+    for node in ast.walk(tree):
+        if not isinstance(node,ast.Constant) or type(node.value) not in (int,float):continue
+        literal=ast.get_source_segment(expression,node)
         plain = literal.rstrip("0").rstrip(".") if "." in literal else literal
-        if (literal in sourced or plain in sourced or Decimal(literal) in exact_operands or literal in _DERIVATION_CONSTANTS
+        if (literal in sourced or plain in sourced or Decimal(literal) in exact_operands or id(node) in scale_constants or literal in _DERIVATION_CONSTANTS
                 or (literal.isdigit() and int(literal) <= _BARE_SMALL_INTEGER)):
             continue
         raise MissionDeliverableConflict(
             f"a derivation uses {literal}, which no other figure in this section cites")
     try:
-        value = _evaluate(ast.parse(expression, mode="eval"))
+        value = _evaluate(tree)
     except SyntaxError as exc:
         raise MissionDeliverableValidationError("a derivation must be a valid arithmetic expression") from exc
     decimals = len(result.split(".", 1)[1]) if "." in result else 0
@@ -811,7 +882,17 @@ def validate_derived_number(item: Mapping[str, Any], cited: Sequence[Mapping[str
     if result.lstrip("-") not in stated:
         raise MissionDeliverableConflict(
             f"a derived number entry's text must state its result {result}")
-    stray = [token for token in stated if token != result.lstrip("-") and token not in sourced]
+    prose_text = _without_verified_expression(text, expression)
+    from .derived_number_display import prove_displays, without_proved_displays
+    try:
+        displays = prove_displays(prose_text, expression=expression, result=result,
+                                  period=item.get('period'), unit=item.get('unit'))
+        prose_text = without_proved_displays(prose_text, displays)
+    except (ValueError, SyntaxError, ZeroDivisionError, OverflowError) as exc:
+        raise MissionDeliverableConflict(str(exc)) from exc
+    prose = [_bare(_normalise_number(token)) for token in
+             value_tokens(prose_text,include_small=True)]
+    stray = [token for token in prose if token != result.lstrip("-") and token not in sourced]
     if stray and check_stray:
         raise MissionDeliverableConflict(
             f"a derived number entry states figures that are neither its result nor cited: {stray[:3]}")
@@ -1010,6 +1091,7 @@ def validate_section(
     imported: bool = False,
     resolve_passage: Callable[[str], str | None] | None = None,
     resolve_number: Callable[[str], str | None] | None = None,
+    resolve_request: Callable[[str], Mapping[str, Any] | None] | None = None,
     strict: bool = False,
 ) -> dict[str, Any]:
     """One closed section: a title, a body or a gap, and traceable numbers.
@@ -1048,9 +1130,16 @@ def validate_section(
     if not isinstance(body, str) or len(body) > MAX_BODY_CHARS:
         raise MissionDeliverableValidationError("section.body must be text under 6000 characters")
     numbers = section.get("numbers") or []
-    if not isinstance(numbers, list) or len(numbers) > 60:
-        raise MissionDeliverableValidationError("section.numbers must be a list of at most 60 entries")
+    if not isinstance(numbers, list) or len(numbers) > MAX_SECTION_NUMBERS:
+        raise MissionDeliverableValidationError(
+            f"section.numbers must be a list of at most {MAX_SECTION_NUMBERS} entries")
     checked: list[dict[str, Any]] = []
+    verified_product_passages: list[str] = []
+    def checked_passage(ref):
+        text = resolve_passage(ref) if resolve_passage is not None else None
+        if text is not None:
+            verified_product_passages.append(text)
+        return text
     derived: list[Mapping[str, Any]] = []
     for item in numbers:
         if not isinstance(item, Mapping) or set(item) - {
@@ -1080,7 +1169,7 @@ def validate_section(
             derived.append(item)
             continue
         if cites_passage:
-            checked.append({**validate_passage_number(item, resolve_passage), **meta})
+            checked.append({**validate_passage_number(item, checked_passage), **meta})
             continue
         if cites_pack:
             checked.append({**validate_pack_number(item, resolve_number), **meta})
@@ -1135,20 +1224,25 @@ def validate_section(
             "claim_version_ref": ref,
             "period": None if item.get("period") is None else _text(item["period"], "number.period", maximum=120),
         })
+    from .source_product_identifiers import without_verified_product_identifiers
+    # Product-name digits cannot become an arithmetic operand merely because
+    # the surrounding quote also contains a sourced financial number.
+    numeric_checked = [{**item, 'text': without_verified_product_identifiers(
+        item['text'], verified_product_passages)} for item in checked]
     # Prove arithmetic before accepting any peer result in a range's wording.
     # A peer's unverified prose is never an operand source.
     pending=list(derived);proven=[]
     while pending:
         progress=False;last_error=None
         for item in list(pending):
-            trusted=[*checked,*({'text':d['derivation']['result']} for d in proven)]
+            trusted=[*numeric_checked,*({'text':d['derivation']['result']} for d in proven)]
             try:proof=validate_derived_number(item,trusted,check_stray=False)
             except MissionDeliverableConflict as exc:
                 if 'a derivation uses ' not in str(exc):raise
                 last_error=exc;continue
             proven.append(proof);pending.remove(item);progress=True
         if not progress:raise last_error or MissionDeliverableConflict('derivation sources are unavailable or circular')
-    trusted=[*checked,*({'text':d['derivation']['result']} for d in proven)]
+    trusted=[*numeric_checked,*({'text':d['derivation']['result']} for d in proven)]
     for item in derived:
         meta = {key: _text(item[key], f"number.{key}", maximum=120)
                 for key in ("metric", "unit") if item.get(key) is not None}
@@ -1179,7 +1273,10 @@ def validate_section(
                      for index, item in enumerate(raw_items)]
     except ProductContractError as exc:
         raise MissionDeliverableValidationError(str(exc)) from exc
-    stray = unsourced_numbers(body, checked)
+    from .material_request_citation import without_verified_request_tokens
+    checked_body = without_verified_request_tokens(body, gap_items, resolve_request)
+    checked_body = without_verified_product_identifiers(checked_body, verified_product_passages)
+    stray = unsourced_numbers(checked_body, [*numeric_checked, *checked[len(numeric_checked):]])
     if stray and not imported:
         raise MissionDeliverableConflict(
             f"section「{title}」carries figures with no source behind them: {stray[:5]}；"
@@ -1521,6 +1618,12 @@ class MissionDeliverableAuthority:
 
         return passage_resolver(Path(self.store.path).parent)
 
+    def request_resolver(self, subject_ref: str):
+        if self.store.path == ":memory:":
+            return None
+        from .material_request_citation import request_citation_resolver
+        return request_citation_resolver(Path(self.store.path).parent, subject_ref)
+
     def latest(self, deliverable_ref: str) -> dict[str, Any] | None:
         row = self.connection.execute(
             "SELECT v.record_json AS record_json, v.content_hash AS content_hash "
@@ -1626,11 +1729,12 @@ class MissionDeliverableAuthority:
         strict = contract is not None and kind in CONTRACT_STRICT_KINDS and not as_version_zero
         numbers_by_ref = {str(key): str(value) for key, value in (pack_numbers or {}).items()}
         resolve_number = (numbers_by_ref.get if pack_numbers is not None else None)
+        resolve_request = self.request_resolver(subject_ref)
         checked = [
             validate_section(section, live_claim_refs=live,
                              resolve_cell=resolve_cell, imported=as_version_zero,
                              resolve_passage=resolve_passage,
-                             resolve_number=resolve_number, strict=strict)
+                             resolve_number=resolve_number, resolve_request=resolve_request, strict=strict)
             for section in sections
         ]
         if not any(section["body"] for section in checked):

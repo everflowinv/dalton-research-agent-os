@@ -6,6 +6,7 @@ import argparse
 import json
 import os
 import plistlib
+import signal
 import socket
 import sqlite3
 import subprocess
@@ -113,11 +114,19 @@ def _create(host: Path, release: Path, slug: str, port: int) -> Any:
     return workspace, mission, proposal, foundation
 
 
+def _fixture_popen(argv: list[str], **kwargs: Any) -> subprocess.Popen[str]:
+    """Own a separate process group for these zero-provider fixture engines."""
+    process = subprocess.Popen(argv, start_new_session=(os.name == 'posix'), **kwargs)
+    if os.name == 'posix':
+        process._acceptance_process_group = process.pid
+    return process
+
+
 def _start(workspace: Any, module: str, *args: str) -> subprocess.Popen[str]:
     env = {**os.environ, "PYTHONPATH": str(Path(__file__).resolve().parents[1] / "src"),
            "PYTHONDONTWRITEBYTECODE": "1",
            "DALTON_WORKSPACE_MANIFEST": str(workspace.manifest_path)}
-    return subprocess.Popen(
+    return _fixture_popen(
         [sys.executable, "-m", module, *args], env=env,
         stdout=subprocess.PIPE, stderr=subprocess.PIPE, text=True)
 
@@ -146,16 +155,19 @@ def _start_writer(workspace: Any) -> subprocess.Popen[str]:
            "PYTHONPATH": str(Path(__file__).resolve().parents[1] / "src"),
            "PYTHONDONTWRITEBYTECODE": "1",
            "DALTON_WORKSPACE_MANIFEST": str(workspace.manifest_path)}
-    process = subprocess.Popen(writer_argv, env=env, stdout=subprocess.PIPE,
+    process = _fixture_popen(writer_argv, env=env, stdout=subprocess.PIPE,
                                stderr=subprocess.PIPE, text=True)
     deadline = time.monotonic() + 15
     while time.monotonic() < deadline:
         if workspace.writer_socket.exists():
             return process
         if process.poll() is not None:
+            _drain_fixture_group(process)
             out, err = process.communicate()
+            _stop(process)
             raise RuntimeError(f"writer exited early: {out[-300:]} {err[-500:]}")
         time.sleep(0.02)
+    _stop(process)
     raise RuntimeError("writer did not publish its workspace socket")
 
 
@@ -169,10 +181,44 @@ def _start_controller(workspace: Any) -> subprocess.Popen[str]:
             if value.get("pid") == process.pid and value.get("last_tick_at"):
                 return process
         if process.poll() is not None:
+            _drain_fixture_group(process)
             out, err = process.communicate()
+            _stop(process)
             raise RuntimeError(f"controller exited early: {out[-300:]} {err[-700:]}")
         time.sleep(0.05)
+    _stop(process)
     raise RuntimeError("controller did not complete a real tick")
+
+
+def _live_fixture_group(pgid: int) -> list[int]:
+    rows = subprocess.run(['ps', '-axo', 'pid=,pgid=,stat='], check=True,
+                          capture_output=True, text=True).stdout.splitlines()
+    return [int(fields[0]) for row in rows if len(fields := row.split()) == 3
+            and int(fields[1]) == pgid and not fields[2].startswith(('Z', 'X'))]
+
+
+def _drain_fixture_group(process: subprocess.Popen[str]) -> None:
+    # This marker is set ONLY by _fixture_popen after start_new_session. Never
+    # signal the caller's group or arbitrary production processes. Reap the
+    # parent first, then stop its retained fixture group before removing state.
+    pgid = getattr(process, '_acceptance_process_group', None)
+    if pgid is None:
+        return
+    if pgid != process.pid or pgid == os.getpgrp():
+        raise RuntimeError('acceptance fixture process group identity differs')
+    for sig in (signal.SIGTERM, signal.SIGKILL):
+        if not _live_fixture_group(pgid):
+            return
+        try:
+            os.killpg(pgid, sig)
+        except ProcessLookupError:
+            return
+        deadline = time.monotonic() + 2
+        while time.monotonic() < deadline:
+            if not _live_fixture_group(pgid):
+                return
+            time.sleep(.05)
+    raise RuntimeError(f'acceptance fixture group {pgid} still has live children')
 
 
 def _stop(process: subprocess.Popen[str] | None, *, diagnostics: Path | None = None) -> None:
@@ -184,6 +230,7 @@ def _stop(process: subprocess.Popen[str] | None, *, diagnostics: Path | None = N
             process.wait(timeout=8)
         except subprocess.TimeoutExpired:
             process.kill(); process.wait(timeout=5)
+    _drain_fixture_group(process)
     if diagnostics is not None:
         out,err=process.communicate(timeout=5)
         _write(diagnostics,{'pid':process.pid,'returncode':process.returncode,
@@ -330,10 +377,10 @@ def run_acceptance(output: Path) -> dict[str, Any]:
         host, release = root / "fleet", root / "release"
         release.mkdir()
         a, mission_a, proposal_a, foundation_a = _create(host, release, "alpha", _free_port())
-        writer_a = _start_writer(a); processes.append(writer_a)
-        controller_a = _start_controller(a); processes.append(controller_a)
-        a_pid, a_before = controller_a.pid, _tick_count(a)
         try:
+            writer_a = _start_writer(a); processes.append(writer_a)
+            controller_a = _start_controller(a); processes.append(controller_a)
+            a_pid, a_before = controller_a.pid, _tick_count(a)
             # B is created and opened while A's real controller remains alive.
             b, mission_b, _proposal_b, foundation_b = _create(host, release, "beta", _free_port())
             writer_b = _start_writer(b); processes.append(writer_b)

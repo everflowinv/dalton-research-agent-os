@@ -180,7 +180,10 @@ class NumericIdentityContractTests(unittest.TestCase):
         from dalton_core.needs_human import _numeric_contract_system_item
         f, authority, admission, executor, producer, verifier = self.fixture()
         producer.candidate_wire['targets'][0]['figure']['period'] = 'FY2024'
+        # Distinct diagnostics exhaust the bounded windows; identical failures
+        # now stop earlier under the separately tested repeat guard.
         for _ in range(24):
+            producer.candidate_wire['targets'][0]['figure']['period'] = f'FY{1900 + producer.calls}'
             result = executor.run_once(admission['id'])
             if result.get('reason') == 'contract_failed_after_automatic_retry': break
         else: self.fail(str(result))
@@ -228,6 +231,7 @@ class NumericIdentityContractTests(unittest.TestCase):
             result = executor.run_once(admission['id'])
             if result.get('reason') == 'automatic_bounded_contract_retry': break
         for _ in range(5):
+            producer.candidate_wire['targets'][0]['figure']['period'] = f'FY{1900 + producer.calls}'
             result = executor.run_once(admission['id'])
             if result.get('status') == 'failed': break
         work, links = _effective_stage(authority, executor.scheduler, admission, 1,

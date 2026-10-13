@@ -12,6 +12,8 @@ import uuid
 from typing import Any, Mapping
 
 from .writer_protocol import (
+    DISPATCH_CLIENT_TIMEOUT,
+    is_dispatch_operation,
     MAX_FRAME_BYTES,
     ProtocolError,
     RemoteAuthorizationError,
@@ -74,7 +76,12 @@ class WriterClient:
         frame = request_frame(request_id, operation, params or {}, self._token)
         try:
             with socket.socket(socket.AF_UNIX, socket.SOCK_STREAM) as sock:
-                sock.settimeout(self.timeout)
+                # Keep deliberately short UI probes short. Ordinary dispatch
+                # callers wait for the server's structured completion/refusal.
+                timeout = (max(self.timeout, DISPATCH_CLIENT_TIMEOUT)
+                           if self.timeout >= SERVER_REQUEST_TIMEOUT
+                           and is_dispatch_operation(operation) else self.timeout)
+                sock.settimeout(timeout)
                 sock.connect(self.socket_path)
                 sock.sendall(frame)
                 reader = sock.makefile("rb")

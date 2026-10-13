@@ -386,6 +386,7 @@ class PreserveExistingTransitionTests(unittest.TestCase):
                        change_owner_signature: bool = False,
                        managed_web_search: bool = False,
                        managed_model_broker: bool = False,
+                       profile_timeout_migration: bool = False,
                        already_target: bool = False):
         service = json.loads(json.dumps(self.service_before))
         service["bounded_planner"]["config"]["planner_call_budget"] = self.budget
@@ -405,6 +406,13 @@ class PreserveExistingTransitionTests(unittest.TestCase):
         after["plugins"]["entries"]["dalton-openclaw-model-broker"][
             "config"]["maxFrameBytes"] = OPENCLAW_TARGET_MAX_FRAME_BYTES
         plugin_args = {}
+        if profile_timeout_migration:
+            profiles = [dict(id='profile:'+str(i),model='p/m',maxTokens=100,timeoutMs=t)
+                        for i,t in enumerate((600000,900000,12345))]
+            before['plugins']['entries']['dalton-openclaw-model-broker']['config']['profiles'] = profiles
+            after['plugins']['entries']['dalton-openclaw-model-broker']['config']['profiles'] = [
+                {**p,'timeoutMs':1800000 if p['timeoutMs'] in (600000,900000) else p['timeoutMs']} for p in profiles]
+            plugin_args['model_broker_profile_timeout_ms'] = 1800000
         if managed_model_broker:
             old = self.root / "old/openclaw-model-broker"
             source = self.root / "source/integrations/openclaw-model-broker"
@@ -412,6 +420,11 @@ class PreserveExistingTransitionTests(unittest.TestCase):
             (source / "index.mjs").write_text("export const version = 2;\n")
             write(source / "openclaw.plugin.json", {
                 "id": "dalton-openclaw-model-broker", "version": "0.1.0-spike.5"})
+            if profile_timeout_migration:
+                write(source / "openclaw.plugin.json", {
+                    "id": "dalton-openclaw-model-broker", "version": "0.1.0-spike.5",
+                    "configSchema": {"properties": {"profiles": {"items": {"properties": {
+                        "timeoutMs": {"type":"integer","minimum":1,"maximum":1800000}}}}}}})
             destination = (self.packet / "managed-plugins" /
                            ("openclaw-model-broker-" + "c" * 40))
             destination.mkdir(parents=True)
@@ -1090,6 +1103,31 @@ class PreserveExistingTransitionTests(unittest.TestCase):
             [plugin["plugin_id"] for plugin in row["managed_plugins"]])
         self.assertTrue(row["managed_plugins"][0]["replaces"].endswith(
             "/old/openclaw-model-broker"))
+
+    def test_timeout_migration_is_exact_stopped_window_cas_and_preserves_uncertainty(self):
+        manifest = self.build_external(managed_model_broker=True, already_target=True,
+                                       profile_timeout_migration=True)
+        before, after, row = expected_openclaw_frame_transition_state(manifest=manifest, packet_root=self.packet)
+        self.assertEqual(row['model_broker_profile_timeout_ms'],1800000)
+        self.assertEqual([p['timeoutMs'] for p in json.loads(after)['plugins']['entries']['dalton-openclaw-model-broker']['config']['profiles']], [1800000,1800000,12345])
+        self.assertEqual(len([m for m in row['semantic_mutations'] if m['kind']=='json_leaf_compare_and_patch']),2)
+        self.assertFalse(row['historical_unresolved']['retry_authorized'])
+        self.assertFalse(row['historical_unresolved']['refund_authorized'])
+        bad=json.loads(after);bad['plugins']['entries']['dalton-openclaw-model-broker']['config']['profiles'][0]['maxTokens']=101
+        write(self.packet/'openclaw.after.json',bad)
+        with self.assertRaises(ConfigTransitionError):expected_openclaw_frame_transition_state(manifest=manifest,packet_root=self.packet)
+
+    def test_timeout_migration_cannot_use_old_broker_or_undeclared_upgrade(self):
+        with self.assertRaises(ConfigTransitionError):
+            self.build_external(profile_timeout_migration=True)
+        manifest = self.build_external(managed_model_broker=True, profile_timeout_migration=True)
+        row=manifest['external_config_transitions'][0]
+        destination=Path(row['managed_plugins'][0]['destination'])/'openclaw.plugin.json'
+        definition=json.loads(destination.read_bytes())
+        definition['configSchema']['properties']['profiles']['items']['properties']['timeoutMs']['maximum']=900000
+        write(destination,definition)
+        with self.assertRaisesRegex(ConfigTransitionError,'declare the reviewed timeout bound'):
+            expected_openclaw_frame_transition_state(manifest=manifest,packet_root=self.packet)
 
     def test_r18_preserves_already_promoted_frame_while_replacing_model_broker(self):
         manifest = self.build_external(

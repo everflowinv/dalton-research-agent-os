@@ -24,6 +24,7 @@ Every step is idempotent: a re-run with nothing new to say publishes nothing.
 from __future__ import annotations
 
 import argparse
+import sqlite3
 import calendar
 import json
 import os
@@ -542,6 +543,22 @@ def _run_legacy_sections(
         "age_months": prior_block["age_months"],
         "imported": prior_block["imported"],
     }
+    if model is not None:
+        from .initial_screen_quiesce import wrap, resume_context, ScreenQuiesceUnproved
+        resumed = resume_context(args)
+        if resumed is not None:
+            if resumed.get('mode') != 'legacy' or resumed['company']['company_ref'] != company_ref:
+                raise ScreenQuiesceUnproved('paused legacy screen target changed')
+            context, prior_block = resumed['claim_context'], resumed['prior_reference']
+            playbook, entry = resumed['playbook'], resumed['entry']
+            titles = section_titles(playbook)
+            valuation = resumed['valuation']
+        model=wrap(model,args,context={'mode':'legacy',
+            'company':{'company_ref':company_ref,'ticker':entry['ticker']},
+            'claim_context':context,'claim_refs':sorted({r['ref'] for r in
+                [*context['claims'],*context['numbers']] if not r.get('cell')}),
+            'prior_reference':prior_block,'playbook':playbook,'entry':entry,'valuation':valuation},
+            mission=mission,authority=deliverable_authority)
     sections: list[dict[str, Any]] = []
     invocations: list[str] = []
     for index, title in enumerate(titles):
@@ -733,7 +750,17 @@ def _call_json(model: Any, *, request_id: str, prompt: str, mission: Mapping[str
     return unwrap_json_object(call["text"]), call
 
 
-def _run_strl(
+def _run_strl(*args,**kwargs):
+    try:result=_run_strl_body(*args,**kwargs)
+    except BaseException:
+        kwargs['summary'].pop('_failed_input_binding',None)
+        raise
+    from .initial_screen_failed_input import record_failure
+    record_failure(kwargs['state'],result)
+    return result
+
+
+def _run_strl_body(
     args: argparse.Namespace, *, state: Path, store: DaltonStore, mission: dict[str, Any],
     playbook: dict[str, Any], entry: dict[str, Any], summary: dict[str, Any],
     deliverable_authority: MissionDeliverableAuthority, missions: CoverageMissionAuthority,
@@ -759,35 +786,44 @@ def _run_strl(
     deliverable_ref = f"mission-deliverable:{KIND}:{company_ref.rsplit(':', 1)[-1]}"
     run_ref = f"{KIND}-run:{company_ref}:{summary.get('created_at') or _now()}"
     as_of = getattr(args, "as_of", None)
+    from .initial_screen_quiesce import wrap, resume_context, ScreenQuiesceUnproved
+    resumed = resume_context(args)
     # Batch C: collect first, then draft. The sufficiency check opens (or
     # joins) a MaterialRequest per missing item -- never on a dry run -- and
     # a product that may not draft yet holds with the reason and the wait.
-    try:
-        check = check_sufficiency(
-            state, company_ref, KIND, as_of,
-            requester={"lane": KIND, "product_ref": deliverable_ref, "run_ref": run_ref},
-            record=not args.dry_run)
-    except MaterialPackUnavailable as exc:
-        summary["status"] = "held"
-        summary["reason_code"] = "material_pack_unavailable"
-        summary["failure_reason"] = str(exc)
-        return summary
-    summary["sufficiency"] = {key: check.get(key) for key in (
-        "status", "drafting_allowed", "reason", "wait_until", "gap_request_refs")}
-    if not check.get("drafting_allowed"):
-        summary["status"] = "held"
-        summary["reason_code"] = "material_insufficient"
-        summary["failure_reason"] = ("材料包未通过充分性检查，先取材料再起草："
-                                     + str(check.get("reason") or "缺必需材料"))[:800]
-        summary["material_requests"] = list(check.get("gap_request_refs") or [])
-        return summary
-    try:
-        pack = build_pack(state, company_ref, KIND, as_of)
-    except MaterialPackUnavailable as exc:
-        summary["status"] = "held"
-        summary["reason_code"] = "material_pack_unavailable"
-        summary["failure_reason"] = str(exc)
-        return summary
+    if resumed is not None:
+        if resumed.get('mode') != 'strl' or resumed['company']['company_ref'] != company_ref:
+            raise ScreenQuiesceUnproved('paused screen target or contract mode changed')
+        pack = resumed['pack']
+        check = dict(pack.get('sufficiency') or {})
+        summary['sufficiency'] = check
+    else:
+        try:
+            check = check_sufficiency(
+                state, company_ref, KIND, as_of,
+                requester={"lane": KIND, "product_ref": deliverable_ref, "run_ref": run_ref},
+                record=not args.dry_run)
+        except MaterialPackUnavailable as exc:
+            summary["status"] = "held"
+            summary["reason_code"] = "material_pack_unavailable"
+            summary["failure_reason"] = str(exc)
+            return summary
+        summary["sufficiency"] = {key: check.get(key) for key in (
+            "status", "drafting_allowed", "reason", "wait_until", "gap_request_refs")}
+        if not check.get("drafting_allowed"):
+            summary["status"] = "held"
+            summary["reason_code"] = "material_insufficient"
+            summary["failure_reason"] = ("材料包未通过充分性检查，先取材料再起草："
+                                         + str(check.get("reason") or "缺必需材料"))[:800]
+            summary["material_requests"] = list(check.get("gap_request_refs") or [])
+            return summary
+        try:
+            pack = build_pack(state, company_ref, KIND, as_of)
+        except MaterialPackUnavailable as exc:
+            summary["status"] = "held"
+            summary["reason_code"] = "material_pack_unavailable"
+            summary["failure_reason"] = str(exc)
+            return summary
     # The check this run made is the one the drafter cites (its requests).
     pack["sufficiency"] = {**dict(pack.get("sufficiency") or {}),
                            **{key: check[key] for key in ("status", "gap_request_refs", "missing")
@@ -796,13 +832,14 @@ def _run_strl(
         "content_hash": pack["content_hash"], "recipe_version": pack["recipe_version"],
         "chars": len(pack["text"]), "tags": len(pack["tags"]),
     }
-    if not args.dry_run:
+    if not args.dry_run and resumed is None:
         try:
             record_pack_build(state, pack, run_ref=run_ref)
         except Exception as exc:  # noqa: BLE001 - the ledger row is provenance, not the draft
             summary["pack"]["build_ledger"] = f"not_recorded: {type(exc).__name__}: {exc}"[:300]
     prior_block = prior_reference(
         deliverable_authority.latest(f"mission-deliverable:{KIND}:{company_ref.rsplit(':', 1)[-1]}"))
+    if resumed is not None: prior_block = resumed["prior_reference"]
     company = {"ticker": entry["ticker"], "company_ref": company_ref}
     worksheet_prompt = build_worksheet_prompt(company=company, pack=pack, prior_reference=prior_block)
     summary["prompts"] = {"worksheet_chars": len(worksheet_prompt)}
@@ -816,11 +853,92 @@ def _run_strl(
             max_input_tokens=STRL_MAX_INPUT_TOKENS, max_output_tokens=STRL_MAX_OUTPUT_TOKENS,
             timeout_seconds=args.timeout_seconds,
         )
+    validation_context={'company':company,'pack':pack,'prior_reference':prior_block}
+    from .initial_screen_failure_feedback import prepare_prompt,snapshot_passage_bindings
+    validation_context['source_bindings']=(resumed['source_bindings'] if resumed is not None
+        else snapshot_passage_bindings(deliverable_authority,pack))
+    from .initial_screen_failed_input import input_binding,unchanged_failure,execution_binding
+    if resumed is None:
+        try:
+            binding=input_binding(mission,company,pack,prior_block,validation_context['source_bindings'],
+                reopen=entry.get('reopen'),execution=execution_binding(model,state))
+            previous=unchanged_failure(state,binding)
+        except (ValueError,OSError) as exc:
+            summary.update(status='held',reason_code='initial_screen_failed_input_unverified',failure_reason=str(exc))
+            return summary
+        if previous is not None:
+            summary.update(status='held',reason_code='initial_screen_unchanged_failure',
+                failure_reason='相同研究材料与核验规则已失败；等待实质材料变化或明确的新授权',
+                failed_input_hash=binding['content_hash'])
+            from . import initial_screen_validator_recovery as recovery
+            try:
+                result=recovery.qualify(state=state,binding=binding,previous=previous,
+                    mission=mission,model=model,authority=deliverable_authority)
+                receipt=recovery.persist(state,result)
+                summary['validator_recheck']={key:receipt[key] for key in
+                    ('contract_ref','validator_fingerprint','source_ticket_ref','content_hash')}
+                if receipt['findings']:
+                    summary.update(reason_code='initial_screen_revalidated_content_refused',
+                        findings=receipt['findings'][:40],failure_reason='当前完整核验仍拒绝：'+
+                        '、'.join(sorted({str(row.get('code')) for row in receipt['findings']})))
+                    from . import initial_screen_content_maintenance as maintenance
+                    try:
+                        result=maintenance.run(result,model=model,state=state,mission=mission,
+                            authority=deliverable_authority,summary_dir=args.summary_dir)
+                        summary['content_maintenance']={'contract_ref':maintenance.CONTRACT,
+                            'permission_ref':maintenance.permission(result),'findings':result['record']['findings'][:40]}
+                    except (*recovery.PROOF_ERRORS,CockpitModelError) as exc:
+                        summary['content_maintenance']={'status':'refused','reason':str(exc)[:600]}
+                        return summary
+                    if result['record']['findings']:
+                        summary['findings']=result['record']['findings'][:40]
+                        return summary
+                verdict,verified_call=recovery.verifier(result,model=model,mission=mission,state=state,summary_dir=args.summary_dir)
+                if verdict['verdict']!='pass':
+                    summary.update(reason_code='initial_screen_revalidated_verifier_refused',
+                        findings=verdict['findings'],failure_reason='原独立 verifier 核验仍拒绝')
+                    return summary
+                summary.update(status='succeeded',reason_code=None,failure_reason=None,
+                    verification=[{'attempt':result['attempt'],'verdict':'pass','codes':[]}])
+                context=result['context']
+                return _publish_strl_revalidated(args=args,state=state,store=store,mission=mission,
+                    playbook=playbook,entry=entry,summary=summary,deliverable_authority=deliverable_authority,
+                    missions=missions,claims=claims,pack=context['pack'],worksheet=result['worksheet'],
+                    sections=result['sections'],verdict=verdict,prior_block=context.get('prior_reference'),
+                    invocations=list(dict.fromkeys(call['invocation_ref'] for call in [*result['calls'],verified_call]
+                        if call.get('invocation_ref'))),base_id=recovery._base(mission,context),company_ref=company_ref)
+            except (*recovery.PROOF_ERRORS,CockpitModelError) as exc:
+                summary['validator_recheck']={'status':'unverified','reason':str(exc)[:600]}
+                return summary
+        summary['_failed_input_binding']=binding
+        summary['_failed_source_ticket_ref']='initial-screen:'+Path(args.summary_dir).name
+    model=wrap(model,args,context={**validation_context,'mode':'strl',
+        'contract':STRL_CONTRACT_VERSION,'entry':entry,'playbook':playbook},
+        mission=mission,authority=deliverable_authority)
+    worksheet_bound,document_bound=False,False
+    worksheet_repair: list[dict[str, Any]] = []
     invocations: list[str] = []
     routes: list[str] = []
     base_id = f"{mission['id']}:{company_ref}:{KIND}:strl:{pack['content_hash'][:16]}"
+    def record_failure(stage, calls, *, document_repair=()):
+        from .initial_screen_failure_feedback import save_failure,PROOF_ERRORS
+        try:
+            summary['validation_feedback'] = save_failure(
+                state_dir=state, summary_dir=args.summary_dir, model=model, mission=mission,
+                context={'stage':stage, 'company':company, 'pack':pack,
+                         'prior_reference':prior_block,'source_bindings':validation_context['source_bindings'],
+                         'worksheet_repair':worksheet_repair,
+                         'document_repair':list(document_repair),'worksheet_bound':worksheet_bound,
+                         'document_bound':document_bound}, calls=calls,
+                authority=deliverable_authority)
+        except (*PROOF_ERRORS,AttributeError):
+            # Missing proof never changes the original refusal or authorizes a retry.
+            summary['validation_feedback'] = {'status':'unverified',
+                'reason':'initial_screen_failure_proof_unavailable'}
     try:
         # Step one, with one repair on deterministic findings.
+        worksheet_prompt,worksheet_bound=prepare_prompt(model,prompt=worksheet_prompt,
+            context=validation_context,request_id=f'{base_id}:worksheet',mission=mission)
         raw, call = _call_json(model, request_id=f"{base_id}:worksheet", prompt=worksheet_prompt,
                                mission=mission, invocations=invocations)
         routes.append(str(call.get("route_decision_ref") or ""))
@@ -829,6 +947,7 @@ def _run_strl(
         except InitialScreenContractError as exc:
             worksheet, sheet_findings = None, [{"code": "worksheet_shape", "detail": str(exc)}]
         if sheet_findings:
+            worksheet_repair = list(sheet_findings)
             raw, call = _call_json(
                 model, request_id=f"{base_id}:worksheet:repair",
                 prompt=worksheet_prompt + "\n\nYour previous worksheet was rejected: "
@@ -840,12 +959,14 @@ def _run_strl(
                 worksheet, sheet_findings = validate_worksheet(raw, pack)
             except InitialScreenContractError as exc:
                 worksheet, sheet_findings = None, [{"code": "worksheet_shape", "detail": str(exc)}]
+        worksheet_call = dict(call)
         summary["worksheet"] = {"findings": sheet_findings,
                                 "stance": (worksheet or {}).get("stance")}
         if worksheet is None or sheet_findings:
             summary["status"] = "failed"
             summary["failure_reason"] = "底稿未通过核验：" + "、".join(
                 sorted({item["code"] for item in sheet_findings}))
+            record_failure("worksheet", {"worksheet":worksheet_call})
             return summary
         # Step two: the whole document, one call, then verify; one repair.
         live = deliverable_authority.live_claim_version_refs()
@@ -855,20 +976,28 @@ def _run_strl(
         sections: list[dict[str, Any]] = []
         repair: list[dict[str, Any]] = []
         attempts = []
+        deterministic_findings = []
+        document_call, document_repair = {}, []
         for attempt in range(2):
+            document_repair = list(repair)
             prompt = build_document_prompt(company=company, pack=pack, worksheet=worksheet,
                                            prior_reference=prior_block, repair=repair)
+            prompt,document_bound=prepare_prompt(model,prompt=prompt,context=validation_context,
+                request_id=f'{base_id}:document:{attempt}',mission=mission)
             raw, call = _call_json(model, request_id=f"{base_id}:document:{attempt}", prompt=prompt,
                                    mission=mission, invocations=invocations)
             routes.append(str(call.get("route_decision_ref") or ""))
+            document_call = dict(call)
             try:
                 sections, parse_findings = parse_document_output(raw, pack=pack)
             except InitialScreenContractError as exc:
                 sections, parse_findings = [], [{"code": "document_shape", "detail": str(exc)}]
             verdict = (verify_document(sections, worksheet=worksheet, pack=pack, live_claim_refs=live,
-                                       resolve_cell=resolve_cell, resolve_passage=resolve_passage)
+                                       resolve_cell=resolve_cell, resolve_passage=resolve_passage,
+                                       resolve_request=deliverable_authority.request_resolver(company['company_ref']))
                        if sections else {"verdict": "reject", "findings": []})
             findings = parse_findings + verdict["findings"]
+            deterministic_findings = list(findings)
             if not findings and sections:
                 # The model verifier reads what a regex cannot; it checks and
                 # never rewrites.
@@ -903,7 +1032,19 @@ def _run_strl(
         summary["failure_reason"] = "核验未通过，未发布（不删句子凑过）：" + "、".join(
             sorted({str(item.get("code")) for item in verdict["findings"]}))[:800]
         summary["findings"] = verdict["findings"][:40]
+        if deterministic_findings:
+            record_failure("document", {"worksheet":worksheet_call, "document":document_call},
+                           document_repair=document_repair)
         return summary
+    return _publish_strl_revalidated(args=args,state=state,store=store,mission=mission,
+        playbook=playbook,entry=entry,summary=summary,deliverable_authority=deliverable_authority,
+        missions=missions,claims=claims,pack=pack,worksheet=worksheet,sections=sections,
+        verdict=verdict,prior_block=prior_block,invocations=invocations,base_id=base_id,company_ref=company_ref)
+
+
+def _publish_strl_revalidated(*, args, state, store, mission, playbook, entry, summary,
+        deliverable_authority, missions, claims, pack, worksheet, sections, verdict,
+        prior_block, invocations, base_id, company_ref):
     numbers_by_ref, passages_by_ref = pack_resolvers(pack)
     # Rubric H runs on every draft, before publish, and its result travels in
     # the summary whether or not the version is new.
@@ -914,7 +1055,7 @@ def _run_strl(
     draft_artefact = strl_artefact(
         ref=f"draft:{base_id}", hash=pack["content_hash"], subject_ref=company_ref,
         sections=sections, contract=contract)
-    quality = run_deterministic(draft_artefact, INITIAL_SCREEN_STRL)
+    quality = run_deterministic(draft_artefact, INITIAL_SCREEN_STRL, state_dir=state)
     summary["quality"] = {"rubric": INITIAL_SCREEN_STRL.id, "passed": quality["passed"],
                           "failed_checks": quality["failed_checks"]}
     try:
@@ -976,7 +1117,7 @@ def _record_quality(store: DaltonStore, record: Mapping[str, Any],
     try:
         art = artefact_from_deliverable(record)
         deterministic = run_deterministic(art, INITIAL_SCREEN_STRL, core=store.connection,
-                                          mission_ref=mission.get("mission_ref"))
+                                          mission_ref=mission.get("mission_ref"), state_dir=Path(store.path).parent)
         scored = QualityScoreAuthority(store).record(
             artefact_kind="initial_screen", target_ref=art["ref"], target_hash=art["hash"],
             rubric=INITIAL_SCREEN_STRL, deterministic=deterministic,
@@ -994,6 +1135,7 @@ def run(args: argparse.Namespace) -> dict[str, Any]:
         "drafted": None, "sections": [], "skipped": [], "gate": None,
         "formal_authority_writes": 0, "failure_reason": None,
     }
+    from .initial_screen_quiesce import ScreenQuiesced, ScreenQuiesceUnproved, paused_summary
     store = DaltonStore(str(state / "core.sqlite"))
     try:
         missions = CoverageMissionAuthority(store)
@@ -1048,6 +1190,13 @@ def run(args: argparse.Namespace) -> dict[str, Any]:
             else _redraft_decisions(state, stage_rows, published),
         )
         summary["skipped"] = skipped
+        from .initial_screen_quiesce import resume_context, ScreenQuiesceUnproved
+        resumed = resume_context(args)
+        if resumed is not None:
+            entry = resumed['entry']
+            if entry['company_ref'] not in {m['company_ref'] for m in mission['universe']}:
+                raise ScreenQuiesceUnproved('paused company is no longer in mission')
+            playbook = resumed['playbook']
         if entry is None:
             # 2026-10-02 (ws-7d): "nothing to draft" is the right word for a
             # finished queue and the wrong one for four companies that have
@@ -1090,6 +1239,8 @@ def run(args: argparse.Namespace) -> dict[str, Any]:
             args, state=state, store=store, mission=mission, playbook=playbook, entry=entry,
             summary=summary, deliverable_authority=deliverable_authority, missions=missions,
             claims=claims)
+    except (ScreenQuiesced, ScreenQuiesceUnproved) as exc:
+        return paused_summary(summary, exc)
     finally:
         store.close()
 
@@ -1125,7 +1276,7 @@ def main(argv: list[str] | None = None) -> int:
         print(json.dumps(summary, ensure_ascii=False, sort_keys=True, indent=1))
     # "held" is a governed refusal, not a failure: the ticket should read as a
     # clean run that changed nothing.
-    return 0 if summary["status"] in {"succeeded", "idle", "held"} else 1
+    return 0 if summary["status"] in {"succeeded", "idle", "held", "quiesced"} else 1
 
 
 if __name__ == "__main__":

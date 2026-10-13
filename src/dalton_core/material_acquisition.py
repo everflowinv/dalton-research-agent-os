@@ -93,6 +93,7 @@ from . import material_requests as mr
 SCHEMA_VERSION = "material-acquisition:0.1"
 _SCHEMA_PATH = Path(__file__).with_name("material_acquisition_schema.sql")
 ACTOR_REF = "automation:material-acquisition"
+HELD_FILING_ANSWER_WINDOW_RULE_REF = "rule:unperioded-filing-answer-window:0.1"
 
 #: The default ladder (the diagnosis's order).
 LADDER: tuple[str, ...] = mr.DEFAULT_SOURCE_PRIORITY
@@ -154,6 +155,11 @@ SEC_SPECS: Mapping[str, str] = {
     "sec_8k": "current-report-8k",
     "sec_10k": "annual-report-10k",
     "sec_10q": "quarterly-report-10q",
+    "sec_20f": "annual-report-20f",
+    "sec_20f_amendment": "annual-report-20f-amendment",
+    "sec_40f": "annual-report-40f",
+    "sec_40f_amendment": "annual-report-40f-amendment",
+    "sec_6k": "foreign-disclosure-6k",
 }
 #: Data-item phrasings: what a passage says when it reports the item.  Keyed
 #: by a normalised item name; the item's own words are always included.
@@ -269,11 +275,12 @@ def _reader(state_dir: str | Path) -> Iterator[sqlite3.Connection | None]:
         connection.close()
 
 
-def _rows(connection: sqlite3.Connection | None, sql: str, params: Sequence[Any] = ()) -> list[sqlite3.Row]:
+def _rows(connection: sqlite3.Connection | None, sql: str, params: Sequence[Any] = (), *, deadline: float | None = None) -> list[sqlite3.Row]:
     if connection is None:
         return []
     try:
-        return connection.execute(sql, tuple(params)).fetchall()
+        from .source_discovery_read_budget import bounded_rows
+        return bounded_rows(connection, sql, tuple(params), deadline=deadline)
     except sqlite3.OperationalError as exc:
         if "no such table" in str(exc) or "no such column" in str(exc):
             return []
@@ -320,6 +327,9 @@ def period_window(period: str | None, *, now: str | None = None) -> dict[str, An
         out["date_from"] = (today - timedelta(days=365)).isoformat()
         return out
     kind, _, value = text.partition(":")
+    # Event/document period namespaces identify the request, not public dates.
+    if kind in {"event", "event_document"} and value:
+        return out
     if kind == "quarter_ending" and _day(value):
         end = _day(value)
         out.update(date_from=(end + timedelta(days=1)).isoformat(),
@@ -378,6 +388,10 @@ def _item_key(data_item: str | None) -> str:
 def data_item_terms(data_item: str | None) -> list[str]:
     """The words a passage uses for the data item (its own words first)."""
 
+    from .forecast_driver_retrieval import terms as driver_terms
+    explicit = driver_terms(data_item)
+    if explicit is not None:
+        return explicit
     raw = str(data_item or "").replace("_", " ").strip()
     if raw.lower().startswith("check:"):
         raw = raw[len("check:"):]
@@ -428,7 +442,9 @@ def build_queries(request: Mapping[str, Any], identity: Mapping[str, Any] | None
         else:
             out = [f"{name} {primary.replace('_', ' ')}", f"{ticker} {primary.replace('_', ' ')}"]
     elif kind in ("data", "model"):
-        terms = data_item_terms(need.get("data_item"))
+        from .forecast_driver_retrieval import request_terms
+        from .operating_driver_retrieval import request_terms as operating_terms
+        terms = operating_terms(request) or request_terms(request) or data_item_terms(need.get("data_item"))
         first = terms[0] if terms else str(need.get("data_item") or "")
         out = [f"{name} {first} {period_words or label}".strip()]
         for term in terms[1:3]:
@@ -494,11 +510,22 @@ def _is_company(subject: str) -> bool:
     return not str(subject).startswith(("industry:", "industry-"))
 
 
+def _unperioded_filing_answer(request: Mapping[str, Any]) -> bool:
+    from .material_retrieval import filing_kinds
+    return (not str(request.get("period") or "").strip()
+            and (request.get("need") or {}).get("kind") == "answer"
+            and bool(filing_kinds(request)))
+
+
 def _window_with_acceptance(request: Mapping[str, Any], *, now: str | None) -> tuple[str | None, str | None]:
     window = period_window(request.get("period"), now=now)
     acceptance = request.get("acceptance") or {}
     today = (_parse_ts(now) or datetime.now(timezone.utc)).date()
     date_from, date_to = window["date_from"], window["date_to"]
+    if _unperioded_filing_answer(request):
+        # A filing question without a period is not a rolling publication
+        # year. Explicit bounds below and fiscal/version proofs still apply.
+        date_from, date_to = None, None
     after = _day(acceptance.get("published_after"))
     if after is not None:
         candidate = (after + timedelta(days=1)).isoformat()
@@ -558,7 +585,10 @@ def evaluate_acceptance(state_dir: str | Path, request: Mapping[str, Any], *,
     identity = identity if identity is not None else identity_for(state_dir, subject)
     date_from, date_to = _window_with_acceptance(request, now=now)
     kind = need.get("kind")
-    if acceptance.get("numeric_contract_ref") == "directed-document-numeric:0.1":
+    if acceptance.get("model_gap_rule_ref") == "forecast-statement-history-gaps:0.1":
+        from .forecast_statement_history_gaps import requirement_status
+        return requirement_status(state_dir, request)
+    if acceptance.get("numeric_contract_ref") in ("directed-document-numeric:0.1", "directed-document-operating-numeric:0.1"):
         # Related passages are acquisition inputs, not a verified numeric answer.
         # Only the source-bound Figure/canonical Claim executor closes this request.
         return {"met": False, "partial": False, "items": [],
@@ -566,7 +596,7 @@ def evaluate_acceptance(state_dir: str | Path, request: Mapping[str, Any], *,
     if kind == "model":
         return {"met": False, "partial": False, "items": [], "reason": "模型数据由预测模型更新，不从资料中检索"}
     if kind == "document" and acceptance.get("unit_proof_rule_ref"):
-        from .sec_filing_units import unit_requirement_status
+        from .sec_native_filing_units import unit_requirement_status
         return unit_requirement_status(state_dir, request)
     if kind == "document" and acceptance.get("document_ref"):
         # F's event body: this exact document, read into the index.
@@ -606,12 +636,19 @@ def evaluate_acceptance(state_dir: str | Path, request: Mapping[str, Any], *,
                 "reason": (f"只有 {len(unique)} 份，少于要求的 {needed} 份" if unique else "索引中没有符合要求的文档")}
     queries = build_queries(request, identity, now=now)
     if kind == "data":
-        terms = [t.lower() for t in data_item_terms(need.get("data_item"))]
+        from .forecast_driver_retrieval import request_terms
+        from .operating_driver_retrieval import request_terms as operating_terms
+        terms = [t.lower() for t in (operating_terms(request) or request_terms(request) or data_item_terms(need.get("data_item")))]
         tokens = [t.lower() for t in period_window(request.get("period"), now=now)["tokens"]]
+        candidate_kinds=kinds
+        if operating_terms(request) is not None and need.get('doc_kinds'):
+            candidate_kinds=[k for k in need['doc_kinds'] if not kinds or k in kinds]
+            if not candidate_kinds:
+                return {"met":False,"partial":False,"items":[],"reason":"这个来源不提供经营指标请求的原文类型"}
         good, near = [], []
         for query in queries:
             try:
-                found = evidence_index.evidence_search(state_dir, query, company_ref=company, kinds=kinds or None,
+                found = evidence_index.evidence_search(state_dir, query, company_ref=company, kinds=candidate_kinds or None,
                                                        limit=20)
             except Exception:  # noqa: BLE001
                 continue
@@ -952,6 +989,15 @@ class TargetedSourceRung:
         query_id = _targeted_query_id(ctx.previous)
         status = targeted_query_status(ctx.state_dir, query_id) if query_id else None
         age = _age_hours(ctx.previous, ctx.now)
+        queue_wait = None
+        if (self.name == "sec_edgar" and age >= RUNG_WAIT_HOURS
+                and (status is None or status.get("status") is None
+                     or (status.get("status") == "deferred" and status.get("kind") == "busy"))):
+            from .material_source_queue_recovery import configured_wait
+            queue_wait = configured_wait(ctx.state_dir, ctx.request, query_id, now=ctx.now)
+        if queue_wait is not None:
+            return RungResult("waiting", detail=("SEC 检索已获授权，仍在等待协调器执行"
+                if queue_wait["status"] == "configured" else "SEC 检索配置暂未核实，等待下一轮复核"))
         if status is None or status.get("status") is None:
             if age >= RUNG_WAIT_HOURS:
                 return RungResult("not_connected", query=ctx.queries,
@@ -973,9 +1019,21 @@ class TargetedSourceRung:
         verdict = evaluate_acceptance(ctx.state_dir, ctx.request, identity=ctx.identity, now=ctx.now)
         if verdict["met"]:
             return RungResult("accepted", query=ctx.queries, items=verdict["items"], detail=verdict["reason"])
+        # A finished search can leave original documents queued behind the
+        # source's daily allowance. The search grace period is not an expiry
+        # for that acquisition. Keep the original request deadline and never
+        # label a pending download as a search that found nothing.
+        deadline = _parse_ts(ctx.request.get("deadline"))
+        current = _parse_ts(ctx.now)
+        acquisition_wait_open = (current < deadline if current and deadline
+                                 else age < mr.DEFAULT_DEADLINE_HOURS)
+        if self.name == "sec_edgar" and query_id and acquisition_wait_open:
+            from .material_targeted_sec import archive_pending_for_material
+            if archive_pending_for_material(ctx.state_dir, query_id):
+                return RungResult("waiting", detail="已找到历史申报目录，等待读取其中的原始文件")
         settled = _dispatch_settled(ctx.state_dir, status, now=ctx.now)
-        if not settled and age < RUNG_WAIT_HOURS:
-            return RungResult("waiting")
+        if not settled and acquisition_wait_open:
+            return RungResult("waiting", detail="检索已执行，等待候选原文取回并核对；无需重复检索")
         return RungResult("partial" if verdict["partial"] else "empty", query=ctx.queries,
                           items=verdict["items"], detail=verdict["reason"])
 
@@ -1135,7 +1193,7 @@ def enqueue_targeted_query(state_dir: str | Path, *, request_id: str, source: st
     return {"query_id": query_id, **record, "write_status": "fresh"}
 
 
-def pending_targeted_queries(state_dir: str | Path, source_ref: str, *, limit: int = 5) -> list[dict[str, Any]]:
+def pending_targeted_queries(state_dir: str | Path, source_ref: str, *, limit: int = 5, deadline: float | None = None) -> list[dict[str, Any]]:
     """What a coordinator of ``source_ref`` still owes: queries with no launch/refusal yet, oldest first.
 
     A ``deferred`` query (busy slot, call window full, held source) stays
@@ -1147,7 +1205,7 @@ def pending_targeted_queries(state_dir: str | Path, source_ref: str, *, limit: i
                      "SELECT q.query_id, q.record_json FROM material_targeted_queries q WHERE q.source_ref=? "
                      "AND NOT EXISTS (SELECT 1 FROM material_targeted_query_events e WHERE e.query_id=q.query_id "
                      "AND e.status IN ('launched','refused','failed')) ORDER BY q.created_at, q.query_id LIMIT ?",
-                     (source_ref, max(1, int(limit))))
+                     (source_ref, max(1, int(limit))), deadline=deadline)
     return [{"query_id": row["query_id"], **json.loads(row["record_json"])} for row in rows]
 
 
@@ -1215,7 +1273,7 @@ def _dispatch_settled(state_dir: str | Path, status: Mapping[str, Any], *, now: 
                           "SELECT COUNT(*) FROM coverage_mission_discovered_documents d JOIN "
                           "coverage_mission_source_discoveries s ON s.record_id=d.discovery_ref WHERE "
                           "s.company_ref=? AND s.source_ref=? AND s.spec_ref=? AND s.query_hash=? AND "
-                          "s.created_at>=? AND d.status='acquisition_launched'",
+                          "s.created_at>=? AND d.status IN ('discovered','acquisition_launched')",
                           (dispatch["company_ref"], dispatch["source_ref"], dispatch["spec_ref"],
                            dispatch["query_hash"], dispatch["created_at"]))
         if in_flight and int(in_flight[0][0]):
@@ -1523,7 +1581,8 @@ def _round_attempts(view: Mapping[str, Any]) -> list[dict[str, Any]]:
     events = list(view.get("events") or ())
     start = max((i for i, e in enumerate(events) if e.get("event_kind") == "opened" and e.get("reopened")),
                 default=-1)
-    return [e for e in events[start + 1:] if e.get("event_kind") == "attempt"]
+    from .material_source_queue_recovery import carried_attempts
+    return carried_attempts(events, start, request_ref=view.get("id"), request_hash=view.get("content_hash")) + [e for e in events[start + 1:] if e.get("event_kind") == "attempt"]
 
 
 def _record(state_dir: Path, view: Mapping[str, Any], source: str, result: RungResult, *, now: str,
@@ -1548,6 +1607,10 @@ def _free_retrieval_recheck(state: Path, view: Mapping[str, Any], *, stamp: str)
     retrieval_hash = (retrieval["content_hash"] if retrieval is not None else
                       _sha({"rule_ref": RULE_REF, "need": view.get("need"), "doc_kinds": required_filings}))
     marker = {"rule_ref": RULE_REF, "retrieval_contract_hash": retrieval_hash}
+    if _unperioded_filing_answer(view):
+        # Permit one free local recheck after the corrected window rule,
+        # including requests that consumed the old lexical-contract recheck.
+        marker["window_rule_ref"] = HELD_FILING_ANSWER_WINDOW_RULE_REF
     if any(e.get("event_kind") == "attempt" and e.get("query") == marker
            for e in view.get("events") or ()):
         return None
@@ -1603,18 +1666,23 @@ def serve(state_dir: str | Path, request_id: str, *, rungs: Mapping[str, Any] | 
     view = mr.request(state, request_id)
     if view is None:
         return {"request_id": request_id, "status": None, "outcome": "missing", "rungs": []}
+    from .forecast_driver_retrieval import routing_view
+    view = routing_view(view)
+    from .material_source_queue_recovery import recover
+    if recover(state, view, now=stamp) is not None:
+        view = routing_view(mr.request(state, request_id))
     rechecked = _free_retrieval_recheck(state, view, stamp=stamp)
     if rechecked is not None:
         return rechecked
-    view = mr.request(state, request_id) or view
+    view = routing_view(mr.request(state, request_id) or view)
     if view["closed"] or view["status"] in mr.TERMINAL:
         due, why = retry_due(state, view, now=stamp)
         if not due:
             return {"request_id": request_id, "status": view["status"], "outcome": "cached", "reason": why,
                     "rungs": []}
         mr.reopen(state, request_id, reason=why, actor_ref=ACTOR_REF, now=stamp)
-        view = mr.request(state, request_id)
-    if (view.get("acceptance") or {}).get("numeric_contract_ref") == "directed-document-numeric:0.1":
+        view = routing_view(mr.request(state, request_id))
+    if (view.get("acceptance") or {}).get("numeric_contract_ref") in ("directed-document-numeric:0.1", "directed-document-operating-numeric:0.1"):
         return {"request_id": request_id, "status": view["status"], "outcome": "waiting",
                 "reason": "系统将继续核对所缺数字及出处，取得新的原文段落后再分析", "rungs": []}
     ensure_schema(state)
@@ -1703,7 +1771,8 @@ def serve(state_dir: str | Path, request_id: str, *, rungs: Mapping[str, Any] | 
                 result = RungResult("error", query=queries, detail=f"{type(exc).__name__}: {exc}"[:500])
         if result.outcome == "waiting":
             trail.append({"source": source, "outcome": "waiting"})
-            return {"request_id": request_id, "status": view["status"], "outcome": "waiting", "rungs": trail}
+            return {"request_id": request_id, "status": view["status"], "outcome": "waiting", "rungs": trail,
+                    "reason": result.detail}
         for manifest in result.manifests:
             _register_manifest(state, manifest)
         if result.manifests and result.outcome in ("dispatched", "empty", "partial", "accepted"):
@@ -2032,21 +2101,200 @@ def priority_key(request: Mapping[str, Any], universe: Mapping[str, Mapping[str,
             str(request.get("id") or ""))
 
 
-def retry_sweep(state_dir: str | Path, *, now: str | None = None, limit: int = 3) -> list[dict[str, Any]]:
-    """Reopen exhausted requests that left the negative cache (bounded)."""
+_RETRY_CURSOR_ID = "retry-continuation"
+_RETRY_CURSOR_SCHEMA = "material-retry-continuation:0.1"
+_RETRY_PAGE_SIZE = 64
 
-    stamp = now or _now()
+
+def _decode_retry_cursor(row):
+    if row is None:
+        return 0, None
+    try:
+        body = json.loads(row["record_json"])
+        if (set(body) != {"schema_version", "cursor_id", "last_rowid", "request_ref", "revision", "updated_at"}
+                or body["schema_version"] != _RETRY_CURSOR_SCHEMA
+                or body["cursor_id"] not in (_RETRY_CURSOR_ID, _RETRY_CURSOR_ID+"-queue")
+                or type(body["last_rowid"]) is not int or body["last_rowid"] <= 0
+                or type(body["revision"]) is not int or body["revision"] <= 0
+                or not _REQUEST_ID_RE.fullmatch(body["request_ref"])
+                or _parse_ts(body["updated_at"]) is None
+                or _sha(body) != row["content_hash"]):
+            raise ValueError("cursor identity differs")
+    except (ValueError, TypeError, KeyError) as exc:
+        raise MaterialAcquisitionError("material retry cursor is invalid") from exc
+    return body["last_rowid"], row["content_hash"]
+
+
+def _retry_page(state_dir, *, deadline, recovery_lane=False):
+    from .material_source_queue_recovery import LEGACY_TIMEOUT_DETAIL
+    cursor_id = _RETRY_CURSOR_ID+("-queue" if recovery_lane else "")
+    # IDs only: never unfold all historical request JSON before starting the
+    # allowance. rowid is stable because the request ledger is append-only.
+    with _reader(state_dir) as connection:
+        if connection is None:
+            return [], None
+        try:
+            cursor = connection.execute(
+                "SELECT record_json,content_hash FROM material_acquisition_retry_cursor WHERE cursor_id=?",
+                (cursor_id,)).fetchone()
+        except sqlite3.OperationalError as exc:
+            if str(exc) != "no such table: material_acquisition_retry_cursor":
+                raise
+            cursor = None
+        last, digest = _decode_retry_cursor(cursor)
+        if cursor is not None:
+            if json.loads(cursor["record_json"])["cursor_id"] != cursor_id:
+                raise MaterialAcquisitionError("material retry cursor lane differs")
+            body = json.loads(cursor["record_json"])
+            held = connection.execute("SELECT request_id FROM material_requests WHERE rowid=?", (last,)).fetchone()
+            if held is None or held["request_id"] != body["request_ref"]:
+                raise MaterialAcquisitionError("material retry cursor request differs")
+        sql = ("SELECT r.rowid AS sweep_rowid,r.request_id,"
+               "(SELECT status FROM material_request_events e WHERE e.request_id=r.request_id "
+               "ORDER BY event_id DESC LIMIT 1) AS latest_status FROM material_requests r ")
+        # Cheap indexed event preselection is not authority. Every selected
+        # candidate is re-read and checked by the original strong recovery.
+        clause = " AND latest_status IN ('exhausted','timeout')"
+        queue_shape = ("(EXISTS (SELECT 1 FROM material_request_events e WHERE e.request_id=r.request_id "
+                       "AND e.event_kind='attempt' AND json_extract(e.record_json,'$.source')='sec_edgar' "
+                       "AND json_extract(e.record_json,'$.outcome')='not_connected' "
+                       "AND json_extract(e.record_json,'$.detail')=?) OR EXISTS ("
+                       "SELECT 1 FROM material_targeted_queries q JOIN material_targeted_query_events t ON t.query_id=q.query_id "
+                       "WHERE q.request_id=r.request_id AND q.source_ref='source:sec-edgar' "
+                       "AND t.status='refused' AND json_extract(t.record_json,'$.kind')='no_spec'))")
+        # The same slow queue proof must not also occupy the normal-first
+        # turn. Legacy-shaped requests still get ordinary retry_due checks in
+        # their queue turn if strong special recovery does not qualify.
+        clause += " AND "+("" if recovery_lane else "NOT ")+queue_shape
+        extra = (LEGACY_TIMEOUT_DETAIL,)
+        rows = _rows(connection, sql + "WHERE r.rowid>?"+clause+" ORDER BY r.rowid LIMIT ?",
+                     (last, *extra, _RETRY_PAGE_SIZE), deadline=deadline)
+        if len(rows) < _RETRY_PAGE_SIZE and last:
+            rows += _rows(connection, sql + "WHERE r.rowid<=?"+clause+" ORDER BY r.rowid LIMIT ?",
+                          (last, *extra, _RETRY_PAGE_SIZE-len(rows)), deadline=deadline)
+        return rows, digest
+
+
+def _claim_retry_turn(state_dir, row, *, expected_hash, now, recovery_lane=False):
+    cursor_id = _RETRY_CURSOR_ID+("-queue" if recovery_lane else "")
+    # Claim before strong evaluation. A slow/unverified item gets another
+    # chance after a complete sweep; it cannot pin every future tick here.
+    with _writer(state_dir) as connection:
+        cursor = connection.execute(
+            "SELECT record_json,content_hash FROM material_acquisition_retry_cursor WHERE cursor_id=?",
+            (cursor_id,)).fetchone()
+        if cursor is not None and json.loads(cursor["record_json"]).get("cursor_id") != cursor_id:
+            raise MaterialAcquisitionError("material retry claim lane differs")
+        _, held_hash = _decode_retry_cursor(cursor)
+        if held_hash != expected_hash:
+            return None
+        held = connection.execute("SELECT request_id FROM material_requests WHERE rowid=?",
+                                  (row["sweep_rowid"],)).fetchone()
+        if held is None or held["request_id"] != row["request_id"]:
+            raise MaterialAcquisitionError("material retry turn request differs")
+        body = {"schema_version": _RETRY_CURSOR_SCHEMA, "cursor_id": cursor_id, "last_rowid": row["sweep_rowid"],
+                "request_ref": row["request_id"], "revision": 1 if cursor is None else
+                json.loads(cursor["record_json"])["revision"]+1, "updated_at": now}
+        digest = _sha(body)
+        connection.execute("INSERT INTO material_acquisition_retry_cursor VALUES(?,?,?) "
+                           "ON CONFLICT(cursor_id) DO UPDATE SET record_json=excluded.record_json,content_hash=excluded.content_hash",
+                           (cursor_id, _canonical(body), digest))
+        return digest
+
+
+def _retry_pass(state_dir, *, stamp, limit, deadline, recovery_lane=False, max_evaluations=None):
+    from .material_source_queue_recovery import recover
+    from .source_discovery_read_budget import SourceReadDeadline
     out = []
-    for view in mr.open_requests(state_dir, statuses=("exhausted", "timeout"), include_closed=True, limit=2000):
-        if len(out) >= limit:
+    if limit <= 0 or time.monotonic() >= deadline:
+        return out
+    try:
+        page, cursor_hash = _retry_page(state_dir, deadline=deadline, recovery_lane=recovery_lane)
+    except SourceReadDeadline:
+        return []
+    evaluations = 0
+    for row in page:
+        if (len(out) >= limit or time.monotonic() >= deadline
+                or (max_evaluations is not None and evaluations >= max_evaluations)):
             break
-        full = mr.request(state_dir, view["id"])
-        if full is None:
+        next_hash = _claim_retry_turn(state_dir, row, expected_hash=cursor_hash, now=stamp, recovery_lane=recovery_lane)
+        if next_hash is None:
+            break  # Another tick claimed this exact continuation.
+        cursor_hash = next_hash
+        if row["latest_status"] not in ("exhausted", "timeout"):
             continue
+        evaluations += 1
+        full = mr.request(state_dir, row["request_id"])
+        if full is None or full["status"] not in ("exhausted", "timeout"):
+            continue
+        if time.monotonic() >= deadline:
+            break
+        # Already started strong verification and append-only authority work
+        # finish normally. The deadline governs starting the next item.
+        repaired = recover(state_dir, full, now=stamp)
+        if repaired is not None:
+            out.append({"request_id": row["request_id"], "reason": repaired["rule_ref"]})
+            continue
+        if time.monotonic() >= deadline:
+            break
         due, why = retry_due(state_dir, full, now=stamp)
         if due:
-            mr.reopen(state_dir, view["id"], reason=why, actor_ref=ACTOR_REF, now=stamp)
-            out.append({"request_id": view["id"], "reason": why})
+            result = mr.reopen(state_dir, row["request_id"], reason=why, actor_ref=ACTOR_REF, now=stamp)
+            if result["write_status"] == "fresh":
+                out.append({"request_id": row["request_id"], "reason": why})
+    return out
+
+
+
+def _claim_retry_first(state_dir, *, now):
+    """Persistently alternate the first class, including one-slot/slow ticks."""
+    cursor_id = "retry-class-rotation"
+    schema = "material-retry-class-rotation:0.1"
+    with _writer(state_dir) as connection:
+        row = connection.execute("SELECT record_json,content_hash FROM material_acquisition_retry_cursor WHERE cursor_id=?",
+                                 (cursor_id,)).fetchone()
+        prior = None
+        if row is not None:
+            try:
+                prior = json.loads(row["record_json"])
+                if (set(prior) != {"schema_version", "cursor_id", "next_queue_first", "revision", "updated_at"}
+                        or prior["schema_version"] != schema or prior["cursor_id"] != cursor_id
+                        or type(prior["next_queue_first"]) is not bool
+                        or type(prior["revision"]) is not int or prior["revision"] <= 0
+                        or _parse_ts(prior["updated_at"]) is None or _sha(prior) != row["content_hash"]):
+                    raise ValueError("rotation differs")
+            except (ValueError, TypeError, KeyError) as exc:
+                raise MaterialAcquisitionError("material retry class rotation is invalid") from exc
+        first = prior["next_queue_first"] if prior else False
+        body = {"schema_version": schema, "cursor_id": cursor_id, "next_queue_first": not first,
+                "revision": 1 if prior is None else prior["revision"]+1, "updated_at": now}
+        connection.execute("INSERT INTO material_acquisition_retry_cursor VALUES(?,?,?) "
+                           "ON CONFLICT(cursor_id) DO UPDATE SET record_json=excluded.record_json,content_hash=excluded.content_hash "
+                           "WHERE material_acquisition_retry_cursor.content_hash=?",
+                           (cursor_id, _canonical(body), _sha(body), None if row is None else row["content_hash"]))
+        return first
+
+def retry_sweep(state_dir: str | Path, *, now: str | None = None, limit: int = 3,
+                deadline: float | None = None) -> list[dict[str, Any]]:
+    """Bounded fair continuation; both classes share the original reopen cap.
+
+    The first class rotates durably, even with one slot or a slow strong read.
+    Unused opportunities return to the other class; independent persisted
+    positions stop either class being starved by earlier arrivals. No source/call quota is changed.
+    """
+    stamp = now or _now()
+    allowance = time.monotonic()+2.0
+    deadline = allowance if deadline is None else min(deadline, allowance)
+    if limit <= 0 or time.monotonic() >= deadline:
+        return []
+    queue_first = _claim_retry_first(state_dir,now=stamp)
+    if queue_first:
+        out = _retry_pass(state_dir,stamp=stamp,limit=limit,deadline=deadline,recovery_lane=True)
+        out += _retry_pass(state_dir,stamp=stamp,limit=limit-len(out),deadline=deadline)
+    else:
+        out = _retry_pass(state_dir,stamp=stamp,limit=1,deadline=deadline,max_evaluations=1)
+        out += _retry_pass(state_dir,stamp=stamp,limit=limit-len(out),deadline=deadline,recovery_lane=True)
+        out += _retry_pass(state_dir,stamp=stamp,limit=limit-len(out),deadline=deadline)
     return out
 
 
@@ -2107,7 +2355,8 @@ def _service_order(state_dir: str | Path, pending: Sequence[Mapping[str, Any]],
 def _advance_service_cursor(state_dir: str | Path, request: Mapping[str, Any],
                             universe: Mapping[str, Mapping[str, Any]], *,
                             expected_hash: str | None, now: str,
-                            deadline: float | None = None) -> str | None:
+                            deadline: float | None = None,
+                            expected_priority_hash: Any = ...) -> str | None:
     """Claim one service turn; concurrent stale ticks must not execute it."""
     record = {"schema_version": _SERVICE_CURSOR_SCHEMA, "request_ref": request["id"],
               "priority_key": list(priority_key(request, universe)), "updated_at": now}
@@ -2117,6 +2366,12 @@ def _advance_service_cursor(state_dir: str | Path, request: Mapping[str, Any],
         _, current_hash = _decode_service_cursor(row)
         if current_hash != expected_hash:
             return None
+        if expected_priority_hash is not ...:
+            priority_row = connection.execute("SELECT record_json,content_hash FROM material_acquisition_priority_cursor WHERE cursor_id=?",
+                                              (_PRIORITY_CURSOR_ID,)).fetchone()
+            _, _, current_priority_hash = _decode_priority_cursor(priority_row)
+            if current_priority_hash != expected_priority_hash:
+                return None
         if deadline is not None and time.monotonic() >= deadline:
             return None
         record["revision"] = 1 if row is None else json.loads(row["record_json"])["revision"] + 1
@@ -2126,6 +2381,100 @@ def _advance_service_cursor(state_dir: str | Path, request: Mapping[str, Any],
             "ON CONFLICT(cursor_id) DO UPDATE SET record_json=excluded.record_json,content_hash=excluded.content_hash",
             (_SERVICE_CURSOR_ID, _canonical(record), digest))
     return digest
+
+
+_PRIORITY_CURSOR_ID = "current-product-gap"
+_PRIORITY_CURSOR_SCHEMA = "material-acquisition-priority-cursor:0.1"
+
+
+def _decode_priority_cursor(row: sqlite3.Row | None) -> tuple[tuple[Any, ...] | None, bool, str | None]:
+    if row is None:
+        return None, True, None
+    try:
+        record = json.loads(row["record_json"])
+    except (TypeError, ValueError) as exc:
+        raise MaterialAcquisitionError("material priority cursor JSON is invalid") from exc
+    if (not isinstance(record, dict) or set(record) != {"schema_version", "priority_key", "next_priority_first", "revision", "updated_at"}
+            or record["schema_version"] != _PRIORITY_CURSOR_SCHEMA or type(record["next_priority_first"]) is not bool
+            or type(record["revision"]) is not int or not 0 < record["revision"] < 2**63
+            or not isinstance(record["updated_at"], str) or _parse_ts(record["updated_at"]) is None
+            or _sha(record) != row["content_hash"]):
+        raise MaterialAcquisitionError("material priority cursor hash or fields differ")
+    key = record["priority_key"]
+    if key is not None:
+        # Reuse the ordinary cursor's exact request/key validation.
+        wire = {"schema_version": _SERVICE_CURSOR_SCHEMA, "request_ref": key[-1] if isinstance(key, list) and key else None,
+                "priority_key": key, "revision": record["revision"], "updated_at": record["updated_at"]}
+        key, _ = _decode_service_cursor({"record_json": _canonical(wire), "content_hash": _sha(wire)})
+    return key, record["next_priority_first"], str(row["content_hash"])
+
+
+def _priority_service_order(state_dir, pending, universe):
+    with _reader(state_dir) as connection:
+        if connection is None:
+            raise MaterialAcquisitionError("material priority cursor cannot be read")
+        try:
+            row = connection.execute("SELECT record_json,content_hash FROM material_acquisition_priority_cursor WHERE cursor_id=?",
+                                     (_PRIORITY_CURSOR_ID,)).fetchone()
+        except sqlite3.OperationalError as exc:
+            if str(exc) != "no such table: material_acquisition_priority_cursor":
+                raise MaterialAcquisitionError(f"material priority cursor cannot be read: {exc}") from exc
+            row = None
+    key, first, digest = _decode_priority_cursor(row)
+    ordered = sorted(pending, key=lambda v: priority_key(v, universe))
+    cut = 0 if key is None else next((i for i, v in enumerate(ordered) if priority_key(v, universe) > key), len(ordered))
+    return ordered[cut:] + ordered[:cut], first, digest
+
+
+def _advance_priority_turn(state_dir, request, universe, *, expected_hash, expected_priority_hash,
+                           priority, flip_order, now, deadline, priority_proof=None):
+    """One atomic CAS across both cursors; a losing tick must never serve."""
+    with _writer(state_dir) as connection:
+        normal_row = connection.execute("SELECT record_json,content_hash FROM material_acquisition_service_cursor WHERE cursor_id=?",
+                                        (_SERVICE_CURSOR_ID,)).fetchone()
+        _, normal_hash = _decode_service_cursor(normal_row)
+        row = connection.execute("SELECT record_json,content_hash FROM material_acquisition_priority_cursor WHERE cursor_id=?",
+                                 (_PRIORITY_CURSOR_ID,)).fetchone()
+        key, first, priority_hash = _decode_priority_cursor(row)
+        if normal_hash != expected_hash or priority_hash != expected_priority_hash or time.monotonic() >= deadline:
+            return None
+        if priority:
+            from .material_current_gap_priority import still_current
+            if not still_current(state_dir, priority_proof or {}, deadline=deadline):
+                return None
+            source = connection.execute("SELECT * FROM material_requests WHERE request_id=?", (request["id"],)).fetchone()
+            if source is None or source["content_hash"] != priority_proof["request_hash"]:
+                return None
+            status, closed, _ = mr._status_of(connection, request["id"])
+            if status not in mr.ACTIVE or closed:
+                return None
+        if time.monotonic() >= deadline:
+            return None
+        if not priority:
+            wire = {"schema_version": _SERVICE_CURSOR_SCHEMA, "request_ref": request["id"],
+                    "priority_key": list(priority_key(request, universe)), "updated_at": now,
+                    "revision": 1 if normal_row is None else json.loads(normal_row["record_json"])["revision"] + 1}
+            normal_hash = _sha(wire)
+            connection.execute("INSERT INTO material_acquisition_service_cursor VALUES(?,?,?) "
+                "ON CONFLICT(cursor_id) DO UPDATE SET record_json=excluded.record_json,content_hash=excluded.content_hash",
+                (_SERVICE_CURSOR_ID, _canonical(wire), normal_hash))
+        wire = {"schema_version": _PRIORITY_CURSOR_SCHEMA,
+                "priority_key": list(priority_key(request, universe)) if priority else None if key is None else list(key),
+                "next_priority_first": not first if flip_order else first,
+                "updated_at": now, "revision": 1 if row is None else json.loads(row["record_json"])["revision"] + 1}
+        priority_hash = _sha(wire)
+        connection.execute("INSERT INTO material_acquisition_priority_cursor VALUES(?,?,?) "
+            "ON CONFLICT(cursor_id) DO UPDATE SET record_json=excluded.record_json,content_hash=excluded.content_hash",
+            (_PRIORITY_CURSOR_ID, _canonical(wire), priority_hash))
+    return normal_hash, priority_hash
+
+
+_SERVICE_REASONS = {
+    "waiting": "已选择，等待来源或数字核对", "deferred": "已选择，来源暂时等待",
+    "budget_blocked": "已选择，现有额度门未通过", "error": "已选择，材料处理发生异常",
+    "found": "已有合格材料", "partial": "已有部分材料，缺项保留", "exhausted": "当前来源已用尽",
+    "timeout": "当前材料等待已到期", "cached": "沿用当前等待或终态记录", "missing": "请求已不存在",
+}
 
 
 def tick(state_dir: str | Path, *, max_requests: int = 4, max_seconds: float = 10.0, now: str | None = None,
@@ -2147,7 +2496,7 @@ def tick(state_dir: str | Path, *, max_requests: int = 4, max_seconds: float = 1
                 summary.setdefault("conversion_errors", []).append(f"{sweep.__name__}: {type(exc).__name__}")
         summary["converted"] = sum(1 for item in converted if item.get("write_status") == "fresh")
     if mr.ledger_path(state).is_file():
-        summary["reopened"] = len(retry_sweep(state, now=stamp))
+        summary["reopened"] = len(retry_sweep(state, now=stamp, deadline=started+max_seconds))
     pending = mr.open_requests(state, limit=5000, now=stamp)
     summary["open"] = len(pending)
     if not pending:
@@ -2160,14 +2509,43 @@ def tick(state_dir: str | Path, *, max_requests: int = 4, max_seconds: float = 1
     # the tick then runs only the free rungs.
     allow_costed = True
     summary["pool"] = {k: pool[k] for k in ("day", "spent_calls", "cap_calls", "spent_usd_micros", "cap_usd_micros")}
-    for view in pending[:max(1, int(max_requests))]:
+    from .material_current_gap_priority import priority_gaps
+    proofs, priority_info = priority_gaps(state, pending,
+        deadline=min(started + max_seconds, time.monotonic() + 2.0))
+    summary["priority"] = priority_info
+    cap = max(1, int(max_requests))
+    # Even a no-signal tick must notice a concurrent priority claim. This is
+    # a CAS coordination read only; its ordinary order and quota are unchanged.
+    _, _, priority_hash = _priority_service_order(state, [], universe)
+    choices = [(view, False) for view in pending[:cap]]
+    if proofs:
+        urgent, first, priority_hash = _priority_service_order(state, [v for v in pending if v["id"] in proofs], universe)
+        chosen = urgent[0]
+        ordinary = [v for v in pending if v["id"] not in proofs]
+        if cap == 1:
+            choices = [(chosen, True)] if first or not ordinary else [(ordinary[0], False)]
+        else:
+            choices = [(v, False) for v in ordinary[:cap - 1]]
+            choices = ([(chosen, True)] + choices) if first else (choices + [(chosen, True)])
+    for turn, (view, is_priority) in enumerate(choices):
         if time.monotonic() - started >= max_seconds:
             summary["out_of_time"] = True
             break
-        next_cursor_hash = _advance_service_cursor(
-            state, view, universe, expected_hash=cursor_hash, now=stamp,
-            deadline=started + max_seconds)
-        if next_cursor_hash is None:
+        if proofs:
+            claimed = _advance_priority_turn(state, view, universe, expected_hash=cursor_hash,
+                expected_priority_hash=priority_hash, priority=is_priority, flip_order=turn == 0,
+                now=stamp, deadline=started + max_seconds,
+                priority_proof=proofs[view["id"]] if is_priority else None)
+            claim_failed = claimed is None
+            next_cursor_hash = cursor_hash if claimed is None else claimed[0]
+            if claimed is not None:
+                priority_hash = claimed[1]
+        else:
+            next_cursor_hash = _advance_service_cursor(
+                state, view, universe, expected_hash=cursor_hash, now=stamp,
+                deadline=started + max_seconds, expected_priority_hash=priority_hash)
+            claim_failed = next_cursor_hash is None
+        if claim_failed:
             summary["out_of_time" if time.monotonic() - started >= max_seconds
                     else "scheduling_busy"] = True
             break
@@ -2182,7 +2560,15 @@ def tick(state_dir: str | Path, *, max_requests: int = 4, max_seconds: float = 1
             summary[outcome] += 1
         if outcome == "budget_blocked" and (result.get("budget") or {}).get("scope") == "pool":
             allow_costed = False
-        summary["results"].append({k: result.get(k) for k in ("request_id", "outcome", "status")})
+        diagnostic = {k: result.get(k) for k in ("request_id", "outcome", "status")}
+        diagnostic["request_id"] = view["id"]
+        diagnostic.update(selection_class="current_product_gap" if is_priority else "ordinary_round_robin",
+                          reason_code=outcome, reason=_SERVICE_REASONS.get(outcome, "已选择，结果待核对"))
+        if is_priority:
+            diagnostic["priority_proof_hash"] = proofs[view["id"]]["content_hash"]
+        if outcome == "error":
+            diagnostic["error_type"] = str(result.get("reason") or "").split(":", 1)[0][:64]
+        summary["results"].append(diagnostic)
     return summary
 
 

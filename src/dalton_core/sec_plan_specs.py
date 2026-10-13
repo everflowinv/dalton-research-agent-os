@@ -38,6 +38,7 @@ from .store import canonical_json, content_hash
 
 SEC_SOURCE_REF = "source:sec-edgar"
 SEC_PLAN_SCHEMA = "0.4"
+DEFAULT_SEC_CALLS_24H = 200
 EARNINGS_RELEASE_SPEC_REF = "current-report-8k"
 
 #: The SEC specs every environment runs, in order.  Interval defaults are the
@@ -58,6 +59,22 @@ SEC_PLAN_SPECS: tuple[Mapping[str, Any], ...] = (
         "item_filter": ("2.02",),
     }),
 )
+# These candidates are executable only for a company with a strong reporting
+# profile. They do not turn a foreign disclosure into a periodic statement.
+from .sec_issuer_reporting_profile import FOREIGN_SPECS
+SEC_PLAN_SPECS += tuple(MappingProxyType({
+    "spec_ref": ref, "form": form, "lookback_days": 500 if form.startswith(("20-F", "40-F")) else 90,
+    "rediscovery_interval_days": 30 if form.startswith(("20-F", "40-F")) else 2,
+    "retry_interval_days": 2, "item_filter": None,
+}) for ref, form in FOREIGN_SPECS.items() if not form.endswith('/A'))
+# Exact unit/context requests already use this public SEC form. A bounded
+# three-year default covers the held eight-quarter history and comparison
+# periods; explicit owner intervals remain authoritative in effective_sec_plan.
+SEC_PLAN_SPECS += (MappingProxyType({
+    "spec_ref": "quarterly-report-10q", "form": "10-Q",
+    "lookback_days": 1095, "rediscovery_interval_days": 7, "retry_interval_days": 2,
+    "item_filter": None,
+}),)
 _GOVERNED_SPEC_FIELDS = ("lookback_days", "rediscovery_interval_days", "retry_interval_days")
 
 

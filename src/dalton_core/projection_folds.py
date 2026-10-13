@@ -28,6 +28,9 @@ half-folded state behind.
 from __future__ import annotations
 
 import os
+import json
+import sys
+import time
 import sqlite3
 import threading
 from dataclasses import dataclass, field
@@ -40,6 +43,22 @@ __all__ = [
     "clear_folds",
     "source_identity",
 ]
+
+
+def _phase(event: str, name: str, rows: int, fresh: bool, started: float) -> None:
+    """Bounded operational timing; source rows and exception text never enter it.
+
+    Service stderr is already owner managed. Emit directly so a cold pending
+    projection is diagnosable even without application logging configuration.
+    Diagnostic output must never alter a projection's failure semantics.
+    """
+    try:
+        sys.stderr.write(json.dumps({"event":event,"name":name,"rows":rows,
+            "fresh":fresh,"elapsed_seconds":round(time.monotonic()-started,6)},
+            separators=(",",":"))+"\n")
+        sys.stderr.flush()
+    except (OSError,ValueError):
+        pass
 
 
 def source_identity(path: str | Path) -> tuple[str, int, int]:
@@ -200,9 +219,15 @@ class AppendOnlyFold:
 
         entry = self._entry(identity)
         with entry.lock:
+            started = time.monotonic()
             fresh = entry.last_rowid == 0
+            _phase("projection_fold_started",self.name,0,fresh,started)
             if not fresh:
-                row = connection.execute(self._probe, (entry.last_rowid,)).fetchone()
+                try:
+                    row = connection.execute(self._probe, (entry.last_rowid,)).fetchone()
+                except BaseException:
+                    _phase("projection_fold_failed",self.name,0,fresh,started)
+                    raise
                 if row is None or row[0] != entry.last_key:
                     # Not the database this fold was built from.
                     self._drop(entry)
@@ -228,8 +253,10 @@ class AppendOnlyFold:
                     finish(entry.state)
                 view = self.snapshot(entry.state)
             except BaseException:
+                _phase("projection_fold_failed",self.name,added,fresh,started)
                 self._drop(entry)
                 raise
+            _phase("projection_fold_completed",self.name,added,fresh,started)
             return FoldRead(
                 state=view, count=entry.count, max_created=entry.max_created,
                 fresh=fresh, added=added,

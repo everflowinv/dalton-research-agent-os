@@ -1,0 +1,97 @@
+{
+  "cash_flow_operating_base_shape": {
+    "allowed_fields": [
+      "forecast_method",
+      "forecast_base_ref",
+      "because"
+    ],
+    "change": "operating_cash_flow_only_to_unavailable_and_null_base",
+    "preserve": "all_other_fields_including_filed_concept_and_fcf_formula",
+    "ref": "rule:cash-flow-operating-base-unavailable-repair:0.1",
+    "scope_validation": "exact_parent_and_repaired_body_comparison"
+  },
+  "cash_flow_ratio_applicability": {
+    "allowed_fields": [
+      "forecast_method",
+      "forecast_base_ref",
+      "because"
+    ],
+    "attempts": "shares_existing_single_repair_limit",
+    "choices": "proved_existing_declared_income_base_or_unavailable_null",
+    "ref": "cash-flow-ratio-applicability:0.1",
+    "scope": "one_operating_cash_line_only_source_complete_zero_or_mixed_sign_latest_four"
+  },
+  "cost_slot_exclusive_pair": {
+    "preserve": "all_other_parent_fields_and_all_financial_source_authorities",
+    "ref": "model-spec-cost-slot-exclusive-pair:0.1",
+    "scope": "one_exact_expense_pair_only_original_slot_or_explicit_unbound"
+  },
+  "eligible_error_codes": [
+    "format",
+    "structure",
+    "text_length",
+    "cash_flow_operating_base_shape",
+    "cash_flow_ratio_inapplicable",
+    "signed_filed_income_sum_coefficient",
+    "operating_metric_periodicity",
+    "acquisitions_forecast_method",
+    "revenue_driver_identity",
+    "expense_cost_slot_pair",
+    "independent_settings_bundle"
+  ],
+  "eligible_structure_rules": [
+    "a derived line cannot claim a filed concept",
+    "a filed subtotal may only be actual/tie authority or unavailable",
+    "diluted weighted-average shares require duration direct_annual shares",
+    "only diluted weighted-average shares may carry annual_forecast_method",
+    "Only diluted weighted-average shares may select",
+    "sum formula roles do not match its company statement output",
+    "EPS denominator must be diluted weighted-average shares",
+    "EPS numerator must use the company-specific diluted EPS numerator role",
+    "company-presented components must be filed and subtotals must be derived",
+    "diluted EPS cannot be aggregated from quarterly EPS"
+  ],
+  "eligible_structure_rules_ref": "rule:company-model-spec-repairable-structure:0.4",
+  "eps_numerator_bridge": {
+    "accounting_line": "retain_or_restore_accounting_net_income_role_and_formula",
+    "change": "one_derived_numerator_bridge_and_its_consuming_eps_formula_only",
+    "guidance": "Keep accounting net_income separate from diluted_eps_numerator. When net income is calculated from pretax income, taxes and filed company components, retain that line and its formula with role net_income; do not retag it diluted_eps_numerator. Add a separate derived numerator bridge using the exact net_income or parent_net_income line and only disclosed dilution adjustments. If the filed diluted EPS proves that net income itself is the numerator, the bridge is sum(+1 * net-income), and the EPS divide refers to this bridge and the filed diluted shares. A numerator sum cannot directly use pretax_income or income_tax_expense. Tie the accounting total and numerator to their exact filed authorities and validate the numerator through filed diluted EPS in every period. Missing dilution evidence remains unavailable, never zero.",
+    "ref": "company-model-spec-accounting-eps-bridge:0.1"
+  },
+  "filed_subtotal_placement": {
+    "change": "same_line_concept_to_matching_formula_tie_only",
+    "ref": "model-spec-filed-subtotal-concept-placement:0.1",
+    "source_identity": "exact_filed_concept_and_evidence_remain_unchanged"
+  },
+  "independent_settings_bundle": {
+    "existing_root_slot": "any_recorded_repair_consumes_original_single_slot",
+    "ref": "model-spec-independent-settings-diagnostics:0.1",
+    "rules": [
+      "shares_annual_semantics",
+      "eps_annual_semantics",
+      "operating_cash_base_reference"
+    ],
+    "scope": "exact_parent_allowed_paths_whole_body_guard"
+  },
+  "joint_signed_filed_income_sum": {
+    "attempts": "shares_existing_single_repair_limit",
+    "ref": "model-spec-signed-filed-income-sum-coefficients:0.2",
+    "scope": "two_to_four_exact_coefficients_unique_all_held_periods_full_DAG_proven"
+  },
+  "prior_contract_repair": "model-spec-repair-replay-by-parent-and-error:0.1",
+  "ref": "contract:company-model-spec-structured-output-repair:0.14",
+  "semantic_failure": "whole_refusal",
+  "signed_filed_income_sum": {
+    "ref": "model-spec-signed-filed-income-sum-coefficient:0.1",
+    "scope": "one_exact_coefficient_only_with_all_held_periods_strictly_proven",
+    "validation": "full_financial_validation_after_every_new_or_replayed_answer"
+  },
+  "structure_change": "only_the_named_rule_may_change",
+  "text_length_change": "only_overlong_schema_strings_may_change",
+  "typed_field_change": {
+    "ref": "model-spec-typed-field-repair:0.1",
+    "scope": "exact_parent_paths_only_with_source_group_reconstruction_for_identity",
+    "validation": "full_spec_and_financial_validation_after_every_new_or_replayed_answer"
+  },
+  "validation": "full_spec_from_response_and_supplied_financial_validator_after_every_attempt"
+}

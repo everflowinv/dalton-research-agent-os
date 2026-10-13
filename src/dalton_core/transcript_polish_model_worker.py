@@ -485,6 +485,19 @@ class RoutedTranscriptPolishModelWorker:
         evidence = getattr(exc, "post_send_unknown_evidence", None)
         return evidence if isinstance(evidence, PostSendUnknownEvidence) else None
 
+    @staticmethod
+    def _returned_provider_health(result):
+        """Health only; never authority to refund or dispatch another call."""
+        from .model_profile_health import UNAVAILABLE_COOLDOWN_CODES
+        error = result.error or {}
+        if (result.status == "failed" and error.get("source") == "openclaw-model-broker"
+                and error.get("code") in UNAVAILABLE_COOLDOWN_CODES):
+            return {"outcome": "failed", "failure_class": "provider_failure",
+                    "error_code": error["code"]}
+        # Other returned failures must not masquerade as endpoint success, but
+        # this change grants no broader recovery/paid-retry classification.
+        return {"outcome": "served" if result.status == "succeeded" else "failed"}
+
     def run_once(
         self, work_order: WorkOrder | Mapping[str, Any]
     ) -> dict[str, Any]:
@@ -537,6 +550,39 @@ class RoutedTranscriptPolishModelWorker:
             else None
         )
         route_replayed = recovery_route is not None
+        chain_observed_provider = False
+        if recovery_route is None and work.metadata.get('numeric_contract_ref') == 'directed-document-numeric:0.1':
+            from .directed_numeric_research import unexecutable_period_targets
+            missing = unexecutable_period_targets(work.metadata['numeric_targets'])
+            if missing:
+                # Existing paid routes still replay/account normally above.
+                # An immutable historical target cannot be repaired by a new
+                # provider attempt that is required to copy it unchanged.
+                result = self._control_result(work, attempt_number,
+                    code='NUMERIC_TARGET_PERIOD_UNSPECIFIED', status='failed')
+                wire = result.to_dict()
+                wire['error']['message'] = 'Specify the exact source-supported year or quarter/half-year in a replacement plan; do not infer a period or retry this frozen target.'
+                wire['metadata']['unexecutable_period_targets'] = missing
+                result = ResultEnvelope.from_dict(wire)
+                completion = self.scheduler.complete(work.id, attempt_number,
+                    self.worker_ref, lease['lease_token'], result,
+                    idempotency_key=f'{self.namespace}-complete:{work.id}:{attempt_number}')
+                return {'status': 'failed', 'work_order_ref': work.id,
+                    'result': result.to_dict(), 'completion': completion}
+            from .directed_numeric_failure_diagnostics import repeated_before_admission
+            repeated = repeated_before_admission(self.scheduler.connection,
+                work.to_dict(), before_attempt=attempt_number)
+            if repeated:
+                result = self._control_result(work, attempt_number,
+                    code='NUMERIC_REPEATED_CONTRACT_FAILURE', status='failed')
+                wire = result.to_dict()
+                wire['metadata']['numeric_repeated_contract_failure'] = repeated
+                result = ResultEnvelope.from_dict(wire)
+                completion = self.scheduler.complete(work.id, attempt_number,
+                    self.worker_ref, lease['lease_token'], result,
+                    idempotency_key=f'{self.namespace}-complete:{work.id}:{attempt_number}')
+                return {'status':'failed', 'work_order_ref':work.id,
+                    'result':result.to_dict(), 'completion':completion}
         if recovery_route is not None:
             route = recovery_route
             profile = self.router.get_profile(
@@ -685,7 +731,8 @@ class RoutedTranscriptPolishModelWorker:
                     # A returned envelope may represent a paid provider response.
                     # Preserve it for the normal accounting path; only failures
                     # before an invocation exists are safe to switch past here.
-                    return {"outcome": "served", "value": value}
+                    return {"outcome": "served", "value": value,
+                            "provider_health_outcome": self._returned_provider_health(envelope)}
 
                 chained = execute_chain(
                     self.router,
@@ -705,6 +752,7 @@ class RoutedTranscriptPolishModelWorker:
                     call=call,
                     producer_decision_ref=self._producer_decision_ref(work),
                 )
+                chain_observed_provider = True
                 if chained["status"] != "served":
                     route_ref = chained.get("route_decision_ref")
                     if route_ref is None and chained.get("links"):
@@ -801,6 +849,14 @@ class RoutedTranscriptPolishModelWorker:
         if accounting_failure is None:
             self._accounted_route_replayed = route_replayed
             self._after_accounted_result(work, route, profile, invocation, adapter_result)
+        # Direct provider-retry routing does not pass through execute_chain.
+        # A completed empty frame remains a failed, possibly-paid Work; its
+        # endpoint health must nevertheless govern the next ordinary Work.
+        # Exact formal replay returns above and must not extend a cooldown.
+        if not route_replayed and not chain_observed_provider:
+            from .model_fallback_chain import _observe_provider_outcome
+            _observe_provider_outcome(self.router, profile["id"],
+                self._returned_provider_health(adapter_result), route["id"])
         try:
             self.scheduler.validate_lease_for_use(
                 work.id,
@@ -882,11 +938,15 @@ class RoutedTranscriptPolishModelWorker:
                 self._parse_candidate(text, work)
             except Exception as exc:
                 output_error = type(exc).__name__
+                from .directed_numeric_failure_diagnostics import prior_same_failure
+                repeated = prior_same_failure(self.scheduler.connection, work.to_dict(),
+                    before_attempt=attempt_number, error_type=type(exc).__name__,
+                    message=str(exc))
                 result = self._control_result(
                     work,
                     attempt_number,
                     code="MODEL_OUTPUT_CONTRACT_REJECTED",
-                    status=self._bounded_failure_status(lease),
+                    status="failed" if repeated else self._bounded_failure_status(lease),
                     invocation_ref=invocation.id,
                     route_ref=route["id"],
                     usage_refs=adapter_result.usage_refs,
@@ -899,6 +959,7 @@ class RoutedTranscriptPolishModelWorker:
                 rejected = result.to_dict()
                 rejected["metadata"] = {
                     **dict(result.metadata),
+                    **({"numeric_repeated_contract_failure": repeated} if repeated else {}),
                     "rejected_model_output": {
                         "diagnostic_only": True,
                         "adapter_result_ref": adapter_result.id,

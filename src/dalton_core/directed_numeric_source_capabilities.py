@@ -7,7 +7,8 @@ import sqlite3
 
 SPOKEN_CONTRACT_REF = 'directed-document-spoken-numeric:0.1'
 FILED_CONTRACT_REF = 'directed-document-numeric:0.1'
-NUMERIC_STRATEGIES = frozenset({FILED_CONTRACT_REF, SPOKEN_CONTRACT_REF})
+from .operating_driver_units import CONTRACT_REF as OPERATING_CONTRACT_REF
+NUMERIC_STRATEGIES = frozenset({FILED_CONTRACT_REF, SPOKEN_CONTRACT_REF, OPERATING_CONTRACT_REF})
 
 
 def source_capability(connection: Any, registration: Mapping[str, Any], company_ref: str) -> dict[str, Any]:

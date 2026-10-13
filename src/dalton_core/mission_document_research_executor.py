@@ -1,6 +1,8 @@
 """Durable four-stage executor for one source-neutral directed-document admission."""
 from __future__ import annotations
 
+from types import SimpleNamespace
+
 import hashlib
 import json
 import os
@@ -1219,6 +1221,18 @@ def _derive(admission: Mapping[str, Any], scheduler: Scheduler,
             draft_prompt_builder = (draft_prompt_v2 if draft_contract
                                     == DRAFT_CONTRACT_VERSION_V2 else draft_prompt)
         prompt = draft_prompt_builder(question=question, search_proof=proof)
+        note_target = (admission["planner_inquiry"].get("directed_document") or {}).get("evidence_target")
+        if isinstance(note_target, Mapping) and note_target.get("schema_version") in {"financial-note-target-0.2", "financial-note-target-0.3"}:
+            from .document_research_strategy import normalize_evidence_target, history_note_candidate_scope
+            note_target = normalize_evidence_target(note_target)
+            body = json.loads(prompt)
+            body["financial_note_target"] = note_target
+            body["required_candidate_scope"] = history_note_candidate_scope(note_target)
+            body["task"] += (" For this typed EPS note, copy required_candidate_scope exactly. "
+                "Answer only attribution applicable to that exact filing and period; if the original "
+                "does not establish it, return insufficient_evidence. Do not infer a numerator amount.")
+            prompt = canonical_json(body)
+            metadata["financial_note_target"] = note_target
         context_hash = content_hash(proof["matches"])
         binding = {
             "prompt_hash": content_hash(prompt), "search_proof_hash": proof["content_hash"],
@@ -1249,6 +1263,18 @@ def _derive(admission: Mapping[str, Any], scheduler: Scheduler,
         prompt = (verifier_prompt if verifier_contract == "0.1" else verifier_prompt_v2)(
             question=question, search_proof=proof,
             draft=draft["output"], producer_proof=producer)
+        note_target = (admission["planner_inquiry"].get("directed_document") or {}).get("evidence_target")
+        if isinstance(note_target, Mapping) and note_target.get("schema_version") in {"financial-note-target-0.2", "financial-note-target-0.3"}:
+            from .document_research_strategy import normalize_evidence_target, history_note_candidate_scope
+            note_target = normalize_evidence_target(note_target)
+            body = json.loads(prompt)
+            body["financial_note_target"] = note_target
+            body["required_candidate_scope"] = history_note_candidate_scope(note_target)
+            body["task"] += (" Verify that the cited original establishes this EPS attribution for "
+                "the exact bound filing and period. A different period or missing applicability is "
+                "an error, not permission to infer an amount or apply an annual note to other quarters.")
+            prompt = canonical_json(body)
+            metadata["financial_note_target"] = note_target
         binding = {
             "prompt_hash": content_hash(prompt), "draft_hash": draft["output_hash"],
             "search_proof_hash": proof["content_hash"],
@@ -1334,8 +1360,8 @@ def _historical_derived_work(
         return current
     builders = [_pre_numeric_normalization_draft_prompt]
     if admission.get("numeric_authority") is not None:
-        from .directed_numeric_output import legacy_draft_prompt_v0, legacy_draft_prompt_v1
-        builders = [legacy_draft_prompt_v1, legacy_draft_prompt_v0]
+        from .directed_numeric_output import legacy_draft_prompt_v0, legacy_draft_prompt_v1, legacy_draft_prompt_v2
+        builders = [legacy_draft_prompt_v2, legacy_draft_prompt_v1, legacy_draft_prompt_v0]
     for builder in builders:
         legacy = _derive(
             admission, scheduler, registry, blueprints, index,
@@ -2002,13 +2028,20 @@ def _failure_execution_authority(scheduler: Scheduler, work: Mapping[str, Any],
                 and (envelope.get("error") or {}).get("code") in ROUTE_REJECTED_CODES
                 and envelope.get("metadata", {}).get("control_plane_failure") is True
                 and envelope.get("status") == "failed")
+    route_attempt_matches = route.get('attempt_number') == formal['attempt_number']
+    if not route_attempt_matches:
+        authority = getattr(worker, 'mission_document_research_authority', None)
+        if authority is not None:
+            index = 1 if work['metadata']['stage'] == 'qualitative_model_draft' else 2
+            route_attempt_matches = _paid_contract_failure_proof(
+                authority, work, formal, index, worker) is not None
     if (canonical_json(route) != row["decision_json"]
             or asserted != row["decision_hash"] or asserted != content_hash(route_body)
             or route.get("id") != route_ref
             or (route.get("outcome") != "selected" and not rejected)
             or route.get("work_order_ref") != work["id"]
             or route.get("work_order_hash") != content_hash(work)
-            or route.get("attempt_number") != formal["attempt_number"]
+            or not route_attempt_matches
             or event["attempt_number"] != formal["attempt_number"]
             or route.get("policy_version_ref") != work["metadata"]["routing_policy_ref"]
             or (not rejected and (route.get("selected_endpoint") or {}).get(
@@ -2208,7 +2241,8 @@ def _verify_recovery_failure_proof(authority: Any, scheduler: Scheduler,
                 "paid recovery authorization drifted")
         if "numeric_output_repair" in proof:
             from .directed_numeric_recovery import build_numeric_output_repair
-            if proof["numeric_output_repair"] != build_numeric_output_repair(failed, formal):
+            if proof["numeric_output_repair"] != build_numeric_output_repair(
+                    failed, formal, contract_ref=proof["numeric_output_repair"].get("contract_ref")):
                 raise MissionDocumentResearchExecutorError("numeric output repair differs from formal failure")
         return
     if proof.get("classification") == "reconstructed_historical_provider_controls_no_send":
@@ -3310,11 +3344,17 @@ def _ordinary_staging_work(
 
 
 
-def _effective_staging_work(admission, scheduler, registry, effective):
+def _effective_staging_work(admission, scheduler, registry, effective, *, executor=None):
     current = _ordinary_staging_work(admission, scheduler, registry, effective)
     if admission.get("numeric_authority") is not None:
         from .directed_numeric_local_reconciliation import effective_reconciliation_work
-        return effective_reconciliation_work(admission,scheduler,registry,effective,current)
+        current = effective_reconciliation_work(admission,scheduler,registry,effective,current)
+        from .directed_numeric_promotion_reconciliation import row, effective_work
+        if row(scheduler.connection,admission['id']) is not None:
+            if executor is None:
+                raise MissionDocumentResearchExecutorError('promotion reconciliation requires full reader authority')
+            return effective_work(executor,admission)
+        return current
     return current
 
 
@@ -3366,7 +3406,9 @@ def effective_mission_document_work_orders(
                 authority, scheduler, admission, index, worker=worker)
         else:
             work = _effective_staging_work(
-                admission, scheduler, authority.registry, effective)
+                admission, scheduler, authority.registry, effective,
+                executor=SimpleNamespace(authority=authority,scheduler=scheduler,registry=authority.registry,
+                    connection=scheduler.connection,draft_worker=draft_worker,verifier_worker=verifier_worker))
         stored = scheduler.work_order_authority(work["id"])
         if stored is not None and (stored["work_order_hash"] != content_hash(work)
                                    or canonical_json(stored["work_order"])
@@ -4329,6 +4371,10 @@ class MissionDocumentResearchExecutor:
             worker = self.draft_worker if index == 1 else self.verifier_worker
             route = worker.router.get_decision(route_ref)
             endpoint = route.get("selected_endpoint") if isinstance(route, Mapping) else None
+            from .document_paid_replay import paid_replay_attempt
+            served_attempt = (paid_replay_attempt(self.authority.store.connection,
+                worker.router, work, formal, route, worker.worker_ref)
+                if isinstance(route, Mapping) else None)
             if (alias != invocation_ref
                     or canonical_json({**invocation, "invocation_id": alias})
                     != row["invocation_json"]
@@ -4340,7 +4386,7 @@ class MissionDocumentResearchExecutor:
                     or route.get("id") != route_ref
                     or route.get("work_order_ref") != work["id"]
                     or route.get("work_order_hash") != content_hash(work)
-                    or route.get("attempt_number") != formal["attempt_number"]
+                    or served_attempt is None
                     or route.get("outcome") != "selected"
                     or not isinstance(endpoint, Mapping)
                     or invocation.get("profile_ref")
@@ -4355,7 +4401,7 @@ class MissionDocumentResearchExecutor:
             if budget_store is None:
                 return None
             exact = budget_store.admission(
-                work_order_ref=work["id"], attempt_number=formal["attempt_number"],
+                work_order_ref=work["id"], attempt_number=served_attempt,
                 phase=self._phase(index),
             )
             if not isinstance(exact, Mapping):
@@ -5112,6 +5158,14 @@ class MissionDocumentResearchExecutor:
                 "The model stage failed without authority for a safe replay; its send and "
                 "charging state remains frozen for review."
                 if reason == LEGACY_UNPROVED_SEND_REASON else
+                "The immutable numeric target has no explicit executable period. Do not repeat "
+                "this task. Preserve all original fees and request a source-bound normal-plan "
+                "period replacement using the exact failure binding."
+                if reason == 'numeric_target_period_unspecified' else
+                "The same immutable question produced the same typed validation failure. "
+                "No further identical automatic repair is useful. Preserve all original fees; "
+                "the exact retained answer and validator diagnostic identify the research gap."
+                if reason == 'numeric_repeated_contract_failure' else
                 "The model stage did not send a chargeable request and may use a fresh "
                 "bounded WorkOrder when its recorded retry conditions permit."
             ),
@@ -5218,6 +5272,17 @@ class MissionDocumentResearchExecutor:
         stage = work["metadata"]["stage"]
         authorization = self._existing_automatic_authorization(
             work["id"], AUTOMATIC_CONTRACT_RETRY_CLASSIFICATION)
+        if authorization is None and admission.get('numeric_authority'):
+            from .directed_numeric_recovery import build_numeric_output_repair
+            repair = build_numeric_output_repair(work, formal)
+            if repair is not None and repair['replacement_prompt'] == work['question']:
+                recovery = {'status': 'stopped', 'reason': 'numeric_repeated_contract_failure',
+                    'eligible': False, 'used_fresh_work_orders': len(links),
+                    'max_fresh_work_orders': 0, 'retry_at': None,
+                    'deadline': _time(deadline), 'proof': paid}
+                self._recovery_observation(admission, work, formal, index, recovery)
+                return {'status': 'stopped', 'reason': recovery['reason'],
+                    'work_order_ref': work['id'], 'stage': stage}
         spent = self._contract_retry_disposition(links)
         if spent is None and authorization is None and self.connection.execute(
             "SELECT 1 FROM mission_document_research_controlled_recovery_authorizations "
@@ -5543,6 +5608,38 @@ class MissionDocumentResearchExecutor:
             self.authority, self.scheduler, admission, index, worker=worker)
         if canonical_json(current) != canonical_json(work):
             raise MissionDocumentResearchExecutorError("effective recovery Work drifted")
+        if admission.get('numeric_authority'):
+            from .directed_numeric_research import unexecutable_period_targets
+            missing = unexecutable_period_targets(admission['numeric_authority']['targets'], contract_ref=admission['numeric_authority']['contract_ref'])
+            if missing:
+                recovery = {'status': 'stopped', 'reason': 'numeric_target_period_unspecified',
+                    'eligible': False, 'used_fresh_work_orders': len(links),
+                    'max_fresh_work_orders': 0, 'retry_at': None,
+                    'unexecutable_period_targets': missing,
+                    'proof': {'formal_result_ref': _formal_ref(formal),
+                        'formal_result_hash': _formal_hash(formal),
+                        'result_envelope_ref': formal['result_envelope_id'],
+                        'result_envelope_hash': formal['result_envelope_hash']}}
+                self._recovery_observation(admission, work, formal, index, recovery)
+                return {'status': 'stopped', 'reason': recovery['reason'],
+                    'work_order_ref': work['id'], 'stage': work['metadata']['stage']}
+            envelope = formal['result_envelope']
+            if (envelope.get('error') or {}).get('code') == 'NUMERIC_REPEATED_CONTRACT_FAILURE':
+                from .directed_numeric_failure_diagnostics import repeated_before_admission
+                repeated = repeated_before_admission(self.scheduler.connection, work,
+                    before_attempt=formal['attempt_number'])
+                if repeated != envelope.get('metadata', {}).get('numeric_repeated_contract_failure'):
+                    raise MissionDocumentResearchExecutorError('numeric repeated failure proof differs')
+                recovery = {'status':'stopped','reason':'numeric_repeated_contract_failure',
+                    'eligible':False,'used_fresh_work_orders':len(links),
+                    'max_fresh_work_orders':0,'retry_at':None,'proof':{**repeated,
+                        'formal_result_ref':_formal_ref(formal),
+                        'formal_result_hash':_formal_hash(formal),
+                        'result_envelope_ref':formal['result_envelope_id'],
+                        'result_envelope_hash':formal['result_envelope_hash']}}
+                self._recovery_observation(admission, work, formal, index, recovery)
+                return {'status':'stopped','reason':recovery['reason'],
+                    'work_order_ref':work['id'],'stage':work['metadata']['stage']}
         if admission.get("numeric_authority") is not None:
             from .directed_numeric_maintenance import attempt
             technical = attempt(self, admission, work, formal, index, links)
@@ -6132,7 +6229,7 @@ class MissionDocumentResearchExecutor:
                     self.authority, self.scheduler, admission, index, worker=stage_worker)
             else:
                 work = _effective_staging_work(
-                    admission, self.scheduler, self.registry, effective)
+                    admission, self.scheduler, self.registry, effective, executor=self)
             effective.append(work)
             stored = self.scheduler.work_order_authority(work["id"])
             if stored is None:

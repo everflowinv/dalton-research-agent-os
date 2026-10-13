@@ -41,17 +41,14 @@ def selections(desired):
 
 
 def _consumer_policy_bindings(environment):
-    from .model_selection import model_configs, _runtime_policy_config, ModelSelectionError, RETIRED_PURPOSES
+    from .model_selection import model_configs, _runtime_policy_config, RETIRED_PURPOSES
     from .model_router import ModelRouter
     from .store import content_hash
     pins = [(pin, None) for pin in model_configs(environment.state_dir)]
     for purpose in ('plan', 'human_intent', 'agenda_planning', 'thesis_impact_assessment', 'thesis_impact_verifier'):
         if purpose in RETIRED_PURPOSES:
             continue
-        try:
-            runtime = _runtime_policy_config(environment.state_dir, purpose)
-        except ModelSelectionError:
-            runtime = None
+        runtime = _runtime_policy_config(environment.state_dir, purpose)
         if runtime is not None:
             pins.append((runtime, purpose))
     policies = {}
@@ -107,7 +104,7 @@ def selection_landed(environment, params, bindings=None):
 
 
 def budget_landed(mission, budget):
-    return mission is not None and all(mission['budget'].get(k) == v for k, v in budget.items())
+    return mission is not None and all(mission['budget'].get(k) == v for k, v in settings.mission_budget(budget).items())
 
 
 def _shared_landed(manager, desired):
@@ -115,20 +112,23 @@ def _shared_landed(manager, desired):
         return True
     from .workspace_manager import _config
     from .shared_daily_budget import load_shared_daily_budget_policy
-    path = _config(Path(manager)).get('shared_daily_budget_policy_path')
-    if not path:
-        raise settings.HostSettingsError('本机尚未配置共用每日预算策略')
+    from .host_source_budget_sync import shared_policy_path
+    path = shared_policy_path(manager)
     policy = load_shared_daily_budget_policy(path)
     return all(policy[k] == desired['research_budget'][k] for k in
                ('max_daily_cost_usd', 'max_daily_paid_calls', 'max_alphaengine_calls_24h'))
 
 
 def _sync_shared(manager, desired):
+    if desired['research_budget'] is not None:
+        from .host_source_budget_sync import shared_policy_path
+        shared_policy_path(manager, persist=True)
     if _shared_landed(manager, desired):
         return
     from .workspace_manager import _config
     from .shared_daily_budget import load_shared_daily_budget_policy, policy_wire, ZERO_COUNTS_SCHEMA_VERSION
-    path = Path(_config(Path(manager))['shared_daily_budget_policy_path'])
+    from .host_source_budget_sync import shared_policy_path
+    path = shared_policy_path(manager, persist=True)
     prior = load_shared_daily_budget_policy(path)
     budget = desired['research_budget']
     wire = policy_wire(**{k: budget[k] for k in ('max_daily_cost_usd','max_daily_paid_calls','max_alphaengine_calls_24h')},
@@ -154,6 +154,9 @@ def pending(environment, manager, desired):
         problems.append('research_budget')
     if not _shared_landed(manager, desired):
         problems.append('shared_daily_budget')
+    from .host_source_budget_sync import pending as source_pending
+    if desired['research_budget'] is not None and source_pending(environment.state_dir, manager, desired):
+        problems.append('source_budget')
     return problems
 
 
@@ -173,6 +176,7 @@ def status(manager):
                          'lifecycle': lifecycle, 'reasons': reasons})
     return {'scope': 'all_workspaces', 'desired_hash': desired['content_hash'], 'revision': desired['revision'],
             'status': 'pending' if rows else 'applied', 'pending': rows,
+            'material_acquisition': (desired['research_budget'] or desired['creation_budget_defaults']['budget'] or {}).get('material_acquisition'),
             'note': (f'已保存共用设置，{len(rows)}个项目将在恢复或下一次调度前应用。' if rows else '全部研究项目已采用共用设置，新建项目也将继承。')}
 
 
@@ -205,7 +209,9 @@ def reconcile_writer(server):
             mission = server.coverage_mission.active_mission(row['mission_ref'])
             if not budget_landed(mission, budget):
                 server._op_set_research_budget_authority_chain({'mission_ref': mission['mission_ref'],
-                    'expected_mission_hash': mission['content_hash'], 'budget': budget, 'actor_ref': desired['actor_ref']})
+                    'expected_mission_hash': mission['content_hash'], 'budget': settings.mission_budget(budget), 'actor_ref': desired['actor_ref']})
+        from .host_source_budget_sync import apply as sync_source_budget
+        sync_source_budget(server, manager, desired)
         from .shared_daily_budget import install_binding
         from .workspace_manager import _config
         policy_path = _config(Path(manager)).get('shared_daily_budget_policy_path')
@@ -297,9 +303,17 @@ def resolved_model_config(state_dir, current, purpose):
         raise settings.HostSettingsError('原模型策略内容校验失败')
     environment = environment_for_state_dir([row[0] for row in environments(manager)], state_dir)
     heads = {p['policy_version_ref']:p for p in consumer_policies(environment) if p['id']==pinned['id']}
-    if len(heads) != 1:
+    # Different purposes can legitimately consume different versions of one
+    # family. An exact active pin is unambiguous; do not collapse them into a
+    # supposed single family head. A stale pin still needs one unique head.
+    policy = heads.get(pinned['policy_version_ref'])
+    if policy is not None:
+        if policy['content_hash'] != pinned['content_hash']:
+            raise settings.HostSettingsError('原模型策略内容校验失败')
+    elif len(heads) == 1:
+        policy = next(iter(heads.values()))
+    else:
         raise settings.HostSettingsError('当前模型策略仍未完整同步，新调用暂缓')
-    policy = next(iter(heads.values()))
     resolved = dict(current)
     resolved['routing_policy_ref'] = policy['policy_version_ref']
     desired = settings.load(manager)

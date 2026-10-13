@@ -94,7 +94,12 @@ class AllCompanySkeletonTests(unittest.TestCase):
                 for _ in range(3)],
         }
         built = f.FeedbackProjectionTests.rebind(built)
-        projected = self.project(built)
+        # Keep a fixed allowance for the fixture's business context, separate
+        # from the growing shared instructions. Production keeps its 192KB
+        # ceiling; this tighter test must still exercise real compaction.
+        bound = len(build_prompt({'schema_version': '0.1', 'companies': []}).encode()) + 44_000
+        self.assertGreater(len(build_prompt(built).encode()), bound)
+        projected = self.project(built, bound=bound)
         context = projected['reflection_followup_context']
         full = built['reflection_followup_context']
         # Bounded prompt material adds provenance, not a different obligation.
@@ -105,6 +110,14 @@ class AllCompanySkeletonTests(unittest.TestCase):
         changed = copy.deepcopy(context)
         changed['groups'][0]['suggestions'][0]['reason'] = 'Unbound replacement obligation'
         self.assertFalse(followup_context_matches_prompt(changed, full))
+        production = self.project(built, bound=192_000)
+        self.assertEqual(production['reflection_followup_context']['groups'], full['groups'])
+        self.assertEqual(production['reflection_followup_context']['backlog_questions'], full['backlog_questions'])
+        for original, carried in zip(built['companies'], production['companies']):
+            self.assertEqual(carried['document_research_reopened'], original['document_research_reopened'])
+            execution = original['readable_documents'][-1]
+            self.assertIn((execution['document_ref'], execution['document_version_hash']),
+                          [(d['document_ref'], d['document_version_hash']) for d in carried['readable_documents']])
 
     def test_twelve_companies_all_have_a_selectable_document_under_the_bound(self):
         projected = self.project(self.inventory(12))

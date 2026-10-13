@@ -430,29 +430,18 @@ class PriorContractReplayTests(unittest.TestCase):
             decided_by="automation:test",
             repair_attempts=[] if attempts is None else attempts)
 
-    def test_the_held_answer_is_replayed_free_and_one_new_question_is_asked(self):
-        model = self.model([self.fixed])
-        attempts = []
-        spec, _repairs, accepted = self.run_repair(model, attempts)
-        self.assertEqual(accepted["work_order_ref"], "work:new")
-        self.assertEqual(len(model.calls), 1)
-        self.assertEqual([(item["replayed"], item["cost_micros"]) for item in attempts],
-                         [(True, 0), (False, 480_000)])
-        binding = model.calls[0]["_structured_output_repair"]
-        # Asked of the held answer, about the rule it actually broke, one
-        # level below it, under this contract.
-        self.assertEqual(binding["repair_number"], 2)
-        self.assertEqual(binding["repair_parent"]["work_order_ref"],
-                         f"work:cockpit-model_spec-{0:032d}")
-        self.assertEqual(binding["repair_contract_hash"], cli.REPAIR_CONTRACT_HASH)
-        self.assertIn(EPS_RULE, binding["validation_error"]["message"])
-        self.assertEqual(spec["company_ref"], self.state["company_ref"])
+    def test_paid_legacy_repair_replays_but_contract_change_is_not_new_budget(self):
+        model = self.model([self.fixed]); attempts = []
+        with self.assertRaisesRegex(CompanyModelSpecError, EPS_RULE):
+            self.run_repair(model, attempts)
+        self.assertEqual(model.calls, [])
+        self.assertEqual([(item["replayed"], item["cost_micros"]) for item in attempts], [(True, 0)])
 
-    def test_the_new_contract_gets_one_call_not_two(self):
+    def test_unproved_legacy_root_never_gets_a_second_paid_slot(self):
         model = self.model([self.held_repair, self.fixed])
         with self.assertRaisesRegex(CompanyModelSpecError, EPS_RULE):
             self.run_repair(model)
-        self.assertEqual(len(model.calls), 1)
+        self.assertEqual(model.calls, [])
 
     def test_an_answer_that_changed_nothing_is_not_bought_again(self):
         _scheduler_db(Path(self.directory.name) / "same.sqlite", [{
@@ -594,19 +583,17 @@ class RuleVersionThroughTheSchedulerTests(unittest.TestCase):
                 run()
         self.assertEqual(len(adapter.served), 2)
 
-        # After: the held repair is replayed and one new repair is admitted by
-        # the Cockpit's own ancestry proof.
-        spec, repairs, accepted = run()
-        self.assertEqual(len(adapter.served), 3)
-        self.assertEqual([item["replayed"] for item in repairs], [True, False])
-        self.assertEqual(spec["state_hash"], STATE["state_hash"])
-
-        # And again: everything replays; nothing more is bought.
-        again, repairs_again, accepted_again = run()
-        self.assertEqual(len(adapter.served), 3)
-        self.assertEqual(accepted_again["work_order_ref"], accepted["work_order_ref"])
-        self.assertTrue(all(item["replayed"] for item in repairs_again))
-        self.assertEqual(again["content_hash"], spec["content_hash"])
+        # After: full revalidation can diagnose the newly known EPS error,
+        # but changing rules cannot purchase a second repair below this root.
+        for _ in range(2):
+            repairs = []
+            with self.assertRaisesRegex(CompanyModelSpecError, EPS_RULE):
+                cli._validated_spec_with_repair(model=model, state=STATE, mission=self.mission,
+                    original_call=first, repair_config=config, decided_by="automation:test",
+                    repair_attempts=repairs)
+            self.assertEqual(len(adapter.served), 2)
+            self.assertEqual([item["replayed"] for item in repairs], [True])
+            self.assertEqual(repairs[0]["cost_micros"], 0)
 
 
 # ---------------------------------------------------------------------------

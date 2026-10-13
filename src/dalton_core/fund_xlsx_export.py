@@ -286,17 +286,81 @@ def _is_operating_expense_share_formula(
     return bool(concept) and formula == f"{concept}[k] = revenue[k] * share[k]"
 
 
+def _level_assumptions(
+    result: Mapping[str, Any], cell: Mapping[str, Any],
+    assumption_measures: Mapping[str, str] | None,
+    assumption_units: Mapping[str, str] | None = None,
+) -> list[str]:
+    measures = assumption_measures or {}
+    assumptions = list(cell.get("assumption_refs") or [])
+    levels = [ref for ref in assumptions
+              if measures.get(ref) in {"mechanism_amount", "economic_driver_level"}]
+    if any(measures.get(ref) in {"carry_forward_mean", "hold_last", "zero_one_off"}
+           for ref in assumptions):
+        if len(assumptions) != 1:
+            raise FundWorkbookExportError("bound level has extra assumptions: " + cell["ref"])
+        measure = measures[assumptions[0]]
+        if (cell.get("result_refs") or cell.get("input_cell_refs")
+                or (assumption_units or {}).get(assumptions[0]) != result.get("unit")):
+            raise FundWorkbookExportError("bound level dependencies or unit differ: " + cell["ref"])
+        suffix = {"carry_forward_mean": "[k] = trailing four-quarter mean (carried)",
+                  "hold_last": "[last filed] (held)",
+                  "zero_one_off": "[k] = 0 (one-off)"}[measure]
+        if not str(result.get("formula") or "").endswith(suffix):
+            raise FundWorkbookExportError("bound level formula differs: " + cell["ref"])
+        return assumptions
+    return levels
+
+
+def _rate_base(
+    result: Mapping[str, Any], cell: Mapping[str, Any],
+    assumption_measures: Mapping[str, str] | None,
+    assumption_units: Mapping[str, str] | None,
+    history_units: Mapping[tuple[str, str], str] | None,
+    result_units: Mapping[str, str] | None,
+) -> tuple[str, tuple[str, str], str] | None:
+    assumptions = list(cell.get("assumption_refs") or [])
+    if not any((assumption_measures or {}).get(ref) == "rate_times_balance"
+               for ref in assumptions):
+        return None
+    inputs, results = list(cell.get("input_cell_refs") or []), list(cell.get("result_refs") or [])
+    if (len(assumptions) != 1 or len(inputs) + len(results) != 1
+            or (assumption_units or {}).get(assumptions[0]) != "ratio"):
+        raise FundWorkbookExportError("bound rate dependencies or unit differ: " + cell["ref"])
+    source = (inputs or results)[0]
+    kind = "input" if inputs else "result"
+    key = (source.get("concept") if inputs else source.get("ref"), source.get("period_end"))
+    suffix = "[last filed] * rate[k]" if inputs else "[k] * rate[k]"
+    if (not all(isinstance(part, str) and part for part in key)
+            or not str(result.get("formula") or "").endswith(suffix)):
+        raise FundWorkbookExportError("bound rate base or formula differs: " + cell["ref"])
+    unit = ((history_units or {}).get(key) if inputs
+            else (result_units or {}).get(key[0]))
+    if unit != result.get("unit"):
+        raise FundWorkbookExportError("bound rate base unit differs: " + cell["ref"])
+    return assumptions[0], key, kind
+
+
 def _formula_for(
     result: Mapping[str, Any], cell: Mapping[str, Any], period: str,
     result_cells: Mapping[tuple[str, str], str], assumption_cells: Mapping[str, str],
     history_cells: Mapping[tuple[str, str], str],
     assumption_measures: Mapping[str, str] | None = None,
+    *, assumption_units: Mapping[str, str] | None = None,
+    history_units: Mapping[tuple[str, str], str] | None = None,
+    result_units: Mapping[str, str] | None = None,
 ) -> str | None:
-    levels = [ref for ref in cell.get("assumption_refs") or []
-              if (assumption_measures or {}).get(ref) in {"mechanism_amount", "economic_driver_level"}]
+    levels = _level_assumptions(result, cell, assumption_measures, assumption_units)
     if len(levels) == 1 and len(cell.get("assumption_refs") or []) == 1:
         coordinate = assumption_cells.get(levels[0])
         return None if coordinate is None else "=" + coordinate
+    rate = _rate_base(result, cell, assumption_measures, assumption_units,
+                      history_units, result_units)
+    if rate is not None:
+        assumption, key, kind = rate
+        base = history_cells.get(key) if kind == "input" else result_cells.get(key)
+        coordinate = assumption_cells.get(assumption)
+        return None if base is None or coordinate is None else f"={base}*{coordinate}"
     refs = [result_cells.get((r["ref"], r["period_end"]))
             for r in cell.get("result_refs") or []]
     if any(ref is None for ref in refs):
@@ -355,14 +419,31 @@ def _verify_translated_value(
     assumption_values: Mapping[str, Decimal],
     history_values: Mapping[tuple[str, str], Decimal],
     assumption_measures: Mapping[str, str] | None = None,
+    *, assumption_units: Mapping[str, str] | None = None,
+    history_units: Mapping[tuple[str, str], str] | None = None,
+    result_units: Mapping[str, str] | None = None,
 ) -> None:
-    levels = [ref for ref in cell.get("assumption_refs") or []
-              if (assumption_measures or {}).get(ref) in {"mechanism_amount", "economic_driver_level"}]
+    levels = _level_assumptions(result, cell, assumption_measures, assumption_units)
     if len(levels) == 1 and len(cell.get("assumption_refs") or []) == 1:
         expected = assumption_values.get(levels[0])
         actual = Decimal(str(cell["value"]))
+        if ((assumption_measures or {}).get(levels[0]) == "zero_one_off"
+                and (expected != 0 or actual != 0)):
+            raise FundWorkbookExportError("bound zero-one-off amount is not zero: " + cell["ref"])
         if expected is None or abs(expected - actual) > max(Decimal("0.00000001"), abs(actual) * Decimal("1e-12")):
-            raise FundWorkbookExportError("bound mechanism amount differs from result: " + cell["ref"])
+            raise FundWorkbookExportError("bound level amount differs from result: " + cell["ref"])
+        return
+    rate = _rate_base(result, cell, assumption_measures, assumption_units,
+                      history_units, result_units)
+    if rate is not None:
+        assumption, key, kind = rate
+        base = history_values.get(key) if kind == "input" else result_values.get(key)
+        rate_value = assumption_values.get(assumption)
+        if base is None or rate_value is None:
+            raise FundWorkbookExportError("bound rate source value is unavailable: " + cell["ref"])
+        expected, actual = base * rate_value, Decimal(str(cell["value"]))
+        if abs(expected - actual) > max(Decimal("0.000001"), abs(actual) * Decimal("1e-12")):
+            raise FundWorkbookExportError("bound rate amount differs from result: " + cell["ref"])
         return
     refs = [result_values.get((item["ref"], item["period_end"]))
             for item in cell.get("result_refs") or []]
@@ -596,7 +677,7 @@ def export_fund_workbook(
     if is_structured_schema(model.get("schema_version")) and calendar_binding is not None:
         from .company_model_annual_projection import (
             AnnualProjectionError, build_annual_projection,
-            validate_annual_projection,
+            validate_annual_projection, annual_projection_result_refs,
         )
 
         try:
@@ -701,6 +782,7 @@ def export_fund_workbook(
     }
     history_cells: dict[tuple[str, str], str] = {}
     history_values: dict[tuple[str, str], Decimal] = {}
+    history_units: dict[tuple[str, str], str] = {}
     history_flow_periods: set[tuple[str, str]] = set()
     row = 3
     for item in model["drivers"]:
@@ -731,6 +813,8 @@ def export_fund_workbook(
                 history_cells[(item["ref"], period)] = f"'Driver'!{_col(ci)}{row}"
                 history_values[(item.get("concept"), period)] = Decimal(str(value["value"]))
                 history_values[(item["ref"], period)] = Decimal(str(value["value"]))
+                history_units[(item.get("concept"), period)] = item["unit"]
+                history_units[(item["ref"], period)] = item["unit"]
                 if isinstance(value.get("period_start"), str):
                     history_flow_periods.add((item["ref"], period))
         row += 1
@@ -740,6 +824,7 @@ def export_fund_workbook(
     assumption_cells: dict[str, str] = {}
     assumption_values: dict[str, Decimal] = {}
     assumption_measures: dict[str, str] = {}
+    assumption_units = {item["ref"]: item["unit"] for item in model["assumptions"]}
     driver_labels = {
         item["ref"]: _reader_label(item["label"]) for item in model["drivers"]
     }
@@ -808,7 +893,7 @@ def export_fund_workbook(
                     row, ci,
                     actual_share_formula or (
                         _template_value(assumption["value"], unit)
-                        if measure in {"mechanism_amount", "economic_driver_level"} else _number(assumption["value"])),
+                        if measure in {"mechanism_amount", "economic_driver_level", "carry_forward_mean", "hold_last", "zero_one_off"} else _number(assumption["value"])),
                 )
                 template_cell_styles["driver"].append({
                     "range": driver.cell(row, ci).coordinate,
@@ -872,6 +957,10 @@ def export_fund_workbook(
         row["label"]: row.get("line_outcomes") or {}
         for row in ((annual_projection or {}).get("periods") or [])
     }
+    annual_result_coverage = (
+        annual_projection_result_refs(model) if annual_projection is not None
+        else frozenset()
+    )
     result_cells: dict[tuple[str, str], str] = {}
     result_flow_periods: set[tuple[str, str]] = set()
     result_values = {
@@ -879,6 +968,7 @@ def export_fund_workbook(
         for result in model["results"] for cell in result["cells"]
         if cell.get("status") == "computed" and "value" in cell
     }
+    result_units = {item["ref"]: item["unit"] for item in model["results"]}
     gaps: list[str] = []
     if calendar_binding is None:
         gaps.append("annual columns unavailable: no bound fiscal calendar")
@@ -1004,12 +1094,16 @@ def export_fund_workbook(
                         result_flow_periods.add((result["ref"], period))
             elif cell is not None and cell["status"] == "computed":
                 formula = _formula_for(result, cell, period, result_cells,
-                                       assumption_cells, history_cells, assumption_measures)
+                                       assumption_cells, history_cells, assumption_measures,
+                                       assumption_units=assumption_units,
+                                       history_units=history_units, result_units=result_units)
                 model_cell_ref = cell["ref"]
                 if formula is not None:
                     _verify_translated_value(
                         result, cell, result_values, assumption_values,
-                        history_values, assumption_measures)
+                        history_values, assumption_measures,
+                        assumption_units=assumption_units,
+                        history_units=history_units, result_units=result_units)
                     if _duration_quarter_cell(cell, period):
                         result_flow_periods.add((result["ref"], period))
             if formula is None:
@@ -1054,6 +1148,12 @@ def export_fund_workbook(
             )
             if annual_semantics not in {None, "not_applicable"}:
                 if projection_outcome is None:
+                    if result["ref"] not in annual_result_coverage:
+                        gaps.append(
+                            f"{result['ref']} {label}: "
+                            "此科目暂未生成年度汇总，已保留可用的季度预测。"
+                        )
+                        continue
                     raise FundWorkbookExportError(
                         f"annual projection lacks result {result['ref']}")
                 if structured_role == "diluted_eps":

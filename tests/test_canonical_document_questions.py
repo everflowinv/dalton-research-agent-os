@@ -104,8 +104,14 @@ class CanonicalDocumentQuestionTests(unittest.TestCase):
                 'open_blockers':[{'document_ref':'source:original','blocker':'Awaiting an exact source'}]},
             'readable_documents':[],'irrelevant_detail':'x'*50000}
         state={'schema_version':'0.1','content_hash':'d'*64,'goal':{},'companies':[company]}
-        projected=project_state_for_prompt(state,max_input_bytes=25000)
-        self.assertLessEqual(len(build_prompt(projected).encode()),25000)
+        # Keep a fixed allowance for this fixture's state, independent of the
+        # shared planner instructions. Those instructions can grow without
+        # changing which pending bindings outrank historical statistics.
+        empty_state={**state,'companies':[]}
+        input_bound=len(build_prompt(empty_state).encode())+2700
+        self.assertGreater(len(build_prompt(state).encode()),input_bound)
+        projected=project_state_for_prompt(state,max_input_bytes=input_bound)
+        self.assertLessEqual(len(build_prompt(projected).encode()),input_bound)
         self.assertEqual(projected['companies'][0]['canonical_document_questions']['questions'],[active])
         self.assertEqual(projected['companies'][0]['reading_pipeline']['open_blockers'],company['reading_pipeline']['open_blockers'])
         self.assertEqual(projected['companies'][0]['reading_pipeline']['kind_counts_summary']['open'],100)

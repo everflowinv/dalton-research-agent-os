@@ -170,7 +170,8 @@ PROMPT_PROJECTION_RULE = {
         "gaps", "blocked_on", "source_base_ready", "figures",
         "filed_statement_figures", "reading_pipeline",
         "readable_documents", "readable_documents_summary",
-        "document_execution_availability", "numeric_reading_requirements", "canonical_document_questions",
+        "document_execution_availability", "document_execution_failures", "numeric_reading_requirements", "canonical_document_questions",
+        "model_execution_failures", "model_execution_failure_summary", "memo_question_feedback",
         "numeric_source_refusal_ids", "numeric_source_refusals", "numeric_waiting_targets", "numeric_completed_context",
         "document_research_feedback_summary", "dossier_feedback.repair_target_ids",
         "dossier_feedback.material", "document_research_reopened",
@@ -201,6 +202,8 @@ FEEDBACK_KEEP_LADDER: tuple[int, ...] = (READABLE_KEEP_PER_COMPANY, 4, 2, 1, 0)
 _FEEDBACK_PLANNER_FIELDS: tuple[str, ...] = (
     "id", "created_at", "outcome", "stage", "document_ref", "question", "wants",
     "tried_query_terms", "missing_evidence", "recovery", "candidate_claim_ref",
+    "numeric_failure_diagnostics", "replaces_numeric_contract_failure",
+    "replacement_admission_ref", "original_outcome",
 )
 
 # Stage "compact_company_detail" keeps these fields of every company.
@@ -210,7 +213,8 @@ _COMPANY_CORE_FIELDS: tuple[str, ...] = (
     "gaps", "blocked_on", "source_base_ready", "figures",
     "filed_statement_figures", "reading_pipeline",
     "readable_documents", "readable_documents_summary",
-    "document_execution_availability", "numeric_reading_requirements", "canonical_document_questions",
+    "document_execution_availability", "document_execution_failures", "numeric_reading_requirements", "canonical_document_questions",
+    "model_execution_failures", "model_execution_failure_summary", "model_history_note_priority", "model_history_note_priority_unavailable", "memo_question_feedback", "initial_screen_validation_feedback", "initial_screen_quality_feedback",
     "document_research_feedback_summary",
     "document_research_reopened", "document_research_reopened_omitted",
 )
@@ -327,9 +331,15 @@ OUTPUT_SCHEMA = {
                                 "required":["admission_ref","admission_hash","numeric_result_hash"],
                                 "properties":{k:{"type":"string"} for k in ("admission_ref","admission_hash","numeric_result_hash")}},
                             "replaces_numeric_rejection": {
+                                "description": "Required inside directed_document when continuing a matching numeric_reading_requirements entry; copy its entire four-field object exactly. Omit when using replaces_numeric_contract_failure: a period replacement continues its own failed numeric admission, not the earlier capability rejection.",
                                 "type":"object","additionalProperties":False,
                                 "required":["admission_ref","admission_hash","rejection_ref","rejection_hash"],
                                 "properties":{k:{"type":"string"} for k in ("admission_ref","admission_hash","rejection_ref","rejection_hash")}},
+                            "replaces_numeric_contract_failure": {
+                                "description": "Copy an exact source-period replacement binding from document execution feedback. Keep its original question/source and all targets; only make formerly unspecified periods explicit from the original excerpts. Never combine with replaces_numeric_rejection or resumes_numeric_result in the same directed_document.",
+                                "type":"object", "additionalProperties":False,
+                                "required":["admission_ref","admission_hash","failure_ref","failure_hash"],
+                                "properties":{k:{"type":"string"} for k in ("admission_ref","admission_hash","failure_ref","failure_hash")}},
                             "numeric_targets": numeric_target_schema(),
                             "evidence_target": {
                                 "type": "object", "additionalProperties": False,
@@ -420,6 +430,7 @@ TASK_HASH = content_hash({
     "task": TASK_REF,
     "output": OUTPUT_SCHEMA,
     "authority": "proposes_work_only_within_the_state_it_was_given",
+    "memo_question_feedback": "investment-memo-planner-feedback:0.1",
 })
 
 
@@ -454,6 +465,8 @@ def prompt_size_report(
     """
 
     prompt_bytes = len(build_prompt(state).encode("utf-8"))
+    from .planner_note_options import prompt_state
+    state, _ = prompt_state(state)
     top_level = sorted(
         ({"field": str(key), "bytes": _wire_bytes(value)}
          for key, value in state.items()),
@@ -770,8 +783,8 @@ def project_state_for_prompt(
                 )
         return {
             "schema_version": "0.1",
-            "rule_ref": PROMPT_PROJECTION_REF,
-            "rule_hash": PROMPT_PROJECTION_HASH,
+            "rule_ref": _projection_ref_for_state(projected),
+            "rule_hash": _projection_hash_for_state(projected),
             "full_state_hash": state.get("content_hash"),
             "full_prompt_sha256": hashlib.sha256(full_prompt.encode("utf-8")).hexdigest(),
             "full_prompt_bytes": full_prompt_bytes,
@@ -853,8 +866,8 @@ def project_state_for_prompt(
                 continue
             company["document_research_feedback"] = [
                 {key: row[key] for key in (*_FEEDBACK_PLANNER_FIELDS,
-                    *(("reason", "source_grade", "document_version_hash")
-                      if row.get("outcome") == "numeric_admission_source_grade_refused" else ())) if key in row}
+                    *(("reason", "source_grade", "document_version_hash", "unexecutable_period_targets")
+                      if row.get("outcome") in ("numeric_admission_source_grade_refused", "numeric_admission_period_refused") else ())) if key in row}
                 if isinstance(row, Mapping) else row
                 for row in rows
             ]
@@ -952,11 +965,18 @@ def project_state_for_prompt(
                 # precisely when the planner is asked to retry its open question.
                 reopened_refs.update(r.get("document_ref") for r in
                                      (company.get("numeric_reading_requirements") or {}).get("requirements") or ())
+                # These are executable source-bound capabilities, not prose
+                # hints. Keep their exact source/version/period alongside the
+                # output schema even when an older report has a recent quarter.
+                reopened_refs.update(document.get("document_ref") for document in documents
+                                     if _valid_note_targets(document))
                 pinned = sum(document.get("document_ref") in reopened_refs for document in documents)
                 retain = max(keep_per_company, pinned)
                 ordered = sorted(
                     documents,
                     key=lambda document: (
+                        document.get("document_ref") in {o['document_ref'] for o in
+                            (company.get('model_history_note_priority') or {}).get('note_options',())},
                         document.get("document_ref") in reopened_refs,
                         str(document.get("doc_date") or ""),
                         str(document.get("document_ref") or ""),
@@ -1264,11 +1284,168 @@ def project_state_for_prompt(
     return projected
 
 
+def _has_initial_screen_feedback(state: Mapping[str, Any]) -> bool:
+    return any(isinstance(feedback, Mapping) and feedback.get('status') == 'verified'
+               and feedback.get('items')
+               for company in state.get('companies', ())
+               for feedback in (company.get('initial_screen_validation_feedback'),company.get('initial_screen_quality_feedback')))
+
+
+def _valid_note_targets(document: Mapping[str, Any]) -> bool:
+    from .document_research_strategy import normalize_evidence_target
+    targets = document.get("evidence_targets")
+    if not isinstance(targets, list) or not targets:
+        return False
+    try:
+        for target in targets:
+            normalize_evidence_target(target)
+    except ValueError:
+        return False
+    return True
+
+
+def _has_note_targets(state: Mapping[str, Any]) -> bool:
+    return any(_valid_note_targets(document)
+               for company in state.get("companies", ())
+               for document in company.get("readable_documents", ()))
+
+
+def typed_note_directory_contract(state: Mapping[str, Any]) -> dict[str, str] | None:
+    """Stable normal-planning identity for a complete admitted typed directory.
+
+    This is an input contract, never a financial assertion or retry grant.
+    Without a complete capability directory, legacy planning identity stays.
+    """
+    from .document_research_strategy import normalize_evidence_target
+    directory = []
+    for company in state.get("companies", ()):
+        for document in company.get("readable_documents", ()):
+            if not document.get("evidence_targets"):
+                continue
+            if (not _valid_note_targets(document) or document.get("readable") is not True
+                    or document.get("source_ref") != "source:sec-edgar"
+                    or document.get("authority_hash") != document.get("document_version_hash")
+                    or not document.get("authority_ref")
+                    or "search_registered_document" not in document.get("operations", ())):
+                return None
+            targets = [normalize_evidence_target(t) for t in document["evidence_targets"]]
+            if any(document["document_ref"] != "sec:filing:" + t["accession"] for t in targets):
+                return None
+            directory.append({"company_ref": company["company_ref"],
+                "document_ref": document["document_ref"],
+                "document_version_hash": document["document_version_hash"],
+                "targets": sorted(targets, key=canonical_json)})
+    if not directory:
+        return None
+    result = {"rule_ref": "rule:research-plan-input-projection:typed-note-directory-2",
+              "directory_hash": content_hash(sorted(directory, key=canonical_json))}
+    priorities = [c['model_history_note_priority']['content_hash'] for c in state.get('companies',())
+                  if c.get('model_history_note_priority')]
+    if priorities:
+        result['model_history_note_priorities_hash'] = content_hash(priorities)
+    return result
+
+
+def _projection_ref_for_state(state: Mapping[str, Any]) -> str:
+    return ("rule:research-plan-input-projection:typed-note-directory-2"
+            if _has_note_targets(state) else PROMPT_PROJECTION_REF)
+
+
+def _projection_hash_for_state(state: Mapping[str, Any]) -> str:
+    has_feedback = any('initial_screen_validation_feedback' in company
+                       for company in state.get('companies', ()))
+    if not has_feedback and not _has_note_targets(state):
+        return PROMPT_PROJECTION_HASH
+    rule = PROMPT_PROJECTION_RULE
+    if has_feedback:
+        rule = {**rule, 'company_core_fields': [
+            *rule['company_core_fields'], 'initial_screen_validation_feedback']}
+    if _has_note_targets(state):
+        rule = {**rule, "ref": _projection_ref_for_state(state),
+                "typed_note_directory": "retain all normalized exact source/version/period targets before recent documents"}
+    if any(c.get('model_history_note_priority') for c in state.get('companies',())):
+        rule = {**rule, 'model_history_note_priority': 'retain exact source-replayed discrepancy and source-bound option refs'}
+    return content_hash(rule)
+
+
+def _history_note_prompt_schema(state: Mapping[str, Any]) -> dict[str, Any]:
+    # Ordinary and legacy planning prompts remain byte-identical. A new target
+    # is an explicit state change and carries its exact extended output shape.
+    if not any(target.get("schema_version") in {"financial-note-target-0.2", "financial-note-target-0.3"}
+               for company in state.get("companies", ())
+               for document in company.get("readable_documents", ())
+               for target in document.get("evidence_targets", ())):
+        return OUTPUT_SCHEMA
+    import copy
+    schema = copy.deepcopy(OUTPUT_SCHEMA)
+    props = schema["properties"]["inquiries"]["items"]["properties"]["directed_document"]["properties"]
+    legacy = props["evidence_target"]
+    history = copy.deepcopy(legacy)
+    history["required"] += ["statement_context_ref", "statement_context_hash"]
+    target = history["properties"]
+    target["schema_version"] = {"const": "financial-note-target-0.2"}
+    target["form"] = {"enum": ["10-K", "10-Q", "10-K/A", "10-Q/A"]}
+    target["statement_context_ref"] = {"type": ["string", "null"]}
+    target["statement_context_hash"] = {"type": ["string", "null"]}
+    variants = [legacy, history]
+    if any(target.get("schema_version") == "financial-note-target-0.3"
+           for company in state.get("companies", ())
+           for document in company.get("readable_documents", ())
+           for target in document.get("evidence_targets", ())):
+        from .financial_note_source_lineage import FIELDS, SCHEMA
+        lineage = copy.deepcopy(history)
+        lineage["required"].append("source_lineage_binding")
+        lineage["properties"]["schema_version"] = {"const": "financial-note-target-0.3"}
+        lineage["properties"]["source_lineage_binding"] = {
+            "type": "object", "additionalProperties": False, "required": sorted(FIELDS),
+            "properties": {k: ({"const": SCHEMA} if k == "schema_version"
+                               else {"type": "string", "minLength": 1}) for k in sorted(FIELDS)}}
+        variants.append(lineage)
+    props["evidence_target"] = {"oneOf": variants}
+    return schema
+
+
 def build_prompt(state: Mapping[str, Any]) -> str:
+    output_schema = _history_note_prompt_schema(state)
+    note_original = "filing" if output_schema is not OUTPUT_SCHEMA else "10-K"
+    from .planner_note_options import prompt_state
+    rendered_state, option_count = prompt_state(state)
+    option_notice = ""
+    if option_count:
+        import copy
+        output_schema = copy.deepcopy(output_schema)
+        props = output_schema["properties"]["inquiries"]["items"]["properties"]["directed_document"]["properties"]
+        # Full targets remain accepted by the normal validator for original
+        # saved responses, but this prompt asks only for the compact choice.
+        props.pop("evidence_target", None)
+        props["evidence_target_ref"] = {"type": "string", "minLength": 1,
+            "description": "Copy one exact evidence_target_options.option_ref for this company/document/version; omit evidence_target."}
+        option_notice = (
+            "For evidence_target_options, copy its exact option_ref as directed_document.evidence_target_ref "
+            "and omit evidence_target. The system restores the complete original target and source lineage "
+            "from this exact full research state before validation. Each option retains its own filing, "
+            "period and purpose; do not borrow options across companies, documents or versions. Options "
+            "authorize only the listed note reading, not a numeric answer or new source authority.\n\n")
+    if any(c.get('model_history_note_priority') for c in state.get('companies',())):
+        option_notice += (
+            "model_history_note_priority links a source-replayed formula/period failure to existing exact note option_refs. "
+            "Address that current model blocker before unrelated disclosure questions. Read its EPS-note numerator basis; "
+            "never change filed EPS/shares, invent a residual or treat this operations feedback as retry authority.\n\n")
+    validation_notice = (
+        "initial_screen_quality_feedback names current formal quality defects and exact material gaps; reuse existing requests under current permissions. It grants no new content repair attempt and is not financial evidence. "
+        "initial_screen_validation_feedback: verified draft defects, not evidence or retry authority. "
+        "Fix cited defects within normal gates; invent no facts or unrelated material requests. "
+    ) if _has_initial_screen_feedback(state) else ""
     numeric_notice = (
         "numeric_reading_requirements preserves verified rejections. Address the original question with numeric "
         "strategy, its exact replaces_numeric_rejection binding and preferably verbatim question; never make a "
-        "qualitative copy. Do not guess equivalence; other qualitative same-document questions remain valid.\n\n"
+        "qualitative copy. For a matching requirement, copy its four-field object into the inquiry's "
+        "directed_document.replaces_numeric_rejection (not inquiry top level or numeric_targets): "
+        '{"admission_ref":"<copy>","admission_hash":"<copy>","rejection_ref":"<copy>","rejection_hash":"<copy>"}. '
+        "Replace <copy> with the exact state value, never a placeholder. The schema permits omission only "
+        "for other inquiries; missing, null or guessed binding invalidates "
+        "the entire plan. Keep its exact company/document/version; never borrow another requirement's binding. "
+        "Do not guess equivalence; other qualitative same-document questions remain valid.\n\n"
     ) if any(company.get("numeric_reading_requirements") for company in state.get("companies", ())) else ""
     return (
         "\n".join(final_text_instructions()) + "\n\n" +
@@ -1313,10 +1490,10 @@ def build_prompt(state: Mapping[str, Any]) -> str:
           "subject/prior_review: attachment proves neither relevance nor filing/call eligibility. Use bounded "
           "original-language query_terms (synonyms/translations allowed), explain query_rationale, obey "
           "document_research_policy; invent no document/version/path/route. A miss is not absence; revise "
-          "retrieval/context when warranted. Copy only an exact listed evidence_target: cited 10-K "
+          f"retrieval/context when warranted. Copy only an exact listed evidence_target: cited {note_original} "
           "diluted-EPS-numerator note text for its bound company/document/filing/period, not numeric/formula "
           "authority. Never retag it; omit for ordinary qualitative work.\n\n"
-        f"{numeric_notice}"
+        f"{option_notice}{numeric_notice}"
         "An unavailable_evidence_targets entry is an explicit authority gap, not a target you may select or a "
         "reason to infer a value from labels.\n\nNumeric questions require the original authority's source_grade: directed-document-numeric:0.1 for company-filed-document; directed-document-spoken-numeric:0.1 for earnings-call-transcript. Spoken answers preserve management attribution, exact quote and source-provided date (explicitly unknown if missing) and never become filed financial facts. Unknown grades cannot authorize numeric research. Numeric questions require typed targets and ALL "
         "numeric_targets: target_ref/metric_ref, question-scoped metric_definition {label,meaning}, "
@@ -1337,20 +1514,40 @@ def build_prompt(state: Mapping[str, Any]) -> str:
         "results cannot qualify. Never invent amounts; calculated YoY needs a separate calculation task, not a "
         "reported Figure. Old unmet targets and the broader question stay open. Missing targets remain source "
         "gaps; complete requires every target's independently verified Figure; FILED answers additionally require formal quantitative Claims, while SPOKEN answers require quoted management attribution and source-provided date (unknown if absent) and no such Claims. numeric_completed_context records "
-        "strongly verified completed targets from the same exact original. Use their full definitions and Figure "
+        "verified targets from this original; partial remaining_target_refs stay open. Keep definitions and Figure "
         "bindings as planning context, not to automatically close different metric definitions or rejection "
-        "bindings; identify the remaining difference. An aggregate or average does not prove narrower business "
+        "bindings; identify the remaining difference. verified_answer contains the exact approved value and "
+        "scope: use it for an already answered disclosure instead of reasking under renamed metric/target refs. "
+        "A new task must name a material unresolved difference; a citation excerpt is not new admission authority. "
+        "An aggregate or average does not prove narrower business "
         "coverage or a complete maturity breakdown. numeric_waiting_targets retains precise source gaps despite "
         "omitted feedback. Seek original disclosures: context identifiers are not amounts. Excerpted reasons "
         "include full_reason_hash. Under planner-numeric-waiting-source-bindings:0.1, zero-based "
         "source_binding_index selects the same company's source_bindings; copy document/version/result hashes "
-        "exactly.\ndocument_research_feedback records attempted directed reads. query_miss/no_verified_claim means "
+        "exactly.\nmemo_question_feedback lists source-checked unanswered investment-memo questions. "
+        "It is an operational research gap, never evidence, an answer, a trading instruction or budget permission. "
+        "Use each question and falsifier to choose precise missing sources, metrics and periods through ordinary "
+        "directives/inquiries and the current material catalogue. Existing document counts do not answer these questions. "
+        "For missing portfolio permissions preserve the human authority boundary; do not invent authorization "
+        "or repeatedly search for a private decision. Group compatible source requests and reuse held originals.\n"
+        "document_research_feedback records attempted directed reads. query_miss/no_verified_claim means "
         "unresolved, not source absence: refine tried terms/context, select another available document or request "
         "missing material. Never repeat an unsuccessful same-version/query by changing rationale. candidate_staged"
         " awaits publication, not a Claim/Dossier fix; recovery_required blocks execution, not the answer. "
         "numeric_admission_source_grade_refused proves a source restriction: keep that task blocked and ask a "
         "compatible source-authority numeric strategy (SPOKEN management statements or FILED facts) on that exact original, or a separate inquiry from another eligible source. Never move its replaces_numeric_rejection "
         "binding across document/version. Unverified source feedback is not a grade refusal. "
+        "numeric_admission_period_refused means a numeric target lacks an executable period: preserve the "
+        "question and exact original, identify its explicit year or quarter/half-year before resubmitting; "
+        "never guess a date or repeat latest/current reporting period. "
+        + validation_notice +
+        "model_execution_failures: hashed failures, not readiness/evidence/retry authority. "
+        "Respect unlinked Work/formal status. Check held originals for driver/period gaps. "
+        "Cleared/superseded failures are omitted. "
+        "document_execution_failures preserves exact failed/recovery-pending executions, not answers or source absence. "
+        "A replaces_numeric_contract_failure binding permits only one normal-plan source-period replacement: copy the entire binding inside directed_document, preserve the original question/wants/source and every target, and replace only the listed unspecified periods using explicit dates in the held excerpts. No renamed/rephrased duplicate, changed values, unit, metric or basis is permitted. This never retries or rewrites the failed task. "
+        "Choose the operation for the exact admission you are continuing: replaces_numeric_contract_failure cannot coexist with replaces_numeric_rejection or resumes_numeric_result in one directed_document. A failed numeric admission may follow an older capability rejection for the same question; when replacing its unspecified periods, copy only that failed admission's period-replacement binding, not its ancestor's rejection binding. If the supplied state does not prove which operation is eligible, omit that directed read and continue other actionable work. "
+        "Use the existing bounded recovery or exact new-source/revision gates; do not buy an equivalent duplicate. "
         "document_research_feedback_summary aggregates tried history only to fit input; the summary is not a "
         "finding.\n\nContinue canonical_document_questions with exact canonical_question version_ref/content_hash "
         "and document/version, even when rewording. In-flight means wait; settled is not necessarily answered. New"
@@ -1368,8 +1565,8 @@ def build_prompt(state: Mapping[str, Any]) -> str:
         "owner's floor, never lower it. Unjudged items keep the standard.\n\nName only listed company_ref/item_ref; "
         "Inventing either voids the whole plan. Return fewer directives, never padding.\nReturn raw strict JSON "
         "matching OUTPUT_SCHEMA, no markdown fence and no prose outside it.\n"
-        f"OUTPUT_SCHEMA={canonical_json(OUTPUT_SCHEMA)}\n"
-        f"RESEARCH_STATE={canonical_json(state)}"
+        f"OUTPUT_SCHEMA={canonical_json(output_schema)}\n"
+        f"RESEARCH_STATE={canonical_json(rendered_state)}"
     )
 
 
@@ -1524,7 +1721,8 @@ def _int(value: Any) -> int:
 
 
 def plan_from_response(
-    state: Mapping[str, Any], response_text: Any, *, created_at: str
+    state: Mapping[str, Any], response_text: Any, *, created_at: str,
+    canonical_binding_resolver: Any | None = None,
 ) -> dict[str, Any]:
     """A verified plan, or a refusal naming what the model invented.
 
@@ -1535,6 +1733,8 @@ def plan_from_response(
     """
 
     parsed = parse_response(response_text)
+    from .planner_structural_revalidation import normalize_wrappers
+    parsed, _ = normalize_wrappers(parsed)
     known = _known_work(state)
     repair_targets = _known_repair_targets(state)
     for index, directive in enumerate(parsed["directives"]):
@@ -1602,7 +1802,10 @@ def plan_from_response(
             except ValueError as exc:
                 raise ResearchPlanError(f"inquiry {index}: {exc}") from exc
             try:
-                strategy, _ = resolve_strategy(inquiry["directed_document"],
+                from .planner_note_options import expand_selection
+                directed = expand_selection(inquiry["directed_document"],
+                                             company_ref=company_ref, state=state)
+                strategy, _ = resolve_strategy(directed,
                                                company_ref=company_ref, state=state)
             except DocumentResearchStrategyError as exc:
                 raise ResearchPlanError(f"inquiry {index}: {exc}") from exc
@@ -1610,7 +1813,13 @@ def plan_from_response(
         if "canonical_question" in inquiry:
             from .canonical_document_questions import validate_state_binding
             try:
-                normalized["canonical_question"] = validate_state_binding(inquiry, state)
+                directed_inquiry = {**inquiry, 'directed_document': normalized.get('directed_document')}
+                try:
+                    normalized["canonical_question"] = validate_state_binding(directed_inquiry, state)
+                except ValueError:
+                    if canonical_binding_resolver is None:
+                        raise
+                    normalized["canonical_question"] = canonical_binding_resolver(directed_inquiry, state)
             except ValueError as exc:
                 raise ResearchPlanError(f"inquiry {index}: {exc}") from exc
         inquiries.append(normalized)

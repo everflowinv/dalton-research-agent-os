@@ -95,6 +95,15 @@ class MissionModelForecastLaneCoordinator:
         reason = summary.get("failure_reason")
         if reason:
             settled["failure_reason"] = str(reason)[:MAX_FAILURE_DETAIL_CHARS]
+        state_dir = getattr(self.launcher, 'state_dir', None)
+        if state_dir is not None and summary.get('family_partition_failures'):
+            from .forecast_family_failure_feedback import pointer as family_pointer
+            try:
+                hint = family_pointer(state_dir, ticket_ref, summary)
+            except (OSError, ValueError, KeyError, TypeError):
+                hint = None
+            if hint:
+                settled['family_failure_pointer'] = hint
         return settled
 
     def _settle_open(self) -> dict[str, Any] | None:
@@ -117,6 +126,8 @@ class MissionModelForecastLaneCoordinator:
         if failed and company_ref and digest and contract_hash:
             key = f"{company_ref}|{digest}|{contract_hash}"
             reason = settled.get("failure_reason") or f"last run: {status or settled.get('status')}"
+            if settled.get('family_failure_pointer'):
+                reason = settled['family_failure_pointer'] + '; ' + reason
             settled["failure"] = record_controlled_failure(
                 self.budget, key, self.mission() or {}, self.launcher,
                 reason=reason, connection=authority_connection(
@@ -229,7 +240,10 @@ class MissionModelForecastLaneCoordinator:
                         FinancialNoteContextError) as exc:
                     unavailable[candidate] = f"{type(exc).__name__}: {exc}"
                     if state_dir is not None:
-                        open_gap_requests(state_dir,candidate_spec,candidate_table,record=self.models.latest(candidate),failure=str(exc))
+                        from .company_financial_statement_structure import FinancialStatementStructureNotReady
+                        history = isinstance(exc, FinancialStatementStructureNotReady)
+                        open_gap_requests(state_dir,candidate_spec,candidate_table,record=self.models.latest(candidate),failure=str(exc),
+                            **({'structure_failure':exc,'source_filings':self.missions.statement_filings(candidate)} if history else {}))
                     continue
                 business_key = (
                     f"{candidate}|{candidate_digest}|"

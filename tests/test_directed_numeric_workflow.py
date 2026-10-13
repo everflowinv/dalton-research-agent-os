@@ -22,7 +22,7 @@ class NumericWorkflowTests(unittest.TestCase):
     _record_plan=docfixtures.MissionDocumentResearchTests._record_plan
     _executor=docfixtures.MissionDocumentResearchTests._executor
     def fixture(self,*,missing=False,old_rejection=False,extra_text="",
-                source_spec="annual-report-10k", strategy_version=CONTRACT_REF, basis="gaap-reported"):
+                source_spec="annual-report-10k", strategy_version=CONTRACT_REF, basis="gaap-reported", period="FY2025"):
         from tests import test_mission_annual_research as mission_fixture
         original_params=mission_fixture.mission_params
         def with_discovery(method):
@@ -36,7 +36,7 @@ class NumericWorkflowTests(unittest.TestCase):
                 body={**body,'research_candidate_auto_commit':{'enabled':True,'max_records':20,
                     'rules':[mission_fixture.DOCUMENT_QUALITATIVE_RULE_REF,MISSION_VERIFIED_FIGURE_RULE_REF]}}
             return original_create(store,body,**kwargs)
-        with patch.object(mission_fixture,'mission_params',with_discovery), patch.object(annual_support,'TEXT',(TEXT.replace('Uncommenced leases were $2.5 billion.','The amount of uncommenced leases is not disclosed in this excerpt.') if missing else TEXT)+extra_text), patch.object(DaltonStore,'create_policy',signed_numeric_policy):
+        with patch.object(mission_fixture,'mission_params',with_discovery), patch.object(annual_support,'TEXT',(TEXT.replace('Uncommenced leases were $2.5 billion.','The amount of uncommenced leases is not disclosed in this excerpt.') if missing else TEXT).replace("FY2025",period)+extra_text), patch.object(DaltonStore,'create_policy',signed_numeric_policy):
             f=MissionAnnualFixture(self,company_in_mandate=True,additional_connected_source='source:web-search',auto_commit=True)
         coverage=CoverageMissionAuthority(f.store)
         envelope=f.source.reader.get_source_envelope(f.source.manifest['discovery_source_envelope_ref'])
@@ -68,7 +68,7 @@ class NumericWorkflowTests(unittest.TestCase):
                ('duration','weighted average remaining contract life','RPO weighted average remaining contract life at year-end','years',None,'4.1',None),
                ('leases','Uncommenced leases','Issuer total leases not yet commenced at year-end','currency','USD','2.5','billion')]
         targets=normalize_targets([{'target_ref':'target:'+ref,'metric_ref':'metric:synthetic-'+ref,
-            'metric_definition':{'label':label,'meaning':meaning},'period':'FY2025',
+            'metric_definition':{'label':label,'meaning':meaning},'period':period,
             'unit':unit,'currency':currency,'basis':basis} for ref,label,meaning,unit,currency,value,scale in specs])
         inquiry={'rank':0,'company_ref':COMPANY,'question':'What are RPO total, recognition duration and uncommenced leases at FY2025?',
             'wants':'All three exact numeric facts from the original, each with explicit period and unit.',
@@ -122,7 +122,7 @@ class NumericWorkflowTests(unittest.TestCase):
             else:
                 rows.append({'target_ref':target['target_ref'],'status':'supported','figure':{'quote_id':quote_id,
                     'metric_ref':target['metric_ref'],'subject_as_named':'Synthetic issuer','as_reported_label':label,
-                    'value':value,'unit':unit,'currency':currency,'period':'FY2025','basis':basis,'scale':scale},'reason':None})
+                    'value':value,'unit':unit,'currency':currency,'period':period,'basis':basis,'scale':scale},'reason':None})
         draft={'schema_version':CONTRACT_REF,'targets':rows}
         verdict={'schema_version':'0.1','candidate_ref':candidate_ref(draft),'verdict':'pass',
                  'targets':[{'target_ref':r['target_ref'],'verdict':'accept' if r['status']=='supported' else 'unavailable',
@@ -184,16 +184,21 @@ class NumericWorkflowTests(unittest.TestCase):
         self.assertFalse(any(x.get('numeric_strategy_required') for x in feedback['by_company'][COMPANY]))
         self.assertTrue(any(x['outcome']=='numeric_targets_completed' for x in feedback['by_company'][COMPANY]))
 
-    def test_partial_replacement_keeps_the_exact_old_numeric_requirement(self):
+    def test_partial_replacement_keeps_research_pending_after_admitted_operation_supersession(self):
         f,authority,admission,executor,producer,verifier=self.fixture(old_rejection=1,missing=True)
         self.drive(executor,admission)
         from dalton_core.document_research_feedback import read_document_research_feedback
         feedback=read_document_research_feedback(f.store,f.mission)
         self.assertEqual(feedback['status'],'available')
-        self.assertTrue(any(x.get('numeric_strategy_required') for x in feedback['by_company'][COMPANY]))
+        self.assertFalse(any(x.get('numeric_strategy_required') for x in feedback['by_company'][COMPANY]))
+        ancestor=[x for x in feedback['by_company'][COMPANY]if x.get('numeric_upgrade_supersession')]
+        self.assertTrue(ancestor)
+        self.assertTrue(all(x['numeric_upgrade_supersession']['successor_admission_ref']==admission['id']
+                            and x['numeric_upgrade_supersession']['research_status']=='pending'for x in ancestor))
+        self.assertFalse(any(x['outcome']=='numeric_targets_completed'for x in feedback['by_company'][COMPANY]))
         self.assertTrue(any(x['outcome']=='numeric_waiting_evidence' for x in feedback['by_company'][COMPANY]))
 
-    def test_missing_final_formal_result_cannot_clear_the_old_requirement(self):
+    def test_missing_final_formal_result_cannot_complete_the_admitted_upgrade(self):
         f,authority,admission,executor,producer,verifier=self.fixture(old_rejection=1)
         self.drive(executor,admission)
         work=f.store.connection.execute('SELECT work_order_ref FROM mission_document_numeric_results WHERE admission_ref=?',(admission['id'],)).fetchone()[0]
@@ -207,7 +212,12 @@ class NumericWorkflowTests(unittest.TestCase):
         from dalton_core.document_research_feedback import read_document_research_feedback
         feedback=read_document_research_feedback(SimpleNamespace(connection=MissingFinal()),f.mission)
         self.assertEqual(feedback['status'],'available')
-        self.assertTrue(any(x.get('numeric_strategy_required') for x in feedback['by_company'][COMPANY]))
+        self.assertFalse(any(x.get('numeric_strategy_required') for x in feedback['by_company'][COMPANY]))
+        ancestor=[x for x in feedback['by_company'][COMPANY]if x.get('numeric_upgrade_supersession')]
+        self.assertTrue(ancestor)
+        self.assertTrue(all(x['numeric_upgrade_supersession']['successor_admission_ref']==admission['id']
+                            and x['numeric_upgrade_supersession']['research_status']=='pending'for x in ancestor))
+        self.assertFalse(any(x['outcome']=='numeric_targets_completed'for x in feedback['by_company'][COMPANY]))
         self.assertFalse(any(x['outcome']=='numeric_targets_completed' for x in feedback['by_company'][COMPANY]))
 
     def test_actual_window_and_typed_definition_drift_refuse_before_model_call(self):
@@ -376,6 +386,11 @@ class NumericWorkflowTests(unittest.TestCase):
         import copy
         inquiry=copy.deepcopy(admission['planner_inquiry'])
         inquiry['question']='Read separately scoped FY2025 lease contractual commitment details.'
+        for target in inquiry['directed_document']['numeric_targets']:
+            target['metric_ref'] += '-commitment'
+            target['metric_definition']['meaning'] += ' Separately requested contractual commitment scope.'
+            target.pop('metric_definition_hash')
+        inquiry['directed_document']['numeric_targets']=normalize_targets(inquiry['directed_document']['numeric_targets'])
         inquiry['directed_document']['query_terms']=['a literal query not contained in the original']
         plan={'schema_version':'0.1','task_ref':'task:research-plan-directives:0.1','created_at':f.mission['created_at'],
             'state_hash':'3'*64,'mission_version_ref':f.mission['id'],'assessment':'Perform a bounded independent query.',

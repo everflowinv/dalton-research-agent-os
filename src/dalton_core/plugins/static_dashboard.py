@@ -106,41 +106,42 @@ def render_static_dashboard(
     output_path: str | Path,
 ) -> dict[str, Any]:
     """Atomically render a self-contained HTML dashboard from a projection."""
-    snapshot = dashboard_snapshot(projection_db)
-    template = _HTML_PATH.read_text(encoding="utf-8")
-    if template.count(_EMBED_MARKER) != 1:
-        raise StaticDashboardError("dashboard template embed marker is missing or ambiguous")
-    html = template.replace(
-        _EMBED_MARKER,
-        f"const EMBEDDED_DATA = {_safe_script_json(snapshot)};",
-        1,
-    )
-    body = html.encode("utf-8")
-    destination = Path(output_path).expanduser().resolve()
-    destination.parent.mkdir(mode=0o700, parents=True, exist_ok=True)
-    fd, temporary_name = tempfile.mkstemp(
-        prefix=f".{destination.name}.", suffix=".tmp", dir=destination.parent
-    )
-    temporary = Path(temporary_name)
-    try:
-        with os.fdopen(fd, "wb") as handle:
-            handle.write(body)
-            handle.flush()
-            os.fsync(handle.fileno())
-        os.chmod(temporary, 0o600)
-        os.replace(temporary, destination)
-    finally:
-        if temporary.exists():
-            temporary.unlink()
-    status = snapshot["/v1/projection/status"]
-    return {
-        "path": str(destination),
-        "bytes": len(body),
-        "sha256": hashlib.sha256(body).hexdigest(),
-        "as_of": status["as_of"],
-        "projection_watermark": status["projection_watermark"],
-    }
-
+    from ..projection_stage_diagnostics import stage_timing
+    with stage_timing('static_render'):
+        snapshot = dashboard_snapshot(projection_db)
+        template = _HTML_PATH.read_text(encoding="utf-8")
+        if template.count(_EMBED_MARKER) != 1:
+            raise StaticDashboardError("dashboard template embed marker is missing or ambiguous")
+        html = template.replace(
+            _EMBED_MARKER,
+            f"const EMBEDDED_DATA = {_safe_script_json(snapshot)};",
+            1,
+        )
+        body = html.encode("utf-8")
+        destination = Path(output_path).expanduser().resolve()
+        destination.parent.mkdir(mode=0o700, parents=True, exist_ok=True)
+        fd, temporary_name = tempfile.mkstemp(
+            prefix=f".{destination.name}.", suffix=".tmp", dir=destination.parent
+        )
+        temporary = Path(temporary_name)
+        try:
+            with os.fdopen(fd, "wb") as handle:
+                handle.write(body)
+                handle.flush()
+                os.fsync(handle.fileno())
+            os.chmod(temporary, 0o600)
+            os.replace(temporary, destination)
+        finally:
+            if temporary.exists():
+                temporary.unlink()
+        status = snapshot["/v1/projection/status"]
+        return {
+            "path": str(destination),
+            "bytes": len(body),
+            "sha256": hashlib.sha256(body).hexdigest(),
+            "as_of": status["as_of"],
+            "projection_watermark": status["projection_watermark"],
+        }
 
 def _fetch(url: str, *, timeout: float = 30.0) -> tuple[bytes, Mapping[str, str], int]:
     separator = "&" if "?" in url else "?"

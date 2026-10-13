@@ -256,7 +256,7 @@ def render(
         # Measured 2026-08-26: ``Background`` runs CPU work ~6x slower than
         # ``Standard`` and nothing inside the child can lift the clamp; a live
         # CTSH lane step took 6m31s under Background.  Only the writer moves
-        # to ``Standard``; the other agents keep ``Background``.
+        # to ``Standard``; unrelated short-lived agents keep ``Background``.
         "ProcessType": "Standard",
         "ProgramArguments": [
             str(bin_dir / "python"), "-m", "dalton_core.writer_server",
@@ -411,6 +411,9 @@ def render(
         )
     controller = common | {
         "Label": labels["controller"],
+        # The controller's cold projection is CPU/SQLite work too. Background
+        # I/O throttling must not restart the same build before it finishes.
+        "ProcessType": "Standard",
         "ProgramArguments": [str(bin_dir / "python"), "-m", "dalton_core.service",
                              "--config", str(config)],
         "StandardOutPath": str(logs / "controller.stdout.log"),

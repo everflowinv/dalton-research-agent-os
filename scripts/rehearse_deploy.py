@@ -1312,6 +1312,7 @@ CORE_MIGRATIONS: tuple[MigrationSpec, ...] = (
     MigrationSpec("mission_document_research_schema.sql", "dalton_core.mission_document_research", "MissionDocumentResearchAuthority", "core_sql"),
     MigrationSpec("mission_document_research_executor_schema.sql", "dalton_core.mission_document_research_executor", "MissionDocumentResearchExecutor", "core_sql"),
     MigrationSpec("mission_document_research_promotion_schema.sql", "dalton_core.mission_document_research_promotion", "persist_document_promotion", "core_sql"),
+    MigrationSpec("model_spec_source_sign_projection_schema.sql", "dalton_core.model_spec_source_sign_projection", "project", "core_sql"),
     MigrationSpec("runner_journal_schema.sql", "dalton_core.runner_journal", "RunnerJournal", "core"),
     MigrationSpec("statement_snapshot_schema.sql", "dalton_core.statement_snapshot", "StatementSnapshotAuthority", "core"),
     # P11b: the broker notes those expectations were read out of.

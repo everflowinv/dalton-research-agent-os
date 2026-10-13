@@ -79,9 +79,42 @@ class SQLiteHeaderLockSafetyTests(unittest.TestCase):
             result=run(*args,**kwargs)
             self.path.write_bytes(b'other'+b'1'*95)
             return result
-        with mock.patch.object(sqlite_header.subprocess,'run',side_effect=change):
+        with mock.patch.object(sqlite_header.subprocess,'run',side_effect=change) as reads:
             with self.assertRaisesRegex(sqlite3.OperationalError,'changed'):
                 sqlite_header.read_sqlite_header(self.path)
+        self.assertEqual(reads.call_count, sqlite_header._MAX_READ_ATTEMPTS)
+        self.assertFalse(sqlite_header._HEADERS)
+
+    def test_one_concurrent_change_retries_and_caches_only_stable_header(self):
+        self.path.write_bytes(b'first'+b'0'*95)
+        run = subprocess.run
+        calls = 0
+        def change_once(*args, **kwargs):
+            nonlocal calls
+            calls += 1
+            result = run(*args, **kwargs)
+            if calls == 1:
+                self.path.write_bytes(b'other'+b'1'*95)
+            return result
+        with mock.patch.object(sqlite_header.subprocess, 'run', side_effect=change_once):
+            self.assertEqual(sqlite_header.read_sqlite_header(self.path), b'other'+b'1'*95)
+            self.assertEqual(sqlite_header.read_sqlite_header(self.path), b'other'+b'1'*95)
+        self.assertEqual(calls, 2)
+        self.assertEqual(list(sqlite_header._HEADERS), [(str(self.path), *sqlite_header._fingerprint(self.path))])
+
+    def test_changed_reads_share_one_bounded_timeout(self):
+        self.path.write_bytes(b'first'+b'0'*95)
+        run = subprocess.run
+        def change(*args, **kwargs):
+            result = run(*args, **kwargs)
+            self.path.write_bytes(b'other'+b'1'*95)
+            return result
+        with mock.patch.object(sqlite_header.time, 'monotonic', side_effect=[0, 1, 6]), \
+                mock.patch.object(sqlite_header.subprocess, 'run', side_effect=change) as reads:
+            with self.assertRaisesRegex(sqlite3.OperationalError, 'header read failed'):
+                sqlite_header.read_sqlite_header(self.path)
+        self.assertEqual(reads.call_count, 1)
+        self.assertEqual(reads.call_args.kwargs['timeout'], 4)
         self.assertFalse(sqlite_header._HEADERS)
 
     def test_cache_has_a_fixed_bound_and_keeps_no_descriptors(self):

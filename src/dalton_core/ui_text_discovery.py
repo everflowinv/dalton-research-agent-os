@@ -18,6 +18,7 @@ from pathlib import Path
 from typing import Any
 
 from .cockpit_research_library import research_library
+from .research_preparation_checkpoint import checkpoint, PreparationQuiesced
 from .mission_stage import retired_claim_refs
 from .store import canonical_json, content_hash
 
@@ -206,7 +207,7 @@ def _read_closed(path: Path, schema: str, fields: set[str]) -> dict[str, Any]:
     return value
 
 
-def _current_index_canonicality(connection: Any) -> dict[str, bool]:
+def _current_index_canonicality(connection: Any, *, stop_requested=None) -> dict[str, bool]:
     table = connection.execute(
         "SELECT 1 FROM sqlite_master WHERE type='table' AND name='claim_index_entry_versions'"
     ).fetchone()
@@ -217,30 +218,35 @@ def _current_index_canonicality(connection: Any) -> dict[str, bool]:
         "JOIN (SELECT entry_ref,MAX(version_number) AS version_number "
         "FROM claim_index_entry_versions GROUP BY entry_ref) latest "
         "ON latest.entry_ref=e.entry_ref AND latest.version_number=e.version_number"
-    ).fetchall()
+    )
     result: dict[str, bool] = {}
     for row in rows:
+        checkpoint(stop_requested)
         ref = str(row["claim_version_ref"])
         result[ref] = result.get(ref, False) or bool(row["is_canonical"])
     return result
 
 
-def _claim_rows(connection: Any, mission: Mapping[str, Any]) -> dict[str, dict[str, Any]]:
+def _claim_rows(connection: Any, mission: Mapping[str, Any], *, stop_requested=None) -> dict[str, dict[str, Any]]:
     subjects = {str(row["company_ref"]) for row in mission.get("universe") or []
                 if isinstance(row, Mapping) and row.get("company_ref")}
     industry = mission.get("industry_ref")
     if isinstance(industry, str) and industry:
         subjects.add(industry)
+    checkpoint(stop_requested)
     retired = retired_claim_refs(connection)
+    checkpoint(stop_requested)
     rows = connection.execute(
         "SELECT c.claim_version_id,c.claim_ref,c.claim_json,c.content_hash "
         "FROM claim_versions c JOIN (SELECT claim_ref,MAX(version_number) AS version_number "
         "FROM claim_versions GROUP BY claim_ref) latest "
         "ON latest.claim_ref=c.claim_ref AND latest.version_number=c.version_number"
-    ).fetchall()
-    indexed = _current_index_canonicality(connection)
+    )
+    checkpoint(stop_requested)
+    indexed = _current_index_canonicality(connection, stop_requested=stop_requested)
     found: dict[str, dict[str, Any]] = {}
     for row in rows:
+        checkpoint(stop_requested)
         ref = str(row["claim_version_id"])
         if ref in retired:
             continue
@@ -257,7 +263,7 @@ def _claim_rows(connection: Any, mission: Mapping[str, Any]) -> dict[str, dict[s
 
 
 def _historical_library_claim_rows(connection: Any, refs: set[str],
-                                   mission: Mapping[str, Any]) -> dict[str, dict[str, Any]]:
+                                   mission: Mapping[str, Any], *, stop_requested=None) -> dict[str, dict[str, Any]]:
     """Resolve exact library ClaimVersion refs, including superseded versions."""
     subjects = {str(row["company_ref"]) for row in mission.get("universe") or []
                 if isinstance(row, Mapping) and row.get("company_ref")}
@@ -265,6 +271,7 @@ def _historical_library_claim_rows(connection: Any, refs: set[str],
         subjects.add(mission["industry_ref"])
     found: dict[str, dict[str, Any]] = {}
     for offset in range(0, len(refs), 400):
+        checkpoint(stop_requested)
         batch = sorted(refs)[offset:offset + 400]
         if not batch:
             continue
@@ -273,6 +280,7 @@ def _historical_library_claim_rows(connection: Any, refs: set[str],
             "SELECT claim_version_id,claim_json,content_hash FROM claim_versions "
             f"WHERE claim_version_id IN ({placeholders})", batch).fetchall()
         for row in rows:
+            checkpoint(stop_requested)
             ref = str(row["claim_version_id"])
             wire = json.loads(row["claim_json"])
             wire_hash = _claim_hash(wire)
@@ -285,9 +293,10 @@ def _historical_library_claim_rows(connection: Any, refs: set[str],
     return found
 
 
-def _library_claim_refs(connection: Any, mission: Mapping[str, Any]) -> set[str]:
+def _library_claim_refs(connection: Any, mission: Mapping[str, Any], *, stop_requested=None) -> set[str]:
     refs: set[str] = set()
     for member in mission.get("universe") or []:
+        checkpoint(stop_requested)
         if not isinstance(member, Mapping) or not member.get("company_ref"):
             continue
         library = research_library(connection, mission, str(member["company_ref"]),
@@ -303,14 +312,16 @@ def _library_claim_refs(connection: Any, mission: Mapping[str, Any]) -> set[str]
     return refs
 
 
-def _discover(connection: Any, mission: Mapping[str, Any]) -> list[dict[str, Any]]:
-    claims = _claim_rows(connection, mission)
-    library_refs = _library_claim_refs(connection, mission)
+def _discover(connection: Any, mission: Mapping[str, Any], *, stop_requested=None) -> list[dict[str, Any]]:
+    checkpoint(stop_requested)
+    claims = _claim_rows(connection, mission, stop_requested=stop_requested)
+    library_refs = _library_claim_refs(connection, mission, stop_requested=stop_requested)
     for ref, row in _historical_library_claim_rows(connection, library_refs - set(claims),
-                                                   mission).items():
+                                                   mission, stop_requested=stop_requested).items():
         claims[ref] = row
     by_text: dict[str, dict[str, Any]] = {}
     for ref, row in claims.items():
+        checkpoint(stop_requested)
         if not row["canonical"] and ref not in library_refs:
             continue
         # Current mission Claims are visible in the conclusion list.  A Claim
@@ -323,6 +334,7 @@ def _discover(connection: Any, mission: Mapping[str, Any]) -> list[dict[str, Any
             "text": row["text"], "text_sha256": _text_hash(row["text"]), "sources": []})
         entry["sources"].append(source)
     for entry in by_text.values():
+        checkpoint(stop_requested)
         entry["sources"].sort(key=lambda item: (item["ref"], item["hash"]))
     return sorted(by_text.values(), key=lambda item: (item["text_sha256"], item["text"]))
 
@@ -363,10 +375,12 @@ def _validate_manifest(path: Path) -> dict[str, Any]:
     return value
 
 
-def _verify_manifest_authority(connection: Any, manifest: Mapping[str, Any]) -> None:
+def _verify_manifest_authority(connection: Any, manifest: Mapping[str, Any], *,
+                               stop_requested=None) -> None:
     """Re-read every immutable ClaimVersion named by a sealed manifest."""
     for entry in manifest["entries"]:
         for source in entry["sources"]:
+            checkpoint(stop_requested)
             row = connection.execute(
                 "SELECT claim_json,content_hash FROM claim_versions WHERE claim_version_id=?",
                 (source["ref"],),
@@ -637,7 +651,62 @@ def _eligible(manifest: Mapping[str, Any], mission_ref: str,
                .issubset(current[entry["text"]]) for entry in manifest["entries"])
 
 
+def quiesced_discovery_result(*, batches_per_run=DEFAULT_BATCHES_PER_RUN,
+                               max_attempts=DEFAULT_MAX_ATTEMPTS):
+    # Counts refer only to work attempted in this poll; the undiscovered
+    # backlog is explicitly unknown, never reported complete or successful.
+    return {"schema_version": POLL_SCHEMA, "quiesced": True,
+            "discovery_complete": False, "pending_unknown": True,
+            "pending": 0, "attempted": 0, "sealed": 0, "blocked": 0,
+            "batches": [], "blocked_reasons": [], "blocked_reason_classes": {},
+            "batches_per_run": batches_per_run, "max_attempts": max_attempts}
+
+
 def poll_ui_texts(connection: Any, mission: Mapping[str, Any], *, state_dir: Path,
+                  mapping: Mapping[str, str],
+                  prepare: Callable[[Mapping[str, Any]], Mapping[str, Any]],
+                  batches_per_run: int = DEFAULT_BATCHES_PER_RUN,
+                  max_attempts: int = DEFAULT_MAX_ATTEMPTS,
+                  route_fingerprint: Callable[[], str | None] | None = None,
+                  stop_requested: Callable[[], bool] | None = None) -> dict[str, Any]:
+    try:
+        return _poll_ui_texts_active(connection, mission, state_dir=state_dir,
+            mapping=mapping, prepare=prepare, batches_per_run=batches_per_run,
+            max_attempts=max_attempts, route_fingerprint=route_fingerprint,
+            stop_requested=stop_requested)
+    except PreparationQuiesced:
+        return quiesced_discovery_result(batches_per_run=batches_per_run,
+                                         max_attempts=max_attempts)
+
+
+def poll_ui_texts_from_store(connection: Any, mission: Mapping[str, Any], *,
+                             database: Path, state_dir: Path,
+                             prepare: Callable[[Mapping[str, Any]], Mapping[str, Any]],
+                             batches_per_run: int = DEFAULT_BATCHES_PER_RUN,
+                             max_attempts: int = DEFAULT_MAX_ATTEMPTS,
+                             route_fingerprint: Callable[[], str | None] | None = None,
+                             stop_requested: Callable[[], bool] | None = None) -> dict[str, Any]:
+    """Load reviewed membership only while unpaid preparation may continue."""
+    from .research_localization_store import load_ui_source_mapping
+    # Validate options even when stopping; malformed configuration is not a
+    # successful cooperative stop.
+    for name, value in (("batches_per_run", batches_per_run),
+                        ("max_attempts", max_attempts)):
+        if type(value) is not int or not 1 <= value <= 64:
+            raise ValueError(f"{name} must be an integer between 1 and 64")
+    try:
+        checkpoint(stop_requested)
+        mapping = load_ui_source_mapping(database, stop_requested=stop_requested)
+        return poll_ui_texts(connection, mission, state_dir=state_dir,
+            mapping=mapping, prepare=prepare, batches_per_run=batches_per_run,
+            max_attempts=max_attempts, route_fingerprint=route_fingerprint,
+            stop_requested=stop_requested)
+    except PreparationQuiesced:
+        return quiesced_discovery_result(batches_per_run=batches_per_run,
+                                         max_attempts=max_attempts)
+
+
+def _poll_ui_texts_active(connection: Any, mission: Mapping[str, Any], *, state_dir: Path,
                   mapping: Mapping[str, str],
                   prepare: Callable[[Mapping[str, Any]], Mapping[str, Any]],
                   batches_per_run: int = DEFAULT_BATCHES_PER_RUN,
@@ -671,6 +740,7 @@ def poll_ui_texts(connection: Any, mission: Mapping[str, Any], *, state_dir: Pat
                         ("max_attempts", max_attempts)):
         if type(value) is not int or not 1 <= value <= 64:
             raise ValueError(f"{name} must be an integer between 1 and 64")
+    checkpoint(stop_requested)
     root = Path(state_dir)
     _safe_directory(root)
     manifests = root / "manifests"; results = root / "results"
@@ -681,10 +751,17 @@ def poll_ui_texts(connection: Any, mission: Mapping[str, Any], *, state_dir: Pat
     fd = os.open(lock_path, os.O_CREAT | os.O_RDWR | getattr(os, "O_NOFOLLOW", 0), 0o600)
     with os.fdopen(fd, "a+") as lock:
         fcntl.flock(lock, fcntl.LOCK_EX)
-        existing = [_validate_manifest(path) for path in sorted(manifests.glob("*.json"))]
+        checkpoint(stop_requested)
+        existing = []
+        for path in sorted(manifests.glob("*.json")):
+            checkpoint(stop_requested)
+            existing.append(_validate_manifest(path))
         for manifest in existing:
-            _verify_manifest_authority(connection, manifest)
-        discovered = _discover(connection, mission)
+            checkpoint(stop_requested)
+            _verify_manifest_authority(connection, manifest, stop_requested=stop_requested)
+        discovered = (_discover(connection, mission) if stop_requested is None
+                      else _discover(connection, mission, stop_requested=stop_requested))
+        checkpoint(stop_requested)
         mission_ref = mission.get("mission_ref")
         if not isinstance(mission_ref, str) or not mission_ref:
             raise ValueError("mission_ref must be non-empty text")
@@ -697,7 +774,9 @@ def poll_ui_texts(connection: Any, mission: Mapping[str, Any], *, state_dir: Pat
         translatable = [entry for entry in discovered if needs_display_translation(entry["text"])]
         new = [entry for entry in translatable if entry["text"] not in mapping
                and entry["text"] not in assigned]
+        checkpoint(stop_requested)
         for entries in _chunks(new):
+            checkpoint(stop_requested)
             digest = _hash({"mission_ref": mission_ref, "entries": entries})
             batch_ref = f"ui-text-batch:{digest}"
             unsigned = {"schema_version": MANIFEST_SCHEMA, "batch_ref": batch_ref,
@@ -725,6 +804,7 @@ def poll_ui_texts(connection: Any, mission: Mapping[str, Any], *, state_dir: Pat
             return fingerprint_cache[0]
 
         for manifest in existing:
+            checkpoint(stop_requested)
             texts = [entry["text"] for entry in manifest["entries"]]
             result_path = results / (_digest(manifest["batch_ref"]) + ".json")
             prior = None

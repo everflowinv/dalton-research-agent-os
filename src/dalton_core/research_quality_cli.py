@@ -228,7 +228,7 @@ def run_score(args: argparse.Namespace) -> dict[str, Any]:
         scored = score_artefact(
             art, args.rubric, core=core, model=model, mission=mission,
             request_id=f"quality:{rubric.rubric_ref}:{art['ref']}:{art['hash'][:16]}",
-            verifier_model=verifier_model,
+            verifier_model=verifier_model, state_dir=state,
         )
         summary: dict[str, Any] = {
             "schema_version": SUMMARY_SCHEMA_VERSION,

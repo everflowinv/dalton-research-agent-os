@@ -1139,6 +1139,9 @@ class OpenClawModelAdapter:
         # Response v0.1 gained an optional, closed dispatch proof. Preserve
         # replay compatibility with already-journaled pre-proof responses;
         # absence never grants the new definitely-not-sent authority.
+        if request.get("readProfileLimits") is True and isinstance(value, Mapping) and value.get("schemaVersion") == "broker-profile-limits:0.1":
+            from .openclaw_broker_capabilities import RESPONSE_KEYS
+            return _closed(value, keys=RESPONSE_KEYS, label="broker profile limits response")
         if isinstance(value, Mapping) and set(value) == _RESPONSE_KEYS - {"dispatchProof"}:
             return dict(value)
         return _closed(value, keys=_RESPONSE_KEYS, label="broker response")

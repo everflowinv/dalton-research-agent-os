@@ -1,5 +1,5 @@
 from __future__ import annotations
-import http.client,json,os,secrets,subprocess,tempfile,threading,unittest
+import http.client,json,os,secrets,socket,subprocess,tempfile,threading,unittest
 from dataclasses import replace,asdict
 from http.server import ThreadingHTTPServer,BaseHTTPRequestHandler
 from pathlib import Path
@@ -41,6 +41,41 @@ class SharingNetworkTests(unittest.TestCase):
         status,h,body=self.request('/bootstrap',method='POST',data={'credential':self.share});self.assertEqual(status,200);return h['Set-Cookie'].split(';',1)[0]
     def manifest(self,slug,cookie):
         status,h,b=self.request('/w/'+slug+'/v2/data/manifest',cookies=cookie);self.assertEqual(status,200);return json.loads(b)['csrf_token'],h.get('Set-Cookie','').split(';',1)[0]
+    def test_early_post_refusals_close_unread_body_connection_before_next_request(self):
+        body=b'{"unused":"left behind"}'
+        cases=[
+            ('/w/legacy/v2/data/admin/action',[],403),
+            ('/w/legacy/v2/data/admin/action',['Origin: '+ORIGIN,'Origin: '+ORIGIN],403),
+            ('/w/legacy/v2/data/admin/action',['Origin: '+ORIGIN,'Host: foreign.example'],421),
+            ('/w/legacy/%2e%2e/admin',['Origin: '+ORIGIN],404),
+            ('/w/legacy/admin',['Origin: '+ORIGIN],401),
+            ('/bootstrap',['Origin: '+ORIGIN,'Content-Type: text/plain'],405),
+            ('/bootstrap',['Origin: '+ORIGIN,'Content-Type: application/json','Content-Length: 1025'],503),
+        ]
+        for path,extra,status in cases:
+            with self.subTest(path=path,headers=extra):
+                headers=['Host: example.ts.net','Connection: keep-alive']
+                if not any(h.startswith('Content-Length:') for h in extra):headers.append('Content-Length: '+str(len(body)))
+                if any(h.startswith('Host:') for h in extra):headers=[h for h in headers if not h.startswith('Host:')]
+                wire=('POST '+path+' HTTP/1.1\r\n'+'\r\n'.join(headers+extra)+'\r\n\r\n').encode()+body
+                # A reverse proxy can already have queued an unrelated GET.
+                wire+=b'GET / HTTP/1.1\r\nHost: example.ts.net\r\nConnection: close\r\n\r\n'
+                with socket.create_connection(('127.0.0.1',self.proxy.server_port),timeout=2) as conn:
+                    conn.sendall(wire);chunks=[]
+                    while True:
+                        try:chunk=conn.recv(4096)
+                        except ConnectionResetError:break
+                        if not chunk:break
+                        chunks.append(chunk)
+                        self.assertLess(sum(map(len,chunks)),16_384)
+                reply=b''.join(chunks)
+                self.assertTrue(reply.startswith(('HTTP/1.1 '+str(status)+' ').encode()),reply)
+                self.assertIn(b'Connection: close\r\n',reply)
+                self.assertEqual(reply.count(b'HTTP/1.1 '),1,reply)
+                # The proxy must reconnect; the next independent GET is clean.
+                fresh,_,_=self.request('/')
+                self.assertEqual(fresh,200)
+                self.assertEqual(self.calls,[])
     def test_no_tailnet_identity_or_public_credential_can_impersonate_owner(self):
         status,_,_=self.request('/w/legacy/v2/data/manifest',headers={'Tailscale-User-Login':'owner@example.com','X-Dalton-Shared-Gateway':self.backend});self.assertEqual(status,401)
         status,_,_=self.request('/v2/data/manifest',server=self.servers[0],headers={'X-Dalton-Shared-Gateway':self.share,'X-Dalton-Public-Prefix':'/dalton/w/legacy/'});self.assertEqual(status,403)

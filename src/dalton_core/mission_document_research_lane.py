@@ -552,6 +552,15 @@ class MissionDocumentResearchCoordinator:
         order = {admission["id"]: index for index, admission in enumerate(admissions)}
         detail = []
         for admission_ref, held in holds.items():
+            from .directed_numeric_period_replacement import superseding_admission
+            row=self.store.connection.execute('SELECT * FROM mission_document_research_admissions WHERE admission_id=?',(admission_ref,)).fetchone()
+            if row is not None:
+                original=json.loads(row['record_json'])
+                if original.get('numeric_authority'):
+                    from .mission_document_research import MissionDocumentResearchAuthority
+                    original=MissionDocumentResearchAuthority._read_row(None,row)
+                    if superseding_admission(self.store.connection,original) is not None:
+                        continue
             started = self._started(admission_ref)
             # An admission that never started sent nothing and cost nothing, so
             # reopening it is free and the lane may do it.  One that started may
@@ -858,7 +867,12 @@ class MissionDocumentResearchCoordinator:
                     where = f"WHERE ({pending}) AND r.rejection_id IS NULL "
             if self.store.connection.execute("SELECT 1 FROM sqlite_master WHERE type='table' AND name='mission_document_numeric_results'").fetchone():
                 joins += "LEFT JOIN mission_document_numeric_results n ON n.admission_ref=a.admission_id LEFT JOIN scheduler_formal_results nf ON nf.work_order_id=n.work_order_ref "
-                where = (where.rstrip() + " AND (n.admission_ref IS NULL OR nf.terminal_state IS NULL OR nf.terminal_state!='succeeded') " if where else "WHERE (n.admission_ref IS NULL OR nf.terminal_state IS NULL OR nf.terminal_state!='succeeded') ")
+                measure_pending=""
+                if self.store.connection.execute("SELECT 1 FROM sqlite_master WHERE type='table' AND name='mission_document_numeric_measure_reconciliations'").fetchone():
+                    joins += "LEFT JOIN mission_document_numeric_measure_reconciliations nm ON nm.admission_ref=a.admission_id LEFT JOIN scheduler_formal_results nmf ON nmf.work_order_id=('work:' || nm.authorization_ref) "
+                    measure_pending=" OR (json_extract(n.record_json,'$.status')='waiting_evidence' AND json_extract(n.record_json,'$.measure_conflict_contract')='directed-numeric-measure-conflict:0.1' AND (nm.admission_ref IS NULL OR nmf.terminal_state IS NULL))"
+                numeric_pending="(n.admission_ref IS NULL OR nf.terminal_state IS NULL OR nf.terminal_state!='succeeded'"+measure_pending+") "
+                where = where.rstrip()+" AND "+numeric_pending if where else "WHERE "+numeric_pending
             query = (
                 "SELECT a.* FROM mission_document_research_admissions a "
                 + joins + where + "ORDER BY a.created_at,a.admission_id"
@@ -887,7 +901,9 @@ class MissionDocumentResearchCoordinator:
                 raise MissionDocumentResearchLaneError(
                     "document research admission authority drifted"
                 )
-            result.append(wire)
+            from .directed_numeric_period_replacement import superseding_admission
+            if superseding_admission(self.store.connection,wire) is None:
+                result.append(wire)
         return result
 
     def _latest_plan_row(self) -> dict[str, Any] | None:
@@ -1562,6 +1578,12 @@ class MissionDocumentResearchCoordinator:
                 "document research recovery observation has an invalid state"
             )
         recovery = selected["recovery"]
+        if admission.get('numeric_authority'):
+            from .directed_numeric_period_replacement import binding_for
+            replacement = binding_for(self.store.connection, admission['id'])
+            if replacement is not None:
+                return {'action': 'terminal_hold', 'reason': 'numeric_target_period_unspecified',
+                    'work_order_ref': work_ref, 'replaces_numeric_contract_failure': replacement}
         from .mission_document_research_executor import (
             AUTOMATIC_BUDGET_CORRECTION_REASON,
             AUTOMATIC_UNPROVED_SEND_RETRY_REASON,
@@ -2135,13 +2157,27 @@ class MissionDocumentResearchCoordinator:
         recovery: Mapping[str, Any], settled: Mapping[str, Any] | None,
     ) -> dict[str, Any]:
         authorization = self._reentry_authorization(admission, ticket_ref, recovery)
-        resumed = self.launcher.resume(
-            admission_ref=admission["id"],
-            admission_hash=admission["content_hash"],
-            prior_ticket_ref=ticket_ref,
-            authorization=authorization,
-            expected_summary_sha256=recovery.get("expected_summary_sha256"),
-        )
+        from .document_completed_model_replay import candidate
+        local_replay = (candidate(self, admission, ticket_ref)
+                        if hasattr(self.launcher, "replay_completed_models") else None)
+        from .document_unused_recovery_entry import candidate as unused_candidate
+        unused = (unused_candidate(self, admission, ticket_ref, recovery.get('work_order_ref'))
+                  if local_replay is None and hasattr(self.launcher, 'resume_unused_recovery') else None)
+        if unused is not None:
+            resumed = self.launcher.resume_unused_recovery(
+                admission_ref=admission['id'], admission_hash=admission['content_hash'], proof=unused)
+        elif local_replay is not None:
+            resumed = self.launcher.replay_completed_models(
+                admission_ref=admission["id"], admission_hash=admission["content_hash"],
+                proof=local_replay)
+        else:
+            resumed = self.launcher.resume(
+                admission_ref=admission["id"],
+                admission_hash=admission["content_hash"],
+                prior_ticket_ref=ticket_ref,
+                authorization=authorization,
+                expected_summary_sha256=recovery.get("expected_summary_sha256"),
+            )
         pointer = {
             "ticket_ref": resumed["id"],
             "admission_ref": admission["id"],
@@ -2212,15 +2248,37 @@ class MissionDocumentResearchCoordinator:
                 self.store.connection
             )
         }
+        # Numeric completion has its own formal result rather than a generic
+        # research observation. It already removes the admission from the
+        # dispatch queue, and must also retire the older advisory hold.
+        from .document_numeric_completion import completed_numeric_admission
+        numeric_completion_errors = []
+        replaced_refs=set()
+        for admission_ref in holds:
+            try:
+                from .directed_numeric_period_replacement import superseding_admission
+                row=self.store.connection.execute('SELECT * FROM mission_document_research_admissions WHERE admission_id=?',(admission_ref,)).fetchone()
+                if row is not None:
+                    original=json.loads(row['record_json'])
+                    if original.get('numeric_authority'):
+                        from .mission_document_research import MissionDocumentResearchAuthority
+                        original=MissionDocumentResearchAuthority._read_row(None,row)
+                        if superseding_admission(self.store.connection,original) is not None:
+                            replaced_refs.add(admission_ref)
+                if completed_numeric_admission(self.store.connection, admission_ref):
+                    completed_refs.add(admission_ref)
+            except (ValueError, KeyError, TypeError) as exc:
+                numeric_completion_errors.append({"admission_ref":admission_ref,
+                    "error":"numeric_completion_unproved:"+str(exc)})
         admissions = [
             admission for admission in admissions
-            if admission["id"] not in completed_refs
+            if admission["id"] not in completed_refs | replaced_refs
         ]
-        if any(admission_ref in holds for admission_ref in completed_refs):
+        if any(admission_ref in holds for admission_ref in completed_refs | replaced_refs):
             holds = {
                 admission_ref: held
                 for admission_ref, held in holds.items()
-                if admission_ref not in completed_refs
+                if admission_ref not in completed_refs | replaced_refs
             }
             _write_holds(self.holds_path, holds)
         # 2026-09-30: an admission its owner withdrew is closed for good.  It
@@ -2232,7 +2290,54 @@ class MissionDocumentResearchCoordinator:
         by_ref = {item["id"]: item for item in admissions}
         latest = self._latest()
         settled = None
-        errors: list[dict[str, Any]] = []
+        errors: list[dict[str, Any]] = numeric_completion_errors
+        if hasattr(self.launcher,'replay_completed_models'):
+            # Respect the existing physical child first; a local maintenance
+            # hint does not create a concurrent child slot.
+            active = None if latest is None else self.launcher.status(latest['ticket_ref'])
+            if active is None or active['status']!='running':
+                from .directed_numeric_measure_reconciliation import replay_candidate
+                from .directed_numeric_promotion_reconciliation import replay_candidate as promotion_candidate, failure as promotion_failure
+                from .document_completed_model_replay import candidate as completed_candidate, UNIT_CONTRACT, RECEIPT_CONTRACT, IDENTITY_CONTRACT
+                # Older unrelated failed admissions must not permanently
+                # hide a settled numeric maintenance case behind the batch cap.
+                local_admissions=[a for a in admissions if a.get('numeric_authority') is not None and
+                    self.store.connection.execute("SELECT 1 FROM mission_document_numeric_results WHERE admission_ref=? AND json_extract(record_json,'$.measure_conflict_contract')='directed-numeric-measure-conflict:0.1'",(a['id'],)).fetchone() is not None]
+                from .directed_numeric_local_reconciliation import TABLE as local_authorizations
+                promotion_admissions=[]
+                if self.store.connection.execute("SELECT 1 FROM sqlite_master WHERE type='table' AND name=?",(local_authorizations,)).fetchone():
+                    recent=self.store.connection.execute('SELECT admission_ref FROM '+local_authorizations+' ORDER BY created_at DESC LIMIT ?',
+                        (MAX_RECOVERY_EVALUATIONS_PER_TICK,)).fetchall()
+                    for held in recent:
+                        admission=by_ref.get(held['admission_ref'])
+                        if admission is None or admission.get('numeric_authority') is None:continue
+                        try:
+                            if promotion_failure(self.store.connection,admission) is not None:promotion_admissions.append(admission)
+                        except Exception as exc:
+                            self._isolate_admission_error(holds,admission,exc,errors)
+                # A prior controlled-reentry hold cannot hide this new,
+                # strictly local unit contract. Paid retry rights stay closed.
+                unit_admissions=[a for a in admissions if a.get('numeric_authority') is not None
+                    and holds.get(a['id'],{}).get('ticket_ref')]
+                local_admissions=list({a['id']:a for a in [*promotion_admissions,*local_admissions,*unit_admissions]}.values())
+                for admission in local_admissions[:MAX_RECOVERY_EVALUATIONS_PER_TICK]:
+                    try:
+                        candidate=promotion_candidate(self,admission) or replay_candidate(self,admission)
+                        if candidate is None and admission in unit_admissions:
+                            unit=completed_candidate(self,admission,holds[admission['id']]['ticket_ref'])
+                            if unit is not None and unit['contract_ref'] in {UNIT_CONTRACT,RECEIPT_CONTRACT,IDENTITY_CONTRACT}:candidate=unit
+                        if candidate is None:continue
+                        ticket=self.launcher.replay_completed_models(admission_ref=admission['id'],
+                            admission_hash=admission['content_hash'],proof=candidate)
+                    except LaneChildConflict as exc:
+                        return {'status':'busy','reason':str(exc)}
+                    except Exception as exc:
+                        self._isolate_admission_error(holds,admission,exc,errors)
+                        continue
+                    pointer={'ticket_ref':ticket['id'],'admission_ref':admission['id'],'admission_hash':admission['content_hash']}
+                    write_owner_only(self.latest_path,{**pointer,'content_hash':content_hash(pointer)})
+                    return {'status':'resumed','reason':('durable_numeric_receipt_completion' if candidate['contract_ref']==RECEIPT_CONTRACT else 'figure_identity_local_reconciliation' if candidate['contract_ref']==IDENTITY_CONTRACT else 'source_unit_local_reconciliation' if candidate['contract_ref']==UNIT_CONTRACT else
+                        'canonical_promotion_local_reconciliation' if 'source_local_failure' in candidate else 'source_measure_local_reconciliation'),**pointer}
         if latest is not None and latest["admission_ref"] in by_ref:
             admission = by_ref[latest["admission_ref"]]
             if latest["admission_hash"] != admission["content_hash"]:

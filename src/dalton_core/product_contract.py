@@ -221,6 +221,22 @@ def should_redraft(**kwargs: Any) -> dict[str, Any]:
 # ---------------------------------------------------------------------------
 
 TAG_KINDS: Mapping[str, str] = {"P": "passage", "N": "number", "C": "claim", "O": "ours"}
+PASSAGE_QUOTE_PRINT_CONTRACT = "passage-quote-print:hyphen-line-wrap:1"
+NUMBER_PROVENANCE_CONTRACT = "pack-number-provenance:exact-valuation-parent:1"
+
+
+def passage_quote_matches(quote: str, passage: str) -> bool:
+    """Compare words in one original span; never rewrite its bytes or identity.
+
+    A single layout newline inside a hyphenated token may be omitted in a
+    quotation. Keep the literal hyphen, both neighbouring characters, and
+    every digit/punctuation. Blank lines and a leading minus are not wraps.
+    """
+    def normal(text: str) -> str:
+        return re.sub(r"\s+", " ", text).strip()
+    wrapped = re.sub(r"(?<=\w)-\r?\n[ \t]*(?=\w)", "-", passage)
+    return bool(quote.strip()) and (
+        normal(quote) in normal(passage) or normal(quote) in normal(wrapped))
 TAG_RE = re.compile(r"(?<![A-Za-z0-9])([PNCO])(\d{1,4})(?![A-Za-z0-9])")
 BRACKET_TAG_RE = re.compile(r"\[([PNCO]\d{1,4})\]")
 
@@ -302,7 +318,50 @@ def _label_sources() -> Mapping[str, str]:
     return _LABEL_SOURCE
 
 
+# Only a known renderer delimiter followed by its next passage block.
+# This separates prompt structure; it does not prove any source metadata.
+_RENDER_TRANSCRIPT_BOUNDARY = r"《[^\n》]{1,500}》(?:19|20)\d{2}-\d{2}-\d{2}：管理层发言[ \t]*\r?$(?=\n(?:[ \t]*\r?\n)*\[P\d{1,4}\])"
 _BLOCK_HEAD_RE = re.compile(r"(?m)^\[(?P<tag>[PCO]\d{1,4})\](?P<head>[^\n]*)\n?")
+_BROKER_RENDER_HEADER_RE = re.compile(
+    r"(?m)^券商：(?P<house>[^\n]{1,256}?)（(?:偏多|偏空|中性|立场未识别)）· "
+    r"(?P<date>(?:19|20)\d{2}-\d{2}-\d{2})(?:· [^\n]{0,2048})?\r?\n"
+    r"《(?P<title>[^\n》]{1,500})》[ \t]*(?:\r?\n[ \t]*)*\Z")
+
+
+def _without_next_broker_header(pack: Mapping[str, Any], tag: str, body: str,
+                                next_block: re.Match[str] | None) -> str:
+    """Separate an identified next report's renderer header, never source text.
+
+    The current exact span bounds protect an original header-like suffix. The
+    original/hash verifier still has to prove every byte of the remaining row.
+    This parser cannot certify report metadata or repair a corrupt old pack.
+    """
+    if not tag.startswith("P") or next_block is None:
+        return body
+    next_tag = next_block.group("tag")
+    tags = pack.get("tags") or {}
+    meta = ((pack.get("json") or {}).get("passage_tags") or {}).get(next_tag) or {}
+    header = _BROKER_RENDER_HEADER_RE.search(body)
+    if not next_tag.startswith("P") or next_tag not in tags or not header or meta.get("doc_kind") != "broker_report":
+        return body
+    parts = [part.strip() for part in next_block.group("head").split("·") if part.strip()]
+    if (header.group("house") != meta.get("house") or header.group("date") != meta.get("date")
+            or header.group("house") not in parts or header.group("date") not in parts
+            or f"《{header.group('title')}》" not in next_block.group("head")):
+        return body
+    from .evidence_index import parse_passage_ref, PassageRefInvalid
+    try:
+        current = parse_passage_ref(tags[tag])
+        following = parse_passage_ref(tags[next_tag])
+    except PassageRefInvalid:
+        return body
+    if following["document_ref"] != meta.get("document_ref"):
+        return body
+    candidate = body[:header.start()]
+    span_length = current["end"] - current["start"]
+    if candidate.strip() and len(candidate.strip()) <= span_length < len(body.strip()):
+        return candidate
+    return body
 
 
 def _block_entry(pack: Mapping[str, Any], tag: str) -> dict[str, Any]:
@@ -317,8 +376,10 @@ def _block_entry(pack: Mapping[str, Any], tag: str) -> dict[str, Any]:
         if match.group("tag") != tag:
             continue
         tail = text[match.end():]
-        stop = re.search(r"(?m)^(?:\[[PNCO]\d{1,4}\]|## )", tail)
+        stop = re.search(r"(?m)^(?:\[[PNCO]\d{1,4}\]|## |" + _RENDER_TRANSCRIPT_BOUNDARY + r")", tail)
         body = tail[:stop.start()] if stop else tail
+        next_block = _BLOCK_HEAD_RE.match(tail, stop.start()) if stop else None
+        body = _without_next_broker_header(pack, tag, body, next_block)
         head = match.group("head")
         out: dict[str, Any] = {}
         parts = [part.strip() for part in head.split("·") if part.strip()]
@@ -368,6 +429,21 @@ def _number_entry(pack: Mapping[str, Any], tag: str, ref: str) -> dict[str, Any]
                        "fcf_bridge": "valuation"}.get(parts[1], parts[1])
     else:
         source_kind = parts[0] if parts else "number"
+    # A valuation pointer is a derived vendor consensus multiple only when
+    # its exact held parent and leaf bind that same value. Display wording,
+    # labels or another vendor row cannot confer this capability.
+    if (len(parts) == 5 and parts[:3] == ["numbers", "valuation", "forward_pe"]
+            and parts[3].isdigit() and parts[4] in {"value", "forward_pe"}
+            and ref == "pack-json:" + pointer):
+        rows = ((pack.get("json") or {}).get("numbers") or {}).get("valuation", {}).get("forward_pe", [])
+        index = int(parts[3])
+        if isinstance(rows, list) and index < len(rows):
+            parent = rows[index]
+            if (isinstance(parent, Mapping) and parent.get("source") == "consensus_vendor"
+                    and parent.get("status") == "available" and value is not None
+                    and parent.get(parts[4]) == value and display == str(value)
+                    and not info.get("transform")):
+                source_kind = "consensus"
     out: dict[str, Any] = {"text": text, "value": value, "display": display, "pointer": pointer,
                            "source_kind": source_kind,
                            "metric": ".".join(part for part in parts[1:] if not part.isdigit())[:120]}
@@ -552,12 +628,16 @@ def placeholder_findings(text: str) -> list[dict[str, Any]]:
 def contract_fingerprint() -> str:
     """Hash of the rules a product drafted under, so a changed rule is a changed hash."""
 
+    from .material_request_citation import CONTRACT as request_citation_contract
     return content_hash({
         "version": PRODUCT_CONTRACT_VERSION,
         "number_rules": NUMBER_SOURCE_RULES, "view_rules": VIEW_RULES, "gap_rules": GAP_RULES,
         "stances": STANCES, "gap_kinds": GAP_KINDS,
         "material_missing": MATERIAL_MISSING_RE.pattern,
         "placeholders": [(code, pattern.pattern) for code, pattern in PLACEHOLDER_PATTERNS],
+        "passage_quote_print": PASSAGE_QUOTE_PRINT_CONTRACT,
+        "number_provenance": NUMBER_PROVENANCE_CONTRACT,
+        "material_request_prose_citation": request_citation_contract,
     })
 
 

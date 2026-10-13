@@ -21,6 +21,7 @@ from __future__ import annotations
 
 import argparse
 import hashlib
+import importlib.util
 import json
 import os
 import plistlib
@@ -347,10 +348,14 @@ def repoint_agent(plist_path: Path, venv: Path) -> bool:
     if not arguments:
         raise SwitchError(f"{plist_path} 没有 ProgramArguments")
     wanted = str(venv / "bin" / "python")
-    if arguments[0] == wanted:
+    controller = arguments[1:3] == ["-m", "dalton_core.service"]
+    priority_changed = controller and data.get("ProcessType") != "Standard"
+    if arguments[0] == wanted and not priority_changed:
         return False
     arguments[0] = wanted
     data["ProgramArguments"] = arguments
+    if controller:
+        data["ProcessType"] = "Standard"
     temporary = plist_path.with_name(f".{plist_path.name}.switch.tmp")
     with temporary.open("wb") as stream:
         plistlib.dump(data, stream)
@@ -363,7 +368,7 @@ def repoint_agent(plist_path: Path, venv: Path) -> bool:
     if str(plist_path).endswith(".plist"):
         with plist_path.open("rb") as stream:
             after = plistlib.load(stream)
-        if (after.get("ProgramArguments") or [None])[0] != wanted:
+        if after != data:
             raise SwitchError(f"{plist_path} 回读结果与写入不一致")
     return True
 
@@ -498,6 +503,32 @@ def apply_switch(args: argparse.Namespace, plan: dict[str, Any]) -> dict[str, An
     backup_dir = args.backup_dir.expanduser().resolve()
     actions: list[str] = []
 
+    # Preserve exact official transition proofs before changing any fleet target.
+    helper_path = Path(__file__).resolve().parent.parent / "src/dalton_core/workspace_goal_binding.py"
+    spec = importlib.util.spec_from_file_location("workspace_goal_binding_switch", helper_path)
+    if spec is None or spec.loader is None:
+        raise SwitchError("workspace release transition helper is unavailable")
+    helper = importlib.util.module_from_spec(spec)
+    spec.loader.exec_module(helper)
+    workspace_transitions = {}
+    for row in plan["workspaces"]:
+        if row.get("skipped"):
+            continue
+        path = Path(row["path"])
+        prior_bytes = path.read_bytes()
+        record = json.loads(prior_bytes)
+        record["release_path"] = plan["release_path"]
+        record["release_ref"] = plan["release_ref"]
+        record["shared_readonly_paths"] = sorted(set(record.get("shared_readonly_paths") or []) | {plan["release_path"]})
+        record["content_hash"] = content_hash({key:value for key,value in record.items() if key != "content_hash"})
+        try:
+            proof = helper.record_transition(prior_bytes, record)
+        except (ValueError, OSError, KeyError, TypeError) as exc:
+            raise SwitchError("workspace release transition proof could not be preserved: " + str(exc)) from exc
+        workspace_transitions[str(path)] = (prior_bytes, record)
+        if proof:
+            actions.append(f"preserved workspace release transition {proof}")
+
     # 1) plist
     for row in plan["launch_agents"]:
         path = Path(row["plist"])
@@ -523,13 +554,9 @@ def apply_switch(args: argparse.Namespace, plan: dict[str, Any]) -> dict[str, An
             continue
         path = Path(row["path"])
         _backup(path, backup_dir)
-        record = read_json(path)
-        record["release_path"] = plan["release_path"]
-        record["release_ref"] = plan["release_ref"]
-        record["shared_readonly_paths"] = sorted(
-            set(record.get("shared_readonly_paths") or []) | {plan["release_path"]})
-        body = {key: value for key, value in record.items() if key != "content_hash"}
-        record["content_hash"] = content_hash(body)
+        prior_manifest_bytes, record = workspace_transitions[str(path)]
+        if path.read_bytes() != prior_manifest_bytes:
+            raise SwitchError("workspace manifest changed after transition preflight")
         atomic_write_json(path, record)
         actions.append(f"updated workspace {row['slug']}")
         # service.json 里的 workspace.manifest_hash 绑定的是 workspace.json 的

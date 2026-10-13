@@ -46,12 +46,34 @@ class AnnualProjectionError(ValueError):
     """The supplied authorities cannot produce this annual projection."""
 
 
+def annual_projection_result_refs(model: Mapping[str, Any]) -> frozenset[str]:
+    """Result coverage promised by the existing annual projection contract.
+
+    Structured income lines and the 0.4 cash companion are projected. Other
+    balance/cash statement lines retain their quarterly authority, but this
+    contract does not yet produce annual outcomes for them.
+    """
+
+    structure = model.get("financial_statement_structure") or {}
+    refs = structure_result_refs(structure)
+    covered = {
+        refs[str(line["ref"])] for line in structure.get("lines") or []
+        if line.get("statement") == "income"
+    }
+    if model.get("schema_version") == STRUCTURED_CASH_SCHEMA_VERSION:
+        covered.update({
+            "result:operating_cash_flow", "result:capital_expenditure",
+            "result:free_cash_flow",
+        })
+    return frozenset(covered)
+
+
 def calendar_binding_from_annual_filing(
     filing: Mapping[str, Any], *, company_ref: str,
 ) -> dict[str, Any]:
     """Freeze the fiscal calendar declared by one exact annual filing row."""
 
-    if (filing.get("company_ref") != company_ref or filing.get("form") != "10-K"
+    if (filing.get("company_ref") != company_ref or filing.get("form") not in {"10-K", "10-K/A"}
             or not isinstance(filing.get("ingest_id"), str)
             or not isinstance(filing.get("content_hash"), str)):
         raise AnnualProjectionError("annual filing does not bind this company calendar")
@@ -162,9 +184,17 @@ def verify_statement_filing(
         "governance_ref": filing["governance_ref"],
         "governance_hash": filing["governance_hash"],
     }
-    matches = [line_hash for line_hash in line_hashes
+    if filing["form"] in {"20-F","20-F/A","40-F","40-F/A"}:
+        from .sec_native_annual import stored_evidence, NativeAnnualError
+        try:
+            body["native_evidence_hash"] = stored_evidence(connection,dict(filing))["content_hash"]
+        except (ValueError,KeyError,TypeError,OSError) as exc:
+            raise AnnualProjectionError("native annual source proof differs: "+str(exc)) from exc
+    # The historical line shapes all serialize an empty filing as [].  Count
+    # distinct proofs, not repeated candidates for the same exact line hash.
+    matches = {line_hash for line_hash in line_hashes
                if content_hash({**body, "statement_lines_hash": line_hash})
-               == filing["content_hash"]]
+               == filing["content_hash"]}
     if len(matches) == 1:
         return "line_bound"
     if content_hash(body) == filing["content_hash"]:
@@ -188,7 +218,7 @@ def validate_stored_calendar_binding(
     if row is None:
         raise AnnualProjectionError("fiscal calendar annual filing is unavailable")
     filing = dict(row)
-    if (filing.get("company_ref") != company_ref or filing.get("form") != "10-K"):
+    if (filing.get("company_ref") != company_ref or filing.get("form") not in {"10-K", "10-K/A"}):
         raise AnnualProjectionError(
             "fiscal calendar is not this company's stored annual filing")
     if (filing.get("content_hash") != binding["source_hash"]

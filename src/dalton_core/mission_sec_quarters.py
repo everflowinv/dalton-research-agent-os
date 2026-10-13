@@ -719,7 +719,7 @@ class MissionSecQuartersCoordinator:
             rows = self.connection.execute(
                 "SELECT ingest_id, accession, form, filed, report_date "
                 "FROM coverage_mission_statement_filings "
-                "WHERE company_ref=? AND form IN ('10-Q','10-K')", (company_ref,),
+                "WHERE company_ref=? AND form IN ('10-Q','10-K','10-Q/A','10-K/A')", (company_ref,),
             ).fetchall()
         except Exception:  # noqa: BLE001 - an older Core has no statement lane
             return []
@@ -756,8 +756,20 @@ class MissionSecQuartersCoordinator:
             return (item.get("start") is not None,
                     item.get("form") != ANNUAL_FORM or item.get("fourth_quarter") is not None)
 
+        # A newer amended disclosure cannot be replaced by an older regular
+        # filing merely because the latter has a companyfacts frame. The
+        # independent companyfacts contract still refuses amended forms below.
+        amended_heads = {}
+        for filing in filings:
+            if filing.get("form") in {"10-Q/A", "10-K/A"}:
+                key = (filing["end"], filing["form"].removesuffix("/A"))
+                rank = (str(filing.get("filed") or ""), filing["accession"])
+                amended_heads[key] = max(amended_heads.get(key, rank), rank)
         by_end: dict[str, dict[str, Any]] = {}
         for filing in filings:
+            head = amended_heads.get((filing["end"], str(filing.get("form")).removesuffix("/A")))
+            if head is not None and (str(filing.get("filed") or ""), filing["accession"]) < head:
+                continue
             current = by_end.get(filing["end"])
             if current is None or known(filing) > known(current):
                 by_end[filing["end"]] = dict(filing)
@@ -912,7 +924,8 @@ class MissionSecQuartersCoordinator:
                     skipped.append({"ticker": entry.get("ticker"),
                                     "reason": "原始件读不到、哈希不符或里面没有 10-Q/10-K，不据此排队"})
                     continue
-            missing = [filing for filing in newest if filing["end"] not in held_ends]
+            missing = [filing for filing in newest if filing["end"] not in held_ends
+                       or filing.get("form") in {"10-Q/A", "10-K/A"}]
             if not missing:
                 skipped.append({"ticker": entry.get("ticker"),
                                 "reason": "最近四个季度的同比增速都已入账"})
@@ -929,6 +942,11 @@ class MissionSecQuartersCoordinator:
             # weekly report current, and walking further back is how the lane
             # once spent itself on 2023 filings whose concepts no longer resolve.
             for filing in newest:
+                if filing.get("form") in {"10-Q/A", "10-K/A"}:
+                    skipped.append({"ticker": entry.get("ticker"), "accession": filing["accession"],
+                        "form": filing["form"], "period_end": filing["end"],
+                        "reason": "修订财报已保存；独立 companyfacts 同比契约尚不支持该表单，等待兼容治理，不复用旧普通版作为最新修订"})
+                    continue
                 tried = attempts.get(filing["accession"], 0)
                 if filing["end"] in held_ends or filing["accession"] in seen_accessions:
                     continue
@@ -950,6 +968,13 @@ class MissionSecQuartersCoordinator:
                                     "form": ANNUAL_FORM, "period_end": filing["end"],
                                     "reason": derived["reason"]})
                     continue
+                if filing.get("form") == QUARTERLY_FORM:
+                    primary = self._derive_filed_quarter(company_ref, filing)
+                    if primary is not None:
+                        derivations.append(primary)
+                        if primary["status"] == "committed":
+                            held_ends.add(filing["end"])
+                            continue
                 if tried >= MAX_ATTEMPTS_PER_FILING:
                     skipped.append({"ticker": entry.get("ticker"), "accession": filing["accession"],
                                     "reason": f"这份 filing 已经试过 {tried} 次"})
@@ -1039,6 +1064,50 @@ class MissionSecQuartersCoordinator:
         return {"status": "idle", "skipped": skipped}
 
     # -- FY - 9M -------------------------------------------------------------
+
+    def _derive_filed_quarter(self, company_ref, filing):
+        """Use held original statement authority before retrying lagging companyfacts."""
+        from .research_auto_commit import SEC_FILED_QUARTER_GROWTH_RULE_REF, ResearchAutoCommitRejected
+        from .quantitative_claim_promotion_cli import WRITE_SCOPES, _signed_rules
+        from .quantitative_claim_promotion import QuantitativeClaimPromotionError
+        from .research_verification import ResearchVerificationError
+        from .sec_filed_quarter_growth import stage_filed_quarter_growth_candidate
+        from .store import GateRejected
+        row = self.connection.execute(
+            "SELECT ingest_id FROM coverage_mission_statement_filings "
+            "WHERE company_ref=? AND accession=? AND form='10-Q'",
+            (company_ref, filing["accession"]),
+        ).fetchone()
+        if row is None:
+            return None
+        base = {"accession": filing["accession"], "form": QUARTERLY_FORM,
+                "period_end": filing["end"], "rule_ref": SEC_FILED_QUARTER_GROWTH_RULE_REF}
+        try:
+            signed = _signed_rules(self.store.active_policy())
+        except Exception:
+            signed = frozenset()
+        if SEC_FILED_QUARTER_GROWTH_RULE_REF not in signed:
+            return None  # Preserve the existing lane until this distinct rule is signed.
+        if self.staging is None:
+            return {**base, "status": "unavailable", "reason": "本车道未配置候选暂存库"}
+        mission = self.missions.mission(self._active_mission_version())
+        if WRITE_SCOPES - set(mission["autonomy"]["may_write"]):
+            return {**base, "status": "unavailable", "reason": "任务未授予正式候选写入范围"}
+        try:
+            bundle = stage_filed_quarter_growth_candidate(
+                self.connection, self.staging, ingest_id=row["ingest_id"],
+                actor_ref=mission["autonomy"]["automation_principal"])
+            promoted = self.store.commit_policy_candidate(
+                **{k: bundle[k] for k in ("evidence", "claim", "material", "numeric_spec",
+                                         "source_verification", "numeric_verification")},
+                idempotency_key="policy-ledger:" + bundle["claim"]["id"])
+        except (QuantitativeClaimPromotionError, ResearchVerificationError,
+                ResearchAutoCommitRejected, GateRejected) as exc:
+            return {**base, "status": "refused", "reason": type(exc).__name__ + ": " + str(exc)}
+        return {**base, "status": "committed", "period": bundle["claim"]["period"],
+                "value": bundle["claim"]["value"], "candidate_claim_ref": bundle["claim"]["id"],
+                "claim_version_ref": promoted.get("claim_version_ref"),
+                "ledger_write": promoted.get("status") == "fresh"}
 
     def _derive_fourth_quarter(self, company_ref: str,
                                filing: Mapping[str, Any]) -> dict[str, Any]:

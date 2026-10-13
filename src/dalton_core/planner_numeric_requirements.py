@@ -131,7 +131,7 @@ def numeric_waiting_targets(feedback: Sequence[Mapping[str, Any]]) -> dict[str, 
 
 def numeric_completed_context(feedback: Sequence[Mapping[str, Any]], *,
                               company_ref: str) -> dict[str, Any]:
-    """Retain proved target scopes relevant to an exact pending source version.
+    """Retain recent proved target scopes with their exact original source versions.
 
     These are planning hints, not new Figures or answers to another question.
     The upstream reader has replayed the admission and final successful result.
@@ -140,16 +140,11 @@ def numeric_completed_context(feedback: Sequence[Mapping[str, Any]], *,
     from .directed_numeric_research import normalize_targets
     if not isinstance(company_ref, str) or not company_ref:
         return {'sources': [], 'omitted': 0}
-    requirements = numeric_requirements([row for row in feedback if row.get('company_ref') == company_ref],
-                                       limit=None)['requirements']
-    pending_sources = {(row['document_ref'], row.get('document_version_hash'))
-                       for row in requirements if row.get('document_version_hash')}
     candidates, seen = [], set()
     for observation in sorted(feedback, key=lambda x: (str(x.get('created_at') or ''), str(x.get('id') or '')), reverse=True):
-        if observation.get('outcome') != 'numeric_targets_completed':
+        if observation.get('outcome') not in {'numeric_targets_completed', 'numeric_waiting_evidence'}:
             continue
-        if observation.get('company_ref') != company_ref or (
-                observation.get('document_ref'), observation.get('document_version_hash')) not in pending_sources:
+        if observation.get('company_ref') != company_ref:
             continue
         body = dict(observation)
         digest = body.pop('content_hash', None)
@@ -169,9 +164,23 @@ def numeric_completed_context(feedback: Sequence[Mapping[str, Any]], *,
         targets = normalize_targets(observation['numeric_targets'])
         completed = observation['completed_targets']
         bindings = {row['target_ref']: row for row in completed}
-        if observation.get('missing') or len(bindings) != len(completed) or set(bindings) != {t['target_ref'] for t in targets}:
-            raise ValueError('numeric completed feedback lacks every target')
+        target_refs = {t['target_ref'] for t in targets}
+        missing = observation.get('missing') or []
+        missing_refs = {row['target_ref'] for row in missing}
+        partial = observation['outcome'] == 'numeric_waiting_evidence'
+        if (len(bindings) != len(completed) or len(missing_refs) != len(missing)
+                or set(bindings) & missing_refs or set(bindings) | missing_refs != target_refs
+                or (partial and not missing_refs) or (not partial and missing_refs)):
+            raise ValueError('numeric completed feedback lacks every target completion or missing binding')
+        if partial:
+            if any(not isinstance(row.get('reason'), str) or not row['reason'].strip() for row in missing):
+                raise ValueError('numeric partial feedback lacks a precise missing reason')
+            # Preserve the overall unresolved status while making independently
+            # verified parts usable. No pending question or admission is closed.
+            header.update(result_status='partial', remaining_target_refs=sorted(missing_refs))
         for target in targets:
+            if target['target_ref'] not in bindings:
+                continue
             binding = bindings[target['target_ref']]
             if binding.get('metric_definition_hash') != target['metric_definition_hash']:
                 raise ValueError('numeric completed Figure definition differs')
@@ -181,6 +190,16 @@ def numeric_completed_context(feedback: Sequence[Mapping[str, Any]], *,
                     or any(c not in '0123456789abcdef' for c in figure_hash)):
                 raise ValueError('numeric completed target lacks a Figure binding')
             row = {**target, 'figure_ref': figure_ref, 'figure_hash': figure_hash}
+            answers = {answer['target_ref']: answer for answer in observation.get('completed_answers', ())}
+            answer = answers.get(target['target_ref'])
+            if answer is not None:
+                if (answer['figure_ref'] != figure_ref or answer['figure_hash'] != figure_hash
+                        or answer['metric_definition_hash'] != target['metric_definition_hash']
+                        or any(answer[key] != target[key] for key in ('period', 'unit', 'currency', 'basis'))):
+                    raise ValueError('numeric completed answer scope differs')
+                row['verified_answer'] = {key: answer[key] for key in (
+                    'value', 'unit', 'currency', 'scale', 'period', 'basis', 'as_reported_label',
+                    'source_grade', 'quote_id', 'citation_excerpt', 'citation_excerpt_start', 'citation_excerpt_is_complete', 'citation_text_hash')}
             identity = (header['document_ref'], header['document_version_hash'], content_hash(row))
             if identity not in seen:
                 seen.add(identity)

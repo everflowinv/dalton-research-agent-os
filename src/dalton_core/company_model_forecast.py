@@ -155,7 +155,9 @@ def model_digest(
         )
     else:
         cash_companion = None
-    from .forecast_financial_execution import RULE_REF as FINANCIAL_EXECUTION_RULE
+    from .forecast_financial_execution import (
+        RULE_REF as FINANCIAL_EXECUTION_RULE, DERIVED_HISTORY_UNIT_RULE_REF,
+    )
     digest_body = {
         "financial_execution_rule": FINANCIAL_EXECUTION_RULE,
         "spec_ref": str(spec.get("spec_id") or ""),
@@ -164,7 +166,7 @@ def model_digest(
         "generator_ref": (
             GENERATOR_REF if statement_binding is None else
             COVERAGE_GENERATOR_REF
-            if str(structure.get("schema_version")) == "0.6" else
+            if str(structure.get("schema_version")) in {"0.6", "0.7"} else
             STRUCTURE_GENERATOR_REF
         ),
         "formula_hash": (
@@ -176,9 +178,36 @@ def model_digest(
         "forecast_structure_binding": statement_binding,
         "cash_flow_companion": cash_companion,
     }
+    if statement_binding is not None:
+        # A corrected builder must not replay the old refused child of the
+        # same spec/filings. This changes only the new structured run identity,
+        # not any stored Work, model, source fact or validation arithmetic.
+        digest_body["derived_history_unit_rule"] = DERIVED_HISTORY_UNIT_RULE_REF
+        from .forecast_financial_execution import ASSUMPTION_EXECUTION_REF
+        digest_body["assumption_execution_rule"] = ASSUMPTION_EXECUTION_REF
+        from .forecast_presentation_partition import RULE_REF as PRESENTATION_PARTITION_RULE
+        digest_body["filed_presentation_partition_rule"] = PRESENTATION_PARTITION_RULE
+        from .forecast_consumed_source_groups import RULE_REF as CONSUMED_SOURCE_GROUPS_RULE
+        digest_body["filed_consumed_source_groups_rule"] = CONSUMED_SOURCE_GROUPS_RULE
+        from .forecast_execution_statement_scope import RULE_REF as EXECUTION_STATEMENT_SCOPE_RULE
+        digest_body["filed_execution_statement_scope_rule"] = EXECUTION_STATEMENT_SCOPE_RULE
+        from .forecast_revenue_timing_partition import declared, CONTRACT_REF as TIMING_CONTRACT
+        if declared(spec):
+            from .forecast_execution_statement_scope import TIMING_RULE_REF
+            digest_body["filed_execution_statement_scope_rule"] = TIMING_RULE_REF
+            digest_body["filed_revenue_recognition_timing_rule"] = TIMING_CONTRACT
+        from .forecast_source_accuracy import RULE_REF as SOURCE_ACCURACY_RULE
+        digest_body["filed_source_accuracy_rule"] = SOURCE_ACCURACY_RULE
+        from .forecast_family_failure_feedback import CONTRACT_REF as FAMILY_FEEDBACK_RULE
+        digest_body["filed_family_failure_feedback_rule"] = FAMILY_FEEDBACK_RULE
+        from .company_financial_statement_structure import (
+            CASH_LEAF_DURATION_UNIT_VALIDATION_REF, _TYPED_NOTE_STRUCTURE_VERSIONS,
+        )
+        if structure.get("schema_version") in _TYPED_NOTE_STRUCTURE_VERSIONS:
+            digest_body["typed_filed_leaf_unit_rule"] = CASH_LEAF_DURATION_UNIT_VALIDATION_REF
     if reporting_boundary is not None:
         digest_body["forecast_reporting_boundary"] = dict(reporting_boundary)
-    # Historical model identities remain byte-for-byte stable.  Only the new
+    # Legacy unstructured run identities remain byte-for-byte stable. Only a
     # note-backed structure adds this authority to its digest.
     if note_context_binding is not None:
         digest_body["financial_note_context_binding"] = note_context_binding
@@ -208,6 +237,14 @@ def pending_action(
     try:
         validate_new_forecast_rules(prior)
     except (ValueError, ForecastModelUnavailable):
+        return "rules_upgrade"
+    from .forecast_financial_execution import ASSUMPTION_EXECUTION_REF
+    if (prior.get("execution_contract",{}).get("assumption_execution_ref") != ASSUMPTION_EXECUTION_REF
+            and (any(r.get("role") == "income_tax_expense" and r.get("status") == "unavailable"
+                     for r in prior.get("results") or [])
+                 or any(r.get("status") == "unexecuted" and r.get("ref") in {
+                     e["ref"] for e in spec.get("expense_lines") or [] if e.get("behaviour") == "one_off"}
+                     for r in prior.get("execution_contract",{}).get("drivers",{}).get("drivers",[])))):
         return "rules_upgrade"
     if realised_ends(prior, table):
         return "actualize"
@@ -294,9 +331,9 @@ def forecast_reporting_boundary(missions: Any, connection: Any, company_ref: str
     from .forecast_assumption_sources import preliminary_quarter
     filings = missions.statement_filings(company_ref)
     actual_dates = [str(f["report_date"]) for f in filings
-                    if f.get("form") in {"10-Q", "10-K"} and f.get("report_date")]
+                    if f.get("form") in {"10-Q", "10-K", "10-Q/A", "10-K/A"} and f.get("report_date")]
     annual_dates = [str(f["report_date"]) for f in filings
-                    if f.get("form") == "10-K" and f.get("report_date")]
+                    if f.get("form") in {"10-K", "10-K/A"} and f.get("report_date")]
     result = {"latest_actual_end": max(actual_dates) if actual_dates else None,
               "fiscal_year_end": max(annual_dates) if annual_dates else None}
     from .model_forecast_driver import CONCEPT_ROLES, REVENUE
@@ -470,11 +507,18 @@ def run_company_forecast(
         sources["fcf_definition"] = None
     action = pending_action(prior, spec, table, reporting_boundary=boundary)
     if (action == "actualize" and structure is not None
-            and str(structure.get("schema_version")) == "0.6"
+            and str(structure.get("schema_version")) in {"0.6", "0.7"}
             and structure_topology_changed(prior, structure)):
         # The completed structure moved (a line reached enough history, a
         # subtotal became provable): a rebuilt model, not an actualisation.
         action = "rules_upgrade"
+    if (action in {None, 'actualize'} and structure is not None and prior is not None
+            and isinstance(prior.get('cash_flow_companion'), Mapping)):
+        from .model_forecast_driver import cash_companion_topology_changed
+        if cash_companion_topology_changed(prior, spec, table, structure):
+            # The historical source-basis contract changed. Rebuild freely;
+            # never relabel an old model or buy another specification.
+            action = 'rules_upgrade'
     backfill_proof = (
         action is None and prior is not None
         and models.filing_proof(prior["id"]) is None
@@ -501,6 +545,12 @@ def run_company_forecast(
         return {"company_ref": company_ref, "status": "nothing_to_do",
                 "action": None, "lines": [], "lines_refused": None,
                 "record": prior, "annual_projection": annual_projection}
+    if action is not None and not backfill_proof and structure is not None:
+        from pathlib import Path
+        from .forecast_source_accuracy import prepare_accuracy
+        filename = next((str(row[2]) for row in models.connection.execute("PRAGMA database_list") if row[1] == "main"), "")
+        if filename:
+            sources["source_accuracy"] = prepare_accuracy(models.connection, Path(filename).parent, spec, table)
     if backfill_proof:
         body = prior
         action = "filing_proof_backfill"
@@ -525,26 +575,35 @@ def run_company_forecast(
     else:
         body = actualize_model(
             prior, table, actor_ref=actor_ref, structure=structure,
-            replay=replay, binding=binding)
+            replay=replay, binding=binding, source_accuracy=sources.get("source_accuracy"))
         body["forecast_policy"]["fiscal_year_end"] = boundary.get("fiscal_year_end")
-    # A comparative quarter can occur in several filings.  Segment arithmetic
-    # must use one coherent filing's consolidated row and breakdown members;
-    # flattening every filing would add repeated members while the normalizer
-    # retained only one consolidated value.  Prefer the newest filing for each
-    # concept and economic period, matching the series/restatement rule.
-    chosen: dict[tuple[str, Any, Any], tuple[str, list[Mapping[str, Any]]]] = {}
-    for filing in missions.statement_filings(company_ref):
-        by_period: dict[tuple[str, Any, Any], list[Mapping[str, Any]]] = {}
-        for line in missions.statement_lines(filing["ingest_id"]):
-            key = (str(line.get("concept")), line.get("period_start"),
-                   line.get("period_end"))
-            by_period.setdefault(key, []).append(line)
-        filed = str(filing.get("filed") or "")
-        for key, rows in by_period.items():
-            if key not in chosen or filed > chosen[key][0]:
-                chosen[key] = (filed, rows)
-    statement_rows = [line for _filed, rows in chosen.values() for line in rows]
-    stored = models.publish(body, statement_rows=statement_rows)
+    source_groups = None
+    if structure is not None:
+        from .forecast_consumed_source_groups import select_rows
+        filings = missions.statement_filings(company_ref)
+        statement_rows, source_groups = select_rows(
+            body, filings, {str(f["ingest_id"]): missions.statement_lines(f["ingest_id"])
+                            for f in filings})
+    else:
+        # A comparative quarter can occur in several filings.  Segment arithmetic
+        # must use one coherent filing's consolidated row and breakdown members;
+        # flattening every filing would add repeated members while the normalizer
+        # retained only one consolidated value.  Prefer the newest filing for each
+        # concept and economic period, matching the series/restatement rule.
+        chosen: dict[tuple[str, Any, Any], tuple[str, list[Mapping[str, Any]]]] = {}
+        for filing in missions.statement_filings(company_ref):
+            by_period: dict[tuple[str, Any, Any], list[Mapping[str, Any]]] = {}
+            for line in missions.statement_lines(filing["ingest_id"]):
+                key = (str(line.get("concept")), line.get("period_start"),
+                       line.get("period_end"))
+                by_period.setdefault(key, []).append(line)
+            filed = str(filing.get("filed") or "")
+            for key, rows in by_period.items():
+                if key not in chosen or filed > chosen[key][0]:
+                    chosen[key] = (filed, rows)
+        statement_rows = [line for _filed, rows in chosen.values() for line in rows]
+    stored = models.publish(body, statement_rows=statement_rows,
+                            **({} if source_groups is None else {"source_groups": source_groups}))
     annual_projection = _annual_projection(missions, models, stored, table)
     from .research_followup_automation import FollowupAutomationAuthority, binding as redraft_binding
     if redraft_binding(models.connection, stored["spec_ref"]) is not None:

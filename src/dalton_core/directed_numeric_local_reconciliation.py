@@ -139,10 +139,19 @@ def _repair_evidence(executor, admission, works):
         if item['status'] != 'supported' or item['target_ref'] not in accepted or verifier['output']['verdict'] != 'pass':
             continue
         target = targets[item['target_ref']]
+        # Lookup uses the writer's historical identity. Its period projection
+        # can collide across spellings (and strips non-ASCII wording). That is
+        # a reason to reconstruct a source-bound conflict, never to assume the
+        # two periods are equal or lose the already-paid answer here.
+        from .coverage_mission import _ref, _period_key
+        legacy_ref = _ref('mission-document-figure', {
+            'company_ref': admission['company_ref'], 'metric_ref': target['metric_ref'],
+            'period': _period_key(target['period']),
+            'document_ref': admission['request']['registration']['document_ref']})
         rows = executor.connection.execute('SELECT figure_id FROM coverage_mission_document_figures '
-            'WHERE company_ref=? AND document_ref=? AND metric_ref=? AND period=? AND source_manifest_hash=?',
-            (admission['company_ref'], admission['request']['registration']['document_ref'], target['metric_ref'],
-             target['period'], admission['request']['registration']['manifest_hash'])).fetchall()
+            'WHERE figure_id=? AND company_ref=? AND document_ref=? AND metric_ref=? AND source_manifest_hash=?',
+            (legacy_ref, admission['company_ref'], admission['request']['registration']['document_ref'],
+             target['metric_ref'], admission['request']['registration']['manifest_hash'])).fetchall()
         if not rows:
             continue
         if len(rows) != 1:
@@ -154,6 +163,12 @@ def _repair_evidence(executor, admission, works):
             evidence.append({'kind':'exact_figure_support','proof':mapping})
         except NumericMeasureIdentityConflict as exc:
             evidence.append({'kind':'numeric_measure_identity_conflict','proof':exc.proof})
+            if exc.proof['differing_fields'] == ['scale'] and exc.proof['held_fact']['scale'] is None:
+                from .directed_numeric_source_unit import support
+                mapping = support(connection=executor.connection, registry=executor.registry,
+                    admission=admission, target=target, figure=figure, search_proof=proof,
+                    draft=draft, verifier=verifier)
+                evidence.append({'kind':'source_unit_clarification','proof':mapping})
     if not evidence:
         raise DirectedNumericError('no proved Figure-support/measure defect qualifies for local reconciliation')
     return proof, draft, verifier, accounting, evidence
@@ -205,6 +220,14 @@ def qualification(executor, admission_ref, expected_admission_hash):
 def reconcile(executor, admission_ref, *, expected_admission_hash, requested_by):
     """Official maintenance operation; the sole executable stage is local."""
     from .directed_numeric_executor import complete_numeric_stage, read_numeric_result
+    existing_result=executor.connection.execute('SELECT record_json FROM mission_document_numeric_results WHERE admission_ref=?',(admission_ref,)).fetchone()
+    if existing_result is not None and any('measure_conflict_proof' in item for item in json.loads(existing_result[0]).get('pending_targets',[])):
+        from .directed_numeric_measure_reconciliation import reconcile as reconcile_measure
+        return reconcile_measure(executor,admission_ref,expected_admission_hash=expected_admission_hash,requested_by=requested_by)
+    from .directed_numeric_promotion_reconciliation import failure, reconcile as reconcile_promotion
+    admission = executor.authority.resolve_for_execution(admission_ref)
+    if failure(executor.connection, admission) is not None:
+        return reconcile_promotion(executor,admission_ref,expected_admission_hash=expected_admission_hash,requested_by=requested_by)
     admission, works, candidate = qualification(executor,admission_ref,expected_admission_hash)
     row = _row(executor.connection, admission_ref)
     if row is None:

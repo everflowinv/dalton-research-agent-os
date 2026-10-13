@@ -20,12 +20,12 @@ class PlannerStorageBoundTests(unittest.TestCase):
             plans_dir=self.fx.state/'discovery-plans',as_of='2026-09-11T12:01:00+00:00')
         self.config=self.fx.root/'model.json';self.config.write_text('{}')
 
-    def inventory(self,count):
+    def inventory(self,count,question_padding=430):
         s=copy.deepcopy(self.base)
         s['reflection_followup_context']={'groups':[],'backlog_questions':[
             {'company_ref':s['companies'][-1]['company_ref'],
              'question_ref':f'question:synthetic:{i}',
-             'question':'What source-bound fact remains unresolved? '+'Q'*430,'state':'open'}
+             'question':'What source-bound fact remains unresolved? '+'Q'*question_padding,'state':'open'}
              for i in range(count)]}
         return self.rebind(s)
 
@@ -38,8 +38,10 @@ class PlannerStorageBoundTests(unittest.TestCase):
 
     def exact_96000(self):
         # A fixed sample above the retired64KB gate and below128KB.
-        # New static contracts changed the old64844-byte sample baseline.
-        s=self.inventory(100)
+        # Keep all 100 required questions. Measure current instructions before
+        # adding controllable filler, so contract growth cannot make the seed
+        # exceed the intended exact-size fixture.
+        s=self.inventory(100,question_padding=0)
         measured=len(build_prompt(project_state_for_prompt(s,max_input_bytes=MAX_WORK_ORDER_PROMPT_BYTES)).encode())
         remaining=96000-measured
         self.assertGreaterEqual(remaining,0)
@@ -75,7 +77,7 @@ class PlannerStorageBoundTests(unittest.TestCase):
         state=self.exact_96000();before=copy.deepcopy(state)
         summary,works,calls=self.run_with_budget(state,250000)
         self.assertEqual(summary['plan_status'],'fresh');self.assertEqual(calls,1)
-        self.assertEqual(summary['work_order_prompt_bound'],128000)
+        self.assertEqual(summary['work_order_prompt_bound'],192000)
         self.assertEqual(summary['model_max_input_tokens'],250000)
         self.assertEqual(summary['prompt_bytes'],96000)
         self.assertEqual(works[0].budget['max_input_tokens'],250000)
@@ -99,19 +101,33 @@ class PlannerStorageBoundTests(unittest.TestCase):
                 mission_version_ref=self.mission['id'],max_input_tokens=64000,
                 max_output_tokens=16384,max_cost_usd=1.,max_seconds=300)
 
+    def test_growing_required_inventory_above_128kb_reaches_work_without_losing_questions(self):
+        state=self.inventory(220);before=copy.deepcopy(state)
+        summary,works,calls=self.run_with_budget(state,250000)
+        self.assertEqual(summary['plan_status'],'fresh');self.assertEqual(calls,1)
+        self.assertGreater(summary['prompt_bytes'],128000)
+        self.assertLessEqual(summary['prompt_bytes'],192000)
+        self.assertEqual(works[0].budget['max_input_tokens'],250000)
+        for question in state['reflection_followup_context']['backlog_questions']:
+            self.assertIn(question['question_ref'],works[0].question)
+            self.assertIn(question['question'],works[0].question)
+        self.assertEqual(state,before)
+
     def test_default_eighty_thousand_input_does_not_fill_preview_beyond_its_authority(self):
-        summary,works,calls=self.run_with_budget(self.inventory(80),80000)
+        # Keep the required identities below this model's input authority;
+        # the expanded planner instructions are part of the same byte bound.
+        summary,works,calls=self.run_with_budget(self.inventory(60),80000)
         self.assertEqual(summary['plan_status'],'fresh');self.assertEqual(calls,1)
         self.assertLessEqual(summary['prompt_bytes'],80000)
-        self.assertEqual(summary['work_order_prompt_bound'],128000)
+        self.assertEqual(summary['work_order_prompt_bound'],192000)
         self.assertEqual(summary['conservative_work_input_byte_bound'],80000)
         self.assertEqual(works[0].budget['max_input_tokens'],80000)
 
     def test_oversized_required_inventory_refuses_then_holds_without_any_model_work(self):
-        state=self.inventory(300)
+        state=self.inventory(600)
         summary,works,calls=self.run_with_budget(state,250000)
         self.assertEqual(summary['plan_status'],'input_too_large');self.assertEqual(calls,0);self.assertEqual(works,[])
-        self.assertEqual(summary['prompt_input']['configured_max_input_bytes'],128000)
+        self.assertEqual(summary['prompt_input']['configured_max_input_bytes'],192000)
         self.assertTrue(summary['prompt_input']['document_identities_preserved'])
         again,works,calls=self.run_with_budget(state,250000)
         self.assertEqual(again['plan_status'],'held');self.assertEqual(calls,0);self.assertEqual(works,[])
@@ -142,9 +158,10 @@ class PlannerStorageBoundTests(unittest.TestCase):
              'projection_rule_ref':PROMPT_PROJECTION_REF,'attempts':1}
         self.assertIsNone(attempt_hold({'state':old},'state',now=now))
         self.assertIsNone(attempt_hold({'state':{**old,'work_order_prompt_bound':64000}},'state',now=now))
+        self.assertIsNone(attempt_hold({'state':{**old,'work_order_prompt_bound':128000}},'state',now=now))
         record_attempt(self.fx.state,'state',{'created_at':now.isoformat(),'status':'succeeded','plan_status':'input_too_large'})
         held=read_attempt_ledger(self.fx.state)
-        self.assertEqual(held['state']['work_order_prompt_bound'],128000)
+        self.assertEqual(held['state']['work_order_prompt_bound'],192000)
         self.assertEqual(attempt_hold(held,'state',now=now)['held_reason'],'terminal_for_this_state')
         # A content refusal under the old bound is not reopened by a storage fix.
         self.assertEqual(attempt_hold({'state':{**old,'plan_status':'refused'}},'state',now=now)['held_reason'],'terminal_for_this_state')

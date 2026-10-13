@@ -211,7 +211,7 @@ class EquivalentGateTests(unittest.TestCase):
         self.assertEqual(caught.exception.equivalent["state"], "in_flight")
         self.assertEqual(caught.exception.equivalent["matched_on"], "question")
         self.assertEqual(caught.exception.equivalent["rule_ref"],
-                         "mission-document-research:equivalent-inquiry:v1")
+                         "mission-document-research:admission-equivalence:v2")
         # The exact same inquiry is still just the duplicate it always was.
         self.assertEqual(self.authority.admit_from_plan(**self.args)["status_marker"],
                          "duplicate")

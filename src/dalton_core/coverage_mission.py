@@ -823,8 +823,11 @@ def validate_mission_source_discovery(value: Mapping[str, Any]) -> dict[str, Any
         # P10s: the filings index is asked for an issuer and a form, so it has
         # no query to record. Pinned here as well as in the plan so a malformed
         # parameter set cannot reach the ledger through a hand-made call.
-        if set(wire["parameters"]) != {"issuer", "form", "date_from", "date_to", "limit"}:
+        if set(wire["parameters"]) not in ({"issuer", "form", "date_from", "date_to", "limit"}, {"issuer", "form", "date_from", "date_to", "limit", "cursor"}):
             raise CoverageMissionValidationError("list_filings discovery parameters have an invalid shape")
+        if wire["parameters"].get("cursor") is not None:
+            from .sec_submissions_pages import ROOT_CURSOR,archive_cursor
+            if wire["parameters"]["cursor"] != ROOT_CURSOR: archive_cursor(wire["parameters"]["cursor"])
     elif set(wire["parameters"]) != {"query", "date_after", "date_before"}:
         raise CoverageMissionValidationError("search_web discovery parameters have an invalid shape")
     wire["document_refs"] = refs
@@ -1018,6 +1021,13 @@ class CoverageMissionAuthority:
         self._migrate_plan_json()
         self._migrate_statement_dimension_count()
         self._migrate_statement_dimensions()
+        from .sec_statement_form_schema import migrate
+        from .sec_native_statement_schema import migrate as migrate_native_dispatch
+        # Validate both original table contracts before changing either enum.
+        migrate(self.connection, preview=True)
+        migrate_native_dispatch(self.connection, preview=True)
+        migrate(self.connection)
+        migrate_native_dispatch(self.connection)
 
     def _migrate_statement_dimensions(self) -> None:
         """Legacy projected contexts remain unknown; new complete identities persist."""
@@ -1942,10 +1952,11 @@ class CoverageMissionAuthority:
         return int(row[0])
 
     def open_discovery_dispatches(
-        self, *, limit: int = 20, source_ref: str | None = None
+        self, *, limit: int = 20, source_ref: str | None = None, deadline: float | None = None
     ) -> list[dict[str, Any]]:
         if isinstance(limit, bool) or not isinstance(limit, int) or not 1 <= limit <= 100:
             raise CoverageMissionValidationError("discovery dispatch limit must be 1..100")
+        from .source_discovery_read_budget import bounded_rows
         query = "SELECT * FROM coverage_mission_discovery_dispatches WHERE status='launched'"
         params: list[Any] = []
         if source_ref is not None:
@@ -1953,7 +1964,7 @@ class CoverageMissionAuthority:
             params.append(_text(source_ref, "source_ref"))
         query += " ORDER BY created_at,dispatch_id LIMIT ?"
         params.append(limit)
-        rows = self.connection.execute(query, params).fetchall()
+        rows = bounded_rows(self.connection, query, params, deadline=deadline)
         return [self._dispatch_row(row) for row in rows]
 
     def _version_scope(self, column: str, mission_version_ref: str, across_versions: bool) -> str:
@@ -2405,6 +2416,7 @@ class CoverageMissionAuthority:
         excluded_discovery_refs: Sequence[str] = (),
         included_hosts: Sequence[str] | None = None,
         excluded_document_refs: Sequence[str] = (),
+        deadline: float | None = None,
     ) -> dict[str, Any] | None:
         """Next ``discovered`` document across active missions, or None.
 
@@ -2495,8 +2507,9 @@ class CoverageMissionAuthority:
             query += " CASE WHEN d.host IN (%s) THEN 0 ELSE 1 END," % ",".join("?" * len(preferred))
             params.extend(preferred)
         query += " d.created_at,d.record_id LIMIT 1"
-        row = self.connection.execute(query, params).fetchone()
-        return None if row is None else self._document_row(row)
+        from .source_discovery_read_budget import bounded_rows
+        rows = bounded_rows(self.connection, query, params, deadline=deadline)
+        return None if not rows else self._document_row(rows[0])
 
     def record_research_plan(
         self, plan: Mapping[str, Any], *, decided_by: str,
@@ -2563,10 +2576,12 @@ class CoverageMissionAuthority:
     def latest_research_plan(self, mission_version_ref: str) -> dict[str, Any] | None:
         """The most recent plan for this mission version, or None."""
 
+        from .operating_driver_source_plan import TASK_REF as OPERATING_TASK
         row = self.connection.execute(
             "SELECT * FROM coverage_mission_research_plans WHERE mission_version_ref=? "
+            "AND (plan_json IS NULL OR COALESCE(json_extract(plan_json,'$.task_ref'),'')!=?) "
             "ORDER BY created_at DESC, plan_id DESC LIMIT 1",
-            (_text(mission_version_ref, "mission_version_ref"),),
+            (_text(mission_version_ref, "mission_version_ref"), OPERATING_TASK),
         ).fetchone()
         return None if row is None else self._plan_row(row)
 
@@ -2664,6 +2679,7 @@ class CoverageMissionAuthority:
         figures: Sequence[Mapping[str, Any]],
         observed_by: str,
         numeric_contract_ref: str | None = None,
+        operating_source_proof: Mapping[str, Any] | None = None,
     ) -> dict[str, Any]:
         """Journal figures read out of one document's window.
 
@@ -2683,6 +2699,7 @@ class CoverageMissionAuthority:
         from .document_numeric_unit_contracts import (
             DIRECTED_NUMERIC_CONTRACT_REF, DIRECTED_FIGURE_VERIFIER_REF, numeric_units,
         )
+        from .operating_driver_units import CONTRACT_REF as OPERATING_REF, FIGURE_VERIFIER_REF as OPERATING_VERIFIER
         try:
             numeric_units(numeric_contract_ref)
         except ValueError as exc:
@@ -2716,7 +2733,7 @@ class CoverageMissionAuthority:
             try:
                 wires.append(verify_numeric_candidate(
                     candidate, {candidate["quote_id"]: citation},
-                    numeric_contract_ref=numeric_contract_ref))
+                    numeric_contract_ref=numeric_contract_ref, operating_source_proof=operating_source_proof))
             except NumericCandidateError as exc:
                 raise CoverageMissionValidationError(
                     f"figure is not supported by the quote it cites: {exc}"
@@ -2773,7 +2790,7 @@ class CoverageMissionAuthority:
                     "unit": wire["unit"], "currency": wire["currency"],
                     "scale": wire["scale"], "basis": wire["basis"],
                     "source_grade": source_grade,
-                    "verified_by": (DIRECTED_FIGURE_VERIFIER_REF
+                    "verified_by": (OPERATING_VERIFIER if numeric_contract_ref == OPERATING_REF else DIRECTED_FIGURE_VERIFIER_REF
                                     if numeric_contract_ref == DIRECTED_NUMERIC_CONTRACT_REF
                                     else DOCUMENT_FIGURE_VERIFIER_REF),
                     "observed_by": observed_by, "created_at": now,
@@ -3042,7 +3059,7 @@ class CoverageMissionAuthority:
         return int(self.connection.execute(query, params).fetchone()[0])
 
     def already_held_documents(
-        self, *, source_ref: str | None = None, limit: int = 100
+        self, *, source_ref: str | None = None, limit: int = 100, deadline: float | None = None
     ) -> list[dict[str, Any]]:
         """Unsettled active-mission documents that may now be held in authority.
 
@@ -3058,6 +3075,7 @@ class CoverageMissionAuthority:
 
         if isinstance(limit, bool) or not isinstance(limit, int) or not 1 <= limit <= 100:
             raise CoverageMissionValidationError("discovered document limit must be 1..100")
+        from .source_discovery_read_budget import bounded_rows
         query = (
             "SELECT d.* FROM coverage_mission_discovered_documents d "
             "JOIN coverage_mission_pointer p ON p.mission_version_id=d.mission_version_ref "
@@ -3075,21 +3093,22 @@ class CoverageMissionAuthority:
             "d.updated_at DESC,d.record_id LIMIT ?"
         )
         params.append(limit)
-        return [self._document_row(row) for row in self.connection.execute(query, params).fetchall()]
+        return [self._document_row(row) for row in bounded_rows(self.connection, query, params, deadline=deadline)]
 
     def documents_without_host(
-        self, *, source_ref: str, limit: int = 25
+        self, *, source_ref: str, limit: int = 25, deadline: float | None = None
     ) -> list[dict[str, Any]]:
         """Rows recorded before P9d-13 whose host is still unknown, oldest first."""
 
         if isinstance(limit, bool) or not isinstance(limit, int) or not 1 <= limit <= 100:
             raise CoverageMissionValidationError("discovered document limit must be 1..100")
-        rows = self.connection.execute(
+        from .source_discovery_read_budget import bounded_rows
+        rows = bounded_rows(self.connection,
             "SELECT d.* FROM coverage_mission_discovered_documents d "
             "JOIN coverage_mission_pointer p ON p.mission_version_id=d.mission_version_ref "
             "WHERE d.host IS NULL AND d.source_ref=? ORDER BY d.created_at,d.record_id LIMIT ?",
-            (_text(source_ref, "source_ref"), limit),
-        ).fetchall()
+            (_text(source_ref, "source_ref"), limit), deadline=deadline,
+        )
         return [self._document_row(row) for row in rows]
 
     def set_document_host(self, record_id: str, host: str) -> dict[str, Any]:
@@ -3135,6 +3154,7 @@ class CoverageMissionAuthority:
         restricted_spec_refs: Sequence[str] = (),
         recovery_probe_hosts: Sequence[str] = (),
         excluded_document_refs: Sequence[str] = (),
+        deadline: float | None = None,
     ) -> dict[str, Any] | None:
         """Oldest ``acquisition_failed`` document whose last update is older
         than the retry interval, or None.  Failures (provider errors, orphaned
@@ -3207,12 +3227,14 @@ class CoverageMissionAuthority:
                       % ",".join("?" * len(resting)))
             params.extend(resting)
         query += " ORDER BY d.updated_at,d.record_id LIMIT 1"
-        row = self.connection.execute(query, params).fetchone()
-        return None if row is None else self._document_row(row)
+        from .source_discovery_read_budget import bounded_rows
+        rows = bounded_rows(self.connection, query, params, deadline=deadline)
+        return None if not rows else self._document_row(rows[0])
 
     def capped_failed_documents(
         self, *, as_of: datetime, source_ref: str | None = None,
         cap: int = FETCH_FAILURE_CAP, cooldown: timedelta = FETCH_FAILURE_COOLDOWN,
+        deadline: float | None = None,
     ) -> list[dict[str, Any]]:
         """Documents whose retries are resting under the failure cap."""
 
@@ -3222,14 +3244,16 @@ class CoverageMissionAuthority:
         if source_ref is not None:
             query += " WHERE source_ref=?"
             params.append(_text(source_ref, "source_ref"))
-        rows = [dict(row) for row in self.connection.execute(query, params)]
+        from .source_discovery_read_budget import bounded_rows
+        rows = [dict(row) for row in bounded_rows(self.connection, query, params, deadline=deadline)]
         return capped_fetch_failures(rows, as_of=as_of, cap=cap, cooldown=cooldown)
 
     def launched_discovered_documents(
-        self, *, limit: int = 20, source_ref: str | None = None
+        self, *, limit: int = 20, source_ref: str | None = None, deadline: float | None = None
     ) -> list[dict[str, Any]]:
         if isinstance(limit, bool) or not isinstance(limit, int) or not 1 <= limit <= 100:
             raise CoverageMissionValidationError("discovered document limit must be 1..100")
+        from .source_discovery_read_budget import bounded_rows
         query = "SELECT * FROM coverage_mission_discovered_documents WHERE status='acquisition_launched'"
         params: list[Any] = []
         if source_ref is not None:
@@ -3237,7 +3261,7 @@ class CoverageMissionAuthority:
             params.append(_text(source_ref, "source_ref"))
         query += " ORDER BY updated_at,record_id LIMIT ?"
         params.append(limit)
-        rows = self.connection.execute(query, params).fetchall()
+        rows = bounded_rows(self.connection, query, params, deadline=deadline)
         return [self._document_row(row) for row in rows]
 
     def mark_discovered_document_launched(self, record_id: str, ticket_ref: str) -> dict[str, Any]:
@@ -3573,7 +3597,8 @@ class CoverageMissionAuthority:
         # discovery tick down with it.
         query += " ORDER BY v.version_number DESC,d.created_at,d.record_id LIMIT ?"
         params.append(limit)
-        rows = self.connection.execute(query, params).fetchall()
+        from .source_discovery_read_budget import bounded_rows
+        rows = bounded_rows(self.connection, query, params, deadline=deadline)
         if not rows:
             return []
         grants: dict[tuple[str, str], dict[str, Any] | str] = {}
@@ -3785,6 +3810,47 @@ class CoverageMissionAuthority:
         return {'document_ref':doc_ref,'record_id':record_id,'review_id':review['review_id'],
                 'review_status':review['status'],'source_binding':exact['binding']}
 
+    def register_acquired_interim_attachments(self, parent_record_id: str, *,
+                                            state_dir: Any, spool: Any,
+                                            receipt_reader: Any,
+                                            requested_by: str) -> list[dict[str, Any]]:
+        """Register each strongly acquired original separately, never as a quarter."""
+        from .sec_interim_attachments import verified_sources
+        parent = self.connection.execute(
+            'SELECT * FROM coverage_mission_discovered_documents WHERE record_id=?',
+            (_text(parent_record_id, 'parent_record_id'),)).fetchone()
+        if parent is None or parent['status'] != 'acquired' or parent['source_ref'] != 'source:sec-edgar':
+            raise CoverageMissionConflict('interim attachments require an acquired SEC parent')
+        self.authorize_source_discovery(company_ref=parent['company_ref'], source_ref=parent['source_ref'],
+            requested_by=requested_by, mission_version_ref=parent['mission_version_ref'])
+        originals = verified_sources(self.store, spool, Path(state_dir), ticket_ref=parent['ticket_ref'],
+            parent_document_ref=parent['document_ref'], company_ref=parent['company_ref'], receipt_reader=receipt_reader)
+        result = []
+        for exact in originals:
+            doc_ref = exact['document_ref']
+            if doc_ref == parent['document_ref']:
+                continue
+            record_id = _ref('mission-discovered-document',
+                {'mission_version_ref': parent['mission_version_ref'], 'document_ref': doc_ref})
+            now = _now()
+            with self._transaction() as cur:
+                prior = cur.execute('SELECT * FROM coverage_mission_discovered_documents '
+                    'WHERE mission_version_ref=? AND document_ref=?', (parent['mission_version_ref'], doc_ref)).fetchone()
+                if prior is None:
+                    cur.execute('INSERT INTO coverage_mission_discovered_documents '
+                        '(record_id,mission_version_ref,company_ref,source_ref,document_ref,discovery_ref,status,ticket_ref,'
+                        'failure_reason,failure_retryable,created_at,updated_at,host) VALUES(?,?,?,?,?,?,?,?,?,?,?,?,?)',
+                        (record_id, parent['mission_version_ref'], parent['company_ref'], parent['source_ref'], doc_ref,
+                         parent['discovery_ref'], 'acquired', parent['ticket_ref'], None, None, now, now, 'www.sec.gov'))
+                else:
+                    record_id = prior['record_id']
+                    if any(prior[k] != parent[k] for k in ('mission_version_ref', 'company_ref', 'source_ref', 'discovery_ref', 'ticket_ref')) or prior['status'] != 'acquired':
+                        raise CoverageMissionConflict('interim attachment acquired-row identity differs')
+            review = self.register_document_review(record_id, requested_by=requested_by)
+            result.append({'document_ref': doc_ref, 'record_id': record_id, 'review_id': review['review_id'],
+                           'review_status': review['status'], 'source_binding': exact['binding']})
+        return result
+
     def backfill_document_reviews(
         self, mission_ref: str, *, limit: int = 100, deadline: float | None = None,
     ) -> list[dict[str, Any]]:
@@ -3800,14 +3866,15 @@ class CoverageMissionAuthority:
         mission_ref = _text(mission_ref, "mission_ref")
         if isinstance(limit, bool) or not isinstance(limit, int) or not 1 <= limit <= 100:
             raise CoverageMissionValidationError("backfill limit must be 1..100")
-        rows = self.connection.execute(
+        from .source_discovery_read_budget import bounded_rows
+        rows = bounded_rows(self.connection,
             "SELECT d.record_id,d.mission_version_ref FROM coverage_mission_discovered_documents d "
             "JOIN coverage_mission_pointer p ON p.mission_version_id=d.mission_version_ref "
             "LEFT JOIN coverage_mission_document_reviews r "
             "ON r.mission_version_ref=d.mission_version_ref AND r.document_ref=d.document_ref "
             "WHERE p.mission_ref=? AND d.status='acquired' AND r.review_id IS NULL "
-            "ORDER BY d.created_at,d.record_id LIMIT ?", (mission_ref, limit),
-        ).fetchall()
+            "ORDER BY d.created_at,d.record_id LIMIT ?", (mission_ref, limit), deadline=deadline,
+        )
         result = []
         for row in rows:
             if deadline is not None and time.monotonic() >= deadline:
@@ -4088,7 +4155,7 @@ class CoverageMissionAuthority:
                     "WHERE company_ref=? AND accession=?",
                     (row["company_ref"], accession),
                 ).fetchone()
-                if filing is None or filing["form"] != "10-K":
+                if filing is None or filing["form"] not in {"10-K", "10-K/A"}:
                     raise CoverageMissionConflict(
                         "supplemental annual reread lacks exact issuer 10-K authority")
             pointer = cur.execute(
@@ -5043,6 +5110,7 @@ class CoverageMissionAuthority:
     def queue_statement_dispatch(
         self, *, authorization: Mapping[str, Any], form: str = "10-Q",
         filing_limit: int = 1, attempt: int = 0, retry_salt: str | None = None,
+        native_request: Mapping[str, Any] | None = None, native_spool: Any = None,
     ) -> dict[str, Any]:
         """Queue one financial-statements run for a company, idempotently.
 
@@ -5076,8 +5144,19 @@ class CoverageMissionAuthority:
         )
         if canonical_json(exact) != canonical_json(authorization):
             raise CoverageMissionConflict("statement dispatch authorization drifted")
-        if form not in {"10-Q", "10-K"}:
-            raise CoverageMissionValidationError("statement dispatch form must be 10-Q or 10-K")
+        if form not in {"10-Q", "10-K", "20-F", "40-F"}:
+            raise CoverageMissionValidationError("statement dispatch form is not an admitted periodic form")
+        if form in {"20-F", "40-F"}:
+            from .sec_native_annual import verify_request
+            try:
+                verify_request(self.connection, native_spool, dict(native_request or {}), current_authorization=exact)
+            except (ValueError, KeyError, TypeError) as exc:
+                raise CoverageMissionConflict("native annual request proof differs: " + str(exc)) from exc
+            if (len(native_request["filings"]) != filing_limit
+                    or native_request["filings"][0]["form"].removesuffix("/A") != form):
+                raise CoverageMissionConflict("native annual dispatch selection differs")
+        elif native_request is not None:
+            raise CoverageMissionConflict("domestic dispatch cannot carry foreign annual authority")
         if type(filing_limit) is not int or not 1 <= filing_limit <= MAX_STATEMENT_FILINGS:
             raise CoverageMissionValidationError(
                 f"statement dispatch limit must be 1..{MAX_STATEMENT_FILINGS}"
@@ -5095,6 +5174,8 @@ class CoverageMissionAuthority:
         }
         if retry_salt is not None:
             request["retry_salt"] = _text(retry_salt, "retry_salt")[:64]
+        if native_request is not None:
+            request["native_request_hash"] = native_request["content_hash"]
         request_hash = content_hash(request)
         dispatch_id = f"mission-statement-dispatch:{request_hash[:32]}"
         existing = self.connection.execute(
@@ -5121,11 +5202,25 @@ class CoverageMissionAuthority:
                     filing_limit, attempt, canonical_json(exact), request_hash, now, now,
                 ),
             )
+            if native_request is not None:
+                cur.execute("INSERT INTO coverage_mission_statement_native_requests(dispatch_id,record_json,content_hash) VALUES(?,?,?)",
+                    (dispatch_id, canonical_json(native_request), native_request["content_hash"]))
         return {
             **request, "dispatch_id": dispatch_id, "authorization": exact,
             "request_hash": request_hash, "status": "pending", "ticket_ref": None,
             "created_at": now, "updated_at": now, "status_marker": "fresh",
         }
+
+    def native_statement_request(self, dispatch_id: str) -> dict[str, Any] | None:
+        row = self.connection.execute(
+            "SELECT record_json,content_hash FROM coverage_mission_statement_native_requests WHERE dispatch_id=?",
+            (dispatch_id,)).fetchone()
+        if row is None:
+            return None
+        value = json.loads(row["record_json"])
+        if value.get("content_hash") != row["content_hash"] or content_hash({k:v for k,v in value.items() if k != "content_hash"}) != row["content_hash"]:
+            raise CoverageMissionConflict("native annual immutable request hash differs")
+        return value
 
     def _statement_dispatch(self, dispatch_id: str) -> Any:
         row = self.connection.execute(
@@ -5236,6 +5331,7 @@ class CoverageMissionAuthority:
     def record_statement_observation(
         self, *, dispatch_id: str, observation: Mapping[str, Any],
         governance_ref: str, governance_hash: str,
+        governance_proof: Mapping[str, Any] | None = None,
     ) -> dict[str, Any]:
         """Store one validated statements observation: its filings and lines.
 
@@ -5267,6 +5363,40 @@ class CoverageMissionAuthority:
         company_ref = row["company_ref"]
         governance_ref = _text(governance_ref, "governance_ref")
         governance_hash = _sha256(governance_hash, "governance_hash")
+        native = any(isinstance(f,Mapping) and f.get("form") in {"20-F","20-F/A","40-F","40-F/A"} for f in filings)
+        native_request = self.native_statement_request(dispatch_id) if native else None
+        if native:
+            from .connector_governance import ConnectorGovernance, ConnectorGovernanceError
+            from .sec_financials_core import sec_financials_identity
+            try:
+                approved=ConnectorGovernance(governance_proof or {})
+            except ConnectorGovernanceError as exc:
+                raise CoverageMissionConflict("native annual requires valid approved v6 proof") from exc
+            identity=sec_financials_identity(version=6)
+            if (not approved.approved or approved.id != "connector-governance:sec-financial-statements:v6"
+                    or approved.id != governance_ref or approved.content_hash != governance_hash
+                    or approved.wire["expected_source_hash"] != identity["source_hash"]
+                    or approved.wire["expected_schema_hash"] != identity["schema_hash"] or native_request is None):
+                raise CoverageMissionConflict("native annual requires exact approved v6 and immutable admission")
+            if (len(filings) != len(native_request["filings"])
+                    or {f.get("accession") for f in filings} != {f["accession"] for f in native_request["filings"]}):
+                raise CoverageMissionConflict("native annual observation is not the complete admitted filing set")
+        amendments = any(isinstance(f, Mapping) and f.get("form") in {"10-Q/A", "10-K/A"}
+                         for f in filings)
+        if amendments:
+            from .connector_governance import ConnectorGovernance, ConnectorGovernanceError
+            from .sec_financials_core import sec_financials_identity
+            try:
+                approved = ConnectorGovernance(governance_proof or {})
+            except ConnectorGovernanceError as exc:
+                raise CoverageMissionConflict("amended statements require valid v5 approval proof") from exc
+            version = 6 if approved.id == "connector-governance:sec-financial-statements:v6" else 5
+            expected = sec_financials_identity(version=version)
+            if (not approved.approved or approved.id != f"connector-governance:sec-financial-statements:v{version}"
+                    or approved.id != governance_ref or approved.content_hash != governance_hash
+                    or approved.wire["expected_source_hash"] != expected["source_hash"]
+                    or approved.wire["expected_schema_hash"] != expected["schema_hash"]):
+                raise CoverageMissionConflict("amended statements require exact approved v5 contract")
         now = _now()
         prepared: list[dict[str, Any]] = []
         for filing in filings:
@@ -5275,8 +5405,8 @@ class CoverageMissionAuthority:
             accession = _text(filing.get("accession"), "accession")
             if _ACCESSION_RE.fullmatch(accession) is None:
                 raise CoverageMissionValidationError("statement accession is invalid")
-            form = _vocabulary(filing.get("form"), ("10-Q", "10-K"), "form")
-            if form != row["form"]:
+            form = _vocabulary(filing.get("form"), ("10-Q", "10-K", "10-Q/A", "10-K/A", "20-F", "20-F/A", "40-F", "40-F/A"), "form")
+            if form.removesuffix("/A") != row["form"]:
                 raise CoverageMissionValidationError(
                     "statement filing form differs from its dispatch"
                 )
@@ -5330,8 +5460,21 @@ class CoverageMissionAuthority:
                 "governance_ref": governance_ref, "governance_hash": governance_hash,
                 "statement_lines_hash": content_hash(lines),
             }
+            native_evidence = None
+            if form in {"20-F","20-F/A","40-F","40-F/A"}:
+                from .sec_native_annual import prepare_evidence
+                path = self.connection.execute("PRAGMA database_list").fetchone()[2]
+                if not path:
+                    raise CoverageMissionConflict("native annual requires durably kept source originals")
+                try:
+                    native_evidence=prepare_evidence(self.connection,Path(path).parent,dispatch=dict(row),request=native_request,
+                        filing=dict(filing),cik=cik,source_refs=source_refs,governance_ref=governance_ref,governance_hash=governance_hash)
+                except (ValueError,KeyError,TypeError,OSError) as exc:
+                    raise CoverageMissionConflict("native annual original proof differs: "+str(exc)) from exc
+                body["native_evidence_hash"]=native_evidence["content_hash"]
             line_hash = content_hash(body)
             prepared.append({"accession": accession, "ingest_id": ingest_id,
+                             "native_evidence": native_evidence,
                              "body": body, "line_hash": line_hash,
                              "lines": normalized_lines})
 
@@ -5347,6 +5490,8 @@ class CoverageMissionAuthority:
                     (company_ref, item["accession"]),
                 ).fetchone()
                 if held is not None:
+                    if item["native_evidence"] is not None and held["content_hash"] != item["line_hash"]:
+                        raise CoverageMissionConflict("native annual accession already has a different immutable authority")
                     recorded.append({**dict(held), "status_marker": "duplicate"})
                     continue
                 body = item["body"]
@@ -5382,6 +5527,10 @@ class CoverageMissionAuthority:
                             period_end, value, unit, balance,
                         ),
                     )
+                if item["native_evidence"] is not None:
+                    proof=item["native_evidence"]
+                    cur.execute("INSERT INTO coverage_mission_statement_native_evidence(ingest_id,record_json,content_hash) VALUES(?,?,?)",
+                                (ingest_id,canonical_json(proof),proof["content_hash"]))
                 recorded.append({
                     **body, "ingest_id": ingest_id,
                     "dispatch_id": row["dispatch_id"], "recorded_at": now,
@@ -5484,15 +5633,15 @@ class CoverageMissionAuthority:
             # and answered per form. A company holding four 10-Qs and no 10-K
             # is short of neither if only quarters were wanted.
             "held_by_form": {
-                form: sum(1 for item in held if item["form"] == form)
-                for form in sorted({item["form"] for item in held})
+                form: len({item["report_date"] for item in held if item["form"].removesuffix("/A") == form})
+                for form in sorted({item["form"].removesuffix("/A") for item in held})
             },
             "latest_report_date": max((item["report_date"] for item in held), default=None),
             # Which period each form last reported, so the dispatcher can tell
             # when the next 10-Q or 10-K is due and go and look for it.
             "latest_report_date_by_form": {
-                form: max(item["report_date"] for item in held if item["form"] == form)
-                for form in sorted({item["form"] for item in held})
+                form: max(item["report_date"] for item in held if item["form"].removesuffix("/A") == form)
+                for form in sorted({item["form"].removesuffix("/A") for item in held})
             },
             "last_success_by_form": last_success_by_form,
             "line_count": sum(int(item["line_count"]) for item in held),

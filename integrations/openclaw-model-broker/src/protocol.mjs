@@ -2,6 +2,7 @@ import { createHash } from "node:crypto";
 
 export const PROTOCOL_VERSION = "0.1";
 export const BROKER_VERSION = "0.1.0-spike.5";
+export const MAX_COMPLETION_TIMEOUT_MS = 1_800_000;
 
 const REQUIRED_REQUEST_KEYS = new Set([
   "schemaVersion",
@@ -13,7 +14,7 @@ const REQUIRED_REQUEST_KEYS = new Set([
   "maxTokens",
   "timeoutMs",
 ]);
-const OPTIONAL_REQUEST_KEYS = new Set(["replayOnly", "requiredControls", "queueWaitMs", "controls"]);
+const OPTIONAL_REQUEST_KEYS = new Set(["replayOnly", "readProfileLimits", "requiredControls", "queueWaitMs", "controls"]);
 const REQUEST_KEYS = new Set([...REQUIRED_REQUEST_KEYS, ...OPTIONAL_REQUEST_KEYS]);
 const REQUIRED_CONTROL_KEYS = new Set([
   "maxInputTokens",
@@ -241,10 +242,20 @@ export function validateRequest(input, maxFrameBytes) {
   if ("replayOnly" in input && typeof input.replayOnly !== "boolean") {
     throw new ProtocolError("INVALID_REQUEST", "replayOnly must be boolean");
   }
+  if ("readProfileLimits" in input && typeof input.readProfileLimits !== "boolean") {
+    throw new ProtocolError("INVALID_REQUEST", "readProfileLimits must be boolean");
+  }
+  if (input.readProfileLimits === true && (input.replayOnly === true || input.requiredControls !== undefined)) {
+    throw new ProtocolError("INVALID_REQUEST", "profile limits read cannot request replay or provider controls");
+  }
   if ("queueWaitMs" in input && (!Number.isSafeInteger(input.queueWaitMs) || input.queueWaitMs < 0)) {
     throw new ProtocolError("INVALID_REQUEST", "queueWaitMs must be a non-negative safe integer");
   }
   const maxTokens = positiveInteger(input.maxTokens, "maxTokens");
+  const timeoutMs = positiveInteger(input.timeoutMs, "timeoutMs");
+  if (timeoutMs > MAX_COMPLETION_TIMEOUT_MS) {
+    throw new ProtocolError("INVALID_REQUEST", "timeoutMs exceeds the broker completion maximum");
+  }
   if (input.controls !== undefined) {
     exactRequestObject(input.controls, new Set(["thinkingLevel"]), "controls");
     if (!GENERAL_THINKING_LEVELS.has(input.controls.thinkingLevel)) {
@@ -262,12 +273,13 @@ export function validateRequest(input, maxFrameBytes) {
     model: requiredString(input.model, "model", /^[A-Za-z0-9._-]+\/[A-Za-z0-9][A-Za-z0-9._:/-]*$/),
     prompt: requiredString(input.prompt, "prompt"),
     maxTokens,
-    timeoutMs: positiveInteger(input.timeoutMs, "timeoutMs"),
+    timeoutMs,
     ...(input.controls === undefined ? {} : { controls: Object.freeze({ ...input.controls }) }),
     ...(input.requiredControls === undefined ? {} : {
       requiredControls: validateRequiredControls(input.requiredControls, maxTokens),
     }),
     ...(input.replayOnly === true ? { replayOnly: true } : {}),
+    ...(input.readProfileLimits === true ? { readProfileLimits: true } : {}),
     ...(input.queueWaitMs !== undefined ? { queueWaitMs: input.queueWaitMs } : {}),
   });
   if (Buffer.byteLength(canonicalJson(request), "utf8") > maxFrameBytes) {

@@ -10,7 +10,9 @@ from pathlib import Path
 from types import SimpleNamespace
 from unittest.mock import Mock, patch
 
-from scripts.run_workspace_runtime_acceptance import run_acceptance, _wait_initial_screen, _stop
+from scripts.run_workspace_runtime_acceptance import (
+    run_acceptance, _wait_initial_screen, _stop, _fixture_popen, _live_fixture_group)
+import time
 
 
 class WorkspaceRuntimeAcceptanceTests(unittest.TestCase):
@@ -49,6 +51,48 @@ class WorkspaceRuntimeAcceptanceTests(unittest.TestCase):
             self.assertEqual(diagnostic['returncode'],9)
             self.assertIn('synthetic stdout',diagnostic['stdout_tail'])
             self.assertIn('synthetic stderr',diagnostic['stderr_tail'])
+
+    @unittest.skipUnless(os.name=='posix','fixture process groups require POSIX')
+    def test_stopped_parent_cannot_leave_state_writing_children_or_stop_another_fixture(self):
+        with tempfile.TemporaryDirectory()as directory:
+            root=Path(directory);pidfile=root/'child.pid';state=root/'state';target=state/'heartbeat'
+            child=("import time; from pathlib import Path; p=Path("+repr(str(target))+");\n"
+                   "while True:\n p.parent.mkdir(exist_ok=True); p.write_text(str(time.monotonic())); time.sleep(.01)")
+            parent=("import subprocess,sys,time; from pathlib import Path; p=subprocess.Popen([sys.executable,'-c',"
+                    +repr(child)+"],stdout=subprocess.DEVNULL,stderr=subprocess.DEVNULL); Path("
+                    +repr(str(pidfile))+").write_text(str(p.pid)); time.sleep(30)")
+            process=_fixture_popen([sys.executable,'-c',parent],stdout=subprocess.PIPE,stderr=subprocess.PIPE,text=True)
+            other=_fixture_popen([sys.executable,'-c','import time;time.sleep(30)'],stdout=subprocess.PIPE,stderr=subprocess.PIPE,text=True)
+            try:
+                deadline=time.monotonic()+5
+                while not pidfile.exists()or not target.exists():
+                    self.assertLess(time.monotonic(),deadline);time.sleep(.01)
+                self.assertEqual(os.getpgid(int(pidfile.read_text())),process.pid)
+                _stop(process)
+                self.assertEqual(_live_fixture_group(process.pid),[])
+                self.assertIsNone(other.poll())
+                shutil.rmtree(state);time.sleep(.05)
+                self.assertFalse(state.exists())
+                _stop(process)  # Already-reaped parents remain safe/idempotent.
+            finally:
+                _stop(process);_stop(other)
+
+    @unittest.skipUnless(os.name=='posix','fixture process groups require POSIX')
+    def test_initial_controller_start_failure_still_reaps_started_writer(self):
+        with tempfile.TemporaryDirectory()as directory:
+            root=Path(directory);state=root/'state';state.mkdir()
+            writer=_fixture_popen([sys.executable,'-c','import time;time.sleep(30)'],
+                                   stdout=subprocess.PIPE,stderr=subprocess.PIPE,text=True)
+            workspace=SimpleNamespace(state_dir=state,slug='alpha')
+            try:
+                with patch('scripts.run_workspace_runtime_acceptance._create',return_value=(workspace,{}, {},{})), \
+                     patch('scripts.run_workspace_runtime_acceptance._start_writer',return_value=writer), \
+                     patch('scripts.run_workspace_runtime_acceptance._start_controller',side_effect=RuntimeError('controller setup failure')):
+                    with self.assertRaisesRegex(RuntimeError,'controller setup failure'):
+                        run_acceptance(root/'receipt')
+                self.assertIsNotNone(writer.poll());self.assertEqual(_live_fixture_group(writer.pid),[])
+            finally:
+                _stop(writer)
 
     def test_two_real_engines_keep_processing_and_refuse_cross_namespace_inputs(self):
         with tempfile.TemporaryDirectory(dir="/tmp") as directory:

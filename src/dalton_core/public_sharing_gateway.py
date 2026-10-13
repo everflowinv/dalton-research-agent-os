@@ -185,10 +185,15 @@ def handler(gateway):
         def log_message(self,*args):pass
         def reply(self,status,body,ctype='application/json; charset=utf-8',cookie=None):
             self.send_response(status);self.send_header('Content-Type',ctype);self.send_header('Content-Length',str(len(body)));self.send_header('Cache-Control','no-store');self.send_header('Referrer-Policy','no-referrer');self.send_header('X-Content-Type-Options','nosniff');self.send_header('X-Frame-Options','DENY');self.send_header('Content-Security-Policy',"default-src 'self'; script-src 'self' 'unsafe-inline'; style-src 'self' 'unsafe-inline'; connect-src 'self'; frame-ancestors 'none'; form-action 'self'")
+            if self.close_connection:self.send_header('Connection','close')
             if cookie:self.send_header('Set-Cookie',COOKIE+'='+cookie+'; Path=/dalton/; Secure; HttpOnly; SameSite=Strict')
             self.end_headers()
             if self.command!='HEAD':self.wfile.write(body)
-        def fail(self,status,message):self.reply(status,json.dumps({'display_message':message},ensure_ascii=False).encode())
+        def fail(self,status,message):
+            # Early refusals may leave the POST body unread. Never let that
+            # body become a request line on a reused reverse-proxy connection.
+            self.close_connection=True
+            self.reply(status,json.dumps({'display_message':message},ensure_ascii=False).encode())
         def body(self,limit=MAX_REQUEST):
             lengths=self.headers.get_all('Content-Length',[])
             if self.headers.get('Transfer-Encoding') or len(lengths)!=1 or not lengths[0].isdigit() or int(lengths[0])>limit:raise ValueError('request body size invalid')

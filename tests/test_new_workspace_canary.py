@@ -608,7 +608,24 @@ class NewWorkspaceCanaryTests(unittest.TestCase):
         first = coordinator().dispatch_once()
         self.assertIn(first["status"], {"queued", "committed"},
                       json.dumps(first, indent=1, default=str))
-        [derived] = first["derived"]
+        # The coordinator also reports the two refused direct quarter-pair
+        # attempts. They are not additional FY-minus-9M results or claims.
+        # Exact baseline 2938283d already returns all three diagnostics.
+        self.assertEqual(len(first["derived"]), 3)
+        [derived] = [item for item in first["derived"]
+                     if item["accession"] == GZMO_ANNUAL_ACCESSION
+                     and item["rule_ref"] == SEC_FY_MINUS_9M_RULE_REF]
+        refused = [item for item in first["derived"] if item is not derived]
+        self.assertEqual({item["accession"] for item in refused},
+                         {"0009900002-25-000033", "0009900002-25-000022"})
+        for item in refused:
+            self.assertEqual(item["status"], "refused")
+            self.assertEqual(item["rule_ref"],
+                             "research-auto-commit:sec-statement-line-growth-quarter-pair:v1")
+            self.assertIn("unavailable or ambiguous", item["reason"])
+            self.assertFalse(item.get("ledger_write", False))
+        self.assertEqual({item["accession"] for item in first["queued"]},
+                         {item["accession"] for item in refused})
         self.assertEqual(derived["status"], "committed", json.dumps(derived, indent=1))
         self.assertEqual((derived["accession"], derived["period"], derived["value"],
                           derived["rule_ref"]),

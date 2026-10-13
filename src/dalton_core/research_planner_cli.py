@@ -28,6 +28,7 @@ from __future__ import annotations
 import argparse
 import json
 import os
+import sqlite3
 import sys
 from datetime import datetime, timezone
 from pathlib import Path
@@ -60,7 +61,7 @@ from .research_state import (
     state_digest,
 )
 from .service_config_location import service_config_path
-from .store import DaltonStore, canonical_json
+from .store import DaltonStore, canonical_json, content_hash
 
 SUMMARY_SCHEMA_VERSION = "0.1"
 # One state, one decision.  The child already replays a *stored* plan for an
@@ -108,7 +109,9 @@ SETTLEMENT_REPLAN_SECONDS = 1_800
 # Keep storage bounded (historical 266KB inline rows still do not fit); model
 # Work admission and native provider controls independently enforce token,
 # cost and timeout authority. A token setting is not a byte count.
-MAX_WORK_ORDER_PROMPT_BYTES = 128_000
+# A source-bound note directory can already occupy 127KB after projection.
+# Leave room for new questions while retaining the configured model input cap.
+MAX_WORK_ORDER_PROMPT_BYTES = 192_000
 # The planner reads a small object and answers with a short ranked list. Both
 # bounds are generous against that, and small against a filing window.
 # 2026-09-16: 120,000 → 80,000. The staged projection carries the live state
@@ -286,7 +289,8 @@ def build_state(store: DaltonStore, missions: CoverageMissionAuthority,
     acquisition: dict[str, Any] = {}
     for entry in checklist:
         company_ref = entry["company_ref"]
-        financial_models[company_ref] = financial_state(store.connection, company_ref, mission)
+        financial_models[company_ref] = financial_state(
+            store.connection, company_ref, mission, state_dir=Path(store.path).parent)
         acquisition[company_ref] = missions.sec_dispatch_outcomes(company_ref)
         held = missions.document_figures(company_ref)
         figures[company_ref] = {
@@ -340,10 +344,55 @@ def build_state(store: DaltonStore, missions: CoverageMissionAuthority,
         except Exception as exc:  # preserve ordinary planning, disclose unavailable original reads
             document_inventory = {"status": "unavailable", "reason": type(exc).__name__}
 
+    # Exact source-replayed history failures can point at already admitted
+    # reading capabilities. The hint creates no admission or repair permission.
+    from .model_history_note_priority import read as read_history_note_priority
+    for entry in checklist:
+        company_ref = entry['company_ref']
+        try:
+            priority = read_history_note_priority(missions=missions, mission=mission,
+                state_dir=state_dir, company_ref=company_ref, ticker=entry.get('ticker'),
+                documents=(document_inventory.get('readable_documents_by_company') or {}).get(company_ref,()),
+                failures=financial_models[company_ref].get('model_execution_failures',()))
+            if priority is not None:
+                financial_models[company_ref]['model_history_note_priority'] = priority
+            elif any('does not tie to filed history' in str(f.get('reason',''))
+                     for f in financial_models[company_ref].get('model_execution_failures',())):
+                financial_models[company_ref]['model_history_note_priority_unavailable'] = 'current_root_or_exact_note_target_not_proved'
+        except (OSError, ValueError, KeyError, TypeError, RuntimeError, sqlite3.Error) as exc:
+            financial_models[company_ref]['model_history_note_priority_unavailable'] = type(exc).__name__
+
+    from .initial_screen_failure_feedback import read_feedback
+    try:
+        failure_config = json.loads((state_dir/'initial-screen-model-config.json').read_text())
+        screen_feedback = {entry['company_ref']: read_feedback(store.connection,
+            state_dir=state_dir, mission=mission, company_ref=entry['company_ref'],config=failure_config)
+            for entry in checklist}
+    except (OSError, ValueError, KeyError, TypeError):
+        screen_feedback = {}
+    from .initial_screen_quality_feedback import read_feedback as read_quality_feedback
+    quality_feedback = {}
+    for entry in checklist:
+        try:
+            quality_feedback[entry['company_ref']] = read_quality_feedback(store.connection,company_ref=entry['company_ref'])
+        except (ValueError, KeyError, TypeError, sqlite3.Error) as exc:
+            quality_feedback[entry['company_ref']] = {'status':'unavailable','reason':type(exc).__name__}
+    from .investment_memo_planner_feedback import read_feedback as read_memo_feedback
+    memo_feedback = {}
+    try:
+        memo_config = json.loads((state_dir/'dossier-model-config.json').read_text())
+        memo_feedback = {entry['company_ref']: read_memo_feedback(store.connection,
+            state_dir=state_dir, mission=mission, company_ref=entry['company_ref'], config=memo_config)
+            for entry in checklist}
+    except (OSError, ValueError, KeyError, TypeError):
+        pass
     state = build_research_state(
         mission=mission, checklist=checklist, industry=industry,
         figures_by_company=figures, financial_models_by_company=financial_models,
         metrics_by_company=metrics,
+        initial_screen_feedback_by_company=screen_feedback,
+        initial_screen_quality_feedback_by_company=quality_feedback,
+        memo_question_feedback_by_company=memo_feedback,
         contested_by_company=disputed, acquisition_by_company=acquisition,
         dossier_feedback_by_company=read_dossier_repair_feedback(
             Path(store.path).parent),
@@ -378,6 +427,12 @@ def build_state(store: DaltonStore, missions: CoverageMissionAuthority,
     followups = planner_context(store.connection, mission)
     if followups is not None:
         state["reflection_followup_context"] = followups
+    from .research_planner import typed_note_directory_contract, TASK_HASH
+    note_contract = typed_note_directory_contract(state)
+    if note_contract is not None:
+        # An input-contract change is one normal planning decision. A clock,
+        # event or repeated tick cannot create a new permission or repair slot.
+        state["planner_task_hash"] = content_hash({"task": TASK_HASH, "typed_note_directory": note_contract})
     state["content_hash"] = state_content_hash(state)
     return state
 
@@ -425,7 +480,17 @@ def record_attempt(state_dir: Path, state_hash: str, summary: Mapping[str, Any])
         "projection_rule_ref": PROMPT_PROJECTION_REF,
         "work_order_prompt_bound": MAX_WORK_ORDER_PROMPT_BYTES,
         "conservative_work_input_byte_bound": summary.get("conservative_work_input_byte_bound"),
+        **({"structural_revalidation_contract": (summary.get("structural_revalidation_contract")
+                 or previous.get("structural_revalidation_contract"))}
+           if summary.get("structural_revalidation_contract") or previous.get("structural_revalidation_contract") else {}),
     }
+    if (summary.get("plan_status") == "held" and previous.get("plan_status") in TERMINAL_PLAN_STATUSES
+            and ledger[state_hash].get("structural_revalidation_contract")):
+        # Free verification never turns an original terminal verdict into a
+        # transient retry. Preserve its time/count/reason and remember only
+        # the fixed free contract; changing model policy cannot buy it again.
+        ledger[state_hash] = {**previous, "structural_revalidation_contract":
+                              ledger[state_hash]["structural_revalidation_contract"]}
     ordered = sorted(ledger.items(), key=lambda item: str(item[1].get("at") or ""),
                      reverse=True)[:MAX_LEDGER_ENTRIES]
     try:
@@ -672,6 +737,44 @@ def run_planner(
         recovery = None
         attempts = read_attempt_ledger(state_dir)
         last_attempt = attempts.get(state['content_hash']) or {}
+        from .planner_structural_revalidation import (CONTRACT as STRUCTURAL_REVALIDATION,
+            candidate as revalidate_paid_plan, current_numeric_canonical_binding)
+        def canonical_resolver(inquiry, complete_state):
+            return current_numeric_canonical_binding(store.connection, mission, inquiry, complete_state)
+        if (not dry_run and model_config_path is not None
+                and last_attempt.get('plan_status') in {'refused', 'held'}
+                and last_attempt.get('structural_revalidation_contract') != STRUCTURAL_REVALIDATION):
+            summary['structural_revalidation_contract'] = STRUCTURAL_REVALIDATION
+            # An operational ledger is only a bounded hint. Eligibility comes
+            # from the exact immutable Work, complete state, receipts and fees.
+            try:
+                free = revalidate_paid_plan(state_dir=state_dir, scheduler_db=scheduler_db,
+                    config=effective_planner_model_config(state_dir=state_dir, model_config_path=model_config_path),
+                    state=state, mission=mission, validate=lambda text: plan_from_response(
+                        state, text, created_at=now.isoformat(timespec='microseconds'),
+                        canonical_binding_resolver=canonical_resolver))
+            except (ValueError, OSError, sqlite3.Error) as exc:
+                free = None
+                summary['structural_revalidation'] = {'status':'unverified','reason':f'{type(exc).__name__}: {exc}'}
+            if free is not None:
+                stored = missions.record_research_plan(free['plan'],
+                    decided_by=mission['autonomy']['automation_principal'],
+                    work_order_ref=free['proof']['work_ref'])
+                record_decision(state_dir,state_hash=state['content_hash'],
+                    planning_hash=state_planning_hash(state), planning_core_hash=state_planning_core_hash(state),
+                    settlement_hash=state_planning_settlement_hash(state),at=now.isoformat(timespec='microseconds'))
+                if state.get('reflection_followup_context'):
+                    from .research_followup_automation import FollowupAutomationAuthority
+                    summary['followup_planner_observations'] = [x['id'] for x in
+                        FollowupAutomationAuthority(store).observe_planner(
+                            context=state['reflection_followup_context'], stored_plan=stored, full_state=state)]
+                summary.update({'status':'succeeded','plan_status':stored['status'],'replayed':True,
+                    'plan_ref':stored['plan_id'],'directives':len(free['plan']['directives']),
+                    'inquiries':len(free['plan']['inquiries']),'sufficiency':len(free['plan'].get('sufficiency') or []),
+                    'assessment':free['plan']['assessment'], 'structural_revalidation':free['proof'],
+                    'reading_priorities':document_reading_priorities(free['plan']),
+                    'addressable_inquiries':sum(1 for row in gap_filling_inquiries(free['plan']) if row['addressable'])})
+                return summary
         if (not dry_run and model_config_path is not None
                 and last_attempt.get('plan_status') in {'model_unavailable', 'skipped:pool_exhausted'}):
             from .planner_paid_output_recovery import planner_candidate
@@ -799,7 +902,8 @@ def run_planner(
                         at=now.isoformat(timespec="microseconds"))
         try:
             plan = plan_from_response(
-                state, call["text"], created_at=now.isoformat(timespec="microseconds"))
+                state, call["text"], created_at=now.isoformat(timespec="microseconds"),
+                canonical_binding_resolver=canonical_resolver)
         except ResearchPlanError as exc:
             # Refused whole rather than partially applied: a ranking with the
             # invented parts removed no longer means what the model meant.

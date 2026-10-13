@@ -22,8 +22,8 @@ class AsyncBackupCadenceTests(unittest.TestCase):
     def test_blocked_real_hash_does_not_block_constructor_start_or_ticks(self):
         with tempfile.TemporaryDirectory() as d:
             root=Path(d);config,manifest=self.fixture(root);entered=threading.Event();release=threading.Event();original=backup._sha256
-            def blocked(path):
-                entered.set();self.assertTrue(release.wait(5));return original(path)
+            def blocked(path, **kwargs):
+                entered.set();self.assertTrue(release.wait(5));return original(path, **kwargs)
             with mock.patch.object(backup,'_sha256',side_effect=blocked):
                 service=DaltonService(config)
                 self.assertFalse(entered.is_set())
@@ -55,7 +55,7 @@ class AsyncBackupCadenceTests(unittest.TestCase):
                     self.assertFalse(service._backup_cadence_restored);service._poll_backup();snapshot.assert_not_called();self.assertEqual(restore.call_count,1)
                 finally:service.close()
 
-    def test_stop_waits_for_running_hash_verification_without_new_snapshot(self):
+    def test_stop_cancels_running_hash_verification_without_new_snapshot(self):
         with tempfile.TemporaryDirectory() as d:
             config,_=self.fixture(Path(d));service=DaltonService(config);entered=threading.Event();release=threading.Event();finished=threading.Event()
             original=service._backup.latest_verified_manifest
@@ -66,7 +66,9 @@ class AsyncBackupCadenceTests(unittest.TestCase):
                 try:
                     self.assertFalse(finished.wait(.05));snapshot.assert_not_called()
                     release.set();closer.join(3);self.assertTrue(finished.is_set());snapshot.assert_not_called()
-                    self.assertTrue(service._backup_cadence_restored)
+                    self.assertFalse(service._backup_cadence_restored)
+                    self.assertEqual(service._backup_state['state'], 'cancelled')
+                    self.assertIsNone(service._backup_state['last_success_at'])
                 finally:release.set();closer.join(3)
 
     def test_stop_during_due_or_missing_verification_never_starts_snapshot(self):

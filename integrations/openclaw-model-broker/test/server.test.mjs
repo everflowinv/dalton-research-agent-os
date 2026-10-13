@@ -339,3 +339,19 @@ test("source has no Dalton authority imports, model CLI args, or secret-bearing 
   }
   assert.match(source, /api\.runtime|runtime\.llm\.complete/);
 });
+
+test("profile limits read still requires authenticated owner-only IPC", async () => {
+  const stateDir=await mkdtemp(path.join(os.tmpdir(),"dalton-cap-test-"));
+  let calls=0;
+  const server=new BrokerServer(new ModelBroker({version:"test",llm:{complete(){calls++;throw new Error("provider forbidden");}}},config));
+  try {
+    const socketPath=await server.start(stateDir);
+    const {secret}=await loadOrCreateSecret(stateDir,config.socketName);
+    const read={...request,readProfileLimits:true};
+    const bad=await exchange(socketPath,JSON.stringify(read)+"\n");
+    assert.equal(bad.ok,false);
+    const result=await exchange(socketPath,JSON.stringify(authenticated(read,secret))+"\n");
+    assert.equal(result.available,true);assert.deepEqual(result.limits,{maxTokens:100,timeoutMs:500});
+    assert.equal(calls,0);
+  } finally {await server.stop();await rm(stateDir,{recursive:true,force:true});}
+});

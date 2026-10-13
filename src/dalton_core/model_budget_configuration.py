@@ -176,11 +176,16 @@ def _call_budget_view(state_dir: str | Path, purpose: str, *,
         # globally governed cost is still known and must remain editable.
         effective = {"max_cost_usd": effective_shared_max_cost(
             shared_policy, purpose)}
+    fields = list(defaults_wire["purposes"][purpose]) if kind == "run" else None
+    if kind == "run" and purpose == "investment_memo":
+        from .call_budget import MEMO_MAINTENANCE_ROUNDS_FIELD
+        fields.append(MEMO_MAINTENANCE_ROUNDS_FIELD)
+        effective.setdefault(MEMO_MAINTENANCE_ROUNDS_FIELD, 1)
     overrides = validate((config.get(f"purpose_{kind}_budgets") or {}).get(purpose, {}))
     general = validate(config.get(f"{kind}_budget", {}))
     return {"editable": True, "source": str(path), "effective": effective,
             "overrides": overrides, "general": general, "kind": kind,
-            "fields": list(defaults_wire["purposes"][purpose]) if kind == "run" else None,
+            "fields": fields,
             "config_hash": hashlib.sha256(data).hexdigest(),
             "requires_restart": False,
             "shared_call_cost": (None if shared_policy is None else {

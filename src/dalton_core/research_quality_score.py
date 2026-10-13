@@ -73,7 +73,7 @@ _SCHEMA_PATH = Path(__file__).with_name("research_quality_schema.sql")
 # identity, so a rescore after a scorer change is a new version rather than a
 # duplicate -- otherwise a fixed check could never be applied to a document
 # that had already been scored by the broken one.
-SCORER_VERSION = "0.4"
+SCORER_VERSION = "0.5"
 
 ARTEFACT_KINDS: tuple[str, ...] = (
     "initial_screen", "ask_answer", "company_dossier", "weekly_brief",
@@ -572,7 +572,10 @@ def _result(check: str, *, status: str, findings: Sequence[Mapping[str, Any]] = 
 def check_numbers_without_refs(art: Mapping[str, Any], context: CheckContext) -> dict[str, Any]:
     findings = []
     for section in art["sections"]:
-        for token in unsourced_numbers(section["body"], section["numbers"]):
+        from .material_request_citation import without_verified_request_tokens
+        body = without_verified_request_tokens(section["body"], section.get("gap_items") or (),
+                                               context.get("resolve_request"))
+        for token in unsourced_numbers(body, section["numbers"]):
             findings.append({"section": section["title"], "figure": token})
     return _result(
         "numbers_without_refs",
@@ -1198,19 +1201,36 @@ def check_latest_transcript_and_release_cited(art: Mapping[str, Any], context: C
     inputs = ((art.get("contract") or {}).get("pack") or {}).get("inputs") or []
     findings = []
     for kind, label in (("transcript", "最新电话会纪要"), ("release", "最新业绩发布稿")):
-        held = sorted((item for item in inputs if isinstance(item, Mapping)
-                       and (str(item.get("source_kind") or "")
-                            or DOC_KIND_SOURCE.get(str(item.get("doc_kind") or ""), "")) == kind),
-                      key=lambda item: str(item.get("as_of") or item.get("date") or ""))
+        source = context.get("quality_sources")
+        if kind == "transcript" and context.get("source_state_supplied"):
+            if source is None:
+                findings.append({"code":"earnings_call_source_unavailable", "detail":label,
+                                 "reason":context.get("quality_source_error")})
+                continue
+            held = sorted(({"ref":doc,"date":role['event_date']} for doc,role in source['call_roles'].items()
+                           if role['role']=='issuer_earnings_call'), key=lambda item:item['date'])
+            if not held:
+                findings.append({"code":"earnings_call_role_unverified", "detail":label})
+                continue
+        else:
+            held = sorted((item for item in inputs if isinstance(item, Mapping)
+                           and (str(item.get("source_kind") or "")
+                                or DOC_KIND_SOURCE.get(str(item.get("doc_kind") or ""), "")) == kind),
+                          key=lambda item: str(item.get("as_of") or item.get("date") or ""))
         if held:
             latest = str(held[-1].get("ref"))
             if latest not in cited:
                 findings.append({"code": f"latest_{kind}_not_cited", "ref": latest, "detail": label})
         elif not any(str(item.get("source_kind")) == kind for item in _source_refs(art)):
             findings.append({"code": f"no_{kind}_cited", "detail": label})
-    return _result("latest_transcript_and_release_cited", status="fail" if findings else "pass",
-                   findings=findings, detail=("引用了最新纪要与发布稿" if not findings
+    result = _result("latest_transcript_and_release_cited", status="fail" if findings else "pass",
+                   findings=findings, detail=("引用了已证实发行人财报电话会与发布稿" if not findings
                                               else "、".join(item["detail"] for item in findings) + "未被引用"))
+    if context.get("quality_sources"):
+        result["unclassified_transcripts"] = [
+            {"ref":doc,"reason":role.get("reason")} for doc,role in context["quality_sources"]["call_roles"].items()
+            if role['role']=='unverified']
+    return result
 
 
 def check_material_missing_bound(art: Mapping[str, Any], context: CheckContext) -> dict[str, Any]:
@@ -1382,6 +1402,14 @@ def check_issuer_attribution(art: Mapping[str, Any], context: CheckContext) -> d
         for item in section.get("source_refs") or ():
             owner = item.get("company_ref")
             other = set(item.get("company_refs") or ()) - {subject}
+            if context.get("source_state_supplied") and str(item.get("ref") or "").startswith("doc-passage:"):
+                from .initial_screen_quality_sources import issuer_finding
+                evidence = context.get("quality_sources")
+                code = issuer_finding(section,item,subject,evidence) if evidence else "issuer_source_unavailable"
+                if code:
+                    findings.append({"code":code,"section":section["title"],"ref":item.get("ref"),
+                                     "subject_ref":subject,"company_ref":owner,"company_refs":sorted(other)})
+                continue
             mismatch = (subject and owner and owner != subject) or (subject and other)
             if mismatch and str(item.get("source_kind")) not in _EXTERNAL_KINDS:
                 kind = str(item.get("source_kind") or "")
@@ -1595,6 +1623,7 @@ def withheld_criteria(deterministic: Mapping[str, Any] | None) -> dict[str, str]
 def run_deterministic(
     art: Mapping[str, Any], rubric: Rubric, *,
     core: sqlite3.Connection | None = None, mission_ref: str | None = None,
+    state_dir: Any = None,
 ) -> dict[str, Any]:
     """Every check this rubric names, in the rubric's own order."""
 
@@ -1602,6 +1631,15 @@ def run_deterministic(
     # check about the *rubric*: which of its criteria this Core cannot yet
     # hold against a document. Every other check ignores it.
     context: CheckContext = {"core": core, "rubric": rubric, "mission_ref": mission_ref}
+    if state_dir is not None and rubric.rubric_ref == "rubric:initial-screen-strl":
+        from .material_request_citation import request_citation_resolver
+        from .initial_screen_quality_sources import source_context
+        context["source_state_supplied"] = True
+        context["resolve_request"] = request_citation_resolver(state_dir,art.get("subject_ref"))
+        try:
+            context["quality_sources"] = source_context(state_dir,art)
+        except (OSError, ValueError, sqlite3.Error) as exc:
+            context["quality_source_error"] = str(exc)[:240]
     results = [CHECKS[name](art, context) for name in rubric.deterministic_checks]
     failed = [item["check"] for item in results if item["status"] == "fail"]
     out = {
@@ -1627,6 +1665,8 @@ def run_deterministic(
             "substance": SUBSTANCE_VERSION,
             "artefact_contract": str((art.get("contract") or {}).get("version") or ""),
             "artefact_lint": str((art.get("contract") or {}).get("lint") or ""),
+            **({"quality_source_scope":context["quality_sources"]["content_hash"]}
+               if context.get("quality_sources") else {}),
         }
     return out
 
@@ -2437,13 +2477,14 @@ def score_artefact(
     mission: Mapping[str, Any] | None = None,
     request_id: str | None = None,
     verifier_model: Any = None,
+    state_dir: Any = None,
 ) -> dict[str, Any]:
     """Run the deterministic layer always, the judge layer only if given a model."""
 
     rubric = get_rubric(rubric_name)
     deterministic = run_deterministic(
         art, rubric, core=core,
-        mission_ref=None if mission is None else mission.get("mission_ref"),
+        mission_ref=None if mission is None else mission.get("mission_ref"), state_dir=state_dir,
     )
     judgement = None
     verification = None

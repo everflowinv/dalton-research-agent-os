@@ -7,6 +7,8 @@ lane CLI or the generic governance module landing in the sibling slices.
 
 from __future__ import annotations
 
+from contextlib import ExitStack, contextmanager
+
 import json
 import os
 import stat
@@ -92,7 +94,23 @@ def _stub_child(
     return stub
 
 
-class SecLaneLauncherTests(unittest.TestCase):
+class _LauncherFixture(unittest.TestCase):
+    @contextmanager
+    def _temporary_directory(self):
+        # addCleanup runs after a test's with-block. Supervisors must instead
+        # join before that block removes the ticket directory they may write.
+        with ExitStack() as resources:
+            directory = resources.enter_context(tempfile.TemporaryDirectory())
+            previous = getattr(self, "_launcher_resources", None)
+            self._launcher_resources = resources
+            try:
+                yield directory
+            finally:
+                self._launcher_resources = previous
+
+
+
+class SecLaneLauncherTests(_LauncherFixture):
     def _launcher(self, root: Path, **kwargs) -> SecLaneLauncher:
         state = root / "state"
         state.mkdir(exist_ok=True)
@@ -110,11 +128,49 @@ class SecLaneLauncherTests(unittest.TestCase):
         launcher = SecLaneLauncher(
             state_dir=state, governance_path=gov, staging_path=staging, **kwargs
         )
-        self.addCleanup(launcher.close)
+        self._launcher_resources.callback(launcher.close)
         return launcher
 
+    def test_fixture_joins_supervisors_before_directory_cleanup(self) -> None:
+        original_directory = tempfile.TemporaryDirectory
+        for exit_code, body_error in ((0, False), (3, False), (0, True)):
+            with self.subTest(exit_code=exit_code, body_error=body_error):
+                launchers = []
+                cleanup_checks = []
+
+                class CheckedDirectory(original_directory):
+                    def cleanup(inner_self):
+                        # This is the actual rmtree boundary, not a post-test
+                        # assertion after addCleanup has hidden the ordering.
+                        for launcher in launchers:
+                            self.assertFalse(launcher._supervisor.is_alive())
+                            self.assertIsNone(launcher._current)
+                        cleanup_checks.append(True)
+                        super().cleanup()
+
+                def exercise():
+                    with self._temporary_directory() as directory:
+                        root = Path(directory)
+                        for ticker in ("ACN", "CTSH"):
+                            launcher = self._launcher(root, python_executable=str(
+                                _stub_child(root, exit_code=exit_code)))
+                            launchers.append(launcher)
+                            launcher.start(issuers=[ticker], filed_from="2026-06-01",
+                                           filed_to="2026-10-31", actor_ref=OWNER)
+                            self.assertEqual(launcher.wait(timeout=30), exit_code)
+                        if body_error:
+                            raise RuntimeError("fixture body failure")
+
+                with patch("tempfile.TemporaryDirectory", CheckedDirectory):
+                    if body_error:
+                        with self.assertRaisesRegex(RuntimeError, "fixture body failure"):
+                            exercise()
+                    else:
+                        exercise()
+                self.assertEqual(cleanup_checks, [True])
+
     def test_refuses_before_spawning(self) -> None:
-        with tempfile.TemporaryDirectory() as directory:
+        with self._temporary_directory() as directory:
             root = Path(directory)
             proposed = self._launcher(root, governance_loader=lambda _p: _governance(approved=False))
             with self.assertRaises(LaneLaunchRejected):
@@ -148,7 +204,7 @@ class SecLaneLauncherTests(unittest.TestCase):
             self.assertEqual(list((root / "state" / "sec-lane-runs").iterdir()), [])
 
     def test_registered_annual_report_launch_is_explicitly_configured(self) -> None:
-        with tempfile.TemporaryDirectory() as directory:
+        with self._temporary_directory() as directory:
             root = Path(directory)
             unconfigured = self._launcher(root)
             with self.assertRaisesRegex(LaneLaunchRejected, "not configured"):
@@ -206,7 +262,7 @@ class SecLaneLauncherTests(unittest.TestCase):
             )
 
     def test_annual_child_initialization_failure_exhausts_persisted_restart_budget(self) -> None:
-        with tempfile.TemporaryDirectory() as directory:
+        with self._temporary_directory() as directory:
             root = Path(directory)
             state = root / "state"
             state.mkdir()
@@ -257,7 +313,7 @@ class SecLaneLauncherTests(unittest.TestCase):
             self.assertIsNone(failed["process_restart_not_before"])
 
     def test_writer_restart_adopts_exact_live_child_and_preserves_single_flight(self) -> None:
-        with tempfile.TemporaryDirectory() as directory:
+        with self._temporary_directory() as directory:
             root = Path(directory)
             state = root / "state"
             state.mkdir()
@@ -307,7 +363,7 @@ class SecLaneLauncherTests(unittest.TestCase):
                 )
 
     def test_inactive_orphan_does_not_hide_later_resumable_ticket(self) -> None:
-        with tempfile.TemporaryDirectory() as directory:
+        with self._temporary_directory() as directory:
             root = Path(directory)
             state = root / "state"
             state.mkdir()
@@ -364,7 +420,7 @@ class SecLaneLauncherTests(unittest.TestCase):
             self.assertEqual(launcher._current[0], resumable)
 
     def test_ticket_lifecycle_command_shape_and_single_slot(self) -> None:
-        with tempfile.TemporaryDirectory() as directory:
+        with self._temporary_directory() as directory:
             root = Path(directory)
             launcher = self._launcher(
                 root,
@@ -414,7 +470,7 @@ class SecLaneLauncherTests(unittest.TestCase):
             self.assertEqual(launcher.wait(timeout=30), 0)
 
     def test_failed_child_and_orphaned_ticket_are_reported_truthfully(self) -> None:
-        with tempfile.TemporaryDirectory() as directory:
+        with self._temporary_directory() as directory:
             root = Path(directory)
             launcher = self._launcher(root, python_executable=str(_stub_child(root, exit_code=3)))
             ticket = launcher.start(issuers=["ACN"], filed_from="2026-06-01", filed_to="2026-08-26", actor_ref=OWNER)
@@ -436,7 +492,7 @@ class SecLaneLauncherTests(unittest.TestCase):
                 staging_path=root / "review" / "candidate-staging.sqlite",
                 governance_loader=lambda _p: _governance(),
             )
-            self.addCleanup(fresh.close)
+            self._launcher_resources.callback(fresh.close)
             orphan = fresh.status(ticket["id"])
             self.assertEqual(orphan["status"], "orphaned")
             self.assertIsNotNone(orphan["completed_at"])
@@ -447,7 +503,7 @@ class SecLaneLauncherTests(unittest.TestCase):
 
     def test_form_is_validated_recorded_and_forwarded(self) -> None:
         """P9b: the annual form rides the ticket and the child argv; others fail closed."""
-        with tempfile.TemporaryDirectory() as directory:
+        with self._temporary_directory() as directory:
             root = Path(directory)
             launcher = self._launcher(root)
             with self.assertRaises(LaneLaunchRejected):
@@ -478,7 +534,7 @@ class SecLaneLauncherTests(unittest.TestCase):
             self.assertEqual(argv[argv.index("--form") + 1], "10-Q")
 
     def test_mission_automation_binds_exact_context_and_accession(self) -> None:
-        with tempfile.TemporaryDirectory() as directory:
+        with self._temporary_directory() as directory:
             root = Path(directory)
             launcher = self._launcher(root)
             with self.assertRaises(LaneLaunchRejected):
@@ -518,7 +574,7 @@ class SecLaneLauncherTests(unittest.TestCase):
             )
 
     def test_live_mode_passes_allow_network_and_default_governance_loader_is_lazy(self) -> None:
-        with tempfile.TemporaryDirectory() as directory:
+        with self._temporary_directory() as directory:
             root = Path(directory)
             launcher = self._launcher(root, mode_args=("--allow-network",))
             self.assertTrue(launcher.networked)
@@ -529,9 +585,8 @@ class SecLaneLauncherTests(unittest.TestCase):
                 (root / "state" / "sec-lane-runs" / ticket["id"].split(":", 1)[1] / "argv.json").read_text()
             )
             self.assertEqual(argv[-1], "--allow-network")
-            # ``addCleanup`` runs after this TemporaryDirectory context exits.
-            # Stop the ticket supervisor here so its atomic status write cannot
-            # race the directory removal under a loaded full-suite process.
+            # Close before constructing a second independent launcher; the
+            # enclosing fixture also guarantees close on assertion failures.
             launcher.close()
             # Without an injected loader the launcher goes through the generic
             # governance module; an unreadable record is a rejection, never a crash.
@@ -540,7 +595,7 @@ class SecLaneLauncherTests(unittest.TestCase):
                 state_dir=state, governance_path=root / "missing.json",
                 staging_path=root / "review" / "candidate-staging.sqlite",
             )
-            self.addCleanup(default.close)
+            self._launcher_resources.callback(default.close)
             with self.assertRaises(LaneLaunchRejected):
                 default.start(issuers=["ACN"], filed_from="2026-06-01", filed_to="2026-08-26", actor_ref=OWNER)
             default.close()
@@ -551,7 +606,7 @@ if __name__ == "__main__":
     unittest.main()
 
 
-class MissionIssuerCikTests(unittest.TestCase):
+class MissionIssuerCikTests(_LauncherFixture):
     """2026-09-25: a mission's own companies reach the lane with their CIK.
 
     ws-7d's six company-facts tickets for AMZN all exited 1 with ``unknown
@@ -593,21 +648,21 @@ class MissionIssuerCikTests(unittest.TestCase):
     def test_the_cik_comes_from_the_statement_filings_then_the_sec_plan(self) -> None:
         from dalton_core.sec_lane_launcher import mission_issuer_cik
 
-        with tempfile.TemporaryDirectory() as directory:
+        with self._temporary_directory() as directory:
             state = self._state(Path(directory),
                                 filings=[(self.AMZN, "0001018724"), (self.AMZN, "1018724")])
             self.assertEqual(mission_issuer_cik(state, self.AMZN), "0001018724")
             self.assertIsNone(mission_issuer_cik(state, "company:ticker:nope"))
-        with tempfile.TemporaryDirectory() as directory:
+        with self._temporary_directory() as directory:
             state = self._state(Path(directory), plan_companies={self.AMZN: {"cik": "0001018724"}})
             self.assertEqual(mission_issuer_cik(state, self.AMZN), "0001018724")
-        with tempfile.TemporaryDirectory() as directory:
+        with self._temporary_directory() as directory:
             # Two different CIKs for one company is not guessed between.
             state = self._state(Path(directory), filings=[(self.AMZN, "0001018724"), (self.AMZN, "0000000001")])
             self.assertIsNone(mission_issuer_cik(state, self.AMZN))
 
     def test_the_launcher_passes_the_mission_companys_cik(self) -> None:
-        with tempfile.TemporaryDirectory() as directory:
+        with self._temporary_directory() as directory:
             root = Path(directory)
             state = self._state(root, filings=[(self.AMZN, "0001018724")])
             staging = root / "review" / "candidate-staging.sqlite"
@@ -619,7 +674,7 @@ class MissionIssuerCikTests(unittest.TestCase):
                 governance_loader=lambda _path: _governance(),
                 python_executable=str(_stub_child(root)),
                 mode_args=("--fixture-company-facts", str(root / "facts.json")))
-            self.addCleanup(launcher.close)
+            self._launcher_resources.callback(launcher.close)
             context = {**_mission_context(), "company_ref": self.AMZN, "ticker": "AMZN",
                        "mission_ref": "coverage-mission:ws-7d",
                        "mission_version_ref": "coverage-mission-version:ws-7d:4"}

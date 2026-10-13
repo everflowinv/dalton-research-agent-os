@@ -46,7 +46,16 @@ VERIFIER_SCHEMA = {'type':'object','additionalProperties':False,
                                'properties':{'target_ref':{'type':'string'},'verdict':{'enum':['accept','reject','unavailable']},
                                              'reason':{'type':['string','null']}}}}}}
 
+JSON_ENVELOPE_COMPATIBILITY_REF = 'directed-numeric-json-envelope:0.1'
+
+
 def _json(text):
+    # A single complete presentation fence has no numeric/source meaning.
+    # Remove only that envelope, byte-for-byte preserving its JSON body. The
+    # original model text/hash stays in the immutable invocation/formal proof.
+    # Prose, multiple blocks and an incomplete fence still fail json.loads.
+    from .annual_report_qualitative import unfence_json_text
+    text = unfence_json_text(text)
     def pairs(items):
         result={}
         for key,value in items:
@@ -63,8 +72,9 @@ def quotes(search_proof):
 def candidate_ref(draft):return 'directed-numeric-candidate:'+content_hash(draft)
 
 def parse_draft(text, *, metadata):
-    value=_json(text);targets=normalize_targets(metadata['numeric_targets'])
-    if not isinstance(value,Mapping) or set(value)!={'schema_version','targets'} or value['schema_version']!=CONTRACT_REF:
+    contract = metadata.get('numeric_contract_ref', CONTRACT_REF)
+    value=_json(text);targets=normalize_targets(metadata['numeric_targets'], contract_ref=contract)
+    if not isinstance(value,Mapping) or set(value)!={'schema_version','targets'} or value['schema_version']!=contract:
         raise DirectedNumericError('numeric draft has invalid closed shape')
     rows=value['targets']
     if not isinstance(rows,list) or len(rows)!=len(targets):raise DirectedNumericError('numeric draft must account for every required target')
@@ -92,7 +102,8 @@ def parse_draft(text, *, metadata):
                 raise DirectedNumericError(
                     'numeric figure differs from typed target: ' + key
                     + ' expected ' + short(target[key]) + '; received ' + short(figure.get(key)))
-        verify_numeric_candidate(figure,source,numeric_contract_ref=CONTRACT_REF)
+        verify_numeric_candidate(figure,source,numeric_contract_ref=contract,
+            operating_source_proof=metadata.get('operating_source_proof'))
     return dict(value)
 
 def parse_verifier(text, *, metadata):
@@ -117,21 +128,53 @@ def parse_verifier(text, *, metadata):
 # Immutable 0.1 instruction: future wording revisions need a new contract marker.
 DRAFT_IDENTITY_TASK_V1 = 'Answer ALL required numeric targets solely from the exact registered excerpts. Never calculate, convert units, infer a period, assign issuer amounts, or substitute a segment. Copy target_ref and every figure identity field (metric_ref, period, unit, currency, basis) EXACTLY from identity_templates, including null currency. Do not replace a target period such as FY2025 with a source phrase such as year ended December 31, 2025; the exact quote retains that source wording. as_reported_label must remain the metric label, not a date or period description. Each output target has exactly target_ref, status, figure and reason; never copy metric_definition or add other keys to that row. Supported rows have reason null; unavailable rows have figure null and a specific reason. Templates contain identity only: fill quote_id, subject_as_named, as_reported_label, value and scale from the exact excerpt. A matching year or digits do not prove the target period, issuer or metric. If the quote does not support the exact requested identity, return unavailable with no figure. Every supported figure must bind its own metric meaning, as-reported label, quote, issuer, period, unit, currency and basis. Unsupported targets remain unavailable with a precise missing evidence reason. Numbers hidden in prose do not satisfy a target. Return JSON only.'
 
-def draft_prompt(*,question,search_proof,targets,catalog):
+LABEL_PERIOD_CONTRACT_REF = 'directed-numeric-original-label-period:0.1'
+LABEL_PERIOD_INSTRUCTIONS = ("Copy as_reported_label verbatim from the original disclosure line in its original language; never translate the target label or use an amount/date as the label. Copy figure.period EXACTLY from identity_templates only when the quote explicitly supports that period. Preserve the source's actual date/period wording in the quote, never replace typed period identity with it. If a line's metric meaning or its exact reporting year/quarter/half-year is not established by the supplied original, return unavailable and identify what is missing; never guess current/latest period or invent a year.")
+
+def draft_prompt(*,question,search_proof,targets,catalog,contract_ref=CONTRACT_REF,operating_source_proof=None):
     identities = [{'target_ref': target['target_ref'],
                    'figure_identity': {key: target[key] for key in TARGET_IDENTITY_FIELDS}}
-                  for target in normalize_targets(targets)]
-    return canonical_json({'task':DRAFT_IDENTITY_TASK_V1,
+                  for target in normalize_targets(targets, contract_ref=contract_ref)]
+    schema = DRAFT_SCHEMA
+    if contract_ref != CONTRACT_REF:
+        from .operating_driver_units import CONTRACT_REF as OPERATING_REF
+        if contract_ref != OPERATING_REF:
+            raise DirectedNumericError('numeric draft prompt contract is unknown')
+        schema = copy.deepcopy(DRAFT_SCHEMA)
+        schema['properties']['schema_version']['const'] = contract_ref
+        schema['properties']['targets']['items']['properties']['figure']['anyOf'][0]['properties']['unit'] = {'enum': list(numeric_units(contract_ref))}
+    extra={}
+    if operating_source_proof is not None:
+        from .operating_driver_units import CONTRACT_REF as OPERATING_REF
+        from .operating_source_measurements import prompt_measurements
+        if contract_ref!=OPERATING_REF:
+            raise DirectedNumericError('native operating source proof cannot widen a legacy numeric prompt')
+        extra['native_operating_source_proof']=prompt_measurements(operating_source_proof,targets)
+    task=DRAFT_IDENTITY_TASK_V1
+    if contract_ref=='directed-document-operating-numeric:0.1':
+        task=task.replace('as_reported_label must remain the metric label, not a date or period description.',
+            'as_reported_label must copy the actual source-native operating line label verbatim, not the admitted metric label unless the original uses those exact words. The reader and independent verifier must prove that native line answers the complete admitted economic definition; lexical retrieval alone proves no metric equivalence. Never mix consolidated, segment, product-ton or nutrient-ton amounts.')
+    return canonical_json({'task':task,
                            'identity_contract_ref':DRAFT_IDENTITY_CONTRACT,
                            'identity_templates':identities,
                            'question':question,'targets':targets,'metric_definitions':catalog,
-                           'quotes':quotes(search_proof),'output_schema':DRAFT_SCHEMA,
+                           'quotes':quotes(search_proof),'output_schema':schema,
                            'scale_contract_ref':SCALE_CONTRACT_REF,
-                           'scale_instructions':SCALE_INSTRUCTIONS})
+                           'scale_instructions':SCALE_INSTRUCTIONS,
+                           'label_period_contract_ref':LABEL_PERIOD_CONTRACT_REF,
+                           'label_period_instructions':LABEL_PERIOD_INSTRUCTIONS,**extra})
+
+def legacy_draft_prompt_v2(*,question,search_proof,targets,catalog):
+    """Exact published scale+identity prompt before original-label instructions."""
+    value = json.loads(draft_prompt(question=question,search_proof=search_proof,targets=targets,catalog=catalog))
+    del value['label_period_contract_ref']
+    del value['label_period_instructions']
+    return canonical_json(value)
+
 
 def legacy_draft_prompt_v1(*,question,search_proof,targets,catalog):
     """Exact published identity prompt before canonical scale instructions."""
-    value = json.loads(draft_prompt(question=question,search_proof=search_proof,targets=targets,catalog=catalog))
+    value = json.loads(legacy_draft_prompt_v2(question=question,search_proof=search_proof,targets=targets,catalog=catalog))
     del value['scale_contract_ref']
     del value['scale_instructions']
     value['output_schema'] = LEGACY_DRAFT_SCHEMA
@@ -144,8 +187,12 @@ def legacy_draft_prompt_v0(*, question, search_proof, targets, catalog):
                            'quotes':quotes(search_proof),'output_schema':LEGACY_DRAFT_SCHEMA})
 
 
-def verifier_prompt(*,question,search_proof,draft,targets,catalog,producer_proof):
+def verifier_prompt(*,question,search_proof,draft,targets,catalog,producer_proof,operating_source_proof=None):
+    extra={}
+    if operating_source_proof is not None:
+        from .operating_source_measurements import prompt_measurements
+        extra['native_operating_source_proof']=prompt_measurements(operating_source_proof,targets)
     return canonical_json({'task':'Independently verify EACH numeric target. Accept only when the exact quote demonstrates the definition/label, issuer, period, unit, currency and basis without inference, calculation or translation to another metric. Digits alone are insufficient. Do not edit the figure. Unavailable stays unavailable; a rejection rejects the batch. Return JSON only.',
                            'question':question,'targets':targets,'metric_definitions':catalog,
                            'quotes':quotes(search_proof),'draft':draft,'candidate_ref':candidate_ref(draft),
-                           'producer_proof':producer_proof,'output_schema':VERIFIER_SCHEMA})
+                           'producer_proof':producer_proof,'output_schema':VERIFIER_SCHEMA,**extra})

@@ -288,6 +288,9 @@ def set_shared_model_budget(config_path: Path, login: str, purpose: str,
     checked = (validate_budget_overrides if kind == "call" else validate_run_budget_overrides)(budget)
     if kind == "run":
         supported = default_run_budget(purpose, defaults={})
+        if purpose == "investment_memo":
+            from .call_budget import MEMO_MAINTENANCE_ROUNDS_FIELD
+            supported = {**supported, MEMO_MAINTENANCE_ROUNDS_FIELD: 1}
         if not supported or set(checked) - set(supported):
             raise WorkspaceError("该环节不使用这些每轮预算字段")
     return _save_shared_budget_policy(config, login, expected_hash,

@@ -10,10 +10,13 @@ from collections.abc import Mapping
 from pathlib import Path
 from typing import Any
 
+MEMO_MAINTENANCE_ROUNDS_FIELD = "max_content_maintenance_rounds_per_group"
+
 FIELDS = ("max_input_tokens", "max_output_tokens", "max_cost_usd", "timeout_seconds")
 RUN_FIELDS = ("max_cost_usd", "max_units", "max_events",
               "max_events_per_company", "max_calls", "max_rounds",
-              "max_cost_units", "max_seconds", "max_admissions_per_tick")
+              "max_cost_units", "max_seconds", "max_admissions_per_tick",
+              MEMO_MAINTENANCE_ROUNDS_FIELD)
 _PURPOSE = re.compile(r"^[a-z][a-z0-9]*(?:_[a-z0-9]+)*$")
 
 
@@ -187,6 +190,8 @@ def validate_run_budget_overrides(value: Any) -> dict[str, Any]:
         if field in out and (isinstance(out[field], bool) or not isinstance(out[field], int)
                              or out[field] <= 0):
             raise CallBudgetError(f"run budget override.{field} must be a positive integer")
+    if MEMO_MAINTENANCE_ROUNDS_FIELD in out and out[MEMO_MAINTENANCE_ROUNDS_FIELD] not in {1, 2}:
+        raise CallBudgetError("memo content maintenance rounds per group must be 1 or 2")
     if "max_cost_usd" in out:
         cost = out["max_cost_usd"]
         if (isinstance(cost, bool) or not isinstance(cost, (int, float))
@@ -202,13 +207,13 @@ def freeze_shared_budget_policy(config: Mapping[str, Any]) -> dict[str, Any]:
     Old cost-only policies retain their historical hot-read semantics. The
     snapshot is execution input, never an installed file or a policy write.
     """
-    from .shared_call_budget_policy import LIMITS_SCHEMA_VERSION, load_shared_call_budget_policy
+    from .shared_call_budget_policy import LIMITS_SCHEMA_VERSIONS, load_shared_call_budget_policy
     frozen = dict(config)
     if frozen.get("shared_call_budget_policy_snapshot") is not None:
         _shared_policy(frozen)
     elif frozen.get("shared_call_budget_policy_path") is not None:
         policy = load_shared_call_budget_policy(frozen["shared_call_budget_policy_path"])
-        if policy["schema_version"] == LIMITS_SCHEMA_VERSION:
+        if policy["schema_version"] in LIMITS_SCHEMA_VERSIONS:
             frozen["shared_call_budget_policy_snapshot"] = policy
     return frozen
 
@@ -262,6 +267,12 @@ def resolve_run_budget(config: Mapping[str, Any], purpose: str, *,
     if shared_policy is not None:
         from .shared_call_budget_policy import effective_shared_limits
         resolved.update(effective_shared_limits(shared_policy, purpose, kind="run"))
+    if purpose == 'investment_memo' and MEMO_MAINTENANCE_ROUNDS_FIELD in resolved:
+        # This new permission count belongs to shared administrator authority;
+        # a local configuration cannot silently opt a project into round two.
+        resolved[MEMO_MAINTENANCE_ROUNDS_FIELD] = (
+            (shared_policy or {}).get('purpose_run_limits',{}).get('investment_memo',{}).get(
+                MEMO_MAINTENANCE_ROUNDS_FIELD,1))
     if max_units is not None:
         resolved.update(validate_run_budget_overrides({"max_units": bound_run_argument(
             config, purpose, "max_units", max_units, resolved.get("max_units"))}))

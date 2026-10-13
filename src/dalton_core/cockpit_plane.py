@@ -3060,6 +3060,7 @@ class CockpitConfig:
     journal_path: Path
     model_config_path: Path | None = None
     mission_ref: str | None = None
+    sec_resolver_identity: str | None = None
     # INT2 / P14-M: the broker's own catalog, so the page can say whether the
     # models this Core holds are the models the gateway offers. A path rather
     # than a convention: this process must not go looking for the host's
@@ -3071,7 +3072,7 @@ class CockpitConfig:
     @classmethod
     def from_mapping(cls, raw: Mapping[str, Any]) -> "CockpitConfig":
         fields = {"core_db", "state_dir", "heartbeat_path", "scheduler_db", "journal_path",
-                  "model_config_path", "mission_ref", "openclaw_config_path", "workspace_manager_config_path"}
+                  "model_config_path", "mission_ref", "openclaw_config_path", "workspace_manager_config_path", "sec_resolver_identity"}
         if not isinstance(raw, Mapping) or set(raw) - fields or not {"core_db", "state_dir", "heartbeat_path",
                                                                        "scheduler_db", "journal_path"} <= set(raw):
             raise CockpitError("cockpit config has an invalid shape")
@@ -3091,6 +3092,8 @@ class CockpitConfig:
             workspace_manager_config_path=(None if raw.get("workspace_manager_config_path") is None
                 else _path(raw["workspace_manager_config_path"], "workspace_manager_config_path")),
             mission_ref=mission,
+            sec_resolver_identity=(None if raw.get("sec_resolver_identity") is None else
+                _text(raw["sec_resolver_identity"], "sec_resolver_identity", maximum=512)),
         )
 
 
@@ -3130,7 +3133,10 @@ class CockpitJournal:
         self._lock = threading.Lock()
 
     def close(self) -> None:
-        self.connection.close()
+        # Native connection teardown must not overlap a journal operation
+        # running in one of the background job threads.
+        with self._lock:
+            self.connection.close()
 
     def write(self, sql: str, params: tuple = ()) -> None:
         with self._lock:
@@ -9346,7 +9352,10 @@ class CockpitPlane:
     def _host_settings_view(self) -> dict[str, Any]:
         from .host_research_reconcile import status
         try:
-            return status(self.config.workspace_manager_config_path)
+            view = status(self.config.workspace_manager_config_path)
+            from .budget_pools import material_acquisition_caps
+            view["material_acquisition_effective"] = material_acquisition_caps(None, self.config.state_dir)
+            return view
         except (OSError, ValueError, RuntimeError):
             return {"scope": "all_workspaces", "status": "unavailable",
                     "desired_hash": None, "pending": [],
@@ -9383,7 +9392,7 @@ class CockpitPlane:
             raise CockpitError("研究预算必须是一个对象")
         budget = value.get("budget")
         required = {"max_daily_paid_calls", "max_daily_cost_usd", "max_alphaengine_calls_24h"}
-        optional = {"pools_enforcement", "max_daily_document_reads"}
+        optional = {"pools_enforcement", "max_daily_document_reads", "material_acquisition"}
         if not isinstance(budget, Mapping) or not required <= set(budget) or not set(budget) <= required | optional:
             raise CockpitError("研究预算字段不完整")
         if "pools_enforcement" in budget and budget["pools_enforcement"] not in ("on", "off"):
@@ -9395,6 +9404,8 @@ class CockpitPlane:
                     or mission["content_hash"] != value.get("expected_mission_hash")):
                 raise CockpitConflict("研究目标已更新，请刷新后再保存预算")
             return self._save_host_settings(login, value, budget=budget)
+        if "material_acquisition" in budget:
+            raise CockpitError("材料获取共用上限需要研究主机配置")
         result = self._governance(login, "set_research_budget_authority_chain", {
             "mission_ref": _text(value.get("mission_ref"), "mission_ref", maximum=160),
             "budget": dict(budget),
@@ -9702,10 +9713,12 @@ class CockpitPlane:
             except Exception as exc:  # noqa: BLE001 - surfaced to the owner, never swallowed
                 result, status, error = None, "failed", f"{type(exc).__name__}: {exc}"
             at = _iso(self.clock())
-            with self._jobs_lock:
-                job.update({"status": status, "result": result, "error": error, "updated_at": at})
             self.journal.write("UPDATE cockpit_jobs SET status=?, result_json=?, error=?, updated_at=? WHERE job_id=?",
                                (status, None if result is None else json.dumps(result, ensure_ascii=False), error, at, job_id))
+            # A caller may close the plane as soon as it observes a terminal
+            # job. Publish that state only after its final journal access.
+            with self._jobs_lock:
+                job.update({"status": status, "result": result, "error": error, "updated_at": at})
 
         threading.Thread(target=run, name=f"dalton-cockpit-{kind}", daemon=True).start()
         return self._public_job(job)
@@ -10362,10 +10375,19 @@ class CockpitPlane:
                     result = model.call_setup(**kwargs)
                     call_result.update(result)
                     return result
+            identity = self.config.sec_resolver_identity
+            if identity is None:
+                # Existing installs retain the explicit workspace's SEC lane identity.
+                # No host configuration, credentials or guessed contact is consulted.
+                service = _load_json(workspace.config_path)
+                if (isinstance(service, Mapping)
+                        and Path(service.get("core_db", "")).resolve() == self.config.core_db.resolve()):
+                    value = ((service.get("bounded_planner") or {}).get("config") or {}).get("user_agent")
+                    identity = value if isinstance(value, str) and value.strip() else None
             draft = plan_first_mission_goal(
                 SetupModel(), workspace, goal=text,
                 method_foundation=json.loads(foundation_path.read_text()),
-                request_id=request_id,
+                request_id=request_id, sec_resolver_identity=identity,
                 created_at=datetime.fromtimestamp(foundation_path.stat().st_mtime, timezone.utc).isoformat())
             status = "open"
         else:
@@ -10702,6 +10724,16 @@ def _job_error_message(error: Any) -> str | None:
     if not error:
         return None
     text = str(error)
+    # Only these closed pre-call guards are safe to surface. Other internal
+    # exception messages retain the existing translation/fallback boundary.
+    settings_guards = {
+        "当前模型策略仍未完整同步，新调用暂缓",
+        "这次调用仍持有旧模型设置，请重新载入共用设置后继续",
+        "共用模型或预算设置尚待应用，新调用暂缓",
+        "当前研究预算授权尚未同步，新调用暂缓",
+    }
+    if text.removeprefix("HostSettingsError: ") in settings_guards:
+        return "模型或预算设置尚未完整同步，本次处理尚未开始。请稍后再试。"
     if _CJK.search(text) and not _MACHINE_MARKERS.search(text):
         return text[:300]
     translated = _reason_text(text)

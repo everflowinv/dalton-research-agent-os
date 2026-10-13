@@ -234,6 +234,8 @@ def bound_material(rows: Sequence[Mapping[str, Any]], *, company_ref: str,
                    budget_bytes: int = MATERIAL_BUDGET_BYTES) -> list[dict[str, Any]]:
     """The bounded, deterministic view of the frozen material."""
 
+    history=[r for r in rows if r.get('market_history_proof') is not None]
+    rows=[r for r in rows if r.get('market_history_proof') is None]
     by_kind: dict[str, list[Mapping[str, Any]]] = {}
     for row in rows:
         by_kind.setdefault(str(row.get("kind")), []).append(row)
@@ -315,7 +317,8 @@ def bound_material(rows: Sequence[Mapping[str, Any]], *, company_ref: str,
             continue
         used += size
         claims.append(candidate)
-    return claims + fixed
+    from .investment_memo_market_history import project
+    return claims + fixed + project(history)
 
 
 def material_bytes(rows: Sequence[Mapping[str, Any]]) -> int:

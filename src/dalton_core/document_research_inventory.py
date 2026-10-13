@@ -18,10 +18,13 @@ from .document_research import (
     build_document_research_registry, validate_document_research_policy,
 )
 from .company_model_annual_projection import AnnualProjectionError, verify_statement_filing
-from .company_model_series import ANNUAL_MAX_DAYS, NINE_MONTH_MAX_DAYS
+from .company_model_series import (
+    ANNUAL_MAX_DAYS, NINE_MONTH_MAX_DAYS, QUARTER_MIN_DAYS, QUARTER_MAX_DAYS,
+)
 from .document_research_strategy import (
     FINANCIAL_NOTE_TARGET_REF,
     FINANCIAL_NOTE_TARGET_SCHEMA_VERSION,
+    FINANCIAL_NOTE_HISTORY_TARGET_SCHEMA_VERSION, FINANCIAL_NOTE_LINEAGE_TARGET_SCHEMA_VERSION, FINANCIAL_NOTE_FORMS,
     inventory_document,
     normalize_evidence_target,
 )
@@ -84,7 +87,7 @@ def _unavailable_financial_note_target(
     }]
 
 
-def financial_note_targets_for_registration(
+def _legacy_financial_note_targets_for_registration(
     *, connection: Any, mission: Mapping[str, Any], company_ref: str,
     registration: Mapping[str, Any],
 ) -> list[dict[str, Any]]:
@@ -187,6 +190,163 @@ def financial_note_targets_for_registration(
     }
     return [normalize_evidence_target(target)]
 
+def financial_note_source_mission(*, connection: Any, mission: Mapping[str, Any],
+                                 company_ref: str, registration: Mapping[str, Any]) -> Mapping[str, Any] | None:
+    """Keep the original acquisition while proving a current-project inheritance.
+
+    Used only by target0.2; target0.1 retains its exact-version contract.
+    This does not grant source access or change any acquired record.
+    """
+    authority = registration.get("source_authority", {})
+    if (registration.get("source_ref") != "source:sec-edgar"
+            or authority.get("kind") != "coverage-mission-acquired-document"
+            or authority.get("company_ref") != company_ref):
+        return None
+    original_ref = authority.get("mission_version_ref")
+    if original_ref == mission.get("id"):
+        return mission
+    if (company_ref not in {item["company_ref"] for item in mission.get("universe", ())}
+            or not any(item.get("source_ref") == registration["source_ref"]
+                       and item.get("status") == "connected"
+                       for item in mission.get("source_plan", ()))):
+        return None
+    from .coverage_mission import CoverageMissionAuthority, CoverageMissionError
+    from .document_mission_lineage import document_mission_versions
+    try:
+        if original_ref not in document_mission_versions(connection, mission):
+            return None
+        reader = object.__new__(CoverageMissionAuthority)
+        reader.connection = connection
+        return reader._mission_record(original_ref)
+    except (CoverageMissionError, ValueError, KeyError, TypeError):
+        return None
+
+
+def financial_note_targets_for_registration(
+    *, connection: Any, mission: Mapping[str, Any], company_ref: str,
+    registration: Mapping[str, Any],
+    target_schema_version: str | None = None,
+    context_version_ref: str | None = None, latest_context: bool = True,
+) -> list[dict[str, Any]]:
+    """Advertise only exact EPS/share periods actually held by this original.
+
+    Version0.1 remains byte-identical for replay. Version0.2 includes comparative
+    quarters and annual periods; filing report_date is not a data-period filter.
+    Half-year/YTD and ambiguous or dimensional totals are never note targets.
+    """
+    if target_schema_version == FINANCIAL_NOTE_TARGET_SCHEMA_VERSION:
+        return _legacy_financial_note_targets_for_registration(
+            connection=connection, mission=mission, company_ref=company_ref,
+            registration=registration)
+    if target_schema_version not in {None, FINANCIAL_NOTE_HISTORY_TARGET_SCHEMA_VERSION, FINANCIAL_NOTE_LINEAGE_TARGET_SCHEMA_VERSION}:
+        raise ValueError("unsupported financial note target schema")
+    source_mission = financial_note_source_mission(
+        connection=connection, mission=mission, company_ref=company_ref,
+        registration=registration)
+    if source_mission is None:
+        return []
+    ref = registration.get("document_ref")
+    if not isinstance(ref, str) or not ref.startswith("sec:filing:"):
+        return []
+    tables = {r[0] for r in connection.execute(
+        "SELECT name FROM sqlite_master WHERE type='table' AND name IN "
+        "('coverage_mission_statement_filings','coverage_mission_statement_dispatches',"
+        "'coverage_mission_statement_lines')")}
+    if len(tables) != 3:
+        return []
+    rows = connection.execute(
+        "SELECT f.*,d.mission_version_ref AS dispatch_mission_version_ref,"
+        "d.mission_version_hash AS dispatch_mission_version_hash,"
+        "d.company_ref AS dispatch_company_ref,d.form AS dispatch_form,"
+        "d.status AS dispatch_status FROM coverage_mission_statement_filings f "
+        "JOIN coverage_mission_statement_dispatches d ON d.dispatch_id=f.dispatch_id "
+        "WHERE f.company_ref=? AND f.accession=?",
+        (company_ref, ref.removeprefix("sec:filing:"))).fetchall()
+    if len(rows) != 1:
+        return []
+    filing = dict(rows[0])
+    lineage_binding = None
+    cross_version = filing["dispatch_mission_version_ref"] != source_mission.get("id")
+    if target_schema_version == FINANCIAL_NOTE_LINEAGE_TARGET_SCHEMA_VERSION or (target_schema_version is None and cross_version):
+        from .financial_note_source_lineage import derive_binding
+        try:
+            lineage_binding = derive_binding(connection=connection, mission=mission,
+                company_ref=company_ref, registration=registration, filing=filing)
+        except (RuntimeError, KeyError, TypeError, ValueError):
+            return []
+    if (filing["form"] not in FINANCIAL_NOTE_FORMS
+            or filing["dispatch_form"] != filing["form"]
+            or (lineage_binding is None and (cross_version
+                or filing["dispatch_mission_version_hash"] != source_mission.get("content_hash")))
+            or filing["dispatch_company_ref"] != company_ref
+            or filing["dispatch_status"] != "succeeded"):
+        return []
+    try:
+        verify_statement_filing(connection, filing)
+    except (AnnualProjectionError, KeyError, TypeError, ValueError):
+        return []
+    from .statement_context import statement_rows, context_record, StatementContextError
+    try:
+        source_rows = statement_rows(connection, filing["ingest_id"],
+                                    version_id=context_version_ref, latest=latest_context)
+        contexts = {row["statement_context_ref"] for row in source_rows if row.get("statement_context_ref")}
+        if len(contexts) > 1:
+            return []
+        context_ref = next(iter(contexts), None)
+        context_hash = None if context_ref is None else context_record(connection, context_ref)["content_hash"]
+    except StatementContextError:
+        return []
+    # Exact modern contexts include the same source/unit supplements used by
+    # model inputs. Version0.1 continues to inspect only its frozen base table.
+    periods = {}
+    for row in source_rows:
+        if (row["statement"] != "income" or row["concept"] not in {
+                _DILUTED_EPS_CONCEPT, _DILUTED_SHARES_CONCEPT}
+                or row["period_start"] is None or row["period_end"] is None or row["value"] is None
+                or bool(row["is_breakdown"]) or row.get("dimension_axis") is not None
+                or row.get("dimension_member") is not None or row.get("dimension_count", 0) != 0
+                or row.get("dimensions")):
+            continue
+        periods.setdefault((row["period_start"], row["period_end"]), {}).setdefault(
+            row["concept"], []).append(row["unit"])
+    targets = []
+    for (start, end), held in sorted(periods.items()):
+        eps, shares = held.get(_DILUTED_EPS_CONCEPT, []), held.get(_DILUTED_SHARES_CONCEPT, [])
+        if (len(eps) != 1 or len(shares) != 1 or not isinstance(eps[0], str)
+                or re.fullmatch(r"[a-z]{3}PerShare", eps[0], re.IGNORECASE) is None
+                or not isinstance(shares[0], str) or shares[0].casefold() != "shares"):
+            continue
+        try:
+            days = (date.fromisoformat(end) - date.fromisoformat(start)).days + 1
+        except (TypeError, ValueError):
+            continue
+        kind = ("annual" if NINE_MONTH_MAX_DAYS < days <= ANNUAL_MAX_DAYS
+                else "quarter" if QUARTER_MIN_DAYS <= days <= QUARTER_MAX_DAYS else None)
+        if kind is None:
+            continue
+        targets.append(normalize_evidence_target({
+            "schema_version": (FINANCIAL_NOTE_LINEAGE_TARGET_SCHEMA_VERSION if lineage_binding is not None
+                               else FINANCIAL_NOTE_HISTORY_TARGET_SCHEMA_VERSION),
+            **({"source_lineage_binding": lineage_binding} if lineage_binding is not None else {}),
+            "target_ref": FINANCIAL_NOTE_TARGET_REF, "kind": "diluted_eps_numerator",
+            "statement_ingest_ref": filing["ingest_id"],
+            "statement_filing_hash": filing["content_hash"],
+            "statement_context_ref": context_ref, "statement_context_hash": context_hash,
+            "accession": filing["accession"], "form": filing["form"],
+            "applicability_kind": kind,
+            "periods": [{"period_start": start, "period_end": end}],
+        }))
+    if target_schema_version is None:
+        legacy = _legacy_financial_note_targets_for_registration(
+            connection=connection, mission=mission, company_ref=company_ref,
+            registration=registration)
+        covered = {(item["applicability_kind"], tuple(
+            (p["period_start"], p["period_end"]) for p in item["periods"])) for item in legacy}
+        return legacy + [item for item in targets if (item["applicability_kind"], tuple(
+            (p["period_start"], p["period_end"]) for p in item["periods"])) not in covered]
+    return targets
+
+
 
 def validate_inventory_config(value: Any) -> dict[str, Any]:
     if not isinstance(value, Mapping) or set(value) - OPTIONAL_CONFIG_FIELDS != {
@@ -249,14 +409,42 @@ def _required_numeric_originals(*, core: Any, mission: Mapping[str, Any],
     for company, observations in feedback.get("by_company", {}).items():
         if company not in allowed:
             raise ValueError("numeric original feedback escaped mission coverage")
-        for requirement in numeric_requirements(observations, limit=None)["requirements"]:
+        requirements = numeric_requirements(observations, limit=None)["requirements"]
+        # Supersession removes the duplicate *operation* from planning feedback,
+        # not its unresolved successor's immutable source dependency. Complete
+        # formal numeric results stop emitting this unresolved relationship;
+        # pending and partial successors must retain the exact old registration.
+        for observation in observations:
+            successor = observation.get("numeric_upgrade_supersession")
+            if observation.get("numeric_upgrade_status") != "superseded_by_admitted_numeric_read" \
+                    or not isinstance(successor, Mapping):
+                continue
+            requirements.append({
+                "document_ref": successor.get("document_ref"),
+                "document_version_hash": successor.get("document_version_hash"),
+                "replaces_numeric_rejection": successor.get("rejection_binding"),
+                "supersession": dict(successor),
+                "observed_parent_ref": observation.get("admission_ref"),
+            })
+        for requirement in requirements:
             if selected_document_refs is not None and requirement["document_ref"] not in selected_document_refs:
                 continue
-            binding = requirement["replaces_numeric_rejection"]
             try:
+                binding = requirement["replaces_numeric_rejection"]
+                if (not isinstance(binding, Mapping)
+                        or set(binding) != {"admission_ref", "admission_hash", "rejection_ref", "rejection_hash"}
+                        or not all(isinstance(value, str) and value for value in binding.values())):
+                    raise ValueError("numeric original rejection binding has invalid shape")
                 proof = numeric_rejection(core.connection, binding["admission_ref"])
                 if proof is None or any(proof[key] != binding[key] for key in binding):
                     raise ValueError("numeric original lacks exact rejection binding")
+                if "supersession" in requirement:
+                    from .numeric_capability_supersession import successor_for
+                    successor = requirement["supersession"]
+                    if (successor.get("original_admission_ref") != requirement["observed_parent_ref"]
+                            or successor.get("company_ref") != company
+                            or successor_for(core.connection, proof, mission=mission) != successor):
+                        raise ValueError("numeric original supersession binding differs")
                 row = core.connection.execute(
                     "SELECT record_json,content_hash,company_ref,mission_version_ref FROM "
                     "mission_document_research_admissions WHERE admission_id=?",
@@ -294,6 +482,68 @@ def _required_numeric_originals(*, core: Any, mission: Mapping[str, Any],
                                  "document_version_hash": requirement["document_version_hash"],
                                  "readable": False, "reason": "numeric_required_original_unavailable",
                                  "detail": f"{type(exc).__name__}: {exc}"})
+    return originals, failures
+
+
+def _selected_plan_originals(*, core, mission, registry, purpose, selected_document_refs):
+    """Replay only exact old registrations named by the current accepted plan.
+
+    Selection narrows reads, not document authority. An admission stores the
+    immutable original; its current source must still reproduce every byte.
+    """
+    from .mission_document_research import _exact_plan, MissionDocumentResearchAuthority
+    from .document_research import validate_registration
+    from .document_mission_lineage import document_mission_versions
+    if not selected_document_refs:
+        return [], []
+    tables = {row[0] for row in core.connection.execute(
+        "SELECT name FROM sqlite_master WHERE type='table' AND name IN "
+        "('coverage_mission_research_plans','mission_document_research_admissions')")}
+    if len(tables) != 2:
+        return [], []
+    row = core.connection.execute(
+        'SELECT plan_id FROM coverage_mission_research_plans WHERE mission_version_ref=? '
+        'ORDER BY created_at DESC,plan_id DESC LIMIT 1', (mission['id'],)).fetchone()
+    if row is None:
+        return [], []
+    plan, _ = _exact_plan(core.connection, row['plan_id'])
+    companies = {item['company_ref'] for item in mission['universe']}
+    versions = document_mission_versions(core.connection, mission)
+    originals, failures, seen = [], [], set()
+    for inquiry in plan['inquiries']:
+        strategy = inquiry.get('directed_document') or {}
+        doc, digest = strategy.get('document_ref'), strategy.get('document_version_hash')
+        company = inquiry.get('company_ref')
+        if doc not in selected_document_refs or (company, digest) in seen:
+            continue
+        seen.add((company, digest))
+        if company not in companies:
+            raise ValueError('selected original escaped mission coverage')
+        # Exact authority hash seek; never scan/materialize other documents.
+        parent = core.connection.execute(
+            'SELECT * FROM mission_document_research_admissions WHERE company_ref=? '
+            'AND document_authority_hash=? ORDER BY created_at,admission_id LIMIT 1',
+            (company, digest)).fetchone()
+        if parent is None:
+            continue  # The current registered version may already be in inventory.
+        try:
+            admission = MissionDocumentResearchAuthority._read_row(None, parent)
+            registration = validate_registration(admission['request']['registration'])
+            source = registration['source_authority']
+            if (admission['mission_version_ref'] not in versions
+                    or registration['document_ref'] != doc
+                    or registration['content_hash'] != digest
+                    or source.get('company_ref') != company
+                    or source.get('mission_version_ref') not in versions):
+                raise ValueError('selected original ownership differs')
+            actual, _ = registry._reresolve(registration, purpose=purpose)
+            if actual != registration:
+                raise ValueError('selected original no longer strongly replays')
+            originals.append((company, registration))
+        except (ValueError, RuntimeError, OSError, KeyError, TypeError) as exc:
+            failures.append({'company_ref': company, 'document_ref': doc,
+                'document_version_hash': digest, 'readable': False,
+                'reason': 'selected_original_unavailable', 'detail': f'{type(exc).__name__}: {exc}'})
     return originals, failures
 
 
@@ -402,9 +652,14 @@ def inventory_with_registry(*, core: Any, mission: Mapping[str, Any],
             readable[company].append(projected)
             seen.add(key)
         registrations[registration["content_hash"]] = dict(registration)
-    originals, failures = ([], []) if selected_document_refs is not None else _required_numeric_originals(
-        core=core, mission=mission, registry=registry, purpose=purpose)
+    originals, failures = (_selected_plan_originals(
+        core=core, mission=mission, registry=registry, purpose=purpose,
+        selected_document_refs=selected_document_refs) if selected_document_refs is not None
+        else _required_numeric_originals(core=core, mission=mission, registry=registry, purpose=purpose))
     for company, registration in originals:
+        if selected_document_refs is not None:
+            registrations[registration['content_hash']] = dict(registration)
+            continue
         projected = inventory_document(registration=registration, company_ref=company)
         projected.update({"doc_kind": registration["doc_kind"], "doc_date": registration["doc_date"]})
         from .directed_numeric_source_capabilities import planning_capability

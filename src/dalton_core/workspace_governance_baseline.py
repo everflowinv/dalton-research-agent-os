@@ -54,6 +54,7 @@ from .research_auto_commit import (
     MISSION_VERIFIED_FIGURE_RULE_REF,
     RULE_REF as FILING_COUNT_RULE_REF,
     SEC_FY_MINUS_9M_RULE_REF,
+    SEC_FILED_QUARTER_GROWTH_RULE_REF,
     SEC_STATEMENT_LINE_RULE_REF,
 )
 from .research_plan import (
@@ -78,6 +79,7 @@ BASELINE_AUTO_COMMIT_RULES: tuple[str, ...] = (
     MISSION_VERIFIED_FIGURE_RULE_REF,
     SEC_STATEMENT_LINE_RULE_REF,
     SEC_FY_MINUS_9M_RULE_REF,
+    SEC_FILED_QUARTER_GROWTH_RULE_REF,
 )
 #: The SEC company-facts plan rules legacy ``policy-18`` lists.  The
 #: list-filings rule is no lane's precondition and stays unsigned.
@@ -102,6 +104,7 @@ RULE_CONSUMERS: dict[str, str] = {
     DOCUMENT_QUALITATIVE_RULE_REF: "document extraction (finished reviews become Claims)",
     MISSION_VERIFIED_FIGURE_RULE_REF: "quantitative claim promotion (re-verified document figures)",
     SEC_STATEMENT_LINE_RULE_REF: "SEC statement lines (filed financial statement lines)",
+    SEC_FILED_QUARTER_GROWTH_RULE_REF: "SEC quarter lane (held filed quarter-pair growth)",
     SEC_FY_MINUS_9M_RULE_REF: (
         "SEC quarter lane (fourth quarter of a fiscal-year-only 10-K, FY - 9M)"),
     PLAN_COMPANY_FACTS_AUTO_START_RULE_REF: "SEC company-facts lane precondition (10-Q plans)",

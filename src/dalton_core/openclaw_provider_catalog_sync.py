@@ -26,7 +26,9 @@ from typing import Any
 BROKER_PLUGIN_ID = "dalton-openclaw-model-broker"
 AUTO_PROFILE_PREFIX = "profile:auto-"
 AUTO_PROFILE_HASH_LENGTH = 12
-AUTO_PROFILE_TIMEOUT_MS = 900_000
+from .openclaw_broker_limits import DEFAULT_PROFILE_TIMEOUT_MS, RETIRED_DEFAULT_PROFILE_TIMEOUTS_MS
+
+AUTO_PROFILE_TIMEOUT_MS = DEFAULT_PROFILE_TIMEOUT_MS
 BROKER_MAX_TOKENS = 1_000_000
 
 _TOKEN = re.compile(r"^[A-Za-z0-9][A-Za-z0-9._:/+-]*$")
@@ -245,10 +247,9 @@ def plan_openclaw_provider_catalog_sync(
                 preserved_profile_ids.append(profile_id)
         else:
             preserved_profile_ids.append(profile_id)
-        # The retired generated default predates C2's 900-second long-context
-        # calls. Preserve deliberately smaller custom timeouts, but upgrade
-        # that known default so an admitted request is dispatchable.
-        if kept.get("timeoutMs") == 600_000:
+        # Upgrade only the two retired generated defaults. Other explicit
+        # profile deadlines remain unchanged; no task budget is raised here.
+        if isinstance(kept.get("timeoutMs"), int) and kept["timeoutMs"] in RETIRED_DEFAULT_PROFILE_TIMEOUTS_MS:
             kept["timeoutMs"] = AUTO_PROFILE_TIMEOUT_MS
             if profile_id not in updated_profile_ids:
                 updated_profile_ids.append(profile_id)

@@ -24,7 +24,7 @@ const KEY_LINES = [
   ["diluted_eps", "稀释每股收益"], ["operating_cash_flow", "经营现金流"],
 ];
 const STATEMENTS = [["income", "利润表"], ["balance", "资产负债表"], ["cash", "现金流量表"]];
-export const NO_MODEL_EXPORT = "尚未生成完整财务模型：当前缺少关键财务假设，无法导出有效 Excel 测算底稿。";
+export const NO_MODEL_EXPORT = "预测结果尚未生成，暂时无法导出 Excel 底稿。";
 
 /** True when the grid has forecasts an export could carry (am 5.5). */
 export function hasForecasts(payload) {

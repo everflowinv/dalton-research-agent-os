@@ -19,11 +19,15 @@ from .store import content_hash
 STRATEGY_VERSION = "directed-document:0.1"
 FINANCIAL_NOTE_TARGET_REF = "financial_note:diluted_eps_numerator:0.1"
 FINANCIAL_NOTE_TARGET_SCHEMA_VERSION = "financial-note-target-0.1"
+FINANCIAL_NOTE_HISTORY_TARGET_SCHEMA_VERSION = "financial-note-target-0.2"
+FINANCIAL_NOTE_LINEAGE_TARGET_SCHEMA_VERSION = "financial-note-target-0.3"
+HISTORY_TARGET_SCHEMAS = frozenset({FINANCIAL_NOTE_HISTORY_TARGET_SCHEMA_VERSION, FINANCIAL_NOTE_LINEAGE_TARGET_SCHEMA_VERSION})
+FINANCIAL_NOTE_FORMS = frozenset({"10-Q", "10-K", "10-Q/A", "10-K/A"})
 _STRATEGY_REQUIRED_FIELDS = frozenset({
     "strategy_version", "document_ref", "document_version_hash",
     "query_terms", "query_rationale",
 })
-STRATEGY_FIELDS = _STRATEGY_REQUIRED_FIELDS | {"evidence_target", "numeric_targets", "replaces_numeric_rejection", "resumes_numeric_result"}
+STRATEGY_FIELDS = _STRATEGY_REQUIRED_FIELDS | {"evidence_target", "numeric_targets", "replaces_numeric_rejection", "resumes_numeric_result", "replaces_numeric_contract_failure"}
 FINANCIAL_NOTE_TARGET_FIELDS = frozenset({
     "schema_version", "target_ref", "kind", "statement_ingest_ref",
     "statement_filing_hash", "accession", "form", "applicability_kind",
@@ -41,12 +45,20 @@ class DocumentResearchStrategyError(ValueError):
 def normalize_evidence_target(value: Any) -> dict[str, Any]:
     """Validate the exact typed note target selected from document inventory."""
 
-    if not isinstance(value, Mapping) or set(value) != FINANCIAL_NOTE_TARGET_FIELDS:
+    fields = (FINANCIAL_NOTE_TARGET_FIELDS | {"statement_context_ref", "statement_context_hash"}
+              if isinstance(value, Mapping) and value.get("schema_version") in HISTORY_TARGET_SCHEMAS
+              else FINANCIAL_NOTE_TARGET_FIELDS)
+    if isinstance(value, Mapping) and value.get("schema_version") == FINANCIAL_NOTE_LINEAGE_TARGET_SCHEMA_VERSION:
+        fields |= {"source_lineage_binding"}
+    if not isinstance(value, Mapping) or set(value) != fields:
         raise DocumentResearchStrategyError("financial note target has an invalid closed shape")
-    if (value["schema_version"] != FINANCIAL_NOTE_TARGET_SCHEMA_VERSION
+    if (value["schema_version"] not in {FINANCIAL_NOTE_TARGET_SCHEMA_VERSION,
+                                        *HISTORY_TARGET_SCHEMAS}
             or value["target_ref"] != FINANCIAL_NOTE_TARGET_REF
             or value["kind"] != "diluted_eps_numerator"
-            or value["form"] != "10-K"
+            or value["form"] not in (
+                {"10-K"} if value["schema_version"] == FINANCIAL_NOTE_TARGET_SCHEMA_VERSION
+                else FINANCIAL_NOTE_FORMS)
             or value["applicability_kind"] not in {"annual", "quarter"}):
         raise DocumentResearchStrategyError("financial note target is unsupported")
     for name in ("statement_ingest_ref", "accession"):
@@ -59,9 +71,23 @@ def normalize_evidence_target(value: Any) -> dict[str, Any]:
     digest = value["statement_filing_hash"]
     if not isinstance(digest, str) or _HASH.fullmatch(digest) is None:
         raise DocumentResearchStrategyError("financial note statement hash is invalid")
+    if value["schema_version"] in HISTORY_TARGET_SCHEMAS:
+        ref, digest = value["statement_context_ref"], value["statement_context_hash"]
+        if (ref is None) != (digest is None) or (ref is not None and (
+                not isinstance(ref, str) or re.fullmatch(r"statement-context:[0-9a-f]{32}", ref) is None
+                or not isinstance(digest, str) or _HASH.fullmatch(digest) is None)):
+            raise DocumentResearchStrategyError("financial note statement context identity is invalid")
+    if value["schema_version"] == FINANCIAL_NOTE_LINEAGE_TARGET_SCHEMA_VERSION:
+        from .financial_note_source_lineage import normalize_binding
+        binding = normalize_binding(value["source_lineage_binding"])
+        if any(binding[k] != value[k] for k in ("statement_ingest_ref", "statement_filing_hash", "accession")):
+            raise DocumentResearchStrategyError("financial note lineage differs from target")
     periods = value["periods"]
     if not isinstance(periods, list) or not periods:
         raise DocumentResearchStrategyError("financial note target periods are empty")
+    if (value["schema_version"] in HISTORY_TARGET_SCHEMAS
+            and len(periods) != 1):
+        raise DocumentResearchStrategyError("history note needs one exact period")
     normalized_periods = []
     for period in periods:
         if not isinstance(period, Mapping) or set(period) != {"period_start", "period_end"}:
@@ -97,6 +123,27 @@ def validate_financial_note_target(value: Any) -> dict[str, Any]:
     """Public canonical validator shared by target producers and consumers."""
 
     return normalize_evidence_target(value)
+
+
+
+def history_note_candidate_scope(target: Any) -> dict[str, str]:
+    """Closed text-result scope for a single version0.2 statement period."""
+    target = normalize_evidence_target(target)
+    if (target["schema_version"] not in HISTORY_TARGET_SCHEMAS
+            or len(target["periods"]) != 1):
+        raise DocumentResearchStrategyError("history note needs one exact period")
+    period = target["periods"][0]
+    return {"metric_or_aspect": "diluted EPS numerator attribution",
+            "period": period["period_start"] + "/" + period["period_end"],
+            "basis": "filed note"}
+
+
+def validate_history_note_candidate(target: Any, candidate: Any) -> None:
+    """A note is neither generic prose nor a different period's authority."""
+    expected = history_note_candidate_scope(target)
+    if (not isinstance(candidate, Mapping)
+            or any(candidate.get(key) != value for key, value in expected.items())):
+        raise DocumentResearchStrategyError("history note candidate metric/period/basis differs from exact target")
 
 
 def normalize_strategy(value: Any, *, max_query_terms: int,
@@ -138,7 +185,9 @@ def normalize_strategy(value: Any, *, max_query_terms: int,
         strategy["evidence_target"] = normalize_evidence_target(strategy["evidence_target"])
     if numeric:
         try:
-            strategy["numeric_targets"] = normalize_targets(strategy["numeric_targets"])
+            from .operating_driver_units import CONTRACT_REF as OPERATING_REF
+            strategy["numeric_targets"] = normalize_targets(strategy["numeric_targets"],
+                contract_ref=OPERATING_REF if strategy['strategy_version'] == OPERATING_REF else CONTRACT_REF)
             if strategy["strategy_version"] == SPOKEN_CONTRACT_REF and any(t["basis"] != "management-reported" for t in strategy["numeric_targets"]):
                 raise DocumentResearchStrategyError("spoken numeric targets must retain management-reported basis")
         except ValueError as exc:
@@ -150,6 +199,14 @@ def normalize_strategy(value: Any, *, max_query_terms: int,
         if any(not isinstance(upgrade[k],str) or not upgrade[k] for k in ("admission_ref","rejection_ref")) or any(not isinstance(upgrade[k],str) or _HASH.fullmatch(upgrade[k]) is None for k in ("admission_hash","rejection_hash")):
             raise DocumentResearchStrategyError("numeric capability upgrade binding is invalid")
     resume = strategy.get("resumes_numeric_result")
+    replacement = strategy.get("replaces_numeric_contract_failure")
+    if replacement is not None:
+        from .directed_numeric_period_replacement import BINDING_FIELDS
+        if (not numeric or not isinstance(replacement, Mapping) or set(replacement) != BINDING_FIELDS
+                or any(not isinstance(replacement[k], str) or not replacement[k] for k in BINDING_FIELDS)
+                or any(_HASH.fullmatch(replacement[k]) is None for k in ('admission_hash','failure_hash'))
+                or upgrade is not None or resume is not None):
+            raise DocumentResearchStrategyError('numeric period replacement binding is invalid')
     if resume is not None:
         if not numeric or not isinstance(resume,Mapping) or set(resume)!={"admission_ref","admission_hash","numeric_result_hash"}:
             raise DocumentResearchStrategyError("numeric source resume has invalid closed shape")

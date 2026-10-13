@@ -232,11 +232,18 @@ def draft_contract_version(metadata: Mapping[str, Any]) -> str:
 
 
 def parse_directed_draft_text(text: str, *, metadata: Mapping[str, Any]) -> dict[str, Any]:
-    if metadata.get("numeric_contract_ref") == "directed-document-numeric:0.1":
+    if metadata.get("numeric_contract_ref") in ("directed-document-numeric:0.1", "directed-document-operating-numeric:0.1"):
         from .directed_numeric_output import parse_draft
         return parse_draft(text, metadata=metadata)
     version = draft_contract_version(metadata)
     value = parse_draft_text(text, match_count=metadata["retrieval_match_count"])
+    target = metadata.get("financial_note_target")
+    if target is not None and value["status"] == "answered":
+        from .document_research_strategy import validate_history_note_candidate, DocumentResearchStrategyError
+        try:
+            validate_history_note_candidate(target, value["candidate"])
+        except DocumentResearchStrategyError as exc:
+            raise AnnualReportQualitativeError(str(exc)) from exc
     if version == DRAFT_CONTRACT_VERSION_V2 and value["status"] == "answered":
         question = metadata.get("question")
         if not isinstance(question, str) or not question.strip():
@@ -437,7 +444,7 @@ def verifier_contract_version(metadata: Mapping[str, Any]) -> str:
 
 
 def parse_directed_verifier_text(text: str, *, metadata: Mapping[str, Any]) -> dict[str, Any]:
-    if metadata.get("numeric_contract_ref") == "directed-document-numeric:0.1":
+    if metadata.get("numeric_contract_ref") in ("directed-document-numeric:0.1", "directed-document-operating-numeric:0.1"):
         from .directed_numeric_output import parse_verifier
         return parse_verifier(text, metadata=metadata)
     if verifier_contract_version(metadata) == VERIFIER_OUTPUT_SCHEMA_VERSION_V2:

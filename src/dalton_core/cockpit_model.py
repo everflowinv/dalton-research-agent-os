@@ -18,6 +18,7 @@ Claim.  The control process owns no Core write handle and gets none.
 from __future__ import annotations
 
 import hashlib
+from contextlib import contextmanager
 import inspect
 import json
 import re
@@ -361,6 +362,28 @@ class CockpitModelRouteUnavailable(CockpitModelError):
     """No route was selected, so no model content was produced or refused."""
 
     lane_status = "model_unavailable"
+
+
+class CockpitModelProofUnavailable(CockpitModelError):
+    """A concurrent authority read changed; no new call was admitted."""
+
+    lane_status = "model_unavailable"
+    retryable = True
+
+
+@contextmanager
+def _timeout_proof_readers(router_path, budget_path, *, now):
+    from .planner_paid_output_recovery import recovery_readers
+    try:
+        with recovery_readers(router_path, budget_path, now=now) as readers:
+            yield readers
+    except sqlite3.OperationalError as exc:
+        # The immutable cold reader validates again on context exit. A new
+        # WAL from another tick invalidates the whole proof, including a
+        # previously read successful certificate. Never consume/admit it.
+        raise CockpitModelProofUnavailable(
+            "timeout recovery authority is temporarily unavailable; retry after a fresh proof"
+        ) from exc
 
 
 def model_failure_trace(exc: BaseException) -> dict[str, Any] | None:
@@ -1072,7 +1095,8 @@ def build_work(*, purpose: str, request_id: str, prompt: str, mission_version_re
                provider_retry: Mapping[str, Any] | None = None,
                broker_frame_policy: Mapping[str, Any] | None = None,
                producer_route_decision_refs: Sequence[str] = (),
-               authority_binding: Mapping[str, Any] | None = None) -> WorkOrder:
+               authority_binding: Mapping[str, Any] | None = None,
+               timeout_recovery: Mapping[str, Any] | None = None) -> WorkOrder:
     if purpose not in _PURPOSES:
         raise CockpitModelError("unknown cockpit model purpose")
     if transport_retry is not None:
@@ -1124,6 +1148,8 @@ def build_work(*, purpose: str, request_id: str, prompt: str, mission_version_re
         if dict(broker_frame_policy) != expected_frame:
             raise CockpitModelError("broker frame policy is invalid")
         identity["broker_frame_policy"] = content_hash(expected_frame)
+    if timeout_recovery is not None:
+        identity["timeout_recovery"] = content_hash(timeout_recovery)
     digest = content_hash(identity)
     at = created_at or _now()
     capability = (
@@ -1158,6 +1184,8 @@ def build_work(*, purpose: str, request_id: str, prompt: str, mission_version_re
                                  **({} if structured_output_repair is None else {
                                      "structured_output_repair": dict(
                                          structured_output_repair)}),
+                                 **({} if timeout_recovery is None else {
+                                     "timeout_recovery": dict(timeout_recovery)}),
                                  **({} if provider_retry is None else {
                                      "provider_retry": dict(provider_retry)}),
                                  **({} if transport_retry is None else {
@@ -1205,7 +1233,8 @@ def _preserve_legacy_model_spec_transport_work(
 
 def _validate_structured_output_repair_authority(
     scheduler: Scheduler, binding: Mapping[str, Any], child_work: WorkOrder,
-    config: Mapping[str, Any],
+    config: Mapping[str, Any], *, maintenance_authority: Any | None = None,
+    financial_authority: Any | None = None,
 ) -> None:
     """Prove both named parent results before admitting a repair Work."""
 
@@ -1223,6 +1252,16 @@ def _validate_structured_output_repair_authority(
         or child_metadata.get("structured_output_repair") != binding
     ):
         raise CockpitModelError("structured output repair child binding is invalid")
+    if "maintenance_grant" in binding:
+        from .model_spec_maintenance_repair import MaintenanceAuthority
+        from .coverage_mission import CoverageMissionError
+        if not isinstance(maintenance_authority, MaintenanceAuthority):
+            raise CockpitModelError("maintenance correction requires the live owner authority")
+        try:
+            maintenance_authority.verify_child(scheduler.connection, binding, child_work)
+        except (ValueError, KeyError, TypeError, sqlite3.Error, CoverageMissionError) as exc:
+            raise CockpitModelError("maintenance correction authority differs: " + str(exc)) from exc
+        return
     proved: dict[str, tuple[dict[str, Any], str]] = {}
     for name in ("root_original", "repair_parent"):
         proof = binding.get(name)
@@ -1296,7 +1335,7 @@ def _validate_structured_output_repair_authority(
         _repair_prompt,
         validate_model_spec_request_identity,
     )
-    from .company_model_spec import CompanyModelSpecError
+    from .company_model_spec import CompanyModelSpecError, parse_response
     try:
         root_identity = validate_model_spec_request_identity(
             root_work["metadata"]["model_spec_request_identity"]
@@ -1366,11 +1405,72 @@ def _validate_structured_output_repair_authority(
     if same_contract > binding["repair_config"]["max_attempts"]:
         raise CockpitModelError(
             "structured output repair exceeds its contract's attempts")
+    from .model_spec_typed_field_repair import ERROR_CODES, validate_frozen_parent
+    typed_proof = binding.get("typed_field_proof")
+    if binding["validation_error"]["code"] in ERROR_CODES:
+        try:
+            validate_frozen_parent(
+                parse_response(parent_text), typed_proof,
+                state_hash=root_identity["state_hash"], root_prompt=root_work["question"],
+            )
+        except (ValueError, TypeError, KeyError, CompanyModelSpecError) as exc:
+            raise CockpitModelError("typed structured output repair parent proof differs") from exc
+    elif typed_proof is not None:
+        raise CockpitModelError("unexpected typed structured output repair proof")
+    from .model_spec_complete_diagnostics import (
+        ERROR_CODE as BUNDLE_CODE, validate_parent as validate_bundle_parent, repair_slot_used, error_for)
+    bundle = binding.get("diagnostic_bundle")
+    from .model_spec_joint_field_diagnostics import (
+        ERROR_CODE as JOINT_CODE, validate_frozen_parent as validate_joint_parent,
+        error_for as joint_error_for,
+    )
+    if binding["validation_error"]["code"] in (BUNDLE_CODE, JOINT_CODE):
+        try:
+            parent_body = parse_response(parent_text)
+            from .company_model_spec import repair_output_schema_from_prompt,OUTPUT_SCHEMA
+            repair_schema=(repair_output_schema_from_prompt(root_work['question'])
+                if 'OUTPUT_SCHEMA:\n' in root_work['question'] else OUTPUT_SCHEMA)
+            if bundle.get('output_schema',OUTPUT_SCHEMA)!=repair_schema:
+                raise ValueError('diagnostic schema differs from its exact root Work')
+            if binding["validation_error"]["code"] == JOINT_CODE:
+                validate_joint_parent(parent_body, bundle, state_hash=root_identity['state_hash'],
+                                      root_prompt=root_work['question'])
+                from .model_spec_joint_field_diagnostics import classification_from_prompt
+                diagnosed = joint_error_for(parent_body, {
+                    'state_hash': root_identity['state_hash'],
+                    'industry_classification': classification_from_prompt(root_work['question'])},
+                    output_schema=repair_schema)
+            else:
+                validate_bundle_parent(parent_body, bundle)
+                diagnosed = error_for(parent_body,output_schema=repair_schema)
+            if binding["validation_error"] != {"code": diagnosed.code, "message": str(diagnosed)}:
+                raise ValueError("diagnostic error message differs")
+            if repair_slot_used(scheduler.connection, root_proof, exclude_work=child_work.id, same_binding=binding, config=config):
+                raise ValueError("the original root already used its single repair slot")
+        except (ValueError, KeyError, TypeError, sqlite3.Error) as exc:
+            raise CockpitModelError("diagnostic repair parent proof or existing slot differs") from exc
+    elif bundle is not None:
+        raise CockpitModelError("unexpected diagnostic bundle")
+    transported_proof = bundle if bundle is not None else typed_proof
+    from .model_spec_signed_expense_repair import ERROR_CODE as SIGNED_CODE
+    from .cash_flow_ratio_applicability import ERROR_CODE as RATIO_CODE
+    from .model_spec_filed_tie_repair import ERROR_CODE as FILED_TIE_CODE
+    if binding["validation_error"]["code"] in (SIGNED_CODE, RATIO_CODE, FILED_TIE_CODE):
+        from .model_spec_financial_repair_authority import FinancialRepairAuthority
+        if type(financial_authority) is not FinancialRepairAuthority:
+            raise CockpitModelError("financial correction requires the live source validation owner")
+        try:
+            transported_proof = financial_authority.verify(binding, parent_text, mission_binding=expected_mission)
+        except (ValueError, KeyError, TypeError, ArithmeticError, CompanyModelSpecError) as exc:
+            raise CockpitModelError("financial repair parent source proof differs: " + str(exc)) from exc
     error = CompanyModelSpecError(
         binding["validation_error"]["message"],
-        code=binding["validation_error"]["code"],
+        code=binding["validation_error"]["code"], proof=transported_proof,
     )
-    if child_work.question != _repair_prompt(parent_text, error):
+    from .company_model_spec import repair_output_schema_from_prompt,OUTPUT_SCHEMA
+    repair_schema=(repair_output_schema_from_prompt(root_work['question'])
+        if 'OUTPUT_SCHEMA:\n' in root_work['question'] else OUTPUT_SCHEMA)
+    if child_work.question != _repair_prompt(parent_text, error,output_schema=repair_schema):
         raise CockpitModelError("structured output repair prompt differs from its parent")
 
 
@@ -1917,6 +2017,25 @@ def _capacity_retry(config: Mapping[str, Any]) -> dict[str, int]:
     })
 
 
+def _transport_request_id(request_id: str, config: Mapping[str, Any], *, timeout_recovery: Any = None) -> str:
+    """Canonical ordinary request decoration shared with deny-only owners."""
+    decorated = request_id
+    if "capacity_retry" in config and timeout_recovery is None:
+        suffix = ":capacity-policy:" + content_hash(_capacity_retry(config))[:16]
+        canonical = re.search(re.escape(suffix)
+            + r"(?::route-admission:[0-9a-f]{64})?"
+            + r"(?::operator-recovery:[0-9a-f]{16})?"
+            + r"(?::retired-rule:[0-9a-f]{16})?"
+            + r"(?::capacity-recovery:\d+:[0-9a-f]{16})?$", decorated)
+        if canonical is None:
+            decorated += suffix
+    if "transport_retry" in config and timeout_recovery is None:
+        suffix = ":transport-policy:" + content_hash(config["transport_retry"])[:16]
+        if suffix not in decorated:
+            decorated += suffix
+    return decorated
+
+
 def call_cost_micros(invocation: Any, route: Mapping[str, Any],
                      profile: Mapping[str, Any], reserved: int) -> tuple[int, str]:
     """What the link that actually served this call cost, and how we know.
@@ -1970,6 +2089,23 @@ class CockpitModel:
                              if self.max_cost_usd is None else self.max_cost_usd),
             "timeout_seconds": self.timeout_seconds,
         })
+
+    def _run_cost_refusal(self, *, work: WorkOrder, attempt_number: int,
+                          reserved_micros: int, mission_binding: Mapping[str, Any]) -> str | None:
+        """Optional private, deny-only macro guard before an ordinary admission.
+
+        It never authorizes a call or replaces day/pool gates. Public models
+        have no guard; a run-private producer may install this read-only check.
+        """
+        guard = getattr(self, "_run_cost_admission_guard", None)
+        if guard is None:
+            return None
+        try:
+            guard(work=work, attempt_number=attempt_number,
+                  reserved_micros=reserved_micros, mission_binding=mission_binding)
+        except ValueError as exc:
+            return str(exc)
+        return None
 
     def _adapter(self, router: ModelRouter, *, timeout_seconds: int,
                  provider_cost_admission: Mapping[str, Any] | None = None) -> Any:
@@ -2179,6 +2315,8 @@ class CockpitModel:
              _dossier_recovery_parent: Mapping[str, Any] | None = None,
              _model_spec_request_identity: Mapping[str, Any] | None = None,
              _structured_output_repair: Mapping[str, Any] | None = None,
+             _timeout_recovery: Mapping[str, Any] | None = None,
+             _existing_memo_retry: Mapping[str, Any] | None = None,
              ) -> dict[str, Any]:
         """Run configured paid retries without retaining prior call contexts."""
 
@@ -2191,13 +2329,16 @@ class CockpitModel:
             producer_route_decision_refs=producer_route_decision_refs,
             _dossier_recovery_parent=_dossier_recovery_parent,
             _model_spec_request_identity=_model_spec_request_identity,
-            _structured_output_repair=_structured_output_repair)
+            _structured_output_repair=_structured_output_repair,
+            _timeout_recovery=_timeout_recovery, _existing_memo_retry=_existing_memo_retry)
 
     def _call_resolved(self, *, purpose: str, request_id: str, prompt: str,
                        mission: Mapping[str, Any], producer_route_decision_refs: Sequence[str] = (),
                        _dossier_recovery_parent: Mapping[str, Any] | None = None,
                        _model_spec_request_identity: Mapping[str, Any] | None = None,
-                       _structured_output_repair: Mapping[str, Any] | None = None) -> dict[str, Any]:
+                       _structured_output_repair: Mapping[str, Any] | None = None,
+                       _timeout_recovery: Mapping[str, Any] | None = None,
+                       _existing_memo_retry: Mapping[str, Any] | None = None) -> dict[str, Any]:
         while True:
             outcome = self._call_once(
                 purpose=purpose,
@@ -2208,6 +2349,8 @@ class CockpitModel:
                 _dossier_recovery_parent=_dossier_recovery_parent,
                 _model_spec_request_identity=_model_spec_request_identity,
                 _structured_output_repair=_structured_output_repair,
+                _timeout_recovery=_timeout_recovery,
+                _existing_memo_retry=_existing_memo_retry,
             )
             if outcome.get(_RECLAIMED_LEASE):
                 continue
@@ -2219,6 +2362,12 @@ class CockpitModel:
                     settled = self._settled_cost(str(outcome["work_order_ref"]))
                     if settled is not None:
                         outcome["settled_cost_micros"], outcome["settled_day"] = settled
+                if _timeout_recovery is not None:
+                    prior = _timeout_recovery['proof']['accounted_micros']
+                    outcome['timeout_recovery_authorization_ref'] = _timeout_recovery['id']
+                    outcome['prior_unknown_accounted_micros'] = prior
+                    outcome['task_accounted_micros'] = prior + int(
+                        outcome.get('settled_cost_micros', outcome.get('cost_micros', 0)))
                 return outcome
             backoff = outcome["_provider_retry_backoff_seconds"]
             if backoff:
@@ -2297,6 +2446,8 @@ class CockpitModel:
                    _dossier_recovery_parent: Mapping[str, Any] | None = None,
                    _model_spec_request_identity: Mapping[str, Any] | None = None,
                    _structured_output_repair: Mapping[str, Any] | None = None,
+                   _timeout_recovery: Mapping[str, Any] | None = None,
+                   _existing_memo_retry: Mapping[str, Any] | None = None,
                    ) -> dict[str, Any]:
         """Run one Scheduler attempt and request another through a private marker."""
         capacity_retry = _capacity_retry(self.config)
@@ -2350,27 +2501,9 @@ class CockpitModel:
             request_id = request_identity["decorated_request_id"]
             base_request_id = request_id
         else:
-            base_request_id = request_id
-            if "capacity_retry" in self.config:
-                policy_suffix = ":capacity-policy:" + content_hash(capacity_retry)[:16]
-                canonical = re.search(
-                    re.escape(policy_suffix)
-                    + r"(?::route-admission:[0-9a-f]{64})?"
-                    + r"(?::operator-recovery:[0-9a-f]{16})?"
-                    + r"(?::retired-rule:[0-9a-f]{16})?"
-                    + r"(?::capacity-recovery:\d+:[0-9a-f]{16})?$",
-                    base_request_id,
-                )
-                if canonical is None:
-                    base_request_id += policy_suffix
-                request_id = base_request_id
-            if "transport_retry" in self.config:
-                retry_suffix = ":transport-policy:" + content_hash(
-                    self.config["transport_retry"]
-                )[:16]
-                if retry_suffix not in base_request_id:
-                    base_request_id += retry_suffix
-                request_id = base_request_id
+            base_request_id = _transport_request_id(request_id, self.config,
+                                                     timeout_recovery=_timeout_recovery)
+            request_id = base_request_id
         legacy_budget = {
             "max_input_tokens": self.max_input_tokens,
             "max_output_tokens": self.max_output_tokens,
@@ -2433,6 +2566,7 @@ class CockpitModel:
             ),
             "producer_route_decision_refs": producer_refs,
             "provider_retry": self.config.get("provider_retry"),
+            "timeout_recovery": _timeout_recovery,
             "broker_frame_policy": broker_frame_execution_binding(self.config),
             "model_spec_request_identity": _model_spec_request_identity,
             "structured_output_repair": _structured_output_repair,
@@ -2513,13 +2647,118 @@ class CockpitModel:
             max_total_lease_seconds=lease_seconds * 2,
         ) as scheduler:
             work = _preserve_legacy_model_spec_transport_work(scheduler, work)
+            if _existing_memo_retry is not None:
+                allowed = _existing_memo_retry
+                if (purpose not in {'investment_memo','investment_memo_verifier'}
+                        or set(allowed) != {'work_order_ref','work_order_hash','max_accounted_work_micros'}
+                        or {key:allowed[key] for key in ('work_order_ref','work_order_hash')} !=
+                            {'work_order_ref':work.id,'work_order_hash':content_hash(work.to_dict())}
+                        or type(allowed['max_accounted_work_micros']) is not int or allowed['max_accounted_work_micros'] < 0
+                        or scheduler.work_order_authority(work.id) is None):
+                    raise CockpitModelError('memo retry must retain the exact existing Work and its original budget/policy')
+                if scheduler.formal_result(work.id) is None:
+                    from .investment_memo_scheduler_retry import prove_ready_retry, retry_bill
+                    from .planner_paid_output_recovery import recovery_readers
+                    try:
+                        proof = prove_ready_retry(scheduler.connection,work.id,mission=mission,now=self.clock())
+                        with recovery_readers(self.config['model_router_db'],self.config['budget_db'],now=self.clock()) as (router,budget):
+                            if budget is None:raise ValueError('memo retry fee authority is unavailable')
+                            bill = retry_bill(scheduler.connection,router,budget,scheduler.work_order_authority(work.id),proof)
+                        # Every internal retry has ordinary day/pool admission
+                        # below and must also retain this macro's old charges
+                        # and all future groups/verifier room.
+                        if bill['accounted_micros']+int(Decimal(str(work.budget['max_cost_usd']))*1_000_000)>allowed['max_accounted_work_micros']:
+                            raise ValueError('memo retry prior fees and next attempt exceed retained run room')
+                    except (ValueError,KeyError,OSError,sqlite3.Error) as exc:
+                        raise CockpitModelError('memo retry admission deferred: '+str(exc)) from exc
+            from .initial_screen_content_maintenance import MARKER as SCREEN_MAINTENANCE_MARKER, Authority as ScreenMaintenanceAuthority
+            if SCREEN_MAINTENANCE_MARKER in work.metadata.get('request_id', ''):
+                authority = getattr(self, '_initial_screen_content_maintenance_authority', None)
+                if not isinstance(authority, ScreenMaintenanceAuthority):
+                    raise CockpitModelError('screen content maintenance requires the live owner authority')
+                try:
+                    authority.verify_child(scheduler, work)
+                except (ValueError, KeyError, TypeError, OSError, sqlite3.Error) as exc:
+                    raise CockpitModelError('screen content maintenance authority differs: '+str(exc)) from exc
+            from .investment_memo_terminal_maintenance import MARKER as MEMO_TERMINAL_MARKER, Authority as MemoTerminalAuthority
+            from .coverage_mission import CoverageMissionError
+            if MEMO_TERMINAL_MARKER in work.metadata.get("request_id", ""):
+                authority = getattr(self, "_memo_terminal_maintenance_authority", None)
+                if not isinstance(authority, MemoTerminalAuthority):
+                    raise CockpitModelError("terminal memo maintenance requires the live owner authority")
+                try:
+                    authority.verify_child(scheduler, work)
+                except (ValueError, KeyError, TypeError, sqlite3.Error, CoverageMissionError) as exc:
+                    raise CockpitModelError("terminal memo maintenance authority differs: " + str(exc)) from exc
+            from .openclaw_model_adapter import OpenClawModelAdapterError
+            from .investment_memo_profile_maintenance import MARKER as MEMO_PROFILE_MARKER, Authority as MemoProfileAuthority
+            if MEMO_PROFILE_MARKER in work.metadata.get("request_id", ""):
+                authority = getattr(self, "_memo_profile_maintenance_authority", None)
+                if not isinstance(authority, MemoProfileAuthority):
+                    raise CockpitModelError("profile memo maintenance requires the live owner authority")
+                try:
+                    authority.verify_child(scheduler, work)
+                except (ValueError, KeyError, TypeError, OSError, sqlite3.Error, CoverageMissionError, OpenClawModelAdapterError) as exc:
+                    raise CockpitModelError("profile memo maintenance authority differs: " + str(exc)) from exc
             if _structured_output_repair is not None:
                 _validate_structured_output_repair_authority(
-                    scheduler, _structured_output_repair, work, self.config
+                    scheduler, _structured_output_repair, work, self.config,
+                    maintenance_authority=getattr(self, "_model_spec_maintenance_authority", None),
+                    financial_authority=getattr(self, "_model_spec_financial_repair_authority", None)
                 )
+            from .cockpit_timeout_recovery import (
+                reserve as timeout_reserve, verify as timeout_verify, consume as timeout_consume,
+                prior_authorization as prior_timeout_authorization, saved_successor as timeout_saved_successor)
+            if _timeout_recovery is not None:
+                from .planner_paid_output_recovery import recovery_readers
+                with _timeout_proof_readers(self.config['model_router_db'], self.config['budget_db'],
+                                      now=self.clock()) as (timeout_router, timeout_budget):
+                    timeout_verify(scheduler.connection, timeout_router, timeout_budget,
+                                   _timeout_recovery, mission=mission)
+                parent = _timeout_recovery['proof']
+                if (purpose != parent['purpose'] or work.question != scheduler.work_order_authority(
+                        parent['parent_work_ref'])['work_order']['question']
+                        or base_request_id != parent['parent_request_id'] + _timeout_recovery['suffix']):
+                    raise CockpitModelError('timeout successor differs from its exact original task')
+                timeout_consume(scheduler, _timeout_recovery, work, now=self.clock())
+            if _timeout_recovery is None and purpose in {'initial_screen', 'deep_insight_gate'}:
+                prior_timeout = prior_timeout_authorization(scheduler.connection, work)
+                if prior_timeout is not None and prior_timeout['proof']['parent_work_ref'] != work.id:
+                    from .planner_paid_output_recovery import recovery_readers
+                    with _timeout_proof_readers(self.config['model_router_db'], self.config['budget_db'],
+                                          now=self.clock()) as (timeout_router, timeout_budget):
+                        timeout_verify(scheduler.connection, timeout_router, timeout_budget,
+                                       prior_timeout, mission=mission)
+                    answered = timeout_saved_successor(scheduler, prior_timeout)
+                    if answered is not None:
+                        child, completed = answered
+                        answer = self._answer(completed, child, True, 0, 'replayed')
+                        answer['prior_unknown_accounted_micros'] = prior_timeout['proof']['accounted_micros']
+                        answer['timeout_recovery_authorization_ref'] = prior_timeout['id']
+                        return answer
+                    raise CockpitModelError('timeout maintenance already consumed this exact task; new evidence is required')
             if scheduler.enqueue(work)["status"] == "conflict":
                 raise CockpitModelError("this request is bound to different content; ask again")
             formal = scheduler.formal_result(work.id)
+            if _timeout_recovery is not None:
+                if formal is not None:
+                    # This certificate has one child. Its failed/unknown result
+                    # cannot enter another maintenance/route/capacity generation.
+                    return self._answer(formal, work, True, 0, 'replayed',
+                                        failure_trace=_failed_work_trace(
+                                            scheduler, work, purpose=purpose, request_id=base_request_id))
+            elif (purpose in {'initial_screen', 'deep_insight_gate'}
+                    and formal is not None and formal.get('terminal_state') == 'failed'):
+                from .planner_paid_output_recovery import recovery_readers
+                with _timeout_proof_readers(self.config['model_router_db'], self.config['budget_db'],
+                                      now=self.clock()) as (timeout_router, timeout_budget):
+                    timeout_binding = timeout_reserve(scheduler, timeout_router, timeout_budget,
+                        work=work, mission=mission, config=self.config, now=self.clock())
+                if timeout_binding is not None:
+                    return self.call(purpose=purpose,
+                        request_id=base_request_id + timeout_binding['suffix'], prompt=prompt,
+                        mission=mission, producer_route_decision_refs=producer_refs,
+                        _timeout_recovery=timeout_binding)
             if (purpose == 'plan' and formal is not None and formal.get('terminal_state') == 'failed'
                     and ((formal.get('result_envelope') or {}).get('error') or {}).get('code') == 'PROVIDER_BUDGET_EXCEEDED'):
                 from .planner_paid_output_recovery import (
@@ -2804,9 +3043,23 @@ class CockpitModel:
                             )
                             if paid_retry is not None:
                                 result = paid_retry
+                        timeout_budget_retry_at = None
+                        if _timeout_recovery is not None:
+                            from .cockpit_timeout_recovery import budget_refusal_proof
+                            refusal_proof = budget_refusal_proof(budget, router, work, attempt, outcome)
+                            if refusal_proof is not None:
+                                # A zero-send budget refusal is not a failed
+                                # paid maintenance attempt. Keep the same Work
+                                # and original Scheduler cap; no daily child.
+                                timeout_budget_retry_at = self.clock().astimezone(timezone.utc).replace(
+                                    hour=0, minute=0, second=0, microsecond=0) + timedelta(days=1)
+                                result = ResultEnvelope.from_dict({**result.to_dict(),
+                                    'status':'retryable', 'metadata':{**dict(result.metadata),
+                                        'timeout_budget_refusal_proof':refusal_proof,
+                                        'retry_at':timeout_budget_retry_at.isoformat()}})
                         completion = guard.complete(
                             result, idempotency_key=f"cockpit-complete:{work.id}:{attempt}",
-                            retry_at=(
+                            retry_at=(timeout_budget_retry_at if timeout_budget_retry_at is not None else
                                 self.clock() + timedelta(
                                     seconds=self.config["provider_retry"][
                                         "retry_backoff_seconds"])
@@ -2886,7 +3139,9 @@ class CockpitModel:
                                         request_id=base_request_id),
                                 )
                         reserved = int(Decimal(str(effective["max_cost_usd"])) * 1_000_000)
-                        decision = admit_day_ledger(
+                        run_refusal = self._run_cost_refusal(work=work,attempt_number=attempt,
+                            reserved_micros=reserved,mission_binding=scope)
+                        decision = ({"status":"refused","failure":run_refusal} if run_refusal else admit_day_ledger(
                             budget,
                             policy_version_id=self.config["budget_policy_ref"],
                             day=self.clock().astimezone(timezone.utc).date().isoformat(),
@@ -2894,7 +3149,7 @@ class CockpitModel:
                             route_decision_ref=route["id"], reserved_micros=reserved,
                             mission_binding=scope,
                             purpose=purpose, thinking_level=route.get("thinking_level"),
-                        )
+                        ))
                         admission = decision.get("admission")
                         if decision["status"] == "refused":
                             result = _failure(work, "BUDGET_REFUSED", route["id"])
@@ -3156,6 +3411,11 @@ class CockpitModel:
                 # One attempt, one reservation. The later links of a chain run
                 # under the reservation the first one took out.
                 return {"status": "admitted"}
+            run_refusal = self._run_cost_refusal(work=work,attempt_number=attempt,
+                reserved_micros=max(ceiling,micros),mission_binding=scope)
+            if run_refusal:
+                refusal.append(run_refusal)
+                return None
             try:
                 from .research_publication_limits import fee_binding
                 publication_binding=fee_binding()

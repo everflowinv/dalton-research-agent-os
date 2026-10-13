@@ -886,9 +886,11 @@ class ClaimSupportVerifier:
         max_items_per_call: int = MAX_ITEMS_PER_CALL,
         second_opinion: bool = False,
         second_opinion_route: Callable[[frozenset[str]], str | None] | None = None,
+        checkpoint: Callable[[], None] | None = None,
     ) -> None:
         self.store = store
         self.connection = store.connection
+        self.checkpoint = checkpoint
         self.model_call = model_call
         self.purpose = purpose
         self.daily_cap_micros = int(daily_cap_micros)
@@ -1060,6 +1062,8 @@ class ClaimSupportVerifier:
                     self._settle_on_first(item, opinions[item["item_key"]], outcome,
                                           {"status": "disabled"})
         for chunk in self._chunks([item for item in pending if item["item_key"] not in opinions]):
+            if self.checkpoint is not None:
+                self.checkpoint()
             status = self._ask(mission, chunk, now, outcome)
             if status == "deferred":
                 outcome.update({"status": "deferred"})
@@ -1069,6 +1073,8 @@ class ClaimSupportVerifier:
                   if item["item_key"] in opinions and item["item_key"] not in outcome["verdicts"]
                   and item["item_key"] not in outcome["unverifiable"]]
         for chunk in self._chunks(second):
+            if self.checkpoint is not None:
+                self.checkpoint()
             status = self._ask_second(mission, chunk, opinions, now, outcome)
             if status == "deferred":
                 outcome.update({"status": "deferred"})
@@ -1354,7 +1360,7 @@ class ClaimSupportVerifier:
 def build_verifier(*, store: Any, model_config: Mapping[str, Any], scheduler_db: str | Path,
                    purpose: str, daily_cap_usd: Any,
                    max_items_per_call: int = FORWARD_ITEMS_PER_CALL,
-                   second_opinion: bool = False) -> ClaimSupportVerifier:
+                   second_opinion: bool = False, checkpoint=None) -> ClaimSupportVerifier:
     """The production verifier: CockpitModel on the extraction lane's own configuration."""
 
     from .call_budget import default_call_budget
@@ -1392,7 +1398,7 @@ def build_verifier(*, store: Any, model_config: Mapping[str, Any], scheduler_db:
         return no_link_outside(chain_links, families, purpose=purpose)
 
     return ClaimSupportVerifier(
-        store=store, model_call=model.call, purpose=purpose,
+        store=store, model_call=model.call, purpose=purpose, checkpoint=checkpoint,
         max_prompt_bytes=int(model.budget_for(purpose)["max_input_tokens"]),
         max_items_per_call=max_items_per_call,
         daily_cap_micros=micros(daily_cap_usd),
