@@ -349,12 +349,20 @@ class MissionDocumentResearchAuthority:
             if candidate.get("repair_target_ref") is not None:
                 normalized["repair_target_ref"] = candidate["repair_target_ref"]
             if candidate.get("directed_document") is not None:
-                normalized["directed_document"] = candidate["directed_document"]
-                if candidate["directed_document"].get("numeric_targets") is not None:
-                    from .document_research_strategy import normalize_strategy
-                    normalized["directed_document"] = normalize_strategy(candidate["directed_document"],
-                        max_query_terms=self.registry.policy["max_query_terms"],
-                        max_query_term_chars=self.registry.policy["max_query_term_chars"])
+                from .document_research_strategy import normalize_strategy
+                directed=candidate["directed_document"]
+                if 'evidence_target_ref' in directed:
+                    from .planner_note_options import expand_formal_selection
+                    try:
+                        frozen_state=json.loads(work['question'].rsplit('\nRESEARCH_STATE=',1)[1])
+                        directed=expand_formal_selection(directed,company_ref=candidate.get('company_ref'),
+                            stored_strategy=inquiry.get('directed_document'),prompt_state=frozen_state,
+                            state_hash=plan['state_hash'])
+                    except (ValueError,TypeError,KeyError,IndexError):
+                        continue  # Not this exact saved inquiry; never infer an option.
+                normalized["directed_document"] = normalize_strategy(directed,
+                    max_query_terms=self.registry.policy["max_query_terms"],
+                    max_query_term_chars=self.registry.policy["max_query_term_chars"])
             projected = {
                 key: value for key, value in inquiry.items()
                 if key not in {"rank", "repair_target_hash"}

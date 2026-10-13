@@ -13,6 +13,7 @@ from .document_research_strategy import DocumentResearchStrategyError, normalize
 from .store import content_hash
 
 CONTRACT = "planner-financial-note-option:0.1"
+FORMAL_SELECTION_CONTRACT = 'planner-financial-note-formal-selection:0.1'
 
 
 def option_ref(company_ref, document, target):
@@ -82,3 +83,38 @@ def expand_selection(value, *, company_ref, state):
     del result["evidence_target_ref"]
     result["evidence_target"] = copy.deepcopy(matches[0])
     return result
+
+
+def expand_formal_selection(value, *, company_ref, stored_strategy,
+                            prompt_state, state_hash):
+    """Rebuild a compact choice from the exact successful planner authorities.
+
+    The caller proves the immutable Work/prompt and saved full plan. The prompt
+    directory proves the choice was actually offered; the saved target must
+    independently recreate its source-bound option hash. This inventory is not
+    a replacement research state and grants no source or execution permission.
+    """
+    if not isinstance(value, Mapping) or 'evidence_target_ref' not in value:
+        return value
+    if (not isinstance(prompt_state, Mapping) or prompt_state.get('content_hash')!=state_hash
+            or (prompt_state.get('prompt_projection') or {}).get('full_state_hash',state_hash)!=state_hash
+            or not isinstance(stored_strategy, Mapping)):
+        raise DocumentResearchStrategyError('formal note choice lacks its exact original state')
+    target=normalize_evidence_target(stored_strategy.get('evidence_target'))
+    document={k:stored_strategy.get(k) for k in ('document_ref','document_version_hash')}
+    expected={'option_ref':option_ref(company_ref,document,target),
+              **{k:target[k] for k in ('kind','form','applicability_kind','periods')}}
+    if (value.get('evidence_target_ref')!=expected['option_ref']
+            or any(value.get(k)!=document[k] for k in document)):
+        raise DocumentResearchStrategyError('formal note choice differs from the saved source target')
+    offered=[]
+    for company in prompt_state.get('companies',()):
+        if company.get('company_ref')!=company_ref:continue
+        for doc in company.get('readable_documents',()):
+            if any(doc.get(k)!=document[k] for k in document):continue
+            offered.extend(option for option in doc.get('evidence_target_options',()) if option==expected)
+    if len(offered)!=1:
+        raise DocumentResearchStrategyError('formal note choice is absent or ambiguous in its original prompt')
+    inventory={'companies':[{'company_ref':company_ref,'readable_documents':[
+        {**document,'evidence_targets':[target]}]}]}
+    return expand_selection(value,company_ref=company_ref,state=inventory)

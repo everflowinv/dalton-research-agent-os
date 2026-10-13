@@ -137,6 +137,7 @@ class ResearchTaskCoordinator:
 
         from .document_research_inventory import document_inventory_signature
         from .document_numeric_inquiry_equivalence import RULE_REF
+        from .planner_note_options import FORMAL_SELECTION_CONTRACT
 
         state_dir = getattr(self.launcher, "state_dir", None)
         document_signature = (
@@ -146,6 +147,7 @@ class ResearchTaskCoordinator:
         return {
             "plan_ref": plan_ref,
             "inquiry_equivalence": RULE_REF,
+            "formal_note_selection": FORMAL_SELECTION_CONTRACT,
             "configuration": (self.launcher.configuration_signature()
                               if hasattr(self.launcher, "configuration_signature") else None),
             "document_inventory": document_signature,
