@@ -63,6 +63,35 @@ class NumericInquiryScopeTests(unittest.TestCase):
         b['question']=a['question']
         self.assertEqual(admission_match(a['company_ref'],a,b),'question')
 
+    def test_unbound_untyped_history_is_not_equivalent_but_invalid_typed_source_refuses(self):
+        a=inquiry()
+        for strategy in (None,{}, {'document_ref':'source:old'},
+                         {'document_ref':'source:old','document_version_hash':None}):
+            b={'company_ref':a['company_ref'],'question':a['question']}
+            if strategy is not None:b['directed_document']=strategy
+            self.assertIsNone(admission_match(a['company_ref'],a,b))
+            self.assertIsNone(admission_match(a['company_ref'],b,a))
+        for key in ('document_ref','document_version_hash'):
+            b=copy.deepcopy(a);b['directed_document'].pop(key)
+            with self.assertRaises(ValueError):admission_match(a['company_ref'],a,b)
+
+    def test_actual_authority_scan_ignores_unbound_ordinary_history(self):
+        h,f,a,parent,p,v=self.fixture()
+        # Historical ordinary inquiry projection: it has no selected original,
+        # while the immutable admission's source authority columns remain held.
+        # The gate must not infer equivalence or demand a non-existent strategy.
+        row=f.store.connection.execute('SELECT record_json FROM mission_document_research_admissions WHERE admission_id=?',(parent['id'],)).fetchone()
+        import json
+        from dalton_core.store import canonical_json,content_hash
+        wire=json.loads(row[0]);wire['planner_inquiry'].pop('directed_document')
+        wire['content_hash']=content_hash({k:v for k,v in wire.items()if k!='content_hash'})
+        f.store.connection.execute('DROP TRIGGER mission_document_research_admissions_no_update')
+        f.store.connection.execute('UPDATE mission_document_research_admissions SET record_json=?,content_hash=? WHERE admission_id=?',
+                                   (canonical_json(wire),wire['content_hash'],parent['id']))
+        before=f.store.connection.total_changes
+        self.assertIsNone(self.check_scope(a,parent,copy.deepcopy(parent['planner_inquiry'])))
+        self.assertEqual(f.store.connection.total_changes,before);self.assertEqual((p.calls,v.calls),(0,0))
+
     def test_invalid_or_forged_target_never_falls_back_to_question(self):
         a=inquiry()
         for mode in ('empty','unknown','digest','duplicate'):

@@ -42,6 +42,14 @@ def _scope(strategy):
     return tuple(sorted(canonical_json(row) for row in rows))
 
 
+def _optional_source(strategy):
+    """Untyped history may have no original binding; it proves no equivalence."""
+    try:
+        return _source(strategy)
+    except ValueError:
+        return None
+
+
 def admission_match(company_ref, inquiry, other):
     """Return a proved matching scope, or None; never a shared-number shortcut.
 
@@ -60,7 +68,9 @@ def admission_match(company_ref, inquiry, other):
     if typed_left or typed_right:
         lscope = _scope(left) if typed_left else None
         rscope = _scope(right) if typed_right else None
-        if _source(left) != _source(right):
+        lsource = _source(left) if typed_left else _optional_source(left)
+        rsource = _source(right) if typed_right else _optional_source(right)
+        if lsource is None or rsource is None or lsource != rsource:
             return None
         if typed_left and typed_right:
             if (left.get('strategy_version') == right.get('strategy_version')
