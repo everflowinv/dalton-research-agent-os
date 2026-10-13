@@ -268,6 +268,21 @@ CONCEPT_ROLES: dict[str, str] = {
         OPERATING_CASH_FLOW,
     "us-gaap:PaymentsToAcquirePropertyPlantAndEquipment": CAPITAL_EXPENDITURE,
 }
+# Exact standard-taxonomy concepts, not label matches or US-GAAP aliases.
+# The fact keeps its original concept, statement, period, dimensions and unit;
+# a role only chooses the existing arithmetic path and its complete validators.
+INCOME_TAXONOMY_ROLE_REF = "filed-income-taxonomy-roles:0.2"
+IFRS_INCOME_CONCEPT_ROLES: dict[str, str] = {
+    "ifrs-full:Revenue": REVENUE,
+    "ifrs-full:RevenueFromContractsWithCustomers": REVENUE,
+    "ifrs-full:CostOfSales": COST_OF_REVENUE,
+    "ifrs-full:SellingExpense": OPERATING_EXPENSE,
+    "ifrs-full:GeneralAndAdministrativeExpense": OPERATING_EXPENSE,
+    "ifrs-full:ResearchAndDevelopmentExpense": OPERATING_EXPENSE,
+    "ifrs-full:IncomeTaxExpenseContinuingOperations": INCOME_TAX,
+    "ifrs-full:ProfitLoss": NET_INCOME,
+}
+CONCEPT_ROLES.update(IFRS_INCOME_CONCEPT_ROLES)
 for _cash_role, _cash_concepts in CASH_FLOW_ROLE_CONCEPTS.items():
     for _cash_concept in _cash_concepts:
         CONCEPT_ROLES[_cash_concept] = _cash_role

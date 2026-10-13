@@ -1121,7 +1121,7 @@ def model_spec_validation_contract() -> dict[str, str]:
     from .statement_original_revenue_context import RULE_REF as ORIGINAL_REVENUE_REF
     from .company_model_series import DUPLICATE_FACT_POLICY_REF
     from .model_forecast_driver import (
-        CASH_FLOW_COMPANION_VALIDATION_CONTRACT_HASH,
+        CASH_FLOW_COMPANION_VALIDATION_CONTRACT_HASH, INCOME_TAXONOMY_ROLE_REF,
     )
 
     return {
@@ -1131,6 +1131,7 @@ def model_spec_validation_contract() -> dict[str, str]:
         "financial_repair_admission": FINANCIAL_REPAIR_ADMISSION_REF,
         "proposal_method_completion": PROPOSAL_METHOD_COMPLETION_REF,
         "cash_flow_companion": CASH_FLOW_COMPANION_VALIDATION_CONTRACT_HASH,
+        "income_taxonomy_roles": INCOME_TAXONOMY_ROLE_REF,
         "cash_flow_derived_income_base": DERIVED_CASH_BASE_REF,
         "cash_flow_independent_filed_tie_base": FILED_CASH_BASE_REF,
         "cash_flow_ratio_applicability": CASH_RATIO_REF,
