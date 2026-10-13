@@ -513,12 +513,8 @@ def verified_original(writer, review, row, limits, receipt_reader):
         from .sec_annual_report_exhibit import verified_exhibit_source, AnnualReportExhibitConflict
         accession=document_ref.split(':',3)[2]
         parent_ref='sec:filing:'+accession
-        parent=writer.store.connection.execute(
-            'SELECT * FROM coverage_mission_discovered_documents WHERE document_ref=? AND ticket_ref=? '
-            'AND company_ref=? AND mission_version_ref=? AND source_ref=? AND status=\'acquired\'',
-            (parent_ref,row['ticket_ref'],review['company_ref'],review['mission_version_ref'],source_ref)).fetchone()
-        if parent is None:
-            raise ResearchVerificationConflict('annual report attachment has no acquired parent in this review scope')
+        from .acquired_document_source_chain import acquired_annual_parent
+        parent=acquired_annual_parent(writer,review,row,parent_ref)
         try:
             exact=verified_exhibit_source(writer.store,acquisition_spool(writer,launcher,source_ref),writer.state_dir,
                 ticket_ref=row['ticket_ref'],parent_document_ref=parent_ref,company_ref=review['company_ref'],
@@ -533,10 +529,24 @@ def verified_original(writer, review, row, limits, receipt_reader):
             'raw_media_type':manifest['raw_media_type'],'body_sha256':manifest['body_sha256'],
             'source_renderer':rendering['renderer'],'source_truncated':False,
             'annual_report_attachment':exact['binding']}
-    manifest = completed_acquisition_manifest(
-        launcher, ticket_ref=row["ticket_ref"], document_ref=document_ref)
     store = writer.store
     spool = acquisition_spool(writer, launcher, source_ref)
+    from .public_web_fetch_launcher import FetchLaunchRejected
+    try:
+        manifest = completed_acquisition_manifest(
+            launcher, ticket_ref=row["ticket_ref"], document_ref=document_ref)
+    except Exception as exc:
+        # A filing discovered later may name a page already fetched under its
+        # URL identity. Only the explicitly missing-completion path can use
+        # this alias; bad manifest/receipt/tamper errors remain refusals.
+        if (source_ref != SEC_EDGAR_SOURCE_REF or not document_ref.startswith('sec:filing:')
+                or not (isinstance(exc, FetchLaunchRejected)
+                        or isinstance(exc, ResearchVerificationError)
+                        and isinstance(exc.__cause__, FetchLaunchRejected))
+                or 'no completed acquisition ticket for this document' not in str(exc)):
+            raise
+        from .acquired_document_source_chain import completed_discovery_alias_manifest
+        manifest = completed_discovery_alias_manifest(writer,launcher,review,row,spool)
     if source_ref == ALPHAENGINE_SOURCE_REF:
         manifest, text = verified_source(
             store, spool, manifest, receipt_reader,
