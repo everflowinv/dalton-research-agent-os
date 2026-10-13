@@ -409,14 +409,42 @@ def _required_numeric_originals(*, core: Any, mission: Mapping[str, Any],
     for company, observations in feedback.get("by_company", {}).items():
         if company not in allowed:
             raise ValueError("numeric original feedback escaped mission coverage")
-        for requirement in numeric_requirements(observations, limit=None)["requirements"]:
+        requirements = numeric_requirements(observations, limit=None)["requirements"]
+        # Supersession removes the duplicate *operation* from planning feedback,
+        # not its unresolved successor's immutable source dependency. Complete
+        # formal numeric results stop emitting this unresolved relationship;
+        # pending and partial successors must retain the exact old registration.
+        for observation in observations:
+            successor = observation.get("numeric_upgrade_supersession")
+            if observation.get("numeric_upgrade_status") != "superseded_by_admitted_numeric_read" \
+                    or not isinstance(successor, Mapping):
+                continue
+            requirements.append({
+                "document_ref": successor.get("document_ref"),
+                "document_version_hash": successor.get("document_version_hash"),
+                "replaces_numeric_rejection": successor.get("rejection_binding"),
+                "supersession": dict(successor),
+                "observed_parent_ref": observation.get("admission_ref"),
+            })
+        for requirement in requirements:
             if selected_document_refs is not None and requirement["document_ref"] not in selected_document_refs:
                 continue
-            binding = requirement["replaces_numeric_rejection"]
             try:
+                binding = requirement["replaces_numeric_rejection"]
+                if (not isinstance(binding, Mapping)
+                        or set(binding) != {"admission_ref", "admission_hash", "rejection_ref", "rejection_hash"}
+                        or not all(isinstance(value, str) and value for value in binding.values())):
+                    raise ValueError("numeric original rejection binding has invalid shape")
                 proof = numeric_rejection(core.connection, binding["admission_ref"])
                 if proof is None or any(proof[key] != binding[key] for key in binding):
                     raise ValueError("numeric original lacks exact rejection binding")
+                if "supersession" in requirement:
+                    from .numeric_capability_supersession import successor_for
+                    successor = requirement["supersession"]
+                    if (successor.get("original_admission_ref") != requirement["observed_parent_ref"]
+                            or successor.get("company_ref") != company
+                            or successor_for(core.connection, proof, mission=mission) != successor):
+                        raise ValueError("numeric original supersession binding differs")
                 row = core.connection.execute(
                     "SELECT record_json,content_hash,company_ref,mission_version_ref FROM "
                     "mission_document_research_admissions WHERE admission_id=?",

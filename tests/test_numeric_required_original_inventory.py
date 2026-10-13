@@ -49,6 +49,53 @@ class NumericOriginalInventoryTests(unittest.TestCase):
             'SELECT record_json,content_hash FROM mission_document_research_admissions')), rows)
         self.assertEqual((producer.calls, verifier.calls), (0, 0))
 
+    def test_pending_supersession_keeps_source_without_reopening_parent_operation(self):
+        from dalton_core.document_research_feedback import read_document_research_feedback
+        from dalton_core.document_research_inventory import _required_numeric_originals
+        from dalton_core.planner_numeric_requirements import numeric_requirements
+        f, authority, admission, _, producer, verifier = self.fixture(old_rejection=True)
+        feedback = read_document_research_feedback(f.store, f.mission)
+        observations = feedback['by_company'][COMPANY]
+        upgraded = [r for r in observations if r.get('numeric_upgrade_supersession')]
+        self.assertEqual(len(upgraded), 1)
+        self.assertEqual(upgraded[0]['numeric_upgrade_supersession']['successor_admission_ref'], admission['id'])
+        self.assertEqual(numeric_requirements(observations)['requirements'], [])
+        before = f.store.connection.total_changes
+        with patch.object(authority.registry, '_reresolve', wraps=authority.registry._reresolve) as replay:
+            originals, failures = _required_numeric_originals(core=f.store, mission=f.mission,
+                registry=authority.registry, purpose=PURPOSE)
+        self.assertEqual(originals, [(COMPANY, admission['request']['registration'])])
+        self.assertEqual(failures, [])
+        self.assertEqual(replay.call_count, 1)
+        self.assertEqual(f.store.connection.total_changes, before)
+        self.assertEqual((producer.calls, verifier.calls), (0, 0))
+
+    def test_rehashed_supersession_identity_or_target_drift_cannot_pin_source(self):
+        from dalton_core.document_research_feedback import read_document_research_feedback
+        from dalton_core.document_research_inventory import _required_numeric_originals
+        f, authority, _, _, producer, verifier = self.fixture(old_rejection=True)
+        feedback = read_document_research_feedback(f.store, f.mission)
+        before = f.store.connection.total_changes
+        for field, value in [('successor_admission_ref', 'mission-document-admission:foreign'),
+                             ('numeric_targets_hash', '0'*64),
+                             ('document_version_hash', '0'*64),
+                             ('rejection_binding', {'admission_ref': {'foreign': 'record'}}),
+                             ('company_ref', 'company:foreign')]:
+            with self.subTest(field=field):
+                altered = copy.deepcopy(feedback)
+                row = next(r for r in altered['by_company'][COMPANY] if r.get('numeric_upgrade_supersession'))
+                proof = row['numeric_upgrade_supersession']
+                proof[field] = value
+                proof['content_hash'] = content_hash({k:v for k,v in proof.items() if k != 'content_hash'})
+                with patch('dalton_core.document_research_feedback.read_document_research_feedback', return_value=altered), \
+                     patch.object(authority.registry, '_reresolve', side_effect=AssertionError('unproved source replay')):
+                    originals, failures = _required_numeric_originals(core=f.store, mission=f.mission,
+                        registry=authority.registry, purpose=PURPOSE)
+                self.assertEqual(originals, [])
+                self.assertEqual([r['reason'] for r in failures], ['numeric_required_original_unavailable'])
+        self.assertEqual(f.store.connection.total_changes, before)
+        self.assertEqual((producer.calls, verifier.calls), (0, 0))
+
     def test_full_formal_numeric_completion_stops_pinning_old_original(self):
         f, authority, admission, executor, _, _ = self.fixture(old_rejection=True)
         current = self.current_rendering(admission)
@@ -57,15 +104,21 @@ class NumericOriginalInventoryTests(unittest.TestCase):
                           side_effect=lambda **kw: ({'available': True, 'registration': current} if kw['record_id'] == current['source_authority']['ref'] else {'available': False, 'reason': 'fixture source adapter absent'})):
             result = self.inventory(f, authority)
         self.assertEqual(set(result['registration_by_hash']), {current['content_hash']})
+        from dalton_core.document_research_inventory import _required_numeric_originals
+        with patch.object(authority.registry, '_reresolve', side_effect=AssertionError('completed old source pinned')):
+            self.assertEqual(_required_numeric_originals(core=f.store, mission=f.mission,
+                registry=authority.registry, purpose=PURPOSE), ([], []))
 
     def test_partial_formal_result_keeps_required_original(self):
         f, authority, admission, executor, _, _ = self.fixture(old_rejection=True, missing=True)
         current = self.current_rendering(admission)
         self.assertEqual(self.drive(executor, admission)['research_status'], 'numeric_waiting_evidence')
         with patch.object(authority.registry, 'inspect_acquired_document',
-                          side_effect=lambda **kw: ({'available': True, 'registration': current} if kw['record_id'] == current['source_authority']['ref'] else {'available': False, 'reason': 'fixture source adapter absent'})):
+                          side_effect=lambda **kw: ({'available': True, 'registration': current} if kw['record_id'] == current['source_authority']['ref'] else {'available': False, 'reason': 'fixture source adapter absent'})), \
+             patch.object(authority.registry, '_reresolve', wraps=authority.registry._reresolve) as replay:
             result = self.inventory(f, authority)
         self.assertIn(admission['request']['registration']['content_hash'], result['registration_by_hash'])
+        self.assertEqual(replay.call_count, 1)
 
     def test_unreplayable_old_original_is_diagnostic_not_current_version_alias(self):
         f, authority, admission, _, _, _ = self.fixture(old_rejection=True)
