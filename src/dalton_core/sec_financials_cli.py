@@ -98,6 +98,21 @@ def _output_schema(version: int = 4) -> dict[str, Any]:
     return sec_financials_output_schema(version=version)
 
 
+def _filing_report_date(filing: Any) -> str:
+    """Read the library's actual report-period field without guessing a date."""
+    value = getattr(filing, "report_date", None)
+    if value is None:
+        value = getattr(filing, "period_of_report", None)
+    text = str(value) if value is not None else ""
+    from datetime import date
+    try:
+        if date.fromisoformat(text).isoformat() != text:
+            raise ValueError("noncanonical report date")
+    except ValueError as exc:
+        raise SecFinancialsRunError("SEC filing lacks a canonical original report period") from exc
+    return text
+
+
 def parse_live(ticker: str | None, cik: str | None, *, form: str, limit: int,
                user_agent: str, native_request: dict[str, Any] | None = None) -> dict[str, Any]:
     """Parse the newest filings for one company. Imports the parser lazily.
@@ -141,12 +156,14 @@ def parse_live(ticker: str | None, cik: str | None, *, form: str, limit: int,
         raise SecFinancialsRunError(f"no {form} filing found for this company")
     parsed: list[dict[str, Any]] = []
     for filing in filings:
+        report_date = None
         document_set = None
         if native_request:
+            report_date = _filing_report_date(filing)
             from .sec_native_annual import build_document_set, member, source_member, MAX_MEMBERS, MAX_MEMBER_BYTES, MAX_TOTAL_BYTES
             expected = next(d for d in native_request["filings"] if d["accession"] == str(filing.accession_no))
             if any(str(actual) != expected[key] for key,actual in (
-                    ("form",filing.form),("filed",filing.filing_date),("report_date",filing.report_date))):
+                    ("form",filing.form),("filed",filing.filing_date),("report_date",report_date))):
                 raise SecFinancialsRunError("native annual parser header differs from original index")
             # The library is the same approved public reader. Keep raw member
             # bytes before parsing rather than silently losing exhibit provenance.
@@ -176,6 +193,8 @@ def parse_live(ticker: str | None, cik: str | None, *, form: str, limit: int,
         xbrl = filing.xbrl()
         if xbrl is None:
             continue
+        if report_date is None:
+            report_date = _filing_report_date(filing)
         facts = xbrl.query().with_dimensions().to_dataframe()
         accessors = {
             "income": xbrl.statements.income_statement,
@@ -198,7 +217,7 @@ def parse_live(ticker: str | None, cik: str | None, *, form: str, limit: int,
             "accession": str(filing.accession_no),
             "form": str(filing.form),
             "filed": str(filing.filing_date),
-            "report_date": str(filing.report_date),
+            "report_date": report_date,
             "statements": statements,
         })
     return {
