@@ -60,7 +60,7 @@ from .research_state import (
     state_digest,
 )
 from .service_config_location import service_config_path
-from .store import DaltonStore, canonical_json
+from .store import DaltonStore, canonical_json, content_hash
 
 SUMMARY_SCHEMA_VERSION = "0.1"
 # One state, one decision.  The child already replays a *stored* plan for an
@@ -388,6 +388,12 @@ def build_state(store: DaltonStore, missions: CoverageMissionAuthority,
     followups = planner_context(store.connection, mission)
     if followups is not None:
         state["reflection_followup_context"] = followups
+    from .research_planner import typed_note_directory_contract, TASK_HASH
+    note_contract = typed_note_directory_contract(state)
+    if note_contract is not None:
+        # An input-contract change is one normal planning decision. A clock,
+        # event or repeated tick cannot create a new permission or repair slot.
+        state["planner_task_hash"] = content_hash({"task": TASK_HASH, "typed_note_directory": note_contract})
     state["content_hash"] = state_content_hash(state)
     return state
 

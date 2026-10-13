@@ -1281,19 +1281,52 @@ def _has_initial_screen_feedback(state: Mapping[str, Any]) -> bool:
 
 def _valid_note_targets(document: Mapping[str, Any]) -> bool:
     from .document_research_strategy import normalize_evidence_target
-    for target in document.get("evidence_targets", ()):
-        try:
+    targets = document.get("evidence_targets")
+    if not isinstance(targets, list) or not targets:
+        return False
+    try:
+        for target in targets:
             normalize_evidence_target(target)
-        except ValueError:
-            continue
-        return True
-    return False
+    except ValueError:
+        return False
+    return True
 
 
 def _has_note_targets(state: Mapping[str, Any]) -> bool:
     return any(_valid_note_targets(document)
                for company in state.get("companies", ())
                for document in company.get("readable_documents", ()))
+
+
+def typed_note_directory_contract(state: Mapping[str, Any]) -> dict[str, str] | None:
+    """Stable normal-planning identity for a complete admitted typed directory.
+
+    This is an input contract, never a financial assertion or retry grant.
+    Without a complete capability directory, legacy planning identity stays.
+    """
+    from .document_research_strategy import normalize_evidence_target
+    directory = []
+    for company in state.get("companies", ()):
+        for document in company.get("readable_documents", ()):
+            if not document.get("evidence_targets"):
+                continue
+            if (not _valid_note_targets(document) or document.get("readable") is not True
+                    or document.get("source_ref") != "source:sec-edgar"
+                    or document.get("authority_hash") != document.get("document_version_hash")
+                    or not document.get("authority_ref")
+                    or "search_registered_document" not in document.get("operations", ())):
+                return None
+            targets = [normalize_evidence_target(t) for t in document["evidence_targets"]]
+            if any(document["document_ref"] != "sec:filing:" + t["accession"] for t in targets):
+                return None
+            directory.append({"company_ref": company["company_ref"],
+                "document_ref": document["document_ref"],
+                "document_version_hash": document["document_version_hash"],
+                "targets": sorted(targets, key=canonical_json)})
+    if not directory:
+        return None
+    return {"rule_ref": "rule:research-plan-input-projection:typed-note-directory-1",
+            "directory_hash": content_hash(sorted(directory, key=canonical_json))}
 
 
 def _projection_ref_for_state(state: Mapping[str, Any]) -> str:
