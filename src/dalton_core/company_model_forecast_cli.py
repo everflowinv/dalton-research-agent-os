@@ -63,6 +63,7 @@ from .economic_invariants import (
     FORECAST_INVARIANT_CONTRACT_HASH,
 )
 from .store import DaltonStore, canonical_json
+from .company_financial_statement_structure import FinancialStatementStructureNotReady
 
 SUMMARY_SCHEMA_VERSION = "0.1"
 
@@ -383,6 +384,15 @@ def run_model_forecast(
     except ForecastSpecificationPending as exc:
         summary.update(status="succeeded", forecast_status="awaiting_specification",
                        failure_reason=str(exc), waiting_specifications=exc.specifications)
+        return summary
+    except FinancialStatementStructureNotReady as exc:
+        from .forecast_material_gaps import open_gap_requests
+        summary.update(status='succeeded', forecast_status='unavailable:statement_history',
+            failure_reason=str(exc))
+        summary['material_gap_requests'] = open_gap_requests(state_dir, spec, table,
+            failure=str(exc), structure_failure=exc,
+            source_filings=missions.statement_filings(spec['company_ref']),
+            run_ref=summary.get('run_ref'))
         return summary
     except ForecastModelError as exc:
         summary["failure_reason"] = f"{type(exc).__name__}: {exc}"

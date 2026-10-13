@@ -240,7 +240,10 @@ class MissionModelForecastLaneCoordinator:
                         FinancialNoteContextError) as exc:
                     unavailable[candidate] = f"{type(exc).__name__}: {exc}"
                     if state_dir is not None:
-                        open_gap_requests(state_dir,candidate_spec,candidate_table,record=self.models.latest(candidate),failure=str(exc))
+                        from .company_financial_statement_structure import FinancialStatementStructureNotReady
+                        history = isinstance(exc, FinancialStatementStructureNotReady)
+                        open_gap_requests(state_dir,candidate_spec,candidate_table,record=self.models.latest(candidate),failure=str(exc),
+                            **({'structure_failure':exc,'source_filings':self.missions.statement_filings(candidate)} if history else {}))
                     continue
                 business_key = (
                     f"{candidate}|{candidate_digest}|"

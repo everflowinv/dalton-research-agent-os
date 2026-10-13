@@ -159,6 +159,7 @@ SEC_SPECS: Mapping[str, str] = {
     "sec_20f_amendment": "annual-report-20f-amendment",
     "sec_40f": "annual-report-40f",
     "sec_40f_amendment": "annual-report-40f-amendment",
+    "sec_6k": "foreign-disclosure-6k",
 }
 #: Data-item phrasings: what a passage says when it reports the item.  Keyed
 #: by a normalised item name; the item's own words are always included.
@@ -583,6 +584,9 @@ def evaluate_acceptance(state_dir: str | Path, request: Mapping[str, Any], *,
     identity = identity if identity is not None else identity_for(state_dir, subject)
     date_from, date_to = _window_with_acceptance(request, now=now)
     kind = need.get("kind")
+    if acceptance.get("model_gap_rule_ref") == "forecast-statement-history-gaps:0.1":
+        from .forecast_statement_history_gaps import requirement_status
+        return requirement_status(state_dir, request)
     if acceptance.get("numeric_contract_ref") == "directed-document-numeric:0.1":
         # Related passages are acquisition inputs, not a verified numeric answer.
         # Only the source-bound Figure/canonical Claim executor closes this request.

@@ -83,10 +83,15 @@ def gap_plans(spec: Mapping[str,Any], table: Mapping[str,Any], *, record=None, f
             "Resolve this model publication refusal with original filed or documentary authority: "+str(failure)+". No fabricated actual, arbitrary rate or unproved earnings proxy is admissible.",str(failure))
     return list(plans.values())
 
-def open_gap_requests(state_dir, spec, table, *, record=None, failure=None, run_ref=None):
+def open_gap_requests(state_dir, spec, table, *, record=None, failure=None, run_ref=None,
+                      structure_failure=None, source_filings=None):
     from .material_requests import open_request
     output=[]
-    for plan in gap_plans(spec,table,record=record,failure=failure):
+    plans=gap_plans(spec,table,record=record,failure=failure)
+    if structure_failure is not None:
+        from .forecast_statement_history_gaps import plans as history_plans
+        plans += history_plans(spec, table, structure_failure, filings=source_filings or [])
+    for plan in plans:
         value=open_request(state_dir,requester={"lane":"company_model_forecast","product_ref":spec.get("spec_id"),
             "run_ref":run_ref,"section":plan["key"]},subject=spec["company_ref"],need=plan["need"],period=plan["period"],
             source_priority=plan["source_priority"],acceptance=plan["acceptance"])

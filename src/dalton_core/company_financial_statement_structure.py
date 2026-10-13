@@ -371,6 +371,19 @@ class FinancialStatementStructureError(ValueError):
     pass
 
 
+class FinancialStatementStructureNotReady(FinancialStatementStructureError):
+    """An exact validated replay with insufficient execution inputs.
+
+    This is diagnostic authority only: it does not permit publishing or
+    changing the specification. Callers can reconstruct the original replay
+    before asking the ordinary material lane for missing history.
+    """
+    def __init__(self, structure, replay):
+        self.structure = dict(structure)
+        self.replay = dict(replay)
+        super().__init__("statement structure is not ready for forecast")
+
+
 def _closed(value: Any, fields: set[str], name: str) -> dict[str, Any]:
     if not isinstance(value, Mapping) or set(value) != fields:
         raise FinancialStatementStructureError(f"{name} has an invalid closed shape")
@@ -2566,7 +2579,7 @@ def forecast_structure_binding(
     if replay.get("structure_hash") != structure.get("content_hash"):
         raise FinancialStatementStructureError("historical replay is for another structure")
     if replay.get("ready_for_forecast") is not True:
-        raise FinancialStatementStructureError("statement structure is not ready for forecast")
+        raise FinancialStatementStructureNotReady(structure, replay)
     projection = {
         "schema_version": (
             "forecast-statement-structure-binding-0.7"
