@@ -345,7 +345,7 @@ def _original_limits(proof_scope):
         return CHECKPOINT_MAX_PASSAGES, CHECKPOINT_MAX_ORIGINALS, CHECKPOINT_SOURCE_TIMEOUT_SECONDS
     raise ValueError('unknown original proof scope')
 
-def _checked_originals(state, refs, *, include_render_metadata=False, proof_scope='diagnostic', include_source_metadata=False):
+def _checked_originals(state, refs, *, include_render_metadata=False, proof_scope='diagnostic', include_source_metadata=False, include_quality_metadata=False):
     """One bounded pure-reader process; it has no model or writable authority."""
     import subprocess
     import sys
@@ -353,7 +353,7 @@ def _checked_originals(state, refs, *, include_render_metadata=False, proof_scop
     if len(refs)>max_passages:raise DiagnosticUnavailable('original_passage_limit')
     code='from dalton_core.initial_screen_failure_feedback import _original_check_main;_original_check_main()'
     try:
-        result=subprocess.run([sys.executable,'-c',code],input=canonical_json({'state_dir':str(state),'refs':sorted(refs),'include_render_metadata':include_render_metadata,'proof_scope':proof_scope,**({'include_source_metadata':True} if include_source_metadata else {})}),
+        result=subprocess.run([sys.executable,'-c',code],input=canonical_json({'state_dir':str(state),'refs':sorted(refs),'include_render_metadata':include_render_metadata,'proof_scope':proof_scope,**({'include_source_metadata':True} if include_source_metadata else {}),**({'include_quality_metadata':True} if include_quality_metadata else {})}),
             text=True,stdout=subprocess.PIPE,stderr=subprocess.DEVNULL,timeout=timeout,check=False)
     except subprocess.TimeoutExpired as exc:
         raise DiagnosticUnavailable('original_verification_timeout') from exc
@@ -413,11 +413,11 @@ class _BoundedOriginalSpool:
 def _original_check_main():
     import sys
     request=json.loads(sys.stdin.read(MAX_BYTES+1))
-    try:result=_original_passages(request['state_dir'],request['refs'],include_render_metadata=request.get('include_render_metadata',False),proof_scope=request.get('proof_scope','diagnostic'),include_source_metadata=request.get('include_source_metadata',False))
+    try:result=_original_passages(request['state_dir'],request['refs'],include_render_metadata=request.get('include_render_metadata',False),proof_scope=request.get('proof_scope','diagnostic'),include_source_metadata=request.get('include_source_metadata',False),include_quality_metadata=request.get('include_quality_metadata',False))
     except DiagnosticUnavailable as exc:result={'failure_code':exc.code}
     print(canonical_json(result))
 
-def _original_passages(state_dir, refs, *, include_render_metadata=False, proof_scope='diagnostic', include_source_metadata=False):
+def _original_passages(state_dir, refs, *, include_render_metadata=False, proof_scope='diagnostic', include_source_metadata=False, include_quality_metadata=False):
     """Strong local originals, once per document, and exact frozen spans."""
     from .planner_paid_output_recovery import _authority_connection
     from .evidence_index import _resolve
@@ -463,6 +463,14 @@ def _original_passages(state_dir, refs, *, include_render_metadata=False, proof_
                 raise
             if (body.document_ref,body.text_sha256)!=identity:raise ValueError('original document version differs')
             bodies[identity]=body
+        quality_names = None
+        if include_quality_metadata:
+            from .coverage_mission import validate_coverage_mission_version
+            row = core.execute('SELECT v.record_json,v.content_hash FROM coverage_mission_pointer p JOIN coverage_mission_versions v ON v.mission_version_id=p.mission_version_id ORDER BY p.mission_ref LIMIT 1').fetchone()
+            if row is None: raise ValueError('quality source names have no active mission')
+            mission = validate_coverage_mission_version(json.loads(row['record_json']))
+            if mission['content_hash'] != row['content_hash']: raise ValueError('quality source mission hash differs')
+            quality_names = {ctx.ticker_to_company[ticker]: list(names) for ticker,names in ctx.name_table.items()}
         out={}
         for ref,found in spans.items():
             body=bodies[(found['document_ref'],found['document_sha256'])]
@@ -473,6 +481,12 @@ def _original_passages(state_dir, refs, *, include_render_metadata=False, proof_
                 # Derived by the strong acquired-original loader, never a
                 # document prefix guess or an optional mission review.
                 out[ref]['source_ref']=body.source_ref
+            if include_quality_metadata:
+                header = body.text[:8192]
+                out[ref]['quality_source'] = {'contract_ref':'quality-original-scope:1',
+                    'header':header, 'header_hash':content_hash(header),
+                    'source_ref':body.source_ref, 'names':quality_names,
+                    'mission_ref':mission['id'], 'mission_hash':mission['content_hash']}
             # Current provenance title/date are not frozen acquisition proof.
             # Never certify a renderer header from those mutable metadata rows.
         return out

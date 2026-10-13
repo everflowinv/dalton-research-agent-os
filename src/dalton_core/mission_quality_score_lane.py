@@ -169,7 +169,8 @@ def ensure_quality_verifier_config(state_dir: str | Path) -> dict[str, Any]:
 
 def run_digest(target_ref: str, target_hash: str, rubric: str = RUBRIC) -> str:
     from .research_quality_rubrics import rubric as get_rubric
-    payload = "|".join([TICKET_PREFIX, rubric, get_rubric(rubric).content_hash, target_ref, target_hash])
+    from .research_quality_score import SCORER_VERSION
+    payload = "|".join([TICKET_PREFIX, SCORER_VERSION, rubric, get_rubric(rubric).content_hash, target_ref, target_hash])
     return hashlib.sha256(payload.encode("utf-8")).hexdigest()[:24]
 
 
@@ -190,31 +191,35 @@ class QualityScoreLauncher(LaneChildLauncher):
         self.scheduler_db = (None if scheduler_db is None
                              else Path(scheduler_db).expanduser().resolve())
 
-    def _command(self, *, ticket_dir: Path, target_ref: str, rubric: str = RUBRIC) -> list[str]:
+    def _command(self, *, ticket_dir: Path, target_ref: str, rubric: str = RUBRIC, deterministic_refresh: bool = False) -> list[str]:
         command = [
             self.python_executable, "-m", self.CHILD_MODULE, "score",
             "--state-dir", str(self.state_dir),
             "--rubric", rubric, "--target", target_ref,
-            "--model-config", str(self.judge_model_config_path),
-            "--verifier-model-config", str(self.verifier_model_config_path),
             "--actor-ref", ACTOR_REF,
             "--summary-dir", str(ticket_dir),
         ]
+        if not deterministic_refresh:
+            command += ["--model-config", str(self.judge_model_config_path),
+                        "--verifier-model-config", str(self.verifier_model_config_path)]
         if self.scheduler_db is not None:
             command += ["--scheduler-db", str(self.scheduler_db)]
         return command
 
     def start(self, *, target_ref: str, target_hash: str,
-              deliverable_ref: str | None = None, rubric: str = RUBRIC) -> dict[str, Any]:
+              deliverable_ref: str | None = None, rubric: str = RUBRIC,
+              deterministic_refresh: bool = False) -> dict[str, Any]:
         if not isinstance(target_ref, str) or not target_ref.strip():
             raise LaneChildRejected("a quality score run needs a target version")
         if not isinstance(target_hash, str) or not target_hash.strip():
             raise LaneChildRejected("a quality score run needs the target's hash")
+        from .research_quality_score import SCORER_VERSION
         return self.spawn(
             digest=run_digest(target_ref, target_hash, rubric),
             record={"target_ref": target_ref, "target_hash": target_hash,
-                    "deliverable_ref": deliverable_ref, "rubric": rubric},
-            target_ref=target_ref, rubric=rubric,
+                    "deliverable_ref": deliverable_ref, "rubric": rubric,
+                    "scorer_version":SCORER_VERSION, "deterministic_refresh":deterministic_refresh},
+            target_ref=target_ref, rubric=rubric, deterministic_refresh=deterministic_refresh,
         )
 
     def tickets(self) -> list[dict[str, Any]]:
@@ -259,6 +264,7 @@ def pending_targets(connection: Any) -> list[dict[str, str]]:
             seen.add(row[0])
             record = json.loads(row[1])
             candidates.append(({**record, "kind": kind}, record.get("id")))
+    from .research_quality_score import SCORER_VERSION
     scored_table = connection.execute(
         "SELECT 1 FROM sqlite_master WHERE type='table' "
         "AND name='research_quality_score_versions'").fetchone() is not None
@@ -275,11 +281,17 @@ def pending_targets(connection: Any) -> list[dict[str, str]]:
         if scored_table and connection.execute(
             "SELECT 1 FROM research_quality_score_versions WHERE target_ref=? "
             "AND target_hash=? AND rubric_ref=? AND rubric_hash=? "
-            "AND (judge_status IS NULL OR judge_status='scored') LIMIT 1",
-            (target_ref, target_hash, standard.rubric_ref, standard.content_hash),
+            "AND scorer_version=? AND (judge_status IS NULL OR judge_status='scored') LIMIT 1",
+            (target_ref, target_hash, standard.rubric_ref, standard.content_hash,SCORER_VERSION),
         ).fetchone() is not None:
             continue
-        pending.append({"deliverable_ref": deliverable_ref,
+        older = scored_table and connection.execute(
+            "SELECT 1 FROM research_quality_score_versions WHERE target_ref=? AND target_hash=? "
+            "AND rubric_ref=? AND rubric_hash=? AND scorer_version!=? "
+            "AND (judge_status IS NULL OR judge_status='scored') LIMIT 1",
+            (target_ref,target_hash,standard.rubric_ref,standard.content_hash,SCORER_VERSION)).fetchone() is not None
+        pending.append({**({"deterministic_refresh":True} if older else {}),
+                        "deliverable_ref": deliverable_ref,
                         "target_ref": target_ref, "target_hash": target_hash, "rubric": kind})
     return pending
 
@@ -318,7 +330,7 @@ class QualityScoreLaneCoordinator:
 
     def limits(self, tickets: list[dict[str, Any]]) -> dict[str, Any]:
         now = _utc(self.clock())
-        starts = [moment for moment in (_moment(row.get("started_at")) for row in tickets)
+        starts = [moment for moment in (_moment(row.get("started_at")) for row in tickets if not row.get("deterministic_refresh"))
                   if moment is not None]
         in_day = [moment for moment in starts if now - moment < timedelta(days=1)]
         latest = max(starts, default=None)
@@ -334,8 +346,11 @@ class QualityScoreLaneCoordinator:
         }
 
     def _recently_failed(self, tickets: list[dict[str, Any]], target: Mapping[str, str]) -> bool:
+        from .research_quality_score import SCORER_VERSION
         now = _utc(self.clock())
         for row in tickets:
+            if target.get("deterministic_refresh") and row.get("scorer_version") != SCORER_VERSION:
+                continue
             if (row.get("target_ref") != target["target_ref"]
                     or row.get("target_hash") != target["target_hash"]):
                 continue
@@ -364,11 +379,12 @@ class QualityScoreLaneCoordinator:
             return {"status": "idle", **base,
                     "reason": "every Initial Screen version is scored"
                     if not pending else "unscored versions are waiting out a failure"}
-        if limits["day_cap_reached"]:
+        refresh = [item for item in eligible if item.get("deterministic_refresh")]
+        if not refresh and limits["day_cap_reached"]:
             return {"status": "held", **base, "reason": "daily launch cap reached"}
-        if not limits["interval_open"]:
+        if not refresh and not limits["interval_open"]:
             return {"status": "held", **base, "reason": "minimum launch interval"}
-        target = eligible[0]
+        target = (refresh or eligible)[0]
         try:
             ticket = self.launcher.start(**target)
         except LaneChildConflict as exc:

@@ -1055,7 +1055,7 @@ def _publish_strl_revalidated(*, args, state, store, mission, playbook, entry, s
     draft_artefact = strl_artefact(
         ref=f"draft:{base_id}", hash=pack["content_hash"], subject_ref=company_ref,
         sections=sections, contract=contract)
-    quality = run_deterministic(draft_artefact, INITIAL_SCREEN_STRL)
+    quality = run_deterministic(draft_artefact, INITIAL_SCREEN_STRL, state_dir=state)
     summary["quality"] = {"rubric": INITIAL_SCREEN_STRL.id, "passed": quality["passed"],
                           "failed_checks": quality["failed_checks"]}
     try:
@@ -1117,7 +1117,7 @@ def _record_quality(store: DaltonStore, record: Mapping[str, Any],
     try:
         art = artefact_from_deliverable(record)
         deterministic = run_deterministic(art, INITIAL_SCREEN_STRL, core=store.connection,
-                                          mission_ref=mission.get("mission_ref"))
+                                          mission_ref=mission.get("mission_ref"), state_dir=Path(store.path).parent)
         scored = QualityScoreAuthority(store).record(
             artefact_kind="initial_screen", target_ref=art["ref"], target_hash=art["hash"],
             rubric=INITIAL_SCREEN_STRL, deterministic=deterministic,

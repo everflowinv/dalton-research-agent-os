@@ -28,6 +28,7 @@ from __future__ import annotations
 import argparse
 import json
 import os
+import sqlite3
 import sys
 from datetime import datetime, timezone
 from pathlib import Path
@@ -351,6 +352,13 @@ def build_state(store: DaltonStore, missions: CoverageMissionAuthority,
             for entry in checklist}
     except (OSError, ValueError, KeyError, TypeError):
         screen_feedback = {}
+    from .initial_screen_quality_feedback import read_feedback as read_quality_feedback
+    quality_feedback = {}
+    for entry in checklist:
+        try:
+            quality_feedback[entry['company_ref']] = read_quality_feedback(store.connection,company_ref=entry['company_ref'])
+        except (ValueError, KeyError, TypeError, sqlite3.Error) as exc:
+            quality_feedback[entry['company_ref']] = {'status':'unavailable','reason':type(exc).__name__}
     from .investment_memo_planner_feedback import read_feedback as read_memo_feedback
     memo_feedback = {}
     try:
@@ -365,6 +373,7 @@ def build_state(store: DaltonStore, missions: CoverageMissionAuthority,
         figures_by_company=figures, financial_models_by_company=financial_models,
         metrics_by_company=metrics,
         initial_screen_feedback_by_company=screen_feedback,
+        initial_screen_quality_feedback_by_company=quality_feedback,
         memo_question_feedback_by_company=memo_feedback,
         contested_by_company=disputed, acquisition_by_company=acquisition,
         dossier_feedback_by_company=read_dossier_repair_feedback(

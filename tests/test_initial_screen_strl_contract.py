@@ -351,7 +351,11 @@ class LaneTests(DeliverableHarness):
         self.assertEqual(record["material_pack"]["recipe_version"], "initial_screen:synthetic")
         self.assertEqual(record["material_pack"]["watermark"]["as_of"], "2026-08-15")
         self.assertTrue(summary["gate"]["passed"], summary["gate"]["rationale"])
-        self.assertTrue(summary["quality"]["passed"], summary["quality"])
+        # This synthetic pack has no acquired originals. Publication's full
+        # contract still passes; current quality cannot certify an issuer call
+        # from its declared transcript label alone.
+        self.assertFalse(summary["quality"]["passed"])
+        self.assertIn("latest_transcript_and_release_cited", summary["quality"]["failed_checks"])
         self.assertIn(summary["quality"]["recorded"], {"fresh", "recorded"})
 
     def test_a_rejected_document_gets_one_repair_and_is_not_published_if_still_wrong(self):

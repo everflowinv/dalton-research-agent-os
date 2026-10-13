@@ -214,7 +214,7 @@ _COMPANY_CORE_FIELDS: tuple[str, ...] = (
     "filed_statement_figures", "reading_pipeline",
     "readable_documents", "readable_documents_summary",
     "document_execution_availability", "document_execution_failures", "numeric_reading_requirements", "canonical_document_questions",
-    "model_execution_failures", "model_execution_failure_summary", "memo_question_feedback", "initial_screen_validation_feedback",
+    "model_execution_failures", "model_execution_failure_summary", "memo_question_feedback", "initial_screen_validation_feedback", "initial_screen_quality_feedback",
     "document_research_feedback_summary",
     "document_research_reopened", "document_research_reopened_omitted",
 )
@@ -1286,7 +1286,7 @@ def _has_initial_screen_feedback(state: Mapping[str, Any]) -> bool:
     return any(isinstance(feedback, Mapping) and feedback.get('status') == 'verified'
                and feedback.get('items')
                for company in state.get('companies', ())
-               for feedback in (company.get('initial_screen_validation_feedback'),))
+               for feedback in (company.get('initial_screen_validation_feedback'),company.get('initial_screen_quality_feedback')))
 
 
 def _valid_note_targets(document: Mapping[str, Any]) -> bool:
@@ -1418,6 +1418,7 @@ def build_prompt(state: Mapping[str, Any]) -> str:
             "period and purpose; do not borrow options across companies, documents or versions. Options "
             "authorize only the listed note reading, not a numeric answer or new source authority.\n\n")
     validation_notice = (
+        "initial_screen_quality_feedback names current formal quality defects and exact material gaps; reuse existing requests under current permissions. It grants no new content repair attempt and is not financial evidence. "
         "initial_screen_validation_feedback: verified draft defects, not evidence or retry authority. "
         "Fix cited defects within normal gates; invent no facts or unrelated material requests. "
     ) if _has_initial_screen_feedback(state) else ""
