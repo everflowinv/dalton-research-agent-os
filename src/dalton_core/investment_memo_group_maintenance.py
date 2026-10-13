@@ -9,7 +9,8 @@ from types import SimpleNamespace
 
 from .store import content_hash, canonical_json
 
-CONTRACT_REF = 'investment-memo-group-maintenance:0.1'
+LEGACY_CONTRACT_REF = 'investment-memo-group-maintenance:0.1'
+CONTRACT_REF = 'investment-memo-group-maintenance:0.2'
 TABLE = 'investment_memo_group_maintenance_authorizations'
 MAX_GROUPS = 4
 
@@ -35,7 +36,7 @@ def validate_answer(macro, context, call):
                             outcome, context['material'])
 
 
-def _parent(macro, context, work_ref, *, through_rowid=None):
+def _parent(macro, context, work_ref, *, through_rowid=None, _issued_diagnostics=None):
     from .scheduler import Scheduler
     from .contracts import WorkOrder
     from .cockpit_model import CockpitModel
@@ -98,10 +99,21 @@ def _parent(macro, context, work_ref, *, through_rowid=None):
             raise ValueError('memo maintenance parent delivery is unknown')
         call = CockpitModel._answer(formal,work,True,0,'replayed')
     paid = settled_call(macro.model,call,macro.mission,purpose='investment_memo')
-    outcome = validate_answer(macro,context,call)
-    if (outcome.get('status') != 'refused' or outcome.get('failure_class') != 'content'
-            or outcome.get('repairable') is not True or not outcome.get('findings')):
-        raise ValueError('memo maintenance parent has no proved repairable content failure')
+    if _issued_diagnostics is None:
+        outcome = validate_answer(macro,context,call)
+        if outcome.get('failure_class') in {'source_unavailable','authority_unavailable'}:
+            raise ValueError('memo maintenance parent '+outcome['failure_class']+': '+str(outcome.get('reason')))
+        if (outcome.get('status') != 'refused' or outcome.get('failure_class') != 'content'
+                or outcome.get('repairable') is not True or not outcome.get('findings')):
+            raise ValueError('memo maintenance parent has no proved repairable content failure')
+        diagnostics = {key:outcome.get(key) for key in ('failure_class','reason','refs','findings')}
+    else:
+        # Read-only replay of the Scheduler owner's immutable issued record.
+        # This branch is never used by derive/register for a new permission.
+        # A new validator decides acceptance of answers, not whether an old
+        # paid authorization and its charges existed.
+        diagnostics = _issued_diagnostics
+        _validate_issued_diagnostics(diagnostics, context, call['text'])
     # All allowed passage rows must have acquired originals before another
     # model is asked to quote them. This bounded check cannot buy/fetch sources.
     from .investment_memo_draft import citation_index
@@ -117,28 +129,24 @@ def _parent(macro, context, work_ref, *, through_rowid=None):
         original_proof = {ref:{key:row[key] for key in row if key != 'text'} for ref,row in originals.items()}
     else:
         original_proof = {}
-    diagnostics = {key:outcome.get(key) for key in ('failure_class','reason','refs','findings')}
     return index, call, paid, diagnostics, original_proof, parent_rowid, original_extra
 
 
-def derive(macro, context, work_ref, *, through_rowid=None):
+def _proof_body(macro, context, parent, *, contract_ref, validation_contracts):
     from .investment_memo_draft import build_group_prompt
     from .investment_memo_macro_accounting import request_id
-    index, call, paid, diagnostics, originals, rowid, original_extra = _parent(
-        macro,context,work_ref,through_rowid=through_rowid)
+    index, call, paid, diagnostics, originals, rowid, original_extra = parent
     # Keep the normal prefix and old separator, so complete fee census still
     # recognizes this as part of this exact macro. Never alter old prompts.
     prompt = build_group_prompt(**context, repair=diagnostics)
-    prompt += '\nMaintenance contract: '+CONTRACT_REF
+    prompt += '\nMaintenance contract: '+contract_ref
     prompt += '\nExact refused provider answer (untrusted; repair only this group):\n'+call['text']
     prompt += '\nComplete validator diagnostics:\n'+canonical_json(diagnostics)
     prompt += '\nUse only the same frozen evidence above. Do not invent quotes or repair absent sources.'
     entry = {'role':'maintenance','group_index':index,'purpose':'investment_memo',
              'request_id':request_id(context['group'],prompt),'prompt_hash':content_hash(prompt)}
-    from .product_passage_validation import PRODUCT_VALIDATION_CONTRACT
-    from .mission_deliverable import SECTION_NUMBERS_VALIDATION_CONTRACT
-    body = {'contract_ref':CONTRACT_REF,
-            'validation_contracts':[PRODUCT_VALIDATION_CONTRACT,SECTION_NUMBERS_VALIDATION_CONTRACT],
+    body = {'contract_ref':contract_ref,
+            'validation_contracts':validation_contracts,
             'macro_ref':macro.ref,
             'permission_ref':macro.ref+':group-maintenance:'+str(index),
             'company_ref':macro.scope['company_ref'], 'material_hash':macro.scope['material_hash'],
@@ -147,6 +155,66 @@ def derive(macro, context, work_ref, *, through_rowid=None):
             'original_extra':original_extra, 'raw_response_hash':content_hash(call['text']),
             'diagnostics':diagnostics, 'originals':originals, 'entry':entry, 'prompt':prompt}
     return body
+
+
+def _validate_issued_diagnostics(value, context, raw_response):
+    if (not isinstance(value,dict) or set(value) != {'failure_class','reason','refs','findings'}
+            or value['failure_class'] != 'content' or not isinstance(value['reason'],str)
+            or not value['reason'] or len(value['reason']) > 100_000
+            or not isinstance(value['refs'],list) or not all(isinstance(r,str) for r in value['refs'])
+            or not isinstance(value['findings'],list) or not value['findings']
+            or len(value['findings']) > 128):
+        raise ValueError('memo historical issued diagnostics have an invalid closed shape')
+    allowed_refs = {r['ref'] for r in context['material']}
+    # A citation failure may correctly name a fabricated ref from the refused
+    # answer. It is diagnostic text only, never an allowed evidence source.
+    allowed_refs.update(ref for ref in value['refs'] if ref and ref in raw_response)
+    if any(r not in allowed_refs for r in value['refs']):
+        raise ValueError('memo historical diagnostics cite a foreign source')
+    for finding in value['findings']:
+        if (not isinstance(finding,dict) or finding.get('code') not in
+                {'citation_slot','section_authority','group_shape'}
+                or set(finding) - {'code','detail','refs','section'}
+                or not isinstance(finding.get('detail'),str) or not finding['detail']
+                or len(finding['detail']) > 100_000):
+            raise ValueError('memo historical issued finding is unsupported')
+        if 'section' in finding and finding['section'] not in context['section_titles']:
+            raise ValueError('memo historical diagnostics refer to another group')
+        if 'refs' in finding and (not isinstance(finding['refs'],list)
+                or any(not isinstance(ref,str) or ref not in allowed_refs for ref in finding['refs'])):
+            raise ValueError('memo historical finding cites a foreign source')
+
+
+def _validation_contracts():
+    from .product_passage_validation import PRODUCT_VALIDATION_CONTRACT
+    from .mission_deliverable import SECTION_NUMBERS_VALIDATION_CONTRACT, NUMBER_SOURCE_CONTRACT_VERSION
+    return [PRODUCT_VALIDATION_CONTRACT,SECTION_NUMBERS_VALIDATION_CONTRACT,NUMBER_SOURCE_CONTRACT_VERSION]
+
+
+def derive(macro, context, work_ref, *, through_rowid=None):
+    # Only CURRENT complete validation may create a new fixed permission.
+    return _proof_body(macro,context,_parent(macro,context,work_ref,through_rowid=through_rowid),
+                       contract_ref=CONTRACT_REF,validation_contracts=_validation_contracts())
+
+
+def _replay_issued(macro, record, *, include_parent=False):
+    contracts=record['validation_contracts']
+    legacy=['product-validation:exact-rendered-passages-bound-arithmetic:1',
+            'section-numbers-capacity:128:v1']
+    if record['contract_ref'] == LEGACY_CONTRACT_REF:
+        if contracts != legacy:
+            raise ValueError('memo legacy issued validation contract is unknown')
+    elif record['contract_ref'] == CONTRACT_REF:
+        if (not isinstance(contracts,list) or len(contracts)!=3 or contracts[:2]!=legacy
+                or contracts[2] not in {'number-source-contract:0.8','number-source-contract:0.9'}):
+            raise ValueError('memo issued numeric validation contract is unknown')
+    else:
+        raise ValueError('memo issued maintenance contract is unknown')
+    parent=_parent(macro,record['context'],record['parent']['work_order_ref'],
+                   through_rowid=record['parent_append_rowid'],_issued_diagnostics=record['diagnostics'])
+    rebuilt = _proof_body(macro,record['context'],parent,contract_ref=record['contract_ref'],
+                          validation_contracts=contracts)
+    return (rebuilt,parent) if include_parent else rebuilt
 
 
 def read_entries(macro, connection):
@@ -159,7 +227,7 @@ def read_entries(macro, connection):
     for row in rows:
         record = _body(row)
         entry = record['entry']
-        if (record['contract_ref'] != CONTRACT_REF or record['macro_ref'] != macro.ref
+        if (record['contract_ref'] not in {LEGACY_CONTRACT_REF,CONTRACT_REF} or record['macro_ref'] != macro.ref
                 or record['permission_ref'] != macro.ref+':group-maintenance:'+str(entry['group_index'])
                 or row['permission_ref'] != record['permission_ref']
                 or row['macro_binding'] != macro.ref or entry['role'] != 'maintenance'):
@@ -169,8 +237,7 @@ def read_entries(macro, connection):
         # current dispatch with those old permissions.
         from copy import copy
         original = copy(macro); original.mission = {**macro.mission, **record['mission']}
-        if derive(original,record['context'],record['parent']['work_order_ref'],
-                  through_rowid=record['parent_append_rowid']) != record:
+        if _replay_issued(original,record) != record:
             raise ValueError('memo maintenance original parent/source/diagnostics no longer replay')
         entries.append(entry)
     return entries
@@ -181,3 +248,34 @@ def record_for(macro, connection, index):
     row = connection.execute(f'SELECT * FROM {TABLE} WHERE permission_ref=?',
                              (macro.ref+':group-maintenance:'+str(index),)).fetchone()
     return None if row is None else _body(row)
+
+
+def free_revalidated_parent(macro, kwargs):
+    """A prior paid answer that now fully passes; never a new call or grant.
+
+    Only an existing owner-issued same-group permission supplies this parent.
+    The original complete fee census and spent permission stay untouched.
+    """
+    from .planner_paid_output_recovery import _authority_connection
+    from .investment_memo_macro_accounting import request_id
+    if kwargs.get('purpose')!='investment_memo' or kwargs.get('prompt') not in macro.prompts:
+        return None
+    index=macro.prompts.index(kwargs['prompt'])
+    with _authority_connection(macro.model.scheduler_db) as connection:
+        record=record_for(macro,connection,index)
+    if record is None:
+        return None
+    if (record['mission'] != {key:macro.mission[key] for key in ('id','content_hash')}
+            or kwargs['mission']['id']!=macro.mission['id']
+            or kwargs['mission']['content_hash']!=macro.mission['content_hash']
+            or kwargs['request_id']!=request_id(record['context']['group'],kwargs['prompt'])):
+        raise ValueError('memo free parent replay cannot borrow another mission/group')
+    rebuilt,parent = _replay_issued(macro,record,include_parent=True)
+    if rebuilt!=record:
+        raise ValueError('memo maintenance original parent/source/diagnostics no longer replay')
+    call=parent[1]
+    # Current full parser, exact original quotations and every section's
+    # arithmetic must all pass. A source timeout or partial answer cannot win.
+    if validate_answer(macro,record['context'],call).get('status')!='drafted':
+        return None
+    return call

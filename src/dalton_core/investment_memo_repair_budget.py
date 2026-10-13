@@ -67,7 +67,10 @@ class MemoRepairBudget:
             try:
                 maintenance = None if not self.stage else self.stage.get('maintenance')
                 if not maintenance and not (self.stage and self.stage.get('repair')):
-                    kwargs, maintenance = self.macro.group_request(kwargs)
+                    from .investment_memo_group_maintenance import free_revalidated_parent
+                    cached = free_revalidated_parent(self.macro,kwargs)
+                    if cached is None:
+                        kwargs, maintenance = self.macro.group_request(kwargs)
                 self.selected_maintenance = maintenance
                 if maintenance is not None:
                     if self.stage and self.stage.get('maintenance') and not self.maintenance_enabled:
@@ -78,7 +81,8 @@ class MemoRepairBudget:
                         raise ValueError(self.macro_error)
                     self.macro.register(role='semantic', kwargs=kwargs)
                 try:
-                    cached = self.macro.replay(kwargs)
+                    if cached is None:
+                        cached = self.macro.replay(kwargs)
                 except CockpitModelError as exc:
                     cached_failure = exc
                     from .investment_memo_failure_cost import MemoFailureCostReporter, failure_cost

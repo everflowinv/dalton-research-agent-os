@@ -440,6 +440,23 @@ class MemoMacroAccounting:
                 or kwargs != {'purpose':'investment_memo','request_id':body['entry']['request_id'],
                               'prompt':body['prompt'],'mission':self.mission}):
             raise ValueError('memo maintenance current mission or request differs')
+        # An already issued owner authorization is history, not a request to
+        # issue it again under today's validator. Re-prove its exact stored
+        # chain and paired registration without changing its spent slot.
+        from .planner_paid_output_recovery import _authority_connection
+        from .investment_memo_group_maintenance import _replay_issued
+        with _authority_connection(self.model.scheduler_db) as connection:
+            row=connection.execute(f'SELECT * FROM {TABLE} WHERE permission_ref=?',
+                                   (body['permission_ref'],)).fetchone()
+            if row is not None:
+                issued=_body(row)
+                registered=connection.execute(f'SELECT * FROM {REQUESTS} WHERE request_key=?',
+                    (self.ref+':'+issued['entry']['request_id'],)).fetchone()
+                if (issued != body or row['macro_binding']!=self.ref
+                        or _replay_issued(self,issued)!=issued or registered is None
+                        or _body(registered)!=issued['entry']):
+                    raise ValueError('memo maintenance stored diagnostics/source differ before registration')
+                return
         if derive(self,body['context'],body['parent']['work_order_ref'],
                   through_rowid=body['parent_append_rowid']) != body:
             raise ValueError('memo maintenance parent diagnostics/source differ before registration')

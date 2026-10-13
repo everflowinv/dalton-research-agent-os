@@ -53,7 +53,7 @@ def company_signature(frozen: Mapping[str, Any], launcher: Any) -> str:
     from .product_passage_validation import PRODUCT_VALIDATION_CONTRACT
     from .investment_memo_group_maintenance import CONTRACT_REF as GROUP_MAINTENANCE_REF
     from .investment_memo_terminal_maintenance import CONTRACT_REF as TERMINAL_MAINTENANCE_REF
-    from .mission_deliverable import SECTION_NUMBERS_VALIDATION_CONTRACT
+    from .mission_deliverable import SECTION_NUMBERS_VALIDATION_CONTRACT, NUMBER_SOURCE_CONTRACT_VERSION
     from .store import content_hash
 
     mission = frozen["mission"]
@@ -77,6 +77,7 @@ def company_signature(frozen: Mapping[str, Any], launcher: Any) -> str:
         # Compatible validation change: wake the lane, while the draft prompt,
         # Work identity, existing paid answers and one repair slot stay bound.
         "section_numbers_validation_contract": SECTION_NUMBERS_VALIDATION_CONTRACT,
+        "number_source_validation_contract": NUMBER_SOURCE_CONTRACT_VERSION,
         "macro_accounting_contract": MACRO_ACCOUNTING_REF,
         "legacy_accounting_contract": LEGACY_ACCOUNTING_REF,
         # Free re-validation wakes old content holds. Fixed owner permissions
