@@ -108,7 +108,9 @@ SETTLEMENT_REPLAN_SECONDS = 1_800
 # Keep storage bounded (historical 266KB inline rows still do not fit); model
 # Work admission and native provider controls independently enforce token,
 # cost and timeout authority. A token setting is not a byte count.
-MAX_WORK_ORDER_PROMPT_BYTES = 128_000
+# A source-bound note directory can already occupy 127KB after projection.
+# Leave room for new questions while retaining the configured model input cap.
+MAX_WORK_ORDER_PROMPT_BYTES = 192_000
 # The planner reads a small object and answers with a short ranked list. Both
 # bounds are generous against that, and small against a filing window.
 # 2026-09-16: 120,000 → 80,000. The staged projection carries the live state
