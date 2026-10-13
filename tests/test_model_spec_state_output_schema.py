@@ -13,6 +13,8 @@ from dalton_core.store import content_hash
 from dalton_core.scheduler import Scheduler
 from tests import test_model_spec_joint_field_diagnostics as fixtures
 from tests import test_operating_driver_handoff as handoff
+from tests import test_period_source_family as source_families
+from dalton_core.period_source_family import catalog as source_family_catalog
 from tests.test_company_model_cli import _spec_body
 from dalton_core.company_model_state import build_company_model_state
 
@@ -27,7 +29,8 @@ class StateOutputSchemaTests(unittest.TestCase):
                 if operating:
                     value['operating_driver_context'] = {}
                 if families:
-                    value.setdefault('numeric_context', {})['period_source_family_catalog'] = [{}]
+                    filings, rows = source_families.fixture(value['company_ref'])
+                    value.setdefault('numeric_context', {})['period_source_family_catalog'] = source_family_catalog(value['company_ref'], filings, rows)
                 schema = specs.output_schema_for_state(value)
                 self.assertEqual(specs.checked_current_output_schema(schema), schema)
                 self.assertEqual(specs.repair_output_schema_from_prompt(specs.build_prompt(value)), schema)
@@ -59,7 +62,8 @@ class StateOutputSchemaTests(unittest.TestCase):
     def test_dynamic_diagnostics_preserve_refs_and_require_the_exact_root_schema(self):
         state, bad, fixed = fixtures.case()
         state['operating_driver_context'] = {}
-        state.setdefault('numeric_context', {})['period_source_family_catalog'] = [{}]
+        filings, rows = source_families.fixture(state['company_ref'])
+        state.setdefault('numeric_context', {})['period_source_family_catalog'] = source_family_catalog(state['company_ref'], filings, rows)
         state['state_hash'] = content_hash({k: v for k, v in state.items() if k != 'state_hash'})
         for body in (bad, fixed):
             body['revenue_drivers'][0]['basis_operating_metric_ref'] = 'metric:reported'
