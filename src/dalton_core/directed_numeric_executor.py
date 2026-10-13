@@ -232,7 +232,7 @@ def _record_numeric(executor,admission,works,*,measure_repair=False):
             held=executor.authority._missions.document_figures(company_ref=admission['company_ref'],metric_ref=target['metric_ref'],limit=2000)
             matching=[f for f in held if not f['figure_id'].startswith(('mission-document-figure:source-measure:','mission-document-figure:source-unit:'))
                       and f['document_ref']==admission['request']['registration']['document_ref']
-                      and f['period']==target['period'] and f['source_manifest_hash']==source['source_manifest_hash']]
+                      and f['figure_id']==legacy_ref and f['source_manifest_hash']==source['source_manifest_hash']]
             if len(matching)!=1:raise DirectedNumericError('numeric Figure identity is absent or ambiguous')
             figure=clarified or matching[0]
             if admission['numeric_authority']['contract_ref'] == 'directed-document-operating-numeric:0.1':

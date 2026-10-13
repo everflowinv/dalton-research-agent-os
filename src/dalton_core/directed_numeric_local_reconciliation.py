@@ -139,10 +139,19 @@ def _repair_evidence(executor, admission, works):
         if item['status'] != 'supported' or item['target_ref'] not in accepted or verifier['output']['verdict'] != 'pass':
             continue
         target = targets[item['target_ref']]
+        # Lookup uses the writer's historical identity. Its period projection
+        # can collide across spellings (and strips non-ASCII wording). That is
+        # a reason to reconstruct a source-bound conflict, never to assume the
+        # two periods are equal or lose the already-paid answer here.
+        from .coverage_mission import _ref, _period_key
+        legacy_ref = _ref('mission-document-figure', {
+            'company_ref': admission['company_ref'], 'metric_ref': target['metric_ref'],
+            'period': _period_key(target['period']),
+            'document_ref': admission['request']['registration']['document_ref']})
         rows = executor.connection.execute('SELECT figure_id FROM coverage_mission_document_figures '
-            'WHERE company_ref=? AND document_ref=? AND metric_ref=? AND period=? AND source_manifest_hash=? AND figure_id NOT LIKE ? AND figure_id NOT LIKE ?',
-            (admission['company_ref'], admission['request']['registration']['document_ref'], target['metric_ref'],
-             target['period'], admission['request']['registration']['manifest_hash'],'mission-document-figure:source-measure:%','mission-document-figure:source-unit:%')).fetchall()
+            'WHERE figure_id=? AND company_ref=? AND document_ref=? AND metric_ref=? AND source_manifest_hash=?',
+            (legacy_ref, admission['company_ref'], admission['request']['registration']['document_ref'],
+             target['metric_ref'], admission['request']['registration']['manifest_hash'])).fetchall()
         if not rows:
             continue
         if len(rows) != 1:
