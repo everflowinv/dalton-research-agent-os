@@ -196,7 +196,13 @@ def driver_execution(body: Mapping[str, Any], spec: Mapping[str, Any], *, assump
     lines = {l["ref"]: l for l in structure.get("lines") or []}
     drivers = list(body["drivers"])
     declarations = {d["ref"]: d for d in spec.get("revenue_drivers") or []}
-    by_concept = {d.get("concept"): d for d in drivers if d.get("concept")}
+    # A cash historical denominator is evidence, not a new economic driver.
+    # In particular it must not replace a declared filed leaf with the same
+    # concept when resolving an executed revenue formula.
+    from .cash_flow_filed_tie_base import drivers as filed_cash_history_drivers
+    historical_only = {d["ref"] for d in filed_cash_history_drivers(body.get("cash_flow_companion") or {})}
+    by_concept = {d.get("concept"): d for d in drivers
+                  if d.get("concept") and d.get("ref") not in historical_only}
     by_line = {d.get("structure_line_ref"): d for d in drivers}
     plans = copy.deepcopy(spec.get("driver_formulas") or [])
     # A legacy specification with exactly one total/mix identity has no

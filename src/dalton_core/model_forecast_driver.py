@@ -2488,10 +2488,28 @@ def build_cash_flow_companion(
                     income_drivers, quarters=TRAILING_QUARTERS, rate_quant=_RATE_QUANT) is None:
                 targets = sorted(str(cell["period_end"]) for cell in
                                  quarterly_history(cash_drivers[str(line["role"])]))[-TRAILING_QUARTERS:]
-                raise ForecastModelUnavailable(
-                    f"cash-flow companion {line['role']} derived income base lacks "
-                    "a complete same-duration source-bound trailing window; "
-                    f"target_periods={targets}; no earlier window substituted")
+                from .cash_flow_filed_tie_base import derive as filed_tie_basis
+                tie = next((f.get("tie_out_concept") for f in structure.get("formulas") or []
+                            if f.get("output_ref") == base_ref), None)
+                sources = [f for f in table.get("filed_lines") or [] if f.get("concept") == tie]
+                if len(sources) != 1:
+                    raise ForecastModelUnavailable(
+                        f"cash-flow companion {line['role']} derived income base lacks "
+                        "a complete same-duration source-bound trailing window; "
+                        f"target_periods={targets}; no earlier window substituted")
+                try:
+                    line["historical_base"] = filed_tie_basis(
+                        structure, base_ref, line["source"], sources[0], income_drivers)
+                except ForecastModelUnavailable as exc:
+                    raise ForecastModelUnavailable(
+                        f"cash-flow companion {line['role']} derived income base lacks a complete same-duration "
+                        f"trailing window; independent filed tie unavailable: {exc}") from exc
+        if any(line.get("historical_base") is not None for line in wire["lines"]):
+            for line in wire["lines"]:
+                line.setdefault("historical_base", None)
+            wire["schema_version"] = "cash-flow-companion-0.2"
+            wire["content_hash"] = content_hash({k:v for k,v in wire.items() if k != "content_hash"})
+            wire = validate_cash_flow_companion(wire)
     return wire
 
 
@@ -2505,7 +2523,7 @@ def validate_cash_flow_companion(value: Mapping[str, Any]) -> dict[str, Any]:
     if not isinstance(value, Mapping) or set(value) != fields:
         raise ForecastModelValidationError("cash-flow companion has an invalid closed shape")
     wire = dict(value)
-    if (wire["schema_version"] != "cash-flow-companion-0.1"
+    if (wire["schema_version"] not in {"cash-flow-companion-0.1", "cash-flow-companion-0.2"}
             or wire["authority_ref"] != CASH_FLOW_COMPANION_REF):
         raise ForecastModelValidationError("cash-flow companion contract is unsupported")
     for field in ("company_ref", "spec_ref", "reporting_unit"):
@@ -2537,12 +2555,28 @@ def validate_cash_flow_companion(value: Mapping[str, Any]) -> dict[str, Any]:
         "source_hash",
         "reason", "forecast_method", "forecast_base_ref", "forecast_base_result_ref",
     }
+    if wire["schema_version"] == "cash-flow-companion-0.2":
+        line_fields.add("historical_base")
     normalized_lines = []
     for index, item in enumerate(wire["lines"]):
         if not isinstance(item, Mapping) or set(item) != line_fields:
             raise ForecastModelValidationError(
                 f"cash_flow_companion.lines[{index}] has an invalid closed shape")
         line = dict(item)
+        if line.get("historical_base") is not None:
+            from .cash_flow_filed_tie_base import RULE_REF as FILED_TIE_RULE
+            basis = line["historical_base"]
+            expected = {"schema_version", "rule_ref", "source_basis", "base_ref", "tie_out_concept",
+                        "source", "source_hash", "driver", "driver_hash", "comparisons",
+                        "target_periods", "cash_window_periods", "missing_formula_periods", "trailing", "content_hash"}
+            if (not isinstance(basis, Mapping) or set(basis) != expected
+                    or basis["schema_version"] != "0.1" or basis["rule_ref"] != FILED_TIE_RULE
+                    or basis["source_basis"] != "independent_reported_tie"
+                    or basis["base_ref"] != line["forecast_base_ref"]
+                    or content_hash(basis["source"]) != basis["source_hash"]
+                    or content_hash(basis["driver"]) != basis["driver_hash"]
+                    or content_hash({k:v for k,v in basis.items() if k != "content_hash"}) != basis["content_hash"]):
+                raise ForecastModelValidationError("cash filed historical base has invalid source identity")
         role = _one_of(line["role"], (OPERATING_CASH_FLOW, CAPITAL_EXPENDITURE),
                        f"cash_flow_companion.lines[{index}].role")
         if (line["ref"] != f"cash-flow:{role.replace('_', '-')}"
@@ -2744,7 +2778,14 @@ def default_cash_flow_companion_assumptions(
     for driver in cash_drivers:
         source = by_role[str(driver["role"])]
         base_driver = by_line.get(str(source["forecast_base_ref"]))
-        if base_driver is None:
+        if source.get("historical_base") is not None:
+            from .cash_flow_filed_tie_base import validate as validate_filed_tie
+            if income_structure is None:
+                continue
+            validate_filed_tie(wire, income_structure, income_drivers)
+            trailing = {**source["historical_base"]["trailing"],
+                        "value": Decimal(source["historical_base"]["trailing"]["value"])}
+        elif base_driver is None:
             # A derived subtotal is a result, never a fabricated filed driver.
             # The exact validated structure is supplied by the builder/replayer.
             structure = income_structure
@@ -2781,7 +2822,14 @@ def default_cash_flow_companion_assumptions(
                 "explicit income DAG result; the denominator is not a filed fact")
         for period in periods:
             extra = {}
-            if derived_base:
+            if source.get("historical_base") is not None:
+                from .cash_flow_filed_tie_base import RULE_REF
+                extra["rule_ref"] = RULE_REF
+                because = (f"the average cash share of independently reported {source['historical_base']['tie_out_concept']} "
+                           f"over the latest {trailing['count']} source-bound quarters from {trailing['first_period']} "
+                           f"to {trailing['last_period']}, used only as historical denominator; missing income formula "
+                           "components remain missing and future cash still uses the declared income DAG result")
+            elif derived_base:
                 from .cash_flow_derived_base import CONTRACT_REF
                 extra["rule_ref"] = CONTRACT_REF
             assumptions.append(_assumption(
@@ -3370,6 +3418,8 @@ def build_structured_forecast_model(
         }, spec=spec, table=table, assumption_sources=assumption_sources)
     companion = build_cash_flow_companion(spec, table, structure)
     cash_drivers = build_cash_flow_companion_drivers(table, companion)
+    from .cash_flow_filed_tie_base import drivers as filed_tie_drivers
+    income_drivers.extend(filed_tie_drivers(companion))
     drivers = [*income_drivers, *cash_drivers]
     policy = forecast_policy(revenue_anchor(income_drivers), assumption_sources)
     periods = forecast_periods(revenue_anchor(income_drivers), max(wanted, MIN_FORECAST_PERIODS), policy=policy)
@@ -3653,6 +3703,8 @@ def _actualize_structured_model(
                 "the cash-flow companion changed, so this is a new model rather than "
                 "an actualisation of the old one")
         cash_drivers = build_cash_flow_companion_drivers(table, current_companion)
+        from .cash_flow_filed_tie_base import drivers as filed_tie_drivers
+        income_drivers.extend(filed_tie_drivers(current_companion))
     drivers = [*income_drivers, *cash_drivers]
     historical, historical_refs = _structure_historical_values(
         income_drivers, structure)
@@ -4828,12 +4880,20 @@ def validate_forecast_model(value: Mapping[str, Any]) -> dict[str, Any]:
     if len(driver_refs) != len(drivers):
         raise ForecastModelValidationError("driver refs must be unique")
     wire["drivers"] = drivers
+    if (wire.get("cash_flow_companion") or {}).get("schema_version") == "cash-flow-companion-0.2":
+        from .cash_flow_filed_tie_base import validate as validate_filed_tie, drivers as filed_tie_drivers
+        validate_filed_tie(wire["cash_flow_companion"], wire["financial_statement_structure"], drivers)
+        for expected in filed_tie_drivers(wire["cash_flow_companion"]):
+            if [d for d in drivers if d["ref"] == expected["ref"]] != [expected]:
+                raise ForecastModelValidationError("cash filed historical driver differs from source basis")
 
     if not isinstance(wire["assumptions"], list):
         raise ForecastModelValidationError("assumptions must be a list")
     assumptions = [
         _normalize_assumption(item, f"assumptions[{index}]", driver_refs=driver_refs)
         for index, item in enumerate(wire["assumptions"])]
+    from .cash_flow_filed_tie_base import validate_assumptions as validate_filed_cash_assumptions
+    validate_filed_cash_assumptions(wire.get("cash_flow_companion") or {}, assumptions)
     assumption_refs = {item["ref"] for item in assumptions}
     if len(assumption_refs) != len(assumptions):
         raise ForecastModelValidationError("assumption refs must be unique")
