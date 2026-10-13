@@ -1009,8 +1009,16 @@ class TargetedSourceRung:
             if archive_pending_for_material(ctx.state_dir,query_id):
                 return RungResult("waiting",detail="SEC 原始索引已保存，等待其强绑定归档页正常执行")
         settled = _dispatch_settled(ctx.state_dir, status, now=ctx.now)
-        if not settled and age < RUNG_WAIT_HOURS:
-            return RungResult("waiting")
+        # A finished search can leave original documents queued behind the
+        # source's daily allowance. The search grace period is not an expiry
+        # for that acquisition. Keep the original request deadline and never
+        # label a pending download as a search that found nothing.
+        deadline = _parse_ts(ctx.request.get("deadline"))
+        current = _parse_ts(ctx.now)
+        acquisition_wait_open = (current < deadline if current and deadline
+                                 else age < mr.DEFAULT_DEADLINE_HOURS)
+        if not settled and acquisition_wait_open:
+            return RungResult("waiting", detail="检索已执行，等待候选原文取回并核对；无需重复检索")
         return RungResult("partial" if verdict["partial"] else "empty", query=ctx.queries,
                           items=verdict["items"], detail=verdict["reason"])
 
@@ -1250,7 +1258,7 @@ def _dispatch_settled(state_dir: str | Path, status: Mapping[str, Any], *, now: 
                           "SELECT COUNT(*) FROM coverage_mission_discovered_documents d JOIN "
                           "coverage_mission_source_discoveries s ON s.record_id=d.discovery_ref WHERE "
                           "s.company_ref=? AND s.source_ref=? AND s.spec_ref=? AND s.query_hash=? AND "
-                          "s.created_at>=? AND d.status='acquisition_launched'",
+                          "s.created_at>=? AND d.status IN ('discovered','acquisition_launched')",
                           (dispatch["company_ref"], dispatch["source_ref"], dispatch["spec_ref"],
                            dispatch["query_hash"], dispatch["created_at"]))
         if in_flight and int(in_flight[0][0]):
