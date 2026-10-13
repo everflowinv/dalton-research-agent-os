@@ -443,7 +443,7 @@ def _paid_child_matches(body, parent_text, work, claim, binding, prompt):
             and work['metadata'].get('request_id','').startswith('model-spec-repair:'+content_hash(binding)[:32]))
 
 
-def execute(authority, candidate, *, decided_by, repairs, note_evidence_resolver=None, financial_validator=None):
+def execute(authority, candidate, *, decided_by, repairs, note_evidence_resolver=None, financial_validator=None, source_sign_projection=None):
     """Normal lane entry, with free strong-result replay before any new call."""
     from .company_model_spec import spec_from_response, parse_response, CompanyModelSpecError
     from .planner_paid_output_recovery import _authority_connection
@@ -513,5 +513,12 @@ def execute(authority, candidate, *, decided_by, repairs, note_evidence_resolver
     assert_changed(parse_response(parent['text']),parse_response(call['text']),body['diagnostic_bundle'],state=authority.state)
     spec = spec_from_response(authority.state,call['text'],decided_by=decided_by,
         note_evidence_resolver=note_evidence_resolver)
-    if financial_validator is not None: financial_validator(spec)
+    if financial_validator is not None:
+        from .model_spec_signed_expense_repair import SignedExpenseRepairError
+        try:financial_validator(spec)
+        except SignedExpenseRepairError as error:
+            if source_sign_projection is None:raise
+            projected=source_sign_projection(call,spec,error)
+            if projected is None:raise
+            spec=projected
     return spec,call

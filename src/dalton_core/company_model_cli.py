@@ -89,7 +89,7 @@ MAX_COST_USD = float(DEFAULT_MODEL_SPEC_CALL_BUDGET["max_cost_usd"])
 TIMEOUT_SECONDS = int(DEFAULT_MODEL_SPEC_CALL_BUDGET["timeout_seconds"])
 from .model_spec_signed_expense_repair import (
     CONTRACT_REF as SIGNED_EXPENSE_REPAIR_REF, JOINT_CONTRACT_REF as JOINT_SIGNED_REPAIR_REF, ERROR_CODE as SIGNED_EXPENSE_REPAIR_CODE,
-    assert_only_coefficient_changed, validate_coefficient_parent, validate_financials_for_repair,
+    assert_only_coefficient_changed, validate_coefficient_parent, validate_financials_for_repair, SignedExpenseRepairError,
 )
 
 from .model_spec_typed_field_repair import (
@@ -731,6 +731,7 @@ def _validated_spec_with_repair(
     repair_attempts: list[dict[str, Any]] | None = None,
     note_evidence_resolver: Any | None = None,
     financial_validator: Any | None = None,
+    source_sign_projection: Any | None = None,
 ) -> tuple[dict[str, Any], list[dict[str, Any]], dict[str, Any]]:
     root_call = dict(original_call)
     current_call = dict(original_call)
@@ -753,7 +754,14 @@ def _validated_spec_with_repair(
                 note_evidence_resolver=note_evidence_resolver,
             )
             if financial_validator is not None:
-                financial_validator(spec)
+                try:
+                    financial_validator(spec)
+                except SignedExpenseRepairError as error:
+                    projected = (None if source_sign_projection is None else
+                                 source_sign_projection(current_call, spec, error))
+                    if projected is None:
+                        raise
+                    spec = projected
             return spec, repairs, current_call
         except CompanyModelSpecError as error:
             # This narrow gap declaration gets one reconsideration only, even
@@ -1128,6 +1136,7 @@ def model_spec_validation_contract() -> dict[str, str]:
         "contract": "company-model-spec-pre-persistence-validation:0.2",
         "fixed_maintenance_correction": "model-spec-fixed-maintenance-correction:0.1",
         "fixed_cost_pair_maintenance_correction": "model-spec-fixed-maintenance-correction:0.2",
+        "source_sign_projection": "model-spec-source-sign-projection:0.1",
         "financial_repair_admission": FINANCIAL_REPAIR_ADMISSION_REF,
         "proposal_method_completion": PROPOSAL_METHOD_COMPLETION_REF,
         "cash_flow_companion": CASH_FLOW_COMPANION_VALIDATION_CONTRACT_HASH,
@@ -1534,6 +1543,18 @@ def run_model_spec(
         summary["replayed"] = bool(call.get("replayed"))
         summary["cost_micros"] = int(call.get("cost_micros") or 0)
         repairs: list[dict[str, Any]] = []
+        def source_sign_projection(source_call, candidate, error):
+            from .model_spec_source_sign_projection import project
+            try:
+                projected, record = project(missions, model, state, mission, source_call,
+                    note_evidence_resolver=note_resolver)
+            except (ValueError, KeyError, TypeError, sqlite3.Error, CompanyModelSpecError) as exc:
+                # This free contract does not authorize otherwise-ineligible
+                # history. The original ordinary refusal/repair gates remain.
+                summary["source_sign_projection_refused"] = str(exc)[:500]
+                return None
+            summary["source_sign_projection"] = record
+            return projected
         try:
             if maintenance_candidate is not None:
                 from .model_spec_maintenance_repair import execute
@@ -1541,7 +1562,8 @@ def run_model_spec(
                     decided_by=mission["autonomy"]["automation_principal"], repairs=repairs,
                     note_evidence_resolver=note_resolver,
                     financial_validator=lambda candidate: validate_financials_for_repair(
-                        missions, candidate, note_evidence_resolver=note_resolver))
+                        missions, candidate, note_evidence_resolver=note_resolver),
+                    source_sign_projection=source_sign_projection)
                 summary["maintenance_repair_grant"] = {
                     "contract_ref": maintenance_candidate[0]["contract_ref"],
                     "root_ref": call["work_order_ref"],
@@ -1567,6 +1589,7 @@ def run_model_spec(
                     note_evidence_resolver=note_resolver,
                     financial_validator=lambda candidate: validate_financials_for_repair(
                         missions, candidate, note_evidence_resolver=note_resolver),
+                    source_sign_projection=source_sign_projection,
                 )
         except SchedulerError as exc:
             summary.update({"status": "succeeded", "spec_status": "busy",
