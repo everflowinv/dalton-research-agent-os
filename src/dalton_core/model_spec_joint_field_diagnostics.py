@@ -15,6 +15,7 @@ from . import model_spec_complete_diagnostics as independent
 CONTRACT_REF = 'model-spec-joint-required-fields:0.1'
 ERROR_CODE = 'joint_required_fields'
 SOURCE_CODE = 'declared_driver_source_required'
+PREFLIGHT_CODE = 'joint_fields_source_mismatch'
 MAX_FINDINGS = 20
 _MISSING = object()
 
@@ -118,6 +119,35 @@ def from_state(body, state):
 def error_for(body, state):
     from .company_model_spec import CompanyModelSpecError
     report = from_state(body, state)
+    if report['status'] == 'complete' and report['findings']:
+        # These exact filed sources are outside every allowed annotation or
+        # settings path. Do not spend the one repair slot when the current
+        # authority already proves that those unchanged fields will fail.
+        from .company_financial_statement_structure import _presentation_filed, _same_net_income_source
+        from .company_model_inputs import _declared_statement_hints
+        try:
+            filed, _ = _presentation_filed(state, statement_hints=_declared_statement_hints(
+                {'financial_statement_structure': body['financial_statement_structure']}))
+        except ValueError:
+            filed = None  # Preserve the original malformed/absent state refusal.
+        mismatches = []
+        for line in body['financial_statement_structure']['lines']:
+            if filed is None or line['kind'] != 'filed':
+                continue
+            source = filed.get(line['concept'])
+            if source is None or (
+                source['statement'] != line['statement']
+                and not _same_net_income_source(line, source, line['concept'])
+            ) or source['period_basis'] != line['period_kind']:
+                mismatches.append({'line_ref': line['ref'], 'concept': line['concept'],
+                    'requested_statement': line['statement'], 'requested_period_kind': line['period_kind'],
+                    'held_statement': None if source is None else source['statement'],
+                    'held_period_kind': None if source is None else source['period_basis']})
+        if mismatches:
+            return CompanyModelSpecError('Annotation repair cannot change missing or incompatible filed sources: '
+                + ', '.join(f"{x['line_ref']} needs {x['requested_statement']}/{x['requested_period_kind']}; "
+                            f"held {x['held_statement']}/{x['held_period_kind']}" for x in mismatches),
+                code=PREFLIGHT_CODE, proof={'diagnostics': report, 'source_mismatches': mismatches})
     if report['status'] == 'overflow':
         return CompanyModelSpecError('joint required field diagnostics exceed the fixed finding limit', proof=report)
     if report['status'] == 'source_required':

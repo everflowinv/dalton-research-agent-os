@@ -1403,7 +1403,8 @@ def _validate_forecast_bases(lines: Sequence[Mapping[str, Any]]) -> None:
             )
 
 
-def _presentation_filed(state: Mapping[str, Any]) -> tuple[dict[str, dict[str, Any]], set[str]]:
+def _presentation_filed(state: Mapping[str, Any], *,
+                        statement_hints: Mapping[str, str] | None = None) -> tuple[dict[str, dict[str, Any]], set[str]]:
     filings = state.get("filings")
     if not isinstance(filings, list) or not filings:
         raise FinancialStatementStructureError("company presentation has no filing authority")
@@ -1443,6 +1444,12 @@ def _presentation_filed(state: Mapping[str, Any]) -> tuple[dict[str, dict[str, A
         }
         previous = filed.get(concept)
         if previous is not None and previous != candidate:
+            requested = (statement_hints or {}).get(concept)
+            if requested == statement and previous['statement'] != requested:
+                filed[concept] = candidate
+                continue
+            if requested == previous['statement'] and statement != requested:
+                continue
             if statement != "income":
                 # A cash or balance concept that is ambiguous is simply not
                 # offered as a leaf; the income presentation stays strict.
@@ -1533,7 +1540,9 @@ def validate_structure_proposal(
         or not 1 <= len(raw_formulas) <= MAX_STRUCTURE_FORMULAS
     ):
         raise FinancialStatementStructureError("structure proposal exceeds its bounded shape")
-    filed, accessions = _presentation_filed(state)
+    from .company_model_inputs import _declared_statement_hints
+    filed, accessions = _presentation_filed(state, statement_hints=_declared_statement_hints(
+        {'financial_statement_structure': body}))
     lines = [
         _normalize_line(
             raw, index, filed, validate_values=False, schema_version=schema_version,

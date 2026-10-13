@@ -71,10 +71,12 @@ def normalizer_hash() -> str:
 
 
 def _native_unit_normalizer_hash() -> str:
-    from . import sec_native_filing_units
+    from . import sec_native_filing_units, native_statement_membership
     return content_hash({'domestic_normalizer_hash':normalizer_hash(),
         'native_unit_contract':sec_native_filing_units.CONTRACT,
-        'native_unit_source_sha256':hashlib.sha256(Path(sec_native_filing_units.__file__).read_bytes()).hexdigest()})
+        'native_unit_source_sha256':hashlib.sha256(Path(sec_native_filing_units.__file__).read_bytes()).hexdigest(),
+        'native_membership_contract':native_statement_membership.CONTRACT,
+        'native_membership_source_sha256':hashlib.sha256(Path(native_statement_membership.__file__).read_bytes()).hexdigest()})
 
 
 def _filing(connection: Any, ingest_id: str) -> dict[str, Any]:
@@ -192,6 +194,15 @@ def prepare_context(connection: Any, state_dir: str | Path, ingest_id: str, *,
                         reason="independent snapshot includes exact original revenue concept/duration/dimensions")
         from .sec_filing_units import supplemental_unit_lines, validate_unit_supplement
         from .sec_native_annual import ANNUAL_FORMS
+        if filing['form'] in ANNUAL_FORMS:
+            from .native_statement_membership import supplement as membership, FIELD
+            base['normalizer_hash'] = _native_unit_normalizer_hash()
+            complete_lines, membership_proof = membership(connection, state_dir, filing, parsed, complete_lines)
+            if membership_proof is not None:
+                base.pop('mapping', None)
+                base.update(kind='complete_snapshot', lines=complete_lines,
+                            mapping_hash=content_hash(complete_lines))
+                base[FIELD] = membership_proof
         from .sec_filing_units import unresolved_unit_refs
         native_units = filing['form'] in ANNUAL_FORMS and bool(unresolved_unit_refs(complete_lines))
         if native_units:
@@ -264,6 +275,8 @@ def context_record(connection: Any, version_id: str) -> dict[str, Any]:
     validate_native_unit_supplement(connection, record, filing)
     from .statement_original_revenue_context import validate_revenue_supplement
     validate_revenue_supplement(connection, record, filing)
+    from .native_statement_membership import validate as validate_membership
+    validate_membership(connection, record, filing)
     if "unresolved_unit_refs" in record:
         from .sec_filing_units import unresolved_unit_refs
         source_rows = record.get("lines") if record.get("kind") == "complete_snapshot" else base_statement_rows(connection, record["ingest_id"])
@@ -381,7 +394,7 @@ def refresh_company_contexts(store: Any, state_dir: str | Path, company_ref: str
             from .sec_native_annual import ANNUAL_FORMS
             from .sec_filing_units import unresolved_unit_refs
             native = _filing(connection, ingest_id)['form'] in ANNUAL_FORMS
-            expected_hash = (_native_unit_normalizer_hash() if native and unresolved_unit_refs(base_statement_rows(connection, ingest_id))
+            expected_hash = (_native_unit_normalizer_hash() if native
                              else contract_hash)
             if (not force and previous.get("normalizer_hash") == expected_hash
                     and ((source is None and not supplement)
