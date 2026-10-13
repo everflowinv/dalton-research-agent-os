@@ -17,6 +17,85 @@ from tests.test_model_spec_complete_diagnostics import case
 from tests import test_cockpit_model_fallback as runtime
 
 
+# Original 0.12 contract bytes: never derive historical authority from the
+# current repair contract. The unchanged owner-pinned digest below proves it.
+_HISTORICAL_REPAIR_CONTRACT_012 = json.loads(r'''
+{
+  "ref": "contract:company-model-spec-structured-output-repair:0.12",
+  "eligible_error_codes": [
+    "format",
+    "structure",
+    "text_length",
+    "cash_flow_operating_base_shape",
+    "signed_filed_income_sum_coefficient",
+    "operating_metric_periodicity",
+    "acquisitions_forecast_method",
+    "revenue_driver_identity",
+    "expense_cost_slot_pair"
+  ],
+  "eligible_structure_rules_ref": "rule:company-model-spec-repairable-structure:0.4",
+  "eligible_structure_rules": [
+    "a derived line cannot claim a filed concept",
+    "a filed subtotal may only be actual/tie authority or unavailable",
+    "diluted weighted-average shares require duration direct_annual shares",
+    "only diluted weighted-average shares may carry annual_forecast_method",
+    "Only diluted weighted-average shares may select",
+    "sum formula roles do not match its company statement output",
+    "EPS denominator must be diluted weighted-average shares",
+    "EPS numerator must use the company-specific diluted EPS numerator role",
+    "company-presented components must be filed and subtotals must be derived",
+    "diluted EPS cannot be aggregated from quarterly EPS"
+  ],
+  "validation": "full_spec_from_response_and_supplied_financial_validator_after_every_attempt",
+  "text_length_change": "only_overlong_schema_strings_may_change",
+  "structure_change": "only_the_named_rule_may_change",
+  "eps_numerator_bridge": {
+    "ref": "company-model-spec-accounting-eps-bridge:0.1",
+    "guidance": "Keep accounting net_income separate from diluted_eps_numerator. When net income is calculated from pretax income, taxes and filed company components, retain that line and its formula with role net_income; do not retag it diluted_eps_numerator. Add a separate derived numerator bridge using the exact net_income or parent_net_income line and only disclosed dilution adjustments. If the filed diluted EPS proves that net income itself is the numerator, the bridge is sum(+1 * net-income), and the EPS divide refers to this bridge and the filed diluted shares. A numerator sum cannot directly use pretax_income or income_tax_expense. Tie the accounting total and numerator to their exact filed authorities and validate the numerator through filed diluted EPS in every period. Missing dilution evidence remains unavailable, never zero.",
+    "change": "one_derived_numerator_bridge_and_its_consuming_eps_formula_only",
+    "accounting_line": "retain_or_restore_accounting_net_income_role_and_formula"
+  },
+  "filed_subtotal_placement": {
+    "ref": "model-spec-filed-subtotal-concept-placement:0.1",
+    "change": "same_line_concept_to_matching_formula_tie_only",
+    "source_identity": "exact_filed_concept_and_evidence_remain_unchanged"
+  },
+  "cash_flow_operating_base_shape": {
+    "ref": "rule:cash-flow-operating-base-unavailable-repair:0.1",
+    "allowed_fields": [
+      "forecast_method",
+      "forecast_base_ref",
+      "because"
+    ],
+    "change": "operating_cash_flow_only_to_unavailable_and_null_base",
+    "preserve": "all_other_fields_including_filed_concept_and_fcf_formula",
+    "scope_validation": "exact_parent_and_repaired_body_comparison"
+  },
+  "signed_filed_income_sum": {
+    "ref": "model-spec-signed-filed-income-sum-coefficient:0.1",
+    "scope": "one_exact_coefficient_only_with_all_held_periods_strictly_proven",
+    "validation": "full_financial_validation_after_every_new_or_replayed_answer"
+  },
+  "joint_signed_filed_income_sum": {
+    "ref": "model-spec-signed-filed-income-sum-coefficients:0.2",
+    "scope": "two_to_four_exact_coefficients_unique_all_held_periods_full_DAG_proven",
+    "attempts": "shares_existing_single_repair_limit"
+  },
+  "typed_field_change": {
+    "ref": "model-spec-typed-field-repair:0.1",
+    "scope": "exact_parent_paths_only_with_source_group_reconstruction_for_identity",
+    "validation": "full_spec_and_financial_validation_after_every_new_or_replayed_answer"
+  },
+  "cost_slot_exclusive_pair": {
+    "ref": "model-spec-cost-slot-exclusive-pair:0.1",
+    "scope": "one_exact_expense_pair_only_original_slot_or_explicit_unbound",
+    "preserve": "all_other_parent_fields_and_all_financial_source_authorities"
+  },
+  "semantic_failure": "whole_refusal",
+  "prior_contract_repair": "model-spec-repair-replay-by-parent-and-error:0.1"
+}
+''')
+
 class Missions:
     """Owner transaction only is stubbed; model authority/fees are all real."""
     def __init__(self,path,mission):
@@ -40,6 +119,19 @@ class Missions:
 
 
 class MaintenanceRepairTests(unittest.TestCase):
+    def test_historical_contract_stays_exact_when_current_contract_evolves(self):
+        original=copy.deepcopy(_HISTORICAL_REPAIR_CONTRACT_012)
+        expected=maintenance.KNOWN_INCOMPLETE_CONTRACTS[original['ref']]
+        self.assertEqual(content_hash(original),expected)
+        self.assertNotIn('cash_flow_ratio_applicability',original)
+        self.assertNotIn(cli.CASH_RATIO_CODE,original['eligible_error_codes'])
+        with patch.object(cli,'REPAIR_CONTRACT',{'ref':'future:999','new_field':'unrelated'}):
+            self.assertEqual(content_hash(_HISTORICAL_REPAIR_CONTRACT_012),expected)
+        # Retagging a current capability as historical is not valid authority.
+        forged=copy.deepcopy(original)
+        forged['cash_flow_ratio_applicability']=cli.REPAIR_CONTRACT['cash_flow_ratio_applicability']
+        self.assertNotEqual(content_hash(forged),expected)
+
     def fixture(self,company='company:ticker:cedar',output=None,governed=None):
         f=runtime.CockpitChainTests('test_model_spec_repair_is_a_second_budgeted_scheduler_work');f.setUp();self.addCleanup(f.doCleanups)
         state,bad,fixed=case(company)
@@ -67,9 +159,7 @@ class MaintenanceRepairTests(unittest.TestCase):
         adapter=Adapter();model=f._model(adapter,policy_version_ref=f.pinned_policy,model_spec_output_tokens=6000)
         root=model.call(purpose='model_spec',request_id=cli.model_spec_request_id(state['state_hash'],repair_config={'max_attempts':1}),
             prompt=build_prompt(state),mission=f.mission,_model_spec_request_identity=cli.model_spec_request_identity(state['state_hash'],repair_config={'max_attempts':1}))
-        old_contract={k:v for k,v in cli.REPAIR_CONTRACT.items()if k!='independent_settings_bundle'}
-        old_contract['eligible_error_codes']=[v for v in old_contract['eligible_error_codes']if v!=cli.COMPLETE_DIAGNOSTICS_CODE]
-        old_contract['ref']='contract:company-model-spec-structured-output-repair:0.12'
+        old_contract=copy.deepcopy(_HISTORICAL_REPAIR_CONTRACT_012)
         self.assertEqual(content_hash(old_contract),maintenance.KNOWN_INCOMPLETE_CONTRACTS[old_contract['ref']])
         with patch.multiple(cli,REPAIR_CONTRACT=old_contract,REPAIR_CONTRACT_REF=old_contract['ref'],REPAIR_CONTRACT_HASH=content_hash(old_contract)),patch.object(cli,'complete_diagnostics_error',return_value=None):
             attempts=[]
