@@ -117,6 +117,16 @@ class NativeInstanceUnitTests(unittest.TestCase):
         from dalton_core.sec_filing_units import NUMERIC_RULE_REF
         self.assertEqual(proof[0]['numeric_parse_rule_ref'],NUMERIC_RULE_REF)
 
+    def test_zero_and_nonzero_expansion_exponents_share_the_same_bound(self):
+        for token in ['0e-1001','0e1001','1e-1001','1e1001']:
+            with self.subTest(token=token):
+                self.assertEqual(parse_instance_units(instance(value=token))['facts'],[])
+        parsed=parse_instance_units(instance(value='0e-1000'))
+        self.assertEqual(len(parsed['facts'][0]['value']),1002)
+        lines,proof=match_row_units(parsed,[{**row(),'value':'0'}],cik='0001725964')
+        self.assertEqual(lines[0]['unit'],'USDPerShare')
+        self.assertEqual(len(proof),1)
+
 
 if __name__=='__main__':unittest.main()
 

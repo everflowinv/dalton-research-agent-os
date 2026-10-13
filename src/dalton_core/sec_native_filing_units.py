@@ -128,7 +128,9 @@ def parse_instance_units(raw):
         if re.fullmatch(r'[+-]?(?:\d+(?:\.\d*)?|\.\d+)(?:[eE][+-]?\d+)?', value) is None:continue
         try:amount = Decimal(value)
         except InvalidOperation:continue
-        if not amount.is_finite() or (not amount.is_zero() and abs(amount.adjusted()) > 1000):continue
+        # Zero retains its exponent too: fixed-point formatting of 0e-N can
+        # otherwise allocate N places despite a very small original token.
+        if not amount.is_finite() or abs(amount.adjusted()) > 1000:continue
         key = (node.tag, cref, uref)
         if key in identities and identities[key] != amount:
             raise FilingUnitError('native instance repeats conflicting exact fact identities')
