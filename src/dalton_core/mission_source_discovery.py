@@ -2491,12 +2491,17 @@ class MissionSourceDiscoveryCoordinator:
         # says -- an unreadable sufficiency must not put the last missing
         # quarter on the seven-day rediscovery interval.
         missing, candidate_periods = self._period_state(mission, company_ref, spec)
+        search_periods = tuple(p for p in missing if p not in candidate_periods)
+        if missing and not search_periods:
+            return "所缺季度已有候选资料，等待选取和获取" + missing_periods_note(
+                missing, candidate_periods,
+                step=self._candidate_step(company_ref, spec_ref))
         shortfall = bool(missing) or self._checklist_shortfall(
             mission, company_ref, spec_ref)
         cadence = self._cadence_block(
             mission["id"], company_ref, spec,
             use_retry_interval=shortfall,
-            missing_periods=tuple(p for p in missing if p not in candidate_periods),
+            missing_periods=search_periods,
         )
         if not cadence or cadence == "previous discovery still open":
             return cadence
@@ -2508,7 +2513,7 @@ class MissionSourceDiscoveryCoordinator:
         if (shortfall and cadence.startswith("rediscovered")
                 and self._continuation_page(
                 mission["id"], company_ref, spec_ref,
-                missing_periods=missing)):
+                missing_periods=missing, search_periods=search_periods)):
             return None
         return cadence + missing_periods_note(
             missing, candidate_periods,
@@ -2636,8 +2641,10 @@ class MissionSourceDiscoveryCoordinator:
         return int(held["have"]) < floor
 
     def _continuation_page(self, mission_version_ref: str, company_ref: str,
-                           spec_ref: str, *, missing_periods: Sequence[str] = ()) -> dict[str, Any] | None:
-        """Return an exact prior search binding with its next opaque cursor."""
+                           spec_ref: str, *, missing_periods: Sequence[str] = (),
+                           search_periods: Sequence[str] | None = None) -> dict[str, Any] | None:
+        """Keep selection tied to all gaps, and paging tied to the actual query target."""
+        targets = missing_periods if search_periods is None else search_periods
         if self.source_ref != ALPHAENGINE_SOURCE_REF:
             return None
         discoveries = self.missions.source_discoveries(
@@ -2693,7 +2700,7 @@ class MissionSourceDiscoveryCoordinator:
         spec=plan_spec(self.plan,spec_ref); variant_index=None
         for index in range(len(spec['query_variants'])):
             compiled=build_discovery_parameters(self.plan,spec_ref=spec_ref,company_ref=company_ref,
-                as_of=as_of,variant_index=index,missing_periods=missing_periods,cursor=prior.get('cursor'))
+                as_of=as_of,variant_index=index,missing_periods=targets,cursor=prior.get('cursor'))
             if compiled == prior:
                 variant_index=index; break
         if variant_index is None:
@@ -2702,7 +2709,7 @@ class MissionSourceDiscoveryCoordinator:
             continued = build_discovery_parameters(
                 self.plan, spec_ref=spec_ref, company_ref=company_ref,
                 as_of=as_of, variant_index=variant_index,
-                missing_periods=missing_periods, cursor=continuation["cursor"],
+                missing_periods=targets, cursor=continuation["cursor"],
             )
             if _failed_cursor_dispatch_exists(
                 self.store.connection,
@@ -2741,7 +2748,7 @@ class MissionSourceDiscoveryCoordinator:
         searched={canonical_json({**prior,'cursor':None})}
         for index in range(variant_index+1,len(spec['query_variants'])):
             candidate=build_discovery_parameters(self.plan,spec_ref=spec_ref,company_ref=company_ref,
-                as_of=as_of,variant_index=index,missing_periods=missing_periods)
+                as_of=as_of,variant_index=index,missing_periods=targets)
             if canonical_json(candidate) not in searched:
                 return {'cursor':None,'as_of':as_of.isoformat(),'variant_index':index}
         return None
@@ -2955,7 +2962,8 @@ class MissionSourceDiscoveryCoordinator:
             if (self.plan["schema_version"] == DISCOVERY_PLAN_SCHEMA_VERSION_V6
                     and spec.get("document_type") == "meeting_minutes"):
                 mission = self.missions.mission(mission_version_ref)
-                missing = self._missing_periods(mission, company_ref, spec)
+                missing, candidates = self._period_state(mission, company_ref, spec)
+                missing = tuple(p for p in missing if p not in candidates)
             return dict(build_discovery_parameters(
                 self.plan, spec_ref=spec["spec_ref"], company_ref=company_ref,
                 as_of=as_of, missing_periods=missing,
@@ -3169,9 +3177,11 @@ class MissionSourceDiscoveryCoordinator:
                 budget = self._budget(authorization["max_alphaengine_calls_24h"])
                 if budget["remaining"] < 1:
                     return {"status": "budget_exhausted", "budget": budget, "skipped": skipped}
-                missing_periods=self._missing_periods(mission,company_ref,spec)
+                missing_periods, candidates = self._period_state(mission, company_ref, spec)
+                search_periods = tuple(p for p in missing_periods if p not in candidates)
                 continuation = self._continuation_page(
-                    mission["id"], company_ref, spec["spec_ref"],missing_periods=missing_periods)
+                    mission["id"], company_ref, spec["spec_ref"],
+                    missing_periods=missing_periods, search_periods=search_periods)
                 request_date = (
                     date.fromisoformat(continuation["as_of"])
                     if continuation else self.clock().date()
@@ -3181,7 +3191,7 @@ class MissionSourceDiscoveryCoordinator:
                     as_of=request_date,
                     cursor=None if continuation is None else continuation["cursor"],
                     variant_index=0 if continuation is None else continuation.get('variant_index',0),
-                    missing_periods=missing_periods,
+                    missing_periods=search_periods,
                 )
                 if deadline is not None and _monotonic() >= deadline:
                     raise SourceReadDeadline('source discovery decision deadline exhausted')
@@ -3191,7 +3201,7 @@ class MissionSourceDiscoveryCoordinator:
                     page_options = {"cursor": parameters["cursor"]} if parameters.get("cursor") else {}
                     if self.plan['schema_version'] == DISCOVERY_PLAN_SCHEMA_VERSION_V6:
                         page_options.update(variant_index=0 if continuation is None else continuation.get('variant_index',0),
-                                            missing_periods=missing_periods)
+                                            missing_periods=search_periods)
                     if self.source_ref == SEC_SOURCE_REF and spec['spec_ref'] in FOREIGN_SPECS:
                         page_options['reporting_profile'] = reporting_profile
                     ticket = self.search_launcher.start(
