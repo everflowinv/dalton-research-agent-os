@@ -156,7 +156,7 @@ _DAY_MONTH_RE = re.compile(
     r"Apr(?:il)?|May|Jun(?:e)?|Jul(?:y)?|Aug(?:ust)?|Sep(?:t|tember)?|Oct(?:ober)?|"
     r"Nov(?:ember)?|Dec(?:ember)?)(?![A-Za-z])(?:,?\s+((?:19|20)\d{2})(?!\d))?",
 )
-NUMBER_SOURCE_CONTRACT_VERSION = "number-source-contract:0.9"
+NUMBER_SOURCE_CONTRACT_VERSION = "number-source-contract:0.10"
 
 
 def number_source_contract_fingerprint() -> str:
@@ -179,6 +179,7 @@ def number_source_contract_fingerprint() -> str:
         "print_equivalence": (
             "percent-word+english-number-words-exact+currency-symbol-as-word"),
         "year_amount_disambiguation": "four-digit-year-with-explicit-money-or-percent-unit-is-a-value",
+        "product_identifier_rule": "number-source-product-identifiers:1",
     })
 
 
@@ -1125,6 +1126,12 @@ def validate_section(
         raise MissionDeliverableValidationError(
             f"section.numbers must be a list of at most {MAX_SECTION_NUMBERS} entries")
     checked: list[dict[str, Any]] = []
+    verified_product_passages: list[str] = []
+    def checked_passage(ref):
+        text = resolve_passage(ref) if resolve_passage is not None else None
+        if text is not None:
+            verified_product_passages.append(text)
+        return text
     derived: list[Mapping[str, Any]] = []
     for item in numbers:
         if not isinstance(item, Mapping) or set(item) - {
@@ -1154,7 +1161,7 @@ def validate_section(
             derived.append(item)
             continue
         if cites_passage:
-            checked.append({**validate_passage_number(item, resolve_passage), **meta})
+            checked.append({**validate_passage_number(item, checked_passage), **meta})
             continue
         if cites_pack:
             checked.append({**validate_pack_number(item, resolve_number), **meta})
@@ -1209,20 +1216,25 @@ def validate_section(
             "claim_version_ref": ref,
             "period": None if item.get("period") is None else _text(item["period"], "number.period", maximum=120),
         })
+    from .source_product_identifiers import without_verified_product_identifiers
+    # Product-name digits cannot become an arithmetic operand merely because
+    # the surrounding quote also contains a sourced financial number.
+    numeric_checked = [{**item, 'text': without_verified_product_identifiers(
+        item['text'], verified_product_passages)} for item in checked]
     # Prove arithmetic before accepting any peer result in a range's wording.
     # A peer's unverified prose is never an operand source.
     pending=list(derived);proven=[]
     while pending:
         progress=False;last_error=None
         for item in list(pending):
-            trusted=[*checked,*({'text':d['derivation']['result']} for d in proven)]
+            trusted=[*numeric_checked,*({'text':d['derivation']['result']} for d in proven)]
             try:proof=validate_derived_number(item,trusted,check_stray=False)
             except MissionDeliverableConflict as exc:
                 if 'a derivation uses ' not in str(exc):raise
                 last_error=exc;continue
             proven.append(proof);pending.remove(item);progress=True
         if not progress:raise last_error or MissionDeliverableConflict('derivation sources are unavailable or circular')
-    trusted=[*checked,*({'text':d['derivation']['result']} for d in proven)]
+    trusted=[*numeric_checked,*({'text':d['derivation']['result']} for d in proven)]
     for item in derived:
         meta = {key: _text(item[key], f"number.{key}", maximum=120)
                 for key in ("metric", "unit") if item.get(key) is not None}
@@ -1255,7 +1267,8 @@ def validate_section(
         raise MissionDeliverableValidationError(str(exc)) from exc
     from .material_request_citation import without_verified_request_tokens
     checked_body = without_verified_request_tokens(body, gap_items, resolve_request)
-    stray = unsourced_numbers(checked_body, checked)
+    checked_body = without_verified_product_identifiers(checked_body, verified_product_passages)
+    stray = unsourced_numbers(checked_body, [*numeric_checked, *checked[len(numeric_checked):]])
     if stray and not imported:
         raise MissionDeliverableConflict(
             f"section「{title}」carries figures with no source behind them: {stray[:5]}；"

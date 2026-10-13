@@ -206,7 +206,8 @@ def _replay_issued(macro, record, *, include_parent=False):
             raise ValueError('memo legacy issued validation contract is unknown')
     elif record['contract_ref'] == CONTRACT_REF:
         if (not isinstance(contracts,list) or len(contracts)!=3 or contracts[:2]!=legacy
-                or contracts[2] not in {'number-source-contract:0.8','number-source-contract:0.9'}):
+                or contracts[2] not in {'number-source-contract:0.8','number-source-contract:0.9',
+                                        'number-source-contract:0.10'}):
             raise ValueError('memo issued numeric validation contract is unknown')
     else:
         raise ValueError('memo issued maintenance contract is unknown')
