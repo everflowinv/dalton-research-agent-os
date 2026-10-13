@@ -1,6 +1,7 @@
 """Paid history remains authoritative when current number validation improves."""
 import copy
 import json
+import re
 import unittest
 from dataclasses import replace
 from pathlib import Path
@@ -11,6 +12,42 @@ from dalton_core import mission_deliverable as md
 from dalton_core.investment_memo_draft import build_group_prompt,GROUPS
 from dalton_core.scheduler import Scheduler
 from tests import test_investment_memo_group_maintenance as fixtures
+
+
+# Exact pre-0.9 token behavior, frozen to create actual historical refused
+# answers even when this test runs under an improved current validator.
+_LEGACY_PERIOD_TOKEN_RE = re.compile(
+    # ISO dates and the ".." ranges the Ledger prints for a reporting period,
+    # which live were being read apart into "01" and "31".
+    r"(?:19|20)\d{2}-\d{2}-\d{2}(?:\s*\.\.\s*(?:19|20)?\d{2}-\d{2}-\d{2})?"
+    r"|(?:FY\s?)?(?:19|20)\d{2}(?:\s?[-–/]\s?(?:19|20)?\d{2})?(?:\s?(?:年|财年))?"
+    r"|FY\s?\d{2}(?![0-9])"
+    r"|Q[1-4]\s?(?:FY\s?)?(?:19|20)?\d{0,4}"
+    r"|(?:19|20)\d{2}\s?Q[1-4]"
+    r"|[1-4]Q(?:19|20)?\d{2}"
+    r"|H[12]\s?(?:19|20)?\d{0,4}"
+    r"|第?[一二三四1-4]季度"
+    # Batch D: a rolling-window label is a period, not a figure -- 「30 日 ADV」,
+    # 「52 周区间」, "30-day ADV". Narrow on purpose: only when a window noun
+    # follows, so 「30 日内上涨 5%」's 30 is still a figure to source.
+    r"|\d{1,3}\s?(?:日|天|周|个交易日)(?=\s?(?:ADV|均量|成交|区间|高点|低点|滚动|移动|平均|波动))"
+    r"|\d{1,3}[-\s]?(?:day|week)(?=\s?(?:ADV|average|moving|volume|range|high|low))",
+    re.IGNORECASE,
+)
+
+def _legacy_value_tokens(text: str, *, include_small: bool = False) -> list[str]:
+    """Every figure the text asserts, with period labels and citation tags removed."""
+
+    without_tags = md._CITATION_TAG_RE.sub(" ", text or "")
+    without_periods = _LEGACY_PERIOD_TOKEN_RE.sub(" ", without_tags)
+    tokens = []
+    for match in md._VALUE_TOKEN_RE.finditer(without_periods):
+        token = match.group(0).strip()
+        plain = token.rstrip(".")
+        if not include_small and plain.isdigit() and int(plain) <= md._BARE_SMALL_INTEGER:
+            continue
+        tokens.append(token)
+    return tokens
 
 
 class MemoHistoricalValidationTests(unittest.TestCase):
@@ -98,17 +135,19 @@ class MemoHistoricalValidationTests(unittest.TestCase):
                         {'text':'1319.16360437 亿美元','period':'2026-10-12','derivation':{'expression':'131916360437/100000000','result':'1319.16360437'}}]
             return invocation,replace(envelope,outputs={'text':json.dumps(value,ensure_ascii=False)})
         f.adapter.execute=answer
-        wrapper,outcome=f.seeded()
-        self.assertIn('131916360437',outcome['reason'])
-        with patch.object(gm,'CONTRACT_REF',gm.LEGACY_CONTRACT_REF),patch.object(gm,'_validation_contracts',return_value=['product-validation:exact-rendered-passages-bound-arithmetic:1','section-numbers-capacity:128:v1']):
-            body,bad=f.purchase(wrapper,outcome)
+        current_tokens=md.value_tokens
+        with patch.object(md,'value_tokens',_legacy_value_tokens),patch.object(md,'NUMBER_SOURCE_CONTRACT_VERSION','number-source-contract:0.8'):
+            self.assertEqual(md.value_tokens('市值 131916360437 USD'),['13','360437'])
+            wrapper,outcome=f.seeded()
+            self.assertIn('131916360437',outcome['reason'])
+            with patch.object(gm,'CONTRACT_REF',gm.LEGACY_CONTRACT_REF),patch.object(gm,'_validation_contracts',return_value=['product-validation:exact-rendered-passages-bound-arithmetic:1','section-numbers-capacity:128:v1']):
+                body,bad=f.purchase(wrapper,outcome)
         self.assertEqual(bad['status'],'refused');old=f.fees();calls=len(f.adapter.served)
         # The narrow fixed token behavior: years/dates stay periods; a year
         # substring inside a longer scalar must not split the sourced value.
-        old_tokens=md.value_tokens
         def corrected(text,*,include_small=False):
             if text=='市值 131916360437 USD':return ['131916360437']
-            return old_tokens(text,include_small=include_small)
+            return current_tokens(text,include_small=include_small)
         with patch.object(md,'value_tokens',corrected),patch.object(md,'NUMBER_SOURCE_CONTRACT_VERSION','number-source-contract:0.9'):
             fresh=f.wrapper();value=f.outcome(fresh,1)
             self.assertEqual(value['status'],'drafted')
@@ -126,7 +165,8 @@ class MemoHistoricalValidationTests(unittest.TestCase):
         config_path=f.root/'memo-config.json'
         config_path.write_text(json.dumps(f.model.config))
         launcher=SimpleNamespace(model_config_path=config_path,verifier_model_config_path=config_path)
-        a=company_signature(frozen,launcher)
+        with patch.object(md,'NUMBER_SOURCE_CONTRACT_VERSION','number-source-contract:0.8'):
+            a=company_signature(frozen,launcher)
         with patch.object(md,'NUMBER_SOURCE_CONTRACT_VERSION','number-source-contract:0.9'):
             b=company_signature(frozen,launcher)
         self.assertNotEqual(a,b)
