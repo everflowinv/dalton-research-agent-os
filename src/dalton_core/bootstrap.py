@@ -81,6 +81,7 @@ SCHEMA_DATABASES: tuple[tuple[str, str | None], ...] = (
     # ADR-0013: the owner-published Conviction v2 policy versions.
     ("conviction_policy_schema.sql", None),
     ("coverage_mission_schema.sql", None),
+    ("model_spec_source_sign_projection_schema.sql", None),
     ("document_read_completion_schema.sql", None),
     # C2-1: the windows the extraction lane has proved it cannot read.
     ("document_extraction_window_schema.sql", None),
