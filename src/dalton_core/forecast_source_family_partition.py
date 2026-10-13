@@ -10,7 +10,7 @@ def _refuse(message):
     refuse(message)
 
 
-def partitions(record, rows, families, *, period_bound=False):
+def partitions(record, rows, families, *, period_bound=False, recognition_timing=False):
     from .economic_invariants import (segment_groups, ADDITIVE_SEGMENT_AXES,
         CONSOLIDATION_ITEMS_AXES, OPERATING_SEGMENT_MEMBERS, RECONCILING_MEMBERS)
     drivers = {d["ref"]: d for d in record.get("drivers") or []}
@@ -23,7 +23,9 @@ def partitions(record, rows, families, *, period_bound=False):
             from .period_source_family import identity_for_row
             identity = identity_for_row(driver, family) or {}
         dims = identity.get("dimensions") or {}
-        if (axis not in ADDITIVE_SEGMENT_AXES or axis not in dims
+        from .forecast_revenue_timing_partition import AXIS
+        timing = recognition_timing and axis == AXIS
+        if ((axis not in ADDITIVE_SEGMENT_AXES and not timing) or (timing and fixed) or axis not in dims
                 or {a: m for a, m in dims.items() if a != axis} != fixed
                 or not all(a in CONSOLIDATION_ITEMS_AXES and m in OPERATING_SEGMENT_MEMBERS
                            for a, m in fixed.items())
@@ -84,8 +86,12 @@ def partitions(record, rows, families, *, period_bound=False):
             arithmetic.append(projected)
             origins.append({"concept": row["concept"], "dimensions": dict(row["dimensions"]),
                 "value": row["value"], "unit": row["unit"], "statement_line_refs": sorted(refs)})
-        matches = [g for g in segment_groups(arithmetic) if g["line"] == concept
-                   and g["period"] == f"{start}..{end}" and g["axis"] == axis]
+        if recognition_timing and axis == AXIS:
+            from .forecast_revenue_timing_partition import group
+            matches = [group(arithmetic, concept=concept, statement=statement, start=start, end=end)]
+        else:
+            matches = [g for g in segment_groups(arithmetic) if g["line"] == concept
+                       and g["period"] == f"{start}..{end}" and g["axis"] == axis]
         if len(matches) != 1:
             _refuse("a consumed complete family lacks its own consolidated partition")
         group = matches[0]
@@ -96,5 +102,9 @@ def partitions(record, rows, families, *, period_bound=False):
                  "period_start": start, "period_end": end, "axis": axis,
                  "fixed_dimensions": fixed, "driver_refs": sorted(f["driver_ref"] for f in consumers),
                  "origins": sorted(origins, key=str), "group": group}
+        if recognition_timing and axis == AXIS:
+            from .forecast_revenue_timing_partition import CONTRACT_REF, MEMBERS
+            entry["classification"] = {"contract_ref": CONTRACT_REF, "axis": AXIS,
+                                       "members": sorted(MEMBERS)}
         out.append({**entry, "content_hash": content_hash(entry)})
     return out

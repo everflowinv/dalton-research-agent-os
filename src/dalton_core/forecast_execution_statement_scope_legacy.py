@@ -83,7 +83,7 @@ def _roots(record):
     })
 
 
-def execution_scope(record, rows, source_groups, *, prior_partition_scope=None, period_bound=False):
+def execution_scope(record, rows, source_groups, *, prior_partition_scope=None, period_bound=False, recognition_timing=False):
     from .forecast_consumed_source_groups import RULE_REF as SOURCE_RULE, _wire as source_wire
     from .economic_invariants import (ADDITIVE_SEGMENT_AXES, CONSOLIDATION_ITEMS_AXES,
                                      OPERATING_SEGMENT_MEMBERS, segment_groups, _segment_sum, FAIL)
@@ -126,12 +126,21 @@ def execution_scope(record, rows, source_groups, *, prior_partition_scope=None, 
             if not dimensions:
                 continue
             axes = [a for a in dimensions if a in ADDITIVE_SEGMENT_AXES]
+            if recognition_timing:
+                from .forecast_revenue_timing_partition import AXIS
+                if AXIS in dimensions:
+                    axes.append(AXIS)
             # Unsupported multi-axis families must not silently become a
             # passing consolidated model. Retain the old conservative gate.
             if len(axes) != 1:
+                if recognition_timing:
+                    _refuse("unsupported_additive_axis: no supported axis" if not axes
+                            else "multiple_additive_axes: more than one supported axis")
                 _refuse("consumed dimensional root has no unique additive axis")
             axis = axes[0]
             fixed = {a: m for a, m in dimensions.items() if a != axis}
+            if recognition_timing and axis == AXIS and fixed:
+                _refuse("revenue recognition timing requires its pure full-dimensional identity")
             if fixed and not all(a in CONSOLIDATION_ITEMS_AXES and m in OPERATING_SEGMENT_MEMBERS
                                  for a, m in fixed.items()):
                 _refuse("consumed fixed dimensions have no supported partition semantics")

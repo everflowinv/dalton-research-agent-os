@@ -191,6 +191,11 @@ def model_digest(
         digest_body["filed_consumed_source_groups_rule"] = CONSUMED_SOURCE_GROUPS_RULE
         from .forecast_execution_statement_scope import RULE_REF as EXECUTION_STATEMENT_SCOPE_RULE
         digest_body["filed_execution_statement_scope_rule"] = EXECUTION_STATEMENT_SCOPE_RULE
+        from .forecast_revenue_timing_partition import declared, CONTRACT_REF as TIMING_CONTRACT
+        if declared(spec):
+            from .forecast_execution_statement_scope import TIMING_RULE_REF
+            digest_body["filed_execution_statement_scope_rule"] = TIMING_RULE_REF
+            digest_body["filed_revenue_recognition_timing_rule"] = TIMING_CONTRACT
         from .forecast_source_accuracy import RULE_REF as SOURCE_ACCURACY_RULE
         digest_body["filed_source_accuracy_rule"] = SOURCE_ACCURACY_RULE
         from .forecast_family_failure_feedback import CONTRACT_REF as FAMILY_FEEDBACK_RULE

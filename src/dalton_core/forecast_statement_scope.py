@@ -153,10 +153,26 @@ def statement_scope(record: Mapping[str, Any], rows: Sequence[Mapping[str, Any]]
     The original explicit-partition validator still checks all declared members
     and source presentation proofs before a new execution scope is constructed.
     """
-    from .forecast_execution_statement_scope import SUPPORTED_RULE_REFS, PERIOD_RULE_REF, execution_scope
+    from .forecast_execution_statement_scope import SUPPORTED_RULE_REFS, PERIOD_RULE_REF, TIMING_RULE_REF, execution_scope
     from .model_forecast_driver import ForecastModelValidationError
     period_bound = any(d.get("statement_period_family_bindings") for d in record.get("drivers") or [])
-    if frozen_scope is not None and period_bound and frozen_scope.get("rule_ref") != PERIOD_RULE_REF:
+    from .forecast_revenue_timing_partition import consumed
+    recognition_timing = consumed(record)
+    if recognition_timing and (frozen_scope is None or frozen_scope.get("rule_ref") == TIMING_RULE_REF):
+        declarations = {d["ref"]: d for d in (record.get("execution_contract") or {}).get("specification", {}).get("revenue_drivers") or []}
+        plans = (record.get("execution_contract") or {}).get("specification", {}).get("driver_formulas") or []
+        executed = {d["ref"]: d for d in record.get("drivers") or []}
+        from .forecast_revenue_timing_partition import AXIS
+        for plan in plans:
+            refs = plan.get("driver_refs") or []
+            if not any(AXIS in ((declarations.get(ref, {}).get("basis_identity") or {}).get("dimensions") or {}) for ref in refs):
+                continue
+            histories = [{c["period_end"] for c in executed.get("economic:" + ref, {}).get("history") or []}
+                         for ref in refs]
+            if (not histories or len(histories[0]) < 4
+                    or any(h != histories[0] for h in histories)):
+                raise ForecastModelValidationError("recognition timing requires all historical quarters without dropping a declared member")
+    if frozen_scope is not None and period_bound and frozen_scope.get("rule_ref") not in {PERIOD_RULE_REF, TIMING_RULE_REF}:
         raise ForecastModelValidationError("explicit period-family execution requires its v4 source rule")
     if frozen_scope is not None and frozen_scope.get("rule_ref") == RULE_REF:
         return _legacy_statement_scope(record, rows, connection, frozen_scope=frozen_scope)
@@ -193,4 +209,5 @@ def statement_scope(record: Mapping[str, Any], rows: Sequence[Mapping[str, Any]]
     return execution_scope(record, rows, source_groups,
                            prior_partition_scope=prior_partition_scope,
                            **({"rule_ref": frozen_scope["rule_ref"]} if frozen_scope is not None
+                              else {"rule_ref": TIMING_RULE_REF} if recognition_timing
                               else {"rule_ref": PERIOD_RULE_REF} if period_bound else {}))
