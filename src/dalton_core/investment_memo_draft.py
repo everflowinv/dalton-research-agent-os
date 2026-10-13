@@ -203,6 +203,14 @@ def build_group_prompt(*, group: str, section_titles: Sequence[str], questions: 
         "Return raw JSON only with exactly this shape and the exact requested titles/questions:",
         _json(contract),
     ]
+    if any(row.get('market_history_proof') for row in material):
+        lines += [
+            'Source-bound price-window rows are citable Number rows. Use their exact dates, currency and price basis.',
+            'Close price return excludes dividends; adjusted-price return uses source adj_close and must not add dividends again.',
+            'A broad-market benchmark is not an industry basket. A calendar event window is an observed reaction, not proof of causation or a complete event study.',
+            'A hedge answer may be a labelled research scenario with explicit assumptions and cited risk premises. It does not require invented user holdings or trade permission.',
+            'Do not claim knowledge of actual portfolio exposures, risk limits, approvals or option prices. Preserve those as execution limits; never approve a trade.',
+        ]
     if repair:
         lines += [
             "Your previous answer for this group was refused and was not used:",

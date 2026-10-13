@@ -315,6 +315,8 @@ def collect_frozen_input(store: DaltonStore, *, company_ref: str | None = None,
     market = market_block_row(store.connection, company_ref)
     if market is not None:
         rows.append(market)
+    from .investment_memo_market_history import rows_from
+    rows.extend(rows_from(store.connection, company_ref))
     pack_rows, pack_reason, pack_record = material_pack_bound(store, company_ref)
     rows.extend(pack_rows)
     from .investment_memo_material import bound_material
@@ -492,7 +494,7 @@ def _checks(sections: Sequence[Mapping[str, Any]], questions: Sequence[Mapping[s
              "evidence_refs": refs} for ref, (passed, reason) in zip(CHECK_REFS_V2, values)]
 
 
-def _validated_group(store, outcome, material):
+def _validated_group(store, outcome, material, *, company_ref=None):
     """Check every section before buying another group; no new repair slot."""
     parse_refused = (outcome.get('status') == 'refused' and outcome.get('failure_class') == 'content'
                      and bool(outcome.get('diagnostic_sections')))
@@ -502,6 +504,8 @@ def _validated_group(store, outcome, material):
     index=citation_index(material)
     path=str(getattr(store,'path',':memory:'))
     try:
+        from .investment_memo_market_history import checked_material
+        checked_material(store,material,company_ref)
         passages=checked_rendered_passages(Path(path).parent if path!=':memory:' else ':memory:',
                                            candidate_sections,index['passages'])
     except (ValueError,OSError) as exc:
@@ -543,6 +547,13 @@ def run_memo(*, store: DaltonStore, frozen: Mapping[str, Any], model: Any, verif
     if frozen.get("status") != "ready":
         return dict(frozen)
     mission, playbook, company = frozen["mission"], frozen["playbook"], frozen["company"]
+    company_ref=company['company_ref']
+    try:
+        from .investment_memo_market_history import checked_material
+        checked_material(store,frozen['material'],company_ref)
+    except (ValueError,OSError) as exc:
+        return {'status':'held','memo_status':'source_unavailable',
+                'reason':'memo_source_proof_unavailable: '+str(exc),'cost_micros':0}
     titles = playbook["deliverable_templates"]["investment_memo"]
     questions = [{"question_ref": f"memo_q{i:02d}", "question": text}
                  for i, text in enumerate(playbook["key_questions"], 1)]
@@ -582,7 +593,7 @@ def run_memo(*, store: DaltonStore, frozen: Mapping[str, Any], model: Any, verif
             kwargs["quiesce"] = quiesce
         if repair_budget is not None:
             repair_budget.begin_stage(max_units=max_units, allow_technical=bool(repairs_left), quiesce=quiesce)
-        outcome = _validated_group(store,draft_group(model, **kwargs),frozen['material'])
+        outcome = _validated_group(store,draft_group(model, **kwargs),frozen['material'],company_ref=company_ref)
         cost_micros += int(outcome.get("model", {}).get("cost_micros") or outcome.get("cost_micros") or 0)
         first = {"group": group, "reason": outcome.get("reason"), "refs": outcome.get("refs") or []}
         if isinstance(repair_budget, MemoRepairBudget) and outcome['status'] != 'drafted' and outcome.get('repairable'):
@@ -597,7 +608,7 @@ def run_memo(*, store: DaltonStore, frozen: Mapping[str, Any], model: Any, verif
             repairs_left -= 1
             if repair_budget is not None:
                 repair_budget.begin_stage(max_units=max_units, allow_technical=False, quiesce=quiesce, repair=True)
-            outcome = _validated_group(store,draft_group(model, **kwargs, repair=first),frozen['material'])
+            outcome = _validated_group(store,draft_group(model, **kwargs, repair=first),frozen['material'],company_ref=company_ref)
             cost_micros += int(outcome.get("model", {}).get("cost_micros") or outcome.get("cost_micros") or 0)
             repaired.append(first)
         for _maintenance_round in range(2):
@@ -613,7 +624,7 @@ def run_memo(*, store: DaltonStore, frozen: Mapping[str, Any], model: Any, verif
                 repair_budget.begin_stage(max_units=max_units,allow_technical=False,quiesce=quiesce,
                                           maintenance=maintenance)
                 outcome = _validated_group(store,draft_group(model,**kwargs,maintenance=maintenance),
-                                           frozen['material'])
+                                           frozen['material'],company_ref=company_ref)
                 cost_micros += int(outcome.get('model',{}).get('cost_micros') or outcome.get('cost_micros') or 0)
                 repaired.append({'group':group,'maintenance_permission_ref':maintenance['permission_ref'],
                                  'parent_work_order_ref':maintenance['parent']['work_order_ref'],
@@ -641,6 +652,8 @@ def run_memo(*, store: DaltonStore, frozen: Mapping[str, Any], model: Any, verif
     from .mission_deliverable import pack_passage_resolver
 
     try:
+        from .investment_memo_market_history import checked_material
+        checked_material(store,frozen['material'],company_ref)
         from .product_passage_validation import checked_rendered_passages
         path = str(getattr(store,'path',':memory:'))
         passages = checked_rendered_passages(Path(path).parent if path != ':memory:'

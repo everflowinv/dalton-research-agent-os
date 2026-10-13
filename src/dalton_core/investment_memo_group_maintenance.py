@@ -34,7 +34,7 @@ def validate_answer(macro, context, call):
     outcome = parse_group_call(macro.model, call, **{key:context[key] for key in
         ('group','section_titles','questions','material')})
     return _validated_group(SimpleNamespace(path=Path(macro.model.scheduler_db).parent/'core.sqlite'),
-                            outcome, context['material'])
+                            outcome, context['material'],company_ref=context['company']['company_ref'])
 
 
 def _parent(macro, context, work_ref, *, through_rowid=None, _issued_diagnostics=None,
