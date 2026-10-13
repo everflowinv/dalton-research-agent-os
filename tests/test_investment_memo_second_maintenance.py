@@ -106,6 +106,31 @@ class MemoSecondMaintenanceTests(unittest.TestCase):
             self.assertIsNone(fresh.prepare_maintenance(context=f.contexts[1],outcome=again,remaining_groups=2))
         self.assertEqual(f.fees(),old);self.assertEqual(len(f.adapter.served),paid)
 
+    def test_body_diagnostics_wake_and_budget_restart_never_reset_paid_second(self):
+        from dataclasses import replace
+        from unittest.mock import patch
+        from dalton_core import investment_memo_number_diagnostics as diagnostic
+        f=self.fixture();wrapper,first,bad=self.first_failed(f);self.set_policy(f,2)
+        original=f.adapter.execute
+        def answer(work,route,profile):
+            invocation,envelope=original(work,route,profile)
+            if second.CONTRACT_REF in work.question and envelope.status=='succeeded':
+                value=json.loads(envelope.outputs['text']);s=value['sections'][0]
+                s['body']+=' 利润预期为 15.55。'
+                s['numbers'].append({'text':'15.55','estimate':{'assumption_ref':'assumption:a'}})
+                envelope=replace(envelope,outputs={'text':json.dumps(value,ensure_ascii=False)})
+            return invocation,envelope
+        f.adapter.execute=answer
+        body,refused=f.purchase(wrapper,bad)
+        self.assertIn('without saying',refused['reason'])
+        old=f.fees();paid=len(f.adapter.served)
+        with patch.object(diagnostic,'CONTRACT_REF','investment-memo-complete-section-diagnostics:test'):
+            for ceiling in (112000000,168000000):
+                fresh=f.wrapper(run=ceiling);again=f.outcome(fresh,1)
+                self.assertIsNone(fresh.prepare_maintenance(context=f.contexts[1],outcome=again,remaining_groups=2))
+                self.assertIn('without saying',again['reason'])
+        self.assertEqual(f.fees(),old);self.assertEqual(len(f.adapter.served),paid)
+
     def test_second_reserves_old_charges_remaining_groups_and_independent_verifier(self):
         f=self.fixture();wrapper,first,bad=self.first_failed(f);self.set_policy(f,2)
         old=f.fees();paid=len(f.adapter.served)

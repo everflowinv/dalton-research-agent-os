@@ -61,6 +61,7 @@ def company_signature(frozen: Mapping[str, Any], launcher: Any) -> str:
     from .investment_memo_question_gaps import CONTRACT_REF as QUESTION_GAPS_REF
     from .investment_memo_market_history import CONTRACT_REF as MARKET_HISTORY_REF
     from .investment_memo_second_maintenance import CONTRACT_REF as SECOND_MAINTENANCE_REF, scheduling_rounds
+    from .investment_memo_number_diagnostics import CONTRACT_REF as SECTION_DIAGNOSTICS_REF
     from .store import content_hash
 
     mission = frozen["mission"]
@@ -98,6 +99,9 @@ def company_signature(frozen: Mapping[str, Any], launcher: Any) -> str:
         # and paid request identities do not depend on this scheduling marker.
         "group_maintenance_contract": GROUP_MAINTENANCE_REF,
         "second_group_maintenance_contract": SECOND_MAINTENANCE_REF,
+        # Revalidate paid answers once; this does not change any prompt,
+        # immutable Work, fixed correction permission or macro accounting key.
+        "complete_section_diagnostics_contract": SECTION_DIAGNOSTICS_REF,
         "terminal_maintenance_contract": TERMINAL_MAINTENANCE_REF,
         "profile_maintenance_contract": "investment-memo-profile-capability-maintenance:0.1",
     }

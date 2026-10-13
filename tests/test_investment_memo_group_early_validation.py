@@ -22,6 +22,22 @@ class EarlyMemoValidationTests(TestCase):
         self.assertEqual(len(result['findings']),2)
         self.assertIn('999.3',model.calls[1]['prompt']);self.assertIn('777.2',model.calls[1]['prompt'])
         self.assertEqual(len(result['repairs']),1);self.assertEqual(result['cost_micros'],20)
+
+    def test_one_repair_prompt_contains_numeric_and_independent_body_defects(self):
+        value=self.payload();section=value['sections'][1]
+        section['body']='预期利润为 15.55。详情 {{待填}}。'
+        section['numbers']=[{'text':'111','number_ref':'pack:1'},
+            {'text':'15.55','estimate':{'assumption_ref':'assumption:a'}}]
+        frozen=self.frozen();frozen['material'] += [{'ref':'pack:1','kind':'pack_number','text':'200'},
+            {'ref':'assumption:a','kind':'pack_ours','text':'15.55'}]
+        model=f.FakeModel([value,value]);verifier=f.FakeModel([])
+        result=run_memo(store=SimpleNamespace(),frozen=frozen,model=model,
+                        verifier_model=verifier,max_repairs=1)
+        self.assertEqual(result['status'],'refused');self.assertEqual(len(model.calls),2)
+        self.assertEqual(len(result['repairs']),1);self.assertEqual(verifier.calls,[])
+        prompt=model.calls[1]['prompt']
+        self.assertIn('number[0]',prompt);self.assertIn('without saying',prompt)
+        self.assertIn('indirect_placeholder',prompt)
     def test_run_budget_refusal_does_not_buy_repair_or_later_groups(self):
         model=f.FakeModel([self.bad()]);budget=mock.Mock();budget.can_repair.return_value=False
         result=run_memo(store=SimpleNamespace(),frozen=self.frozen(),model=model,verifier_model=f.FakeModel([]),max_repairs=1,repair_budget=budget)

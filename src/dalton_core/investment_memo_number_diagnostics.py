@@ -1,6 +1,9 @@
-"""Collect independent numeric defects without accepting or rewriting a section."""
+"""Collect independent section defects without accepting or rewriting prose."""
 from .mission_deliverable import (validate_section,validate_derived_number,
-    MissionDeliverableError,MissionDeliverableConflict,MAX_SECTION_NUMBERS)
+    MissionDeliverableError,MissionDeliverableConflict,MAX_SECTION_NUMBERS,
+    MAX_BODY_CHARS,unlabelled_estimates,contract_findings)
+
+CONTRACT_REF = 'investment-memo-complete-section-diagnostics:0.1'
 
 
 def findings(section, *, live_claim_refs, resolve_cell, resolve_passage, resolve_number):
@@ -46,8 +49,33 @@ def findings(section, *, live_claim_refs, resolve_cell, resolve_passage, resolve
             break
         pending=[(index,item) for index,item,_ in waiting]
     accepted=[*trusted,*({'text':p['derivation']['result']} for p in proven)]
+    prose_numbers=list(accepted)
     for index,item in enumerate(numbers):
         if isinstance(item,dict) and item.get('derivation') is not None and any(p['derivation']==item['derivation'] for p in proven):
-            try:validate_derived_number(item,accepted)
+            try:prose_numbers.append(validate_derived_number(item,accepted))
             except MissionDeliverableError as exc:refuse(index,exc)
+    # Full validation stops at its first error. These independent body rules
+    # must also reach the SAME correction, even when a source or DAG failed.
+    # Only independently validated numbers can establish an estimate label;
+    # a bad peer is never evidence or an allowed operand. No section is
+    # accepted here: callers still validate the original complete candidate.
+    body=section.get('body') or ''
+    if isinstance(body,str) and len(body)<=MAX_BODY_CHARS:
+        unlabelled=unlabelled_estimates(body,prose_numbers)
+        if unlabelled:
+            errors.append({'section':section['title'],'code':'section_authority',
+                'detail':f"section「{section['title']}」writes our estimate {unlabelled[:3]} without saying 「我们的估计」"[:700]})
+        from .product_contract import ProductContractError,validate_gap_item
+        raw_items=section.get('gap_items') or []
+        if isinstance(raw_items,list) and len(raw_items)<=20:
+            try:
+                gaps=[validate_gap_item(item,f"section「{section['title']}」.gap_items[{i}]")
+                      for i,item in enumerate(raw_items)]
+            except ProductContractError as exc:
+                errors.append({'section':section['title'],'code':'section_authority','detail':str(exc)[:700]})
+            else:
+                for problem in contract_findings(section['title'],body,gaps):
+                    detail=problem.get('excerpt') or problem.get('matched') or problem.get('reason') or ''
+                    errors.append({'section':section['title'],'code':'section_authority',
+                        'detail':f"section「{section['title']}」breaks the product contract: {problem['code']}（{detail}）"[:700]})
     return errors
