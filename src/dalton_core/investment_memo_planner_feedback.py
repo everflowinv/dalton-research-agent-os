@@ -17,6 +17,12 @@ from .store import content_hash
 CONTRACT_REF = 'investment-memo-planner-feedback:0.1'
 MAX_REQUESTS = 32
 MAX_SECONDS = 12
+_SIGNATURE_SQL = ("SELECT COUNT(*),MAX(rowid) FROM scheduler_formal_results "
+                  "WHERE work_order_id>=? AND work_order_id<?")
+# CockpitModel's immutable IDs are work:cockpit-{purpose}-{digest}. This
+# indexed namespace is ONLY a wake hint. _read still proves the Work's actual
+# purpose, scope, response, source, route and fees before exposing any gap.
+_SIGNATURE_RANGE = ('work:cockpit-investment_memo-', 'work:cockpit-investment_memo.')
 
 
 def signature(state_dir):
@@ -30,9 +36,23 @@ def signature(state_dir):
             deadline = time.monotonic() + 1
             c.execute('PRAGMA busy_timeout=250')
             c.set_progress_handler(lambda: int(time.monotonic() > deadline), 10000)
-            row = c.execute("SELECT COUNT(*),MAX(f.rowid) FROM scheduler_formal_results f "
-                "JOIN scheduler_work_orders w ON w.work_order_id=f.work_order_id "
-                "WHERE json_extract(w.work_order_json,'$.metadata.purpose')='investment_memo'").fetchone()
+            # Require the existing owner-created full unique key before using
+            # its covering range seek. A missing/wrong schema is unknown, not
+            # a fallback scan of historical result or Work payloads.
+            columns = {r['name']: r for r in c.execute('PRAGMA table_info(scheduler_formal_results)')}
+            if 'work_order_id' not in columns or columns['work_order_id']['type'].upper() != 'TEXT':
+                return 'unavailable'
+            indexed = False
+            for index in c.execute('PRAGMA index_list(scheduler_formal_results)'):
+                if not index['unique'] or index['partial']:
+                    continue
+                name = '"' + index['name'].replace('"', '""') + '"'
+                if [r['name'] for r in c.execute('PRAGMA index_info(' + name + ')')] == ['work_order_id']:
+                    indexed = True
+                    break
+            if not indexed:
+                return 'unavailable'
+            row = c.execute(_SIGNATURE_SQL, _SIGNATURE_RANGE).fetchone()
             return content_hash(list(row))
     except (OSError, ValueError, sqlite3.Error):
         return 'unavailable'
