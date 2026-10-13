@@ -141,7 +141,13 @@ class CompleteElementAuditTests(unittest.TestCase):
         old_hash, new_hash = content_hash(prior), content_hash(current)
         self.assertNotEqual(old_hash, new_hash)
         self.assertEqual(TASK_HASH,'608338bcd6cf70cbe6e012acd5f579b99d34f9d990d5bc846c4059a198eda9af')
-        self.assertEqual(REPAIR_CONTRACT_HASH,'565f498cca6064b60f79b3279cc79c667310e0155fe18cb3a6609e55f3c621df')
+        self.assertEqual(REPAIR_CONTRACT_HASH,'94f4fc95cc8b9e0847dcf22250f2d43a9cc237872d7f60e916cd6944b63a2b22')
+        from dalton_core import company_model_cli as cli
+        identity = cli.model_spec_request_identity('a'*64,repair_config={'max_attempts':1})
+        with patch.object(revenue,'RULE_REF',revenue.FIXED_ZERO_RULE_REF):
+            self.assertEqual(cli.model_spec_validation_contract(),prior)
+            self.assertEqual(cli.model_spec_request_identity('a'*64,repair_config={'max_attempts':1}),identity)
+            self.assertEqual(content_hash(cli.REPAIR_CONTRACT),REPAIR_CONTRACT_HASH)
         missions = fixture.FakeMissions([fixture.IBM]); launcher = fixture.FakeLauncher()
         launcher.financial_validation_contract_hash = lambda:old_hash
         mission = {'id':'coverage-mission-version:test:1','universe':[{'company_ref':fixture.IBM,'ticker':'IBM'}]}

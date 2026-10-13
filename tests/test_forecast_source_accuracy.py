@@ -225,11 +225,29 @@ class SourceAccuracyTests(unittest.TestCase):
         validate_execution_contract(updated,publishing=True)
 
     def test_accuracy_rule_does_not_change_paid_producer_or_repair_identity(self):
-        from dalton_core.company_model_cli import REPAIR_CONTRACT_REF,REPAIR_CONTRACT_HASH
+        from dalton_core import company_model_cli as cli
         from dalton_core.company_model_spec import TASK_HASH
         self.assertEqual(TASK_HASH,'608338bcd6cf70cbe6e012acd5f579b99d34f9d990d5bc846c4059a198eda9af')
-        self.assertEqual(REPAIR_CONTRACT_REF,'contract:company-model-spec-structured-output-repair:0.16')
-        self.assertEqual(REPAIR_CONTRACT_HASH,'565f498cca6064b60f79b3279cc79c667310e0155fe18cb3a6609e55f3c621df')
+        self.assertEqual(cli.REPAIR_CONTRACT_REF,'contract:company-model-spec-structured-output-repair:0.17')
+        self.assertEqual(cli.REPAIR_CONTRACT_HASH,'94f4fc95cc8b9e0847dcf22250f2d43a9cc237872d7f60e916cd6944b63a2b22')
+        # 0.17 intentionally adds a source-bound structure correction, not an
+        # accuracy tolerance or another paid slot. Preserve the exact 0.16 pin:
+        # these three explicit changes must be the entire recipe difference.
+        self.assertEqual(cli.REPAIR_CONTRACT['missing_filed_tie_structure'], {
+            'ref':'model-spec-missing-filed-tie-structure:0.1',
+            'change':'financial_statement_structure_only_from_original_current_sources',
+            'quota':'original_unused_ordinary_slot_only',
+            'validation':'all_nonstructure_fields_exact_and_full_financial_history_revalidation'})
+        legacy = copy.deepcopy(cli.REPAIR_CONTRACT)
+        legacy['ref']='contract:company-model-spec-structured-output-repair:0.16'
+        legacy['eligible_error_codes'].remove(cli.FILED_TIE_CODE)
+        del legacy['missing_filed_tie_structure']
+        self.assertEqual(content_hash(legacy),'565f498cca6064b60f79b3279cc79c667310e0155fe18cb3a6609e55f3c621df')
+        self.assertEqual(cli.DEFAULT_REPAIR_ATTEMPTS,1)
+        before = cli.model_spec_request_identity('a'*64, repair_config={'max_attempts':1})
+        with patch('dalton_core.forecast_source_accuracy.RULE_REF','future-accuracy-rule'):
+            self.assertEqual(cli.model_spec_request_identity('a'*64, repair_config={'max_attempts':1}),before)
+            self.assertEqual(content_hash(cli.REPAIR_CONTRACT),cli.REPAIR_CONTRACT_HASH)
 
     def test_ticker_company_uses_verified_filing_issuer_not_ticker_suffix(self):
         from dalton_core.forecast_source_accuracy import _document

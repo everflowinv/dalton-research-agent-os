@@ -125,16 +125,22 @@ class OriginalRevenueTests(unittest.TestCase):
     def test_new_rule_does_not_change_task_or_repair_contract_paid_replay_identity(self):
         from dalton_core.company_model_cli import REPAIR_CONTRACT_REF, REPAIR_CONTRACT_HASH, model_spec_validation_contract
         from dalton_core.company_model_spec import TASK_HASH
-        self.assertEqual(REPAIR_CONTRACT_REF, 'contract:company-model-spec-structured-output-repair:0.16')
+        self.assertEqual(REPAIR_CONTRACT_REF, 'contract:company-model-spec-structured-output-repair:0.17')
         self.assertEqual(TASK_HASH, '608338bcd6cf70cbe6e012acd5f579b99d34f9d990d5bc846c4059a198eda9af')
         self.assertEqual(model_spec_validation_contract()['original_revenue_context'], RULE_REF)
-        self.assertEqual(REPAIR_CONTRACT_HASH, '565f498cca6064b60f79b3279cc79c667310e0155fe18cb3a6609e55f3c621df')
+        self.assertEqual(REPAIR_CONTRACT_HASH, '94f4fc95cc8b9e0847dcf22250f2d43a9cc237872d7f60e916cd6944b63a2b22')
         from dalton_core import statement_context as context
         # The additive rule is not a blanket revision of every old context.
         # Changing this helper's bytes cannot change the base normalizer hash.
+        from dalton_core import company_model_cli as cli
         expected = context.normalizer_hash()
+        identity = cli.model_spec_request_identity('a'*64,repair_config={'max_attempts':1})
+        validation = model_spec_validation_contract()
         with patch('dalton_core.statement_original_revenue_context.RULE_REF', 'future-rule'):
             self.assertEqual(context.normalizer_hash(), expected)
+            self.assertEqual(model_spec_validation_contract(),{**validation,'original_revenue_context':'future-rule'})
+            self.assertEqual(cli.model_spec_request_identity('a'*64,repair_config={'max_attempts':1}),identity)
+            self.assertEqual(content_hash(cli.REPAIR_CONTRACT),REPAIR_CONTRACT_HASH)
 
     def test_bounded_preflight_no_additions_does_not_publish_new_context(self):
         class Missions:
