@@ -299,8 +299,11 @@ class InitialScreenCoordinator:
         last=result.get('last') or {}
         company=(last.get('drafted') or {}).get('company_ref')
         from .initial_screen_failed_input import _path as failed_input_path
-        guarded_failure=(last.get('summary_status')=='failed' and isinstance(company,str)
+        has_guard=(isinstance(company,str)
             and failed_input_path(self.launcher.state_dir,company).is_file())
+        guarded_failure=(has_guard and (last.get('summary_status')=='failed'
+            or last.get('reason_code') in {'initial_screen_revalidated_content_refused',
+                                         'initial_screen_revalidated_verifier_refused'}))
         if last.get('reason_code')=='initial_screen_unchanged_failure' or guarded_failure:
             from .initial_screen_validator_recovery import validator_fingerprint
             signature['validator_recheck']=validator_fingerprint()

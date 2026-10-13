@@ -176,3 +176,22 @@ class ValidatorRecoveryTests(unittest.TestCase):
         self.model.config['purpose_run_budgets']['initial_screen']['max_cost_usd']=224
         with self.assertRaises(ValueError):self.qualify()
         self.assertEqual(len(self.f.adapter.served),before+1)
+
+    def test_revalidated_refusals_keep_stable_wake_marker_and_new_validator_wakes_once(self):
+        from dalton_core.initial_screen_launcher import InitialScreenCoordinator
+        for reason in ('initial_screen_revalidated_content_refused','initial_screen_revalidated_verifier_refused'):
+            with self.subTest(reason=reason):
+                launcher=mock.Mock();launcher.state_dir=self.state;launcher.tickets_dir=self.state/'initial-screens'
+                launcher.status.return_value={'id':self.q.ticket['id'],'status':'succeeded',
+                    'summary':{'status':'held','reason_code':reason,'drafted':self.f.company}}
+                coordinator=InitialScreenCoordinator(store=self.f.store,launcher=launcher,clock=self.model.clock)
+                signature={**coordinator._signature(),'validator_recheck':rec.validator_fingerprint()}
+                feedback._write(launcher.tickets_dir/'latest.json',{'ticket_ref':self.q.ticket['id'],
+                    'idle_signature':signature,'idle_at':self.model.clock().isoformat()})
+                self.assertEqual(coordinator.dispatch_once()['status'],'held')
+                self.assertEqual(coordinator.dispatch_once()['status'],'held');launcher.start.assert_not_called()
+                launcher.start.return_value={'id':self.q.ticket['id'],'started_at':self.model.clock().isoformat()}
+                with mock.patch.object(rec,'validator_fingerprint',return_value='next-verified-contract'):
+                    self.assertEqual(coordinator.dispatch_once()['status'],'launched')
+                    self.assertEqual(coordinator.dispatch_once()['status'],'held')
+                launcher.start.assert_called_once_with()
