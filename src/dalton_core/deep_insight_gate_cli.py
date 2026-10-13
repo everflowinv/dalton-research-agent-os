@@ -230,7 +230,7 @@ def valuation_rows(store: Any, company_ref: str) -> list[dict[str, Any]]:
 #: refused under an old rule stayed refused after the rule was fixed, until the
 #: dossier happened to move.  Bump this when the drafting, repair or refusal
 #: rules change and every such hold lifts on the next tick.
-GATE_DRAFTING_CONTRACT = "deep-insight-gate-drafting:2026-10-12-source-bound-completed-timeout-fees"
+GATE_DRAFTING_CONTRACT = "deep-insight-gate-drafting:2026-10-13-indexed-source-scope-lineage"
 
 
 def deep_insight_company_source_fingerprint(

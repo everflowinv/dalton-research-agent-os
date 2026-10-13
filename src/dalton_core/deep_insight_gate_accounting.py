@@ -40,6 +40,8 @@ def _schema(cur):
                         "'deep-gate accounting is append-only'); END")
     cur.execute(f'CREATE INDEX IF NOT EXISTS {REQUESTS}_scope ON {REQUESTS}(scope_ref_binding)')
     cur.execute(f'CREATE INDEX IF NOT EXISTS {GRANTS}_scope ON {GRANTS}(scope_ref_binding)')
+    cur.execute(f"CREATE INDEX IF NOT EXISTS {REQUESTS}_normal_lookup ON {REQUESTS}("
+                "json_extract(record_json,'$.role'),json_extract(record_json,'$.request_id'),scope_ref_binding)")
 
 
 def _record(cur, table, key, identity, scope, body):
@@ -237,6 +239,7 @@ class DeepGateAccounting:
         self.grant = None
         self.grants = {}
         self.legacy_run_budget = None
+        self.transition = None
 
     def bind_consumer(self, group_inputs, *, wanted):
         """Freeze the current authority-backed consumer, not a fictitious old binding."""
@@ -262,7 +265,7 @@ class DeepGateAccounting:
             if len(saved)>4:raise ValueError('deep-gate budget grants exceed four fixed groups')
             for row in saved:
                 grant=_body(row)
-                if grant['consumer_ref']==ref:self.grants[grant['group']]=grant
+                self.grants[grant['group']]=grant
         return self.consumer
 
     def _complete(self,connection,router,budget):
@@ -274,6 +277,15 @@ class DeepGateAccounting:
         if row is None:return False
         saved=_body(row)
         from .deep_insight_gate_budget_grant import load_archived_policy
+        from .deep_insight_gate_scope_transition import CONTRACT_REF as TRANSITION, derive as transition_derive
+        if saved['proof'].get('contract_ref') == TRANSITION:
+            expected = transition_derive(connection,router,budget,self.model,scope=self.scope,ref=self.ref,
+                consumer=self.consumer,parents=saved['proof']['parents'])
+            if saved != {'consumer_ref':self.consumer['ref'],'proof':expected}:
+                raise ValueError('deep-gate source transition completion differs')
+            self.transition=expected
+            self.legacy_run_budget=expected['original_run_budget']
+            return True
         archived=load_archived_policy(self.model,saved['proof']['original_policy']['content_hash'])
         if archived!=saved['proof']['original_policy']:
             raise ValueError('deep-gate legacy original human policy differs from its archive')
@@ -295,15 +307,22 @@ class DeepGateAccounting:
                 self.model.config['model_router_db'],self.model.config['budget_db'],now=self.model.clock())as(router,budget):
             from .deep_insight_gate_budget_grant import policy_history
             from datetime import datetime
-            raw=derive(c,router,budget,entries=self.entries,
-                group_inputs=self.consumer['group_inputs'],wanted=self.consumer['wanted'],
-                through_rowid=self.scope['registered_work_rowid'])
-            earliest=min(datetime.fromisoformat(f['admitted_at'])for b in raw['historical_works']for f in b['fees'])
-            policy=next((p for p in policy_history(self.model)if datetime.fromisoformat(p['updated_at'])<=earliest),None)
-            if policy is None:raise ValueError('deep-gate original run human policy is unavailable')
-            proof=derive(c,router,budget,entries=self.entries,
-                group_inputs=self.consumer['group_inputs'],wanted=self.consumer['wanted'],
-                through_rowid=self.scope['registered_work_rowid'],original_policy=policy)
+            try:
+                raw=derive(c,router,budget,entries=self.entries,
+                    group_inputs=self.consumer['group_inputs'],wanted=self.consumer['wanted'],
+                    through_rowid=self.scope['registered_work_rowid'])
+            except ValueError as legacy_error:
+                from .deep_insight_gate_scope_transition import derive as transition_derive
+                try:proof=transition_derive(c,router,budget,self.model,scope=self.scope,ref=self.ref,consumer=self.consumer)
+                except ValueError as transition_error:
+                    raise ValueError(str(legacy_error)+'; indexed transition: '+str(transition_error)) from transition_error
+            else:
+                earliest=min(datetime.fromisoformat(f['admitted_at'])for b in raw['historical_works']for f in b['fees'])
+                policy=next((p for p in policy_history(self.model)if datetime.fromisoformat(p['updated_at'])<=earliest),None)
+                if policy is None:raise ValueError('deep-gate original run human policy is unavailable')
+                proof=derive(c,router,budget,entries=self.entries,
+                    group_inputs=self.consumer['group_inputs'],wanted=self.consumer['wanted'],
+                    through_rowid=self.scope['registered_work_rowid'],original_policy=policy)
         ref=self.ref+':completion:'+content_hash(self.consumer)
         with Scheduler(self.model.scheduler_db) as scheduler,scheduler._transaction()as cur:
             _schema(cur);_record(cur,COMPLETIONS,'completion_ref',ref,self.ref,
@@ -324,6 +343,9 @@ class DeepGateAccounting:
                 if not matches:continue
                 work,authority,formal=matches[-1]
                 if formal is None:raise ValueError('deep-gate old group is still in flight')
+                if any(g['group']==entry['group'] for g in (getattr(self,'transition',None)or{}).get('grants',[])):
+                    if entry['group']==group:raise ValueError('deep-gate inherited scope/group already has its one grant')
+                    continue
                 existing=self.grants.get(entry['group'])
                 if existing is not None and existing['limits']!=limits(history[0]):
                     raise ValueError('deep-gate scope/group already has its one grant; another limit edit cannot open a new child')
@@ -362,8 +384,10 @@ class DeepGateAccounting:
 
     def _verify_grant(self,c,router,budget,grant,history):
         from .deep_insight_gate_budget_grant import grant_proof,limits,grant_history
-        if self.consumer is None or grant['consumer_ref']!=self.consumer['ref']:
-            raise ValueError('deep-gate budget grant consumer differs')
+        if self.consumer is None:
+            raise ValueError('deep-gate budget grant current consumer is absent')
+        from .deep_insight_gate_scope_transition import _consumer
+        _consumer(c,grant['consumer_ref'],{**self.scope,'scope_ref':self.ref})
         row=c.execute(f'SELECT * FROM {GRANTS} WHERE grant_ref=?',(grant['id'],)).fetchone()
         if row is None or _body(row)!=grant:
             raise ValueError('deep-gate budget grant authority differs')
@@ -382,7 +406,7 @@ class DeepGateAccounting:
             if bill['unknown_fee_retained']:
                 grant_proof(scope_ref=self.ref,entry=entry,parent=a,formal=f,bill=bill,history=original_history)
                 retained.append(saved.id)
-        expected.update(consumer_ref=self.consumer['ref'],allowed_unknown_work_refs=sorted(retained))
+        expected.update(consumer_ref=grant['consumer_ref'],allowed_unknown_work_refs=sorted(retained))
         expected['content_hash']=content_hash(expected)
         if expected!=grant:raise ValueError('deep-gate grant original proof or retained fee set differs')
 
@@ -397,6 +421,13 @@ class DeepGateAccounting:
 
     def _allowed_unknowns(self, connection=None, router=None, budget=None, *, mission=None):
         allowed = {ref for g in self.grants.values()for ref in g['allowed_unknown_work_refs']}
+        transition=getattr(self,'transition',None)
+        if transition is not None:
+            if mission is None:raise ValueError('deep-gate inherited unknowns require current mission proof')
+            for bill in transition['bills']:
+                if bill['mission_hashes'] != [mission['content_hash']]:
+                    raise ValueError('deep-gate inherited fees have another current mission')
+            allowed.update(transition['allowed_unknown_work_refs'])
         if mission is None or self.consumer is None:
             return allowed
         # A later, valid success closes a group without erasing its earlier
@@ -453,6 +484,9 @@ class DeepGateAccounting:
         return allowed
 
     def register(self, *, role, group, kwargs):
+        # Rebuild lineage before testing its occupied slots; caller memory or
+        # an import performed earlier in this process is not fee authority.
+        self.snapshot()
         if role not in {'shape','numbers','rubric','verifier'}:
             raise ValueError('deep-gate unknown request role')
         if role == 'verifier' and group != 'all':
@@ -473,7 +507,8 @@ class DeepGateAccounting:
             prior = [_body(r) for r in rows]
             if entry not in prior and len(prior)>=MAX_REQUESTS:
                 raise ValueError('deep-gate complete request index exceeds bounded18')
-            same = [e for e in prior if e['role']==role and e['group']==group]
+            inherited=(getattr(self,'transition',None)or{}).get('inherited_entries',[])
+            same = [e for e in [*prior,*inherited] if e['role']==role and e['group']==group]
             limit = 2 if role=='verifier' else 1
             if entry not in same and len(same)>=limit:
                 raise ValueError('deep-gate existing correction generation is already used')
@@ -494,8 +529,11 @@ class DeepGateAccounting:
             entries=[_body(r)for r in rows]
             if sorted((e for e in entries if e['role']=='normal'),key=lambda e:e['group']) != sorted(self.entries,key=lambda e:e['group']):
                 raise ValueError('deep-gate normal request index is incomplete')
+            complete=self._complete(connection,router,budget)
+            inherited=(getattr(self,'transition',None)or{}).get('inherited_entries',[])
+            union={e['request_id']:e for e in [*inherited,*entries]}
             bills={};latest={}
-            for entry in entries:
+            for entry in union.values():
                 matches=works(connection,entry)
                 for work,authority,formal in matches:
                     if formal is None:
@@ -505,7 +543,6 @@ class DeepGateAccounting:
                         raise ValueError('deep-gate in-flight Work has no formal; retain original reservation')
                     bills[work.id]=billed_work(connection,router,budget,authority,formal)
                 if matches:latest[entry['request_id']]=matches[-1]
-            complete=self._complete(connection,router,budget)
             self.last={'contract_ref':CONTRACT_REF,'scope_ref':self.ref,'cost_complete':complete,
                        'status':'complete' if complete else 'legacy_full_fee_import_required',
                        'accounted_micros':sum(b['accounted_micros']for b in bills.values()),
@@ -588,6 +625,8 @@ class DeepGateAccounting:
             entries=[_body(r) for r in c.execute(f'SELECT * FROM {REQUESTS} WHERE scope_ref_binding=? LIMIT ?',
                                                (self.ref,MAX_REQUESTS+1)).fetchall()]
             if len(entries)>MAX_REQUESTS:raise ValueError('deep-gate request index exceeds bounded18')
+            inherited=(getattr(self,'transition',None)or{}).get('inherited_entries',[])
+            entries=list({e['request_id']:e for e in [*inherited,*entries]}.values())
             _active_attempt(c,work,attempt_number,self.model.clock())
             allowed_unknowns = self._allowed_unknowns(c,router,budget,mission=mission)
             total=0;found=False;seen=set()
