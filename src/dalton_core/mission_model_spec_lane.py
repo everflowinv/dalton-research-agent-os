@@ -261,6 +261,7 @@ class MissionModelSpecLaneCoordinator:
         excluded: set[str] = set()
         held_companies: dict[str, Any] = {}
         superseded: list[str] = []
+        prepared_native: set[str] = set()
         try:
             repair_policy_hash = self.launcher.repair_policy_hash()
             if hasattr(self.launcher, "state_projection_config"):
@@ -328,6 +329,30 @@ class MissionModelSpecLaneCoordinator:
                 return {"status": "idle", "settled": settled,
                         **({} if not superseded else {"superseded": superseded}),
                         "reason": "every company has a current specification"}
+            # A native source-rule upgrade is free input preparation, before
+            # consulting a refusal about the old input. It never resets a
+            # paid permission. Rechoose once from the newly appended context.
+            if (company_ref not in prepared_native
+                    and getattr(self.missions, "store", None) is not None
+                    and getattr(self.launcher, "state_dir", None) is not None):
+                prepared_native.add(company_ref)
+                try:
+                    from .sec_native_annual import ANNUAL_FORMS
+                    if any(f['form'] in ANNUAL_FORMS for f in self.missions.statement_filings(company_ref)):
+                        from .sec_native_filing_units import prepare_model_unit_inputs
+                        inputs = prepare_model_unit_inputs(self.missions, self.launcher.state_dir, company_ref)
+                        if inputs.get('context_refresh_refusals'):
+                            held_companies[company_ref] = {
+                                'reason': 'native original context refresh refused',
+                                'context_refresh_refusals': inputs['context_refresh_refusals'],
+                                'retry_authority': False}
+                            excluded.add(company_ref)
+                            continue
+                        if inputs['refreshed']:
+                            continue
+                except Exception as exc:
+                    return {'status': 'unavailable', 'settled': settled,
+                            'reason': f'{type(exc).__name__}: {exc}'}
             # The hash comes from the projection the chooser already built.
             # Keeping that exact state beside the company also lets a held
             # first candidate be skipped without rebuilding a different one.

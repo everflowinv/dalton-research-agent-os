@@ -346,10 +346,51 @@ def prepare_model_unit_inputs(missions, state_dir, company_ref):
     if not any(f['form'] in ANNUAL_FORMS for f in filings):
         from .sec_filing_units import prepare_model_unit_inputs as domestic
         return domestic(missions, state_dir, company_ref)
-    from .statement_context import refresh_company_contexts, _filing, _latest, context_record
-    selected = [f['ingest_id'] for f in filings if unresolved_unit_refs(missions.statement_lines(f['ingest_id']))]
+    from .statement_context import (refresh_company_contexts, _filing, _latest,
+        context_record, _native_unit_normalizer_hash, StatementContextAuthority)
+    from .sec_statement_periodic_filings import model_window
+    from .company_model_state import MAX_FILINGS
+    from .native_model_context_refresh import scope, previous_refusal
+    window = {f['ingest_id'] for f in model_window(filings, MAX_FILINGS)}
+    selected = []; stale = []; refused = []
+    for filing in filings:
+        ingest = filing['ingest_id']
+        if filing['form'] in ANNUAL_FORMS and ingest in window:
+            version = _latest(missions.connection, ingest)
+            # Only compare the immutable projection here. All numeric/source
+            # validation still happens in owner refresh and consumer replay.
+            row = None if version is None else missions.connection.execute(
+                'SELECT record_json,content_hash FROM statement_context_versions WHERE version_id=?',
+                (version,)).fetchone()
+            previous = None if row is None else __import__('json').loads(row['record_json'])
+            if previous is not None and (previous.get('content_hash') != row['content_hash']
+                    or content_hash({k:v for k,v in previous.items() if k != 'content_hash'}) != row['content_hash']):
+                raise FilingUnitError('native model context projection hash differs')
+            if previous is None or previous.get('normalizer_hash') != _native_unit_normalizer_hash():
+                failure = previous_refusal(missions.connection, scope(missions.connection, state_dir, _filing(missions.connection, ingest)))
+                if failure is not None:
+                    refused.append(failure)
+                else:
+                    stale.append(ingest)
+                continue
+        if unresolved_unit_refs(missions.statement_lines(ingest)):
+            selected.append(ingest)
+    if stale:
+        authority = StatementContextAuthority(missions.store)
+        for ingest in stale:
+            record = authority.backfill(state_dir, ingest, native_model_refresh=True)
+            if record['status'] == 'refused':
+                refused.append({'ingest_id': ingest, 'version_id': record['version_id'],
+                    'scope_hash': record['model_refresh_scope']['content_hash'],
+                    'reason': record['reason'], 'reused': False})
+            else:
+                selected.append(ingest)
+    if refused:
+        return {'refreshed': bool(stale), 'unresolved': [], 'context_refresh_refusals': refused}
     if not selected:return {'refreshed':False,'unresolved':[]}
-    refresh_company_contexts(missions.store,state_dir,company_ref,ingest_ids=selected,force=True)
+    unit_only = [ingest for ingest in selected if ingest not in stale]
+    if unit_only:
+        refresh_company_contexts(missions.store,state_dir,company_ref,ingest_ids=unit_only,force=True)
     missing = []
     for ingest in selected:
         refs = unresolved_unit_refs(missions.statement_lines(ingest))

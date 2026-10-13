@@ -1442,6 +1442,12 @@ def run_model_spec(
             return summary
         from .sec_native_filing_units import prepare_model_unit_inputs
         unit_inputs = prepare_model_unit_inputs(missions, state_dir, chosen)
+        if unit_inputs.get('context_refresh_refusals'):
+            summary.update({'status': 'succeeded', 'spec_status': 'refused',
+                'company_ref': chosen, 'state_hash': state['state_hash'],
+                'context_refresh_refusals': unit_inputs['context_refresh_refusals'],
+                'failure_reason': 'Native original context refresh refused; retained previous available source context; no model call.'})
+            return summary
         if unit_inputs["unresolved"]:
             summary.update({"status": "succeeded", "spec_status": "refused",
                             "company_ref": chosen, "state_hash": state["state_hash"],

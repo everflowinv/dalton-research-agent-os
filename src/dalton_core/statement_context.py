@@ -70,11 +70,19 @@ def normalizer_hash() -> str:
                          "supplementary_source_sha256": hashlib.sha256(Path(statement_companyfacts_context.__file__).read_bytes()).hexdigest()})
 
 
+# Exact source compatibility: only native model preflight selection changed.
+# Native numeric parser and supplement functions remain byte-identical.
+_NATIVE_MODEL_PREFLIGHT_SOURCE_ALIAS = {
+    '7402ada6b2e31345afe42a2483f5236f4ecc470934ee1d682c3d4f6501a35cc2': '5e7c02a0dcd4428efbe3b0f2974e28fb3a688a6d57afebd6e1a1406ae3f7d584',
+}
+
+
 def _native_unit_normalizer_hash() -> str:
     from . import sec_native_filing_units, native_statement_membership
+    native_source = hashlib.sha256(Path(sec_native_filing_units.__file__).read_bytes()).hexdigest()
     return content_hash({'domestic_normalizer_hash':normalizer_hash(),
         'native_unit_contract':sec_native_filing_units.CONTRACT,
-        'native_unit_source_sha256':hashlib.sha256(Path(sec_native_filing_units.__file__).read_bytes()).hexdigest(),
+        'native_unit_source_sha256':_NATIVE_MODEL_PREFLIGHT_SOURCE_ALIAS.get(native_source, native_source),
         'native_membership_contract':native_statement_membership.CONTRACT,
         'native_membership_source_sha256':hashlib.sha256(Path(native_statement_membership.__file__).read_bytes()).hexdigest()})
 
@@ -350,9 +358,19 @@ class StatementContextAuthority:
 
     def backfill(self, state_dir: str | Path, ingest_id: str, *,
                  companyfacts_source: Mapping[str, Any] | None = None,
-                 discover_companyfacts: bool = True) -> dict[str, Any]:
+                 discover_companyfacts: bool = True,
+                 native_model_refresh: bool = False) -> dict[str, Any]:
         from datetime import datetime, timezone
+        refresh_scope = None
+        if native_model_refresh:
+            from .native_model_context_refresh import scope
+            refresh_scope = scope(self.connection, state_dir, _filing(self.connection, ingest_id))
         record = prepare_context(self.connection, state_dir, ingest_id, companyfacts_source=companyfacts_source, discover_companyfacts=discover_companyfacts)
+        if refresh_scope is not None and record['status'] == 'refused':
+            identity = {k:v for k,v in record.items() if k not in {'version_id','content_hash'}}
+            identity['model_refresh_scope'] = refresh_scope
+            record = {**identity, 'version_id': 'statement-context:' + content_hash(identity)[:32]}
+            record['content_hash'] = content_hash(record)
         with self._transaction() as cur:
             cur.execute("INSERT OR IGNORE INTO statement_context_versions(version_id,ingest_id,status,record_json,content_hash,created_at) "
                         "VALUES(?,?,?,?,?,?)", (record["version_id"], ingest_id, record["status"], canonical_json(record),
