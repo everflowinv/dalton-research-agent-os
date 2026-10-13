@@ -25,8 +25,9 @@ def validator_fingerprint():
     from .research_reasoning_lint import lint_fingerprint
     from .mission_deliverable import NUMBER_SOURCE_CONTRACT_VERSION
     from .initial_screen import STRL_CONTRACT_VERSION
+    from .initial_screen_estimate_citation_repair import CONTRACT_REF as ESTIMATE_REPAIR_REF
     return content_hash({'contract': CONTRACT, 'producer': STRL_CONTRACT_VERSION,
-        'product': contract_fingerprint(), 'numbers': NUMBER_SOURCE_CONTRACT_VERSION,
+        'product': contract_fingerprint(), 'numbers': NUMBER_SOURCE_CONTRACT_VERSION, 'estimate_citation_repair': ESTIMATE_REPAIR_REF,
         'lint': lint_fingerprint()})
 
 

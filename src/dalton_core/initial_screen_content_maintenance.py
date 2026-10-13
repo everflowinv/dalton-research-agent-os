@@ -109,8 +109,11 @@ def plan(raw, findings, pack):
                 raise ValueError('initial-screen appendix request is not a held declared gap')
             edit.setdefault('append_requests',[]).append(detail)
         elif code=='citation_or_contract':
+            from . import initial_screen_estimate_citation_repair as estimate_repair
             prefix="a derived number entry's text must state its result "
-            if detail.startswith(prefix):
+            if detail == estimate_repair.ERROR:
+                edit['estimate_citations'] = estimate_repair.plan(s,pack)
+            elif detail.startswith(prefix):
                 value=detail[len(prefix):]
                 matched=[j for j,n in enumerate(s.get('numbers',[])) if isinstance(n,dict) and str((n.get('derivation') or {}).get('result'))==value]
                 if len(matched)!=1:raise ValueError('initial-screen derived display target is ambiguous')
@@ -176,6 +179,11 @@ def assert_changes(raw, changed, allowed, pack):
             restored=dict(after);restored['text']=before.get('text')
             if restored!=before:raise ValueError('initial-screen maintenance changed financial derivation or metadata')
             copy_new['numbers'][j]=copy.deepcopy(before)
+        for index,proof in rule.get('estimate_citations',{}).items():
+            from .initial_screen_estimate_citation_repair import assert_edit
+            j=int(index)
+            assert_edit(numbers[j],current[j],proof,pack)
+            copy_new['numbers'][j]=copy.deepcopy(numbers[j])
         additions=current[len(numbers):]
         if additions and not rule.get('append_citations'):raise ValueError('initial-screen maintenance added numbers outside an exact missing-citation diagnostic')
         if len(additions)>16:raise ValueError('initial-screen maintenance added too many citations')
@@ -228,6 +236,10 @@ def _prompt(result, allowed):
         'You may add period ONLY as the exact listed period_end of that same tagged numeric cell; never invent or borrow another period. '
         'For append_requests append a newline and 未取得资料请求：<ref> for each exact listed request. '
         'For missing_phrase only replace 材料缺少 with 待补资料. If the original cannot be repaired within these paths, return it unchanged.\n'
+        +('For estimate_citations change ONLY the listed numbers[index].estimate and numbers[index].text '
+          'to replacement_estimate and replacement_text copied exactly from its proved source. '
+          'Do not change body, period, unit, metric or any other field.\n'
+          if any(edit.get('estimate_citations') for edit in allowed['edits'].values()) else '')
         +'ALLOWED\n'+canonical_json(allowed)+'\nORIGINAL\n'+canonical_json(raw)+'\nFROZEN MATERIAL\n'+result['context']['pack']['text'])
 
 
