@@ -148,6 +148,9 @@ def recover(state, view, *, now):
     from .material_sec_config_recovery import recover as recover_local_config
     restored=recover_local_config(state,view,now=now)
     if restored is not None:return restored
+    from .material_sec_amendment_recovery import recover as recover_amendment
+    restored=recover_amendment(state,view,now=now)
+    if restored is not None:return restored
     from . import material_requests as mr
     proof=candidate(state,view,now=now)
     if proof is None:return None
@@ -173,7 +176,8 @@ def carried_attempts(events, latest_open_index, *, request_ref=None, request_has
     marker=(events[latest_open_index].get('source_queue_recovery')or{})
     if not marker: return []
     from .material_sec_config_recovery import RULE_REF as CONFIG_RULE_REF
-    if (marker.get('rule_ref')not in (RULE_REF,CONFIG_RULE_REF) or marker.get('source')!='sec_edgar'
+    from .material_sec_amendment_recovery import RULE_REF as AMENDMENT_RULE_REF
+    if (marker.get('rule_ref')not in (RULE_REF,CONFIG_RULE_REF,AMENDMENT_RULE_REF) or marker.get('source')!='sec_edgar'
             or marker.get('content_hash')!=content_hash({k:v for k,v in marker.items()if k!='content_hash'})):
         raise ValueError('source queue recovery marker is invalid')
     if (request_ref is not None and marker.get('request_ref')!=request_ref
