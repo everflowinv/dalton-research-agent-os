@@ -17,6 +17,7 @@ import threading
 from pathlib import Path
 from typing import Any, Mapping
 
+from .research_preparation_checkpoint import checkpoint
 from .research_localization import (ResearchLocalizationError, select_localized,
                                    source_content_hash, validate_localization)
 
@@ -312,16 +313,18 @@ def _ui_record_pairs(path: Path) -> tuple[tuple[str, str], ...] | None:
     return pairs
 
 
-def _ui_record_pair_lists(path: Path, payload: Mapping[str, Any]) -> list[tuple[tuple[str, str], ...]]:
+def _ui_record_pair_lists(path: Path, payload: Mapping[str, Any], *, stop_requested=None) -> list[tuple[tuple[str, str], ...]]:
     records = path.parent / UI_RECORDS_DIRECTORY
     if records.is_symlink():
         return []
     wanted: list[Path] = []
     for ref in payload.get("batch_refs") or []:
+        checkpoint(stop_requested)
         if isinstance(ref, str) and _SHA.fullmatch(ref):
             wanted.append(records / (ref + ".json"))
     result = []
     for record in wanted:
+        checkpoint(stop_requested)
         pairs = _ui_record_pairs(record)
         if pairs is not None:
             result.append(pairs)
@@ -442,6 +445,41 @@ def _ui_index(database: str | Path) -> tuple[str, dict[str, str], dict[str, str 
             return _ui_index_cached(str(path), stat.st_ino, stat.st_mtime_ns, stat.st_size)
     except (OSError, ValueError, KeyError, TypeError, ResearchLocalizationError):
         return None
+
+
+def load_ui_source_mapping(database: str | Path, *, stop_requested=None) -> dict[str, str]:
+    """Approved raw pairs for discovery membership, without display formatting.
+
+    This is not the page display API. Discovery only asks whether an exact
+    source key has already been reviewed. Every batch uses the same existing
+    record validator; canceled operations return no partial mapping.
+    """
+    checkpoint(stop_requested)
+    path = directory_for_database(database) / "ui-texts.json"
+    try:
+        if path.parent.is_symlink() or path.is_symlink():
+            return {}
+        payload = _read_json(path)
+        checkpoint(stop_requested)
+        if payload.get("schema_version") == UI_TEXTS_LEGACY_SCHEMA:
+            pair_lists = []
+            for batch in payload.get("batches", []):
+                checkpoint(stop_requested)
+                pair_lists.append(_batch_pairs(batch))
+        elif payload.get("schema_version") == UI_TEXTS_SCHEMA:
+            pair_lists = _ui_record_pair_lists(path, payload, stop_requested=stop_requested)
+        else:
+            pair_lists = []
+        result = {}
+        for pairs in pair_lists:
+            checkpoint(stop_requested)
+            for original, localized in pairs:
+                checkpoint(stop_requested)
+                result.setdefault(original, localized)
+        checkpoint(stop_requested)
+        return result
+    except (OSError, ValueError, KeyError, TypeError, ResearchLocalizationError):
+        return {}
 
 
 def load_ui_texts(database: str | Path) -> dict[str, str]:
