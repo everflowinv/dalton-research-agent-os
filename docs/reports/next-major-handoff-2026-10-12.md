@@ -1,5 +1,7 @@
 # 大版本开发交接：本轮发现的共性问题
 
+最新统一架构问题与验收方向见[大版本起点](architecture-findings-and-major-version-2026-10-13.md)。
+
 这份记录提供设计输入。大版本的具体功能范围仍待确定；当前运行情况以 [PROJECT_STATUS](../PROJECT_STATUS.md) 和 [逐公司状态](company-research-progress-2026-10-12.md) 为准。
 
 ## 已付费成果的复用
