@@ -348,10 +348,14 @@ def repoint_agent(plist_path: Path, venv: Path) -> bool:
     if not arguments:
         raise SwitchError(f"{plist_path} 没有 ProgramArguments")
     wanted = str(venv / "bin" / "python")
-    if arguments[0] == wanted:
+    controller = arguments[1:3] == ["-m", "dalton_core.service"]
+    priority_changed = controller and data.get("ProcessType") != "Standard"
+    if arguments[0] == wanted and not priority_changed:
         return False
     arguments[0] = wanted
     data["ProgramArguments"] = arguments
+    if controller:
+        data["ProcessType"] = "Standard"
     temporary = plist_path.with_name(f".{plist_path.name}.switch.tmp")
     with temporary.open("wb") as stream:
         plistlib.dump(data, stream)
@@ -364,7 +368,7 @@ def repoint_agent(plist_path: Path, venv: Path) -> bool:
     if str(plist_path).endswith(".plist"):
         with plist_path.open("rb") as stream:
             after = plistlib.load(stream)
-        if (after.get("ProgramArguments") or [None])[0] != wanted:
+        if after != data:
             raise SwitchError(f"{plist_path} 回读结果与写入不一致")
     return True
 
