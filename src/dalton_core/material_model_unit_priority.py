@@ -44,15 +44,19 @@ def unit_input_proof(connection, request, mission, *, contract_ref, cache):
         if who.get('lane')!='statement_context' or who.get('section')!='exact_xml_units':continue
         ingest=who.get('product_ref');context_ref=who.get('run_ref')
         if not ingest or not context_ref:continue
-        key=(company,ingest)
+        # A stale declared context cannot qualify. Check its exact current
+        # pointer before replaying the filing and potentially large context.
+        # This is rejection only; a match still needs every original proof.
+        latest=_latest(connection,ingest)
+        if latest is None or latest!=context_ref:continue
+        key=(company,ingest,latest)
         if key not in cache:
             row=connection.execute('SELECT ingest_id FROM coverage_mission_statement_filings WHERE ingest_id=? AND company_ref=?',
                                    (ingest,company)).fetchone()
             if row is None:cache[key]=None
             else:
                 filing=_filing(connection,ingest)
-                latest=_latest(connection,ingest)
-                context=context_record(connection,latest)if latest else None
+                context=context_record(connection,latest)
                 cache[key]=(filing,context)
         held=cache[key]
         if held is None:continue

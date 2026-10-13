@@ -100,6 +100,45 @@ class ModelUnitPriorityTests(unittest.TestCase):
         self.assertFalse(priority.still_current(self.state,proof,deadline=time.monotonic()+5))
         self.assertEqual(self.read()[0],{})
 
+    def proof_inputs(self):
+        mission=__import__('json').loads(self.store.connection.execute(
+            'SELECT record_json FROM coverage_mission_versions ORDER BY version_number DESC LIMIT 1').fetchone()[0])
+        return mr.request(self.state,self.request['id']),mission
+
+    def test_stale_declared_context_skips_all_full_replay(self):
+        request,mission=self.proof_inputs()
+        request['requesters'][0]['run_ref']='statement-context:older'
+        with patch('dalton_core.statement_context._filing') as filing,patch('dalton_core.statement_context.context_record') as context:
+            self.assertIsNone(unit_input_proof(self.store.connection,request,mission,
+                contract_ref=priority.CONTRACT_REF,cache={}))
+            filing.assert_not_called();context.assert_not_called()
+
+    def test_missing_current_pointer_skips_all_full_replay(self):
+        request,mission=self.proof_inputs()
+        with patch('dalton_core.statement_context._latest',return_value=None),patch('dalton_core.statement_context._filing') as filing,patch('dalton_core.statement_context.context_record') as context:
+            self.assertIsNone(unit_input_proof(self.store.connection,request,mission,
+                contract_ref=priority.CONTRACT_REF,cache={}))
+            filing.assert_not_called();context.assert_not_called()
+
+    def test_stale_requester_does_not_poison_later_current_requester_cache(self):
+        request,mission=self.proof_inputs()
+        stale=deepcopy(request['requesters'][0]);stale['run_ref']='statement-context:older'
+        request['requesters'].insert(0,stale)
+        cache={}
+        proof=unit_input_proof(self.store.connection,request,mission,
+            contract_ref=priority.CONTRACT_REF,cache=cache)
+        self.assertEqual(proof['unit_input']['context_ref'],self.context['version_id'])
+        self.assertEqual(list(cache),[(self.filing['company_ref'],self.filing['ingest_id'],self.context['version_id'])])
+
+    def test_pointer_change_cannot_reuse_previously_verified_cache(self):
+        request,mission=self.proof_inputs();cache={}
+        self.assertIsNotNone(unit_input_proof(self.store.connection,request,mission,
+            contract_ref=priority.CONTRACT_REF,cache=cache))
+        with patch('dalton_core.statement_context._latest',return_value='statement-context:newer'),patch('dalton_core.statement_context._filing') as filing,patch('dalton_core.statement_context.context_record') as context:
+            self.assertIsNone(unit_input_proof(self.store.connection,request,mission,
+                contract_ref=priority.CONTRACT_REF,cache=cache))
+            filing.assert_not_called();context.assert_not_called()
+
     def test_real_priority_has_one_slot_and_preserves_three_ordinary_slots(self):
         for n in range(10):mr.open_request(self.state,requester={'lane':'research_planner','run_ref':str(n)},subject=fixtures.COMPANY,need={'kind':'answer','question':f'Ordinary {n}'})
         with patch.object(ma,'serve',side_effect=lambda state,ref,**kw:{'request_id':ref,'outcome':'waiting'}):
