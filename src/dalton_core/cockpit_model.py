@@ -1420,11 +1420,23 @@ def _validate_structured_output_repair_authority(
     from .model_spec_complete_diagnostics import (
         ERROR_CODE as BUNDLE_CODE, validate_parent as validate_bundle_parent, repair_slot_used, error_for)
     bundle = binding.get("diagnostic_bundle")
-    if binding["validation_error"]["code"] == BUNDLE_CODE:
+    from .model_spec_joint_field_diagnostics import (
+        ERROR_CODE as JOINT_CODE, validate_frozen_parent as validate_joint_parent,
+        error_for as joint_error_for,
+    )
+    if binding["validation_error"]["code"] in (BUNDLE_CODE, JOINT_CODE):
         try:
             parent_body = parse_response(parent_text)
-            validate_bundle_parent(parent_body, bundle)
-            diagnosed = error_for(parent_body)
+            if binding["validation_error"]["code"] == JOINT_CODE:
+                validate_joint_parent(parent_body, bundle, state_hash=root_identity['state_hash'],
+                                      root_prompt=root_work['question'])
+                from .model_spec_joint_field_diagnostics import classification_from_prompt
+                diagnosed = joint_error_for(parent_body, {
+                    'state_hash': root_identity['state_hash'],
+                    'industry_classification': classification_from_prompt(root_work['question'])})
+            else:
+                validate_bundle_parent(parent_body, bundle)
+                diagnosed = error_for(parent_body)
             if binding["validation_error"] != {"code": diagnosed.code, "message": str(diagnosed)}:
                 raise ValueError("diagnostic error message differs")
             if repair_slot_used(scheduler.connection, root_proof, exclude_work=child_work.id, same_binding=binding, config=config):

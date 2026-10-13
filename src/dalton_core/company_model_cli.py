@@ -110,7 +110,14 @@ from .cash_flow_ratio_applicability import (
     assert_only_allowed_changed as assert_cash_ratio_only_changed,
 )
 
-REPAIR_CONTRACT_REF = "contract:company-model-spec-structured-output-repair:0.15"
+from .model_spec_joint_field_diagnostics import (
+    CONTRACT_REF as JOINT_FIELDS_REF, ERROR_CODE as JOINT_FIELDS_CODE,
+    SOURCE_CODE as DRIVER_SOURCE_CODE, error_for as joint_fields_error,
+    validate_parent as validate_joint_parent,
+    assert_only_allowed_changed as assert_joint_fields_changed,
+)
+
+REPAIR_CONTRACT_REF = "contract:company-model-spec-structured-output-repair:0.16"
 # One repair call, which is the number every other lane in this repository
 # uses for the same bargain (``draft_contract_repair.MAX_REPAIR_ATTEMPTS``).
 DEFAULT_REPAIR_ATTEMPTS = 1
@@ -137,7 +144,7 @@ REPAIR_CONTRACT = {
     # refusal, because a repair there is an invitation to make the numbers
     # agree.  12 live refusals between 2026-09-11 and 09-13 were wiring.
     "eligible_error_codes": ["format", "structure", "text_length",
-                             CASH_FLOW_OPERATING_BASE_SHAPE_CODE, CASH_RATIO_CODE, SIGNED_EXPENSE_REPAIR_CODE, *TYPED_FIELD_ERROR_CODES, COMPLETE_DIAGNOSTICS_CODE],
+                             CASH_FLOW_OPERATING_BASE_SHAPE_CODE, CASH_RATIO_CODE, SIGNED_EXPENSE_REPAIR_CODE, *TYPED_FIELD_ERROR_CODES, COMPLETE_DIAGNOSTICS_CODE, JOINT_FIELDS_CODE],
     "eligible_structure_rules_ref": REPAIRABLE_STRUCTURE_RULES_REF,
     "eligible_structure_rules": list(REPAIRABLE_STRUCTURE_RULES),
     "validation": "full_spec_from_response_and_supplied_financial_validator_after_every_attempt",
@@ -181,6 +188,10 @@ REPAIR_CONTRACT = {
     "independent_settings_bundle": {"ref": COMPLETE_DIAGNOSTICS_REF,
         "rules": ["shares_annual_semantics", "eps_annual_semantics", "operating_cash_base_reference"],
         "scope": "exact_parent_allowed_paths_whole_body_guard",
+        "existing_root_slot": "any_recorded_repair_consumes_original_single_slot"},
+    "joint_required_fields": {"ref": JOINT_FIELDS_REF,
+        "scope": "missing_expense_explanations_empty_optional_bound_reason_and_independent_settings_only",
+        "missing_driver_execution": "source_task_not_explanation_only_paid_repair",
         "existing_root_slot": "any_recorded_repair_consumes_original_single_slot"},
     "semantic_failure": "whole_refusal",
     # 0.5: a new contract is a new question only where nobody has answered it.
@@ -438,7 +449,7 @@ def validate_structured_output_repair_binding(
     if typed and (not isinstance(binding["typed_field_proof"], Mapping)
                   or binding["typed_field_proof"].get("code") != error["code"]):
         raise CockpitModelError("typed structured output repair proof is invalid")
-    bundled = error["code"] == COMPLETE_DIAGNOSTICS_CODE
+    bundled = error["code"] in (COMPLETE_DIAGNOSTICS_CODE, JOINT_FIELDS_CODE)
     if bundled != ("diagnostic_bundle" in binding):
         raise CockpitModelError("diagnostic bundle is missing or unexpected")
     if bundled and not isinstance(binding["diagnostic_bundle"], Mapping):
@@ -466,7 +477,19 @@ def _repair_prompt(original_text: str, error: CompanyModelSpecError, *,
                    output_schema: Mapping[str, Any] | None = None) -> str:
     contract = REPAIR_CONTRACT if contract is None else contract
     output_schema = OUTPUT_SCHEMA if output_schema is None else output_schema
-    if error.code == COMPLETE_DIAGNOSTICS_CODE:
+    if error.code == JOINT_FIELDS_CODE:
+        validate_joint_parent(parse_response(original_text), error.proof)
+        head = (
+            "Correct all JOINT_FIELD_DIAGNOSTICS in this one response using only their exact paths. "
+            "For missing expense because, explain only the already declared line using original sources; "
+            "do not invent facts. Omit each named empty optional cost_driver_unbound_reason and retain "
+            "its exact bound slot. For annual settings choose only the listed alternatives. For an "
+            "unsupported cash base choose unavailable/null and explain, never a different economic base. "
+            "Do not change driver definitions, formulas, values, concepts, evidence, periods, units, array "
+            "order, assessment or any other field. Return the whole original JSON; complete financial "
+            "and source validation remains mandatory.\n\n"
+            f"JOINT_FIELD_DIAGNOSTICS:\n{canonical_json(error.proof)}\n\n")
+    elif error.code == COMPLETE_DIAGNOSTICS_CODE:
         head = (
             "Correct all independently diagnosed settings in DIAGNOSTIC_BUNDLE in this one response. "
             "Change only its exact paths and choose only its allowed alternatives. Do not change any other "
@@ -615,7 +638,7 @@ def _repair_prompt(original_text: str, error: CompanyModelSpecError, *,
         FINDINGS_LIST_LABEL, Violation, findings_block)
 
     findings = ([Violation(str(f["paths"]), f["rule"], canonical_json(f["choices"]))
-                 for f in error.proof["findings"]] if error.code == COMPLETE_DIAGNOSTICS_CODE else
+                 for f in error.proof["findings"]] if error.code in (COMPLETE_DIAGNOSTICS_CODE, JOINT_FIELDS_CODE) else
                 [Violation("financial_statement_structure" if error.code == "structure"
                            else "(reply)", error.code, str(error))])
     listed = findings_block(findings, label=FINDINGS_LIST_LABEL)
@@ -768,8 +791,18 @@ def _validated_spec_with_repair(
             # if the original response reveals another invalid field afterwards.
             if cash_base_repair_applied or typed_repair_applied or bundle_repair_applied:
                 raise
+            # Collect these finite annotation/independent errors before the
+            # first semantic failure hides later deterministic diagnostics.
+            try:
+                joint_error = joint_fields_error(parse_response(current_call["text"]), state)
+            except CompanyModelSpecError:
+                joint_error = None  # Existing malformed-JSON repair semantics.
+            if joint_error is not None and error.code not in REPAIR_CONTRACT["eligible_error_codes"]:
+                error = joint_error
             if error.code not in REPAIR_CONTRACT["eligible_error_codes"]:
-                raise
+                raise error
+            if error.code == JOINT_FIELDS_CODE:
+                validate_joint_parent(parse_response(current_call["text"]), error.proof)
             if error.code in (SIGNED_EXPENSE_REPAIR_CODE, CASH_RATIO_CODE) and not isinstance(getattr(error, "proof", None), Mapping):
                 raise CompanyModelSpecError("financial repair proof is missing", code=error.code) from error
             if error.code == CASH_RATIO_CODE:
@@ -786,6 +819,19 @@ def _validated_spec_with_repair(
                 exclude=replayed_refs, include_current=True,
                 exact_root={key: root_call.get(key) for key in _REPAIR_AUTHORITY_KEYS},
             )
+            if prior is None and joint_error is not None and error.code != joint_error.code:
+                # Preserve the original exact legacy reply before changing the
+                # diagnosis. A new bundle never hides an already paid answer.
+                error = joint_error
+                if error.code not in REPAIR_CONTRACT["eligible_error_codes"]:
+                    raise error
+                validate_joint_parent(parse_response(current_call["text"]), error.proof)
+                prior = _prior_contract_repair(
+                    getattr(model, "scheduler_db", None), state_hash=str(state["state_hash"]),
+                    parent_text=current_call["text"],
+                    validation_error={"code": error.code, "message": str(error)},
+                    exclude=replayed_refs, include_current=True,
+                    exact_root={key: root_call.get(key) for key in _REPAIR_AUTHORITY_KEYS})
             if prior is not None:
                 replayed_refs.add(prior["work_order_ref"])
                 depth = prior["repair_number"]
@@ -819,6 +865,10 @@ def _validated_spec_with_repair(
                 if error.code == SIGNED_EXPENSE_REPAIR_CODE:
                     assert_only_coefficient_changed(parse_response(current_call["text"]),
                         parse_response(prior["text"]), error.proof)
+                if error.code == JOINT_FIELDS_CODE:
+                    assert_joint_fields_changed(parse_response(current_call["text"]),
+                                                parse_response(prior["text"]), error.proof)
+                    bundle_repair_applied = True
                 if error.code in TYPED_FIELD_ERROR_CODES:
                     assert_only_typed_fields_changed(parse_response(current_call["text"]),
                         parse_response(prior["text"]), prior.get("typed_field_proof") or error.proof, state=state)
@@ -830,7 +880,8 @@ def _validated_spec_with_repair(
                 }
                 continue
             try:
-                bundled_error = complete_diagnostics_error(parse_response(current_call["text"]))
+                bundled_error = (None if error.code == JOINT_FIELDS_CODE else
+                    complete_diagnostics_error(parse_response(current_call["text"])))
             except CompanyModelSpecError:
                 bundled_error = None  # The existing malformed-JSON rule remains unchanged.
             if bundled_error is not None:
@@ -896,7 +947,7 @@ def _validated_spec_with_repair(
                 binding['cash_ratio_proof'] = copy.deepcopy(error.proof)
             if error.code in TYPED_FIELD_ERROR_CODES:
                 binding["typed_field_proof"] = copy.deepcopy(error.proof)
-            if error.code == COMPLETE_DIAGNOSTICS_CODE:
+            if error.code in (COMPLETE_DIAGNOSTICS_CODE, JOINT_FIELDS_CODE):
                 binding["diagnostic_bundle"] = copy.deepcopy(error.proof)
             if any(not isinstance(value, str) or not value
                    for value in binding["root_original"].values()):
@@ -961,6 +1012,10 @@ def _validated_spec_with_repair(
                 assert_only_typed_fields_changed(parse_response(current_call["text"]),
                     parse_response(repaired_call["text"]), error.proof, state=state)
                 typed_repair_applied = True
+            if error.code == JOINT_FIELDS_CODE:
+                assert_joint_fields_changed(parse_response(current_call["text"]),
+                                            parse_response(repaired_call["text"]), error.proof)
+                bundle_repair_applied = True
             if error.code == COMPLETE_DIAGNOSTICS_CODE:
                 assert_only_allowed_changed(parse_response(current_call["text"]),
                     parse_response(repaired_call["text"]), error.proof)
@@ -1161,6 +1216,7 @@ def model_spec_validation_contract() -> dict[str, str]:
         "assessment_compatible_signed_repair": SIGNED_COMPATIBLE_REPLAY_REF,
         "joint_signed_filed_income_sum": JOINT_SIGNED_REPAIR_REF,
         "independent_settings_diagnostics": COMPLETE_DIAGNOSTICS_REF,
+        "joint_required_fields": JOINT_FIELDS_REF,
     }
 
 
@@ -1618,6 +1674,15 @@ def run_model_spec(
             summary["financial_line_gaps"] = gaps
             from .model_history_failure_feedback import describe_failure
             historical_detail, historical_hint = describe_failure(exc)
+            if getattr(exc, "code", None) == DRIVER_SOURCE_CODE:
+                summary["declared_driver_material_diagnostics"] = copy.deepcopy(exc.proof)
+                from .model_spec_joint_field_diagnostics import open_source_request
+                try:
+                    summary["declared_driver_material_requests"] = open_source_request(
+                        missions=missions, model=model, state=state, mission=mission,
+                        call=call, state_dir=state_dir)
+                except (ValueError, KeyError, TypeError, sqlite3.Error, OSError) as source_error:
+                    summary["declared_driver_material_request_refused"] = str(source_error)[:300]
             if historical_detail is not None:
                 summary["historical_formula_diagnostics"] = historical_detail
             summary.update({"status": "succeeded", "spec_status": "refused",
