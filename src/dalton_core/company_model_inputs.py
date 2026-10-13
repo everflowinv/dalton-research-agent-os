@@ -818,12 +818,56 @@ def validate_statement_identity(value):
 def identity_input_lines(missions,spec):
     """Independent dimension-specific series; never reuse the consolidated selector."""
     result=[]
+    period_originals = {}
     for driver in spec.get("revenue_drivers") or []:
         if driver.get("basis_identity") is None:continue
         identity=validate_statement_identity(driver["basis_identity"]);concept=driver.get("basis_concept")
         if not concept:continue
-        rows=[r for r in missions.statement_series_lines(spec["company_ref"],concept,statement=identity["statement"])
-            if r.get("dimensions")==identity["dimensions"]]
+        period_proof = driver.get("basis_period_family_bindings")
+        if period_proof is None:
+            rows=[r for r in missions.statement_series_lines(spec["company_ref"],concept,statement=identity["statement"])
+                if r.get("dimensions")==identity["dimensions"]]
+        else:
+            from .period_source_family import verify_driver_bindings, identity_for_row
+            executed = {"statement_identity": identity, "statement_period_family_bindings": period_proof}
+            try:
+                identity_for_row(executed, {})
+            except ValueError as exc:
+                raise ModelInputError(str(exc)) from exc
+            filings = missions.statement_filings(spec["company_ref"])
+            scopes = period_proof["source_read_scopes"]
+            required = {s["ingest_id"]: s["context_refs"] for s in scopes}
+            if len(required) != len(scopes):
+                raise ModelInputError("period-family original read scope repeats a filing")
+            filing_map = {f["ingest_id"]: f for f in filings}
+            if not set(required).issubset(filing_map):
+                raise ModelInputError("period-family original filing authority is missing")
+            held = [filing_map[s["ingest_id"]] for s in scopes]
+            originals = []
+            for filing in held:
+                ingest = filing["ingest_id"]
+                for context_ref in required[ingest]:
+                    key = (ingest, context_ref)
+                    if key not in period_originals:
+                        period_originals[key] = missions.statement_lines(ingest,
+                            context_version_ref=context_ref, latest_context=False)
+                    originals.extend(period_originals[key])
+            try:
+                verify_driver_bindings(period_proof, driver=driver, company_ref=spec["company_ref"],
+                                       filings=held, rows=originals)
+            except ValueError as exc:
+                raise ModelInputError(str(exc)) from exc
+            filing_by_ingest = {f["ingest_id"]: f for f in held}
+            rows=[]
+            for row in originals:
+                selected = identity_for_row(executed, row)
+                if (row.get("concept") != concept or selected is None
+                        or row.get("statement") != selected["statement"]
+                        or row.get("dimensions") != selected["dimensions"]):
+                    continue
+                filing=filing_by_ingest[row["ingest_id"]]
+                rows.append({**row,"accession":filing["accession"],"filed":filing["filed"],
+                    "report_date":filing["report_date"],"filing_form":filing["form"]})
         evidence_fields=("line_id","ingest_id","ordinal","statement","concept","period_start","period_end","value","unit","accession","filed","dimensions","statement_context_ref")
         evidence=[{k:r[k] for k in evidence_fields if k in r} for r in rows]
         # Once exact identity is selected, the quarterly arithmetic has no mix of segments.
@@ -831,7 +875,9 @@ def identity_input_lines(missions,spec):
         units={_model_unit(c.get("unit")) for c in series["quarters"] if c.get("unit")}
         cells={c["period_end"]:{**c,"unit":_model_unit(c["unit"])} for c in series["quarters"]}
         result.append({"driver_ref":driver["ref"],"concept":concept,"statement":identity["statement"],"statement_identity":identity,
+            **({"statement_period_family_bindings":period_proof} if period_proof is not None else {}),
             "label":driver["label"],"status":FILED if cells and len(units)==1 else NOT_FOUND,"cells":cells,
-            "source_evidence":{"rule_ref":"filed-input-evidence:exact-dimensional-context:1","rows":evidence,"content_hash":content_hash(evidence)},
+            "source_evidence":{"rule_ref":("filed-input-evidence:period-source-family:1" if period_proof is not None
+                else "filed-input-evidence:exact-dimensional-context:1"),"rows":evidence,"content_hash":content_hash(evidence)},
             "gaps":series.get("ambiguous_periods") or []})
     return result

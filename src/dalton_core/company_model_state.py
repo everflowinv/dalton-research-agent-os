@@ -416,9 +416,11 @@ def _fit_prompt_budget(
         _numeric_period_cell_line, _numeric_period_table, build_prompt,
     )
 
-    unavailable = _numeric_period_table({"numeric_context": None})
+    fixed_context = ({"period_source_family_catalog": context["period_source_family_catalog"]}
+                     if context.get("period_source_family_catalog") else None)
+    unavailable = _numeric_period_table({"numeric_context": fixed_context})
     fixed_prompt_bytes = (
-        len(build_prompt({**state_body, "numeric_context": None}).encode("utf-8"))
+        len(build_prompt({**state_body, "numeric_context": fixed_context}).encode("utf-8"))
         - len(unavailable.encode("utf-8"))
     )
 
@@ -510,6 +512,7 @@ def build_company_model_state(
         raise CompanyModelStateError(
             "this company has no filed statements to model against")
     from .sec_statement_periodic_filings import model_window
+    all_filings = list(filings)
     filings = model_window(filings, MAX_FILINGS)
 
     policy = validate_numeric_context_policy(numeric_context_policy)
@@ -549,6 +552,53 @@ def build_company_model_state(
         },
         policy=policy,
     )
+    from .period_source_family import catalog as period_family_catalog, needs_period_choices, PeriodSourceFamilyError
+    from .model_forecast_driver import CONCEPT_ROLES, REVENUE
+    complete_rows = [row for filing in filings for row in lines_by_ingest[str(filing["ingest_id"])]]
+    if len(all_filings) <= 64 and any(row.get("statement") == "income" and row.get("dimensions")
+           and CONCEPT_ROLES.get(str(row.get("concept"))) == REVENUE for row in complete_rows):
+        # Over-bound histories retain the existing path. Never offer a
+        # truncated new period catalog or make legacy state unavailable merely
+        # because it cannot establish this optional contract.
+        # The normal model-input series already consumes these indexed filing
+        # authorities. A catalog of only the prompt's newest8 could silently
+        # drop an older cumulative operand that that series still uses.
+        for filing in all_filings:
+            if str(filing["ingest_id"]) not in lines_by_ingest:
+                lines_by_ingest[str(filing["ingest_id"])] = missions.statement_lines(filing["ingest_id"])
+        family_rows = [row for filing in all_filings for row in lines_by_ingest[str(filing["ingest_id"])]]
+        # Legacy ordinal-only rows cannot establish this new explicit source
+        # contract. Preserve their old state rather than upgrading authority
+        # from guessed axes or an invented context version.
+        source_complete = all(row.get("statement_context_ref") and isinstance(row.get("dimensions"), Mapping)
+            for row in family_rows if row.get("statement") == "income"
+            and CONCEPT_ROLES.get(str(row.get("concept"))) == REVENUE)
+        period_choices = None
+        if source_complete:
+            try:
+                period_choices = period_family_catalog(company_ref, all_filings, family_rows)
+            except PeriodSourceFamilyError as exc:
+                # This optional new contract cannot invalidate an old state.
+                # The existing financial/source validators still receive all
+                # original rows and refuse any real ambiguity under old rules.
+                # Diagnostics are operations metadata, outside business hash.
+                import logging
+                try:
+                    logging.getLogger(__name__).warning(
+                        "model_period_family_catalog_unavailable %s", json.dumps({
+                            "code": "optional_source_catalog_unavailable", "company_ref": company_ref,
+                            "reason": str(exc), "catalog_enabled": False,
+                            "existing_projection_preserved": True, "rows": len(family_rows),
+                            "filings": len(all_filings),
+                            "filing_authorities_hash": content_hash(all_filings),
+                        }, sort_keys=True))
+                except Exception:
+                    pass  # Diagnostic output cannot change financial behavior.
+        if period_choices is not None and needs_period_choices(period_choices):
+            # Complete originals define the choices. Prompt clipping cannot
+            # remove an operand period. Companies without dimensional revenue
+            # keep their existing state and prompt exactly unchanged.
+            numeric_context["period_source_family_catalog"] = period_choices
     body = {
         "series_normalization_contract": "company-model-series:0.2",
         "company_ref": company_ref,

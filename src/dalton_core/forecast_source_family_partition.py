@@ -10,7 +10,7 @@ def _refuse(message):
     refuse(message)
 
 
-def partitions(record, rows, families):
+def partitions(record, rows, families, *, period_bound=False):
     from .economic_invariants import (segment_groups, ADDITIVE_SEGMENT_AXES,
         CONSOLIDATION_ITEMS_AXES, OPERATING_SEGMENT_MEMBERS, RECONCILING_MEMBERS)
     drivers = {d["ref"]: d for d in record.get("drivers") or []}
@@ -19,6 +19,9 @@ def partitions(record, rows, families):
         axis, fixed = family["axis"], family["fixed_dimensions"]
         driver = drivers.get(family["driver_ref"])
         identity = (driver or {}).get("statement_identity") or {}
+        if period_bound and (driver or {}).get("statement_period_family_bindings"):
+            from .period_source_family import identity_for_row
+            identity = identity_for_row(driver, family) or {}
         dims = identity.get("dimensions") or {}
         if (axis not in ADDITIVE_SEGMENT_AXES or axis not in dims
                 or {a: m for a, m in dims.items() if a != axis} != fixed

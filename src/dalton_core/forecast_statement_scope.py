@@ -14,7 +14,8 @@ RULE_REF = "rule:forecast-statement-scope:1"
 
 
 def _legacy_statement_scope(record: Mapping[str, Any], rows: Sequence[Mapping[str, Any]],
-                    connection: Any = None, *, frozen_scope: Mapping[str, Any] | None = None) -> tuple[list[Mapping[str, Any]], dict[str, Any] | None]:
+                    connection: Any = None, *, frozen_scope: Mapping[str, Any] | None = None,
+                    period_bound: bool = False) -> tuple[list[Mapping[str, Any]], dict[str, Any] | None]:
     from .model_forecast_driver import ForecastModelValidationError
     declarations = {d["ref"]: d for d in (record.get("execution_contract") or {}).get("specification", {}).get("revenue_drivers") or []}
     plans = (record.get("execution_contract") or {}).get("specification", {}).get("driver_formulas") or []
@@ -23,6 +24,10 @@ def _legacy_statement_scope(record: Mapping[str, Any], rows: Sequence[Mapping[st
     manifests = []
     for plan in plans:
         members = [declarations.get(ref) for ref in plan.get("driver_refs") or []]
+        if period_bound and any(d and d.get("basis_period_family_bindings") for d in members):
+            # Only a new explicit period-bound proof uses the v4 path below.
+            # Stored static v1/v2/v3 scopes keep their exact original algorithm.
+            continue
         if plan.get("operator") != "sum" or not members or not all(d and d.get("basis_identity") for d in members):
             continue
         identities = [d["basis_identity"] for d in members]
@@ -148,8 +153,11 @@ def statement_scope(record: Mapping[str, Any], rows: Sequence[Mapping[str, Any]]
     The original explicit-partition validator still checks all declared members
     and source presentation proofs before a new execution scope is constructed.
     """
-    from .forecast_execution_statement_scope import SUPPORTED_RULE_REFS, execution_scope
+    from .forecast_execution_statement_scope import SUPPORTED_RULE_REFS, PERIOD_RULE_REF, execution_scope
     from .model_forecast_driver import ForecastModelValidationError
+    period_bound = any(d.get("statement_period_family_bindings") for d in record.get("drivers") or [])
+    if frozen_scope is not None and period_bound and frozen_scope.get("rule_ref") != PERIOD_RULE_REF:
+        raise ForecastModelValidationError("explicit period-family execution requires its v4 source rule")
     if frozen_scope is not None and frozen_scope.get("rule_ref") == RULE_REF:
         return _legacy_statement_scope(record, rows, connection, frozen_scope=frozen_scope)
     if frozen_scope is not None and frozen_scope.get("rule_ref") not in SUPPORTED_RULE_REFS:
@@ -158,6 +166,8 @@ def statement_scope(record: Mapping[str, Any], rows: Sequence[Mapping[str, Any]]
             k: v for k, v in frozen_scope.items() if k != "content_hash"}):
         raise ForecastModelValidationError("frozen execution statement scope hash differs")
     if source_groups is None:
+        if period_bound:
+            raise ForecastModelValidationError("explicit period-family execution lacks complete source-group authority")
         if frozen_scope is not None:
             raise ForecastModelValidationError("execution scope lacks its exact source-group proof")
         return _legacy_statement_scope(record, rows, connection)
@@ -168,7 +178,19 @@ def statement_scope(record: Mapping[str, Any], rows: Sequence[Mapping[str, Any]]
         legacy_frozen = {"partitions": frozen_scope["partitions"]}
         legacy_frozen["content_hash"] = content_hash(legacy_frozen)
     _, prior_partition_scope = _legacy_statement_scope(
-        record, rows, connection, frozen_scope=legacy_frozen)
+        record, rows, connection, frozen_scope=legacy_frozen, period_bound=period_bound)
+    if period_bound:
+        plans = (record.get("execution_contract") or {}).get("specification", {}).get("driver_formulas") or []
+        executed = {d["ref"]: d for d in record.get("drivers") or []}
+        for plan in plans:
+            members = [executed.get("economic:" + ref) for ref in plan.get("driver_refs") or []]
+            if not any(d and d.get("statement_period_family_bindings") for d in members):
+                continue
+            histories = [{c["period_end"] for c in d.get("history") or []} for d in members if d]
+            if (len(histories) != len(members) or not histories or len(histories[0]) < 4
+                    or any(h != histories[0] for h in histories)):
+                raise ForecastModelValidationError("explicit period-family execution requires all common historical quarters without dropping members")
     return execution_scope(record, rows, source_groups,
                            prior_partition_scope=prior_partition_scope,
-                           **({"rule_ref": frozen_scope["rule_ref"]} if frozen_scope is not None else {}))
+                           **({"rule_ref": frozen_scope["rule_ref"]} if frozen_scope is not None
+                              else {"rule_ref": PERIOD_RULE_REF} if period_bound else {}))

@@ -89,6 +89,8 @@ def additional_drivers(spec: Mapping[str, Any], table: Mapping[str, Any],
                     "status": "filed", "role": None, "spec_rows": [declared["ref"]], "note": None,
                     "label": declared["label"], "history": history,
                     **({"statement_identity":source["statement_identity"]} if source.get("statement_identity") is not None else {}),
+                    **({"statement_period_family_bindings":source["statement_period_family_bindings"]}
+                       if source.get("statement_period_family_bindings") is not None else {}),
                     "structure_line_ref": driver_ref,
                     "forecast_method": "year_over_year_growth" if (seasonal_profile(history) or {}).get("significant") else "quarterly_growth", "forecast_base_ref": None})
         concepts.add(concept)

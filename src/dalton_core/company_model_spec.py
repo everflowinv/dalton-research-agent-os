@@ -539,6 +539,9 @@ def _numeric_period_table_header(context: Mapping[str, Any]) -> str:
     for key in ("identity_catalog_contract", "selection_contract", "revenue_group_candidates"):
         if key in context:
             metadata[key] = context[key]
+    if context.get("period_source_family_catalog"):
+        from .period_source_family import prompt_catalog
+        metadata["period_source_family_catalog"] = prompt_catalog(context["period_source_family_catalog"])
     return "\n".join([
         *([typed_guidance.rstrip()] if typed_guidance else []),
         "CONTEXT=" + json.dumps(metadata, ensure_ascii=False, sort_keys=True),
@@ -553,6 +556,7 @@ def _numeric_period_table_header(context: Mapping[str, Any]) -> str:
         *(["SOURCE_IDENTITY suffix, when present, binds complete dimensions and exact context version; never infer missing axes from labels or amounts."] if any("dimensions" in c for c in context.get("cells") or []) else []),
         *(["For a dimensional revenue driver, select the row's catalog_ref as basis_identity={statement:<that row's statement>,dimensions:{catalog_ref:<exact ref>}}. The system binds all original axes; do not hand-copy a subset. A ref must belong to the selected basis_concept in this input."] if context.get("identity_catalog_contract") else []),
         *(["Revenue group candidates are exact-source disclosure choices, not an automatic modeling choice. Select and explain one coherent group using its member identity refs; a not_closed result requires original reconciliation evidence. Do not invent a residual member or mix totals from different groups or filings."] if context.get("revenue_group_candidates") else []),
+        *(["PERIOD SOURCE FAMILIES: groups use the declared group_fields columns; source_index and composition_index are zero-based positions in sources and compositions. If complete fixed dimensions change by original period, explicitly select basis_period_family_refs for every duration, including cumulative operands; every driver in a sum must choose every member of the same complete family for each duration. Keep the full latest basis_identity. These are already source-proven choices, not permission to splice disclosures or manufacture a missing member."] if context.get("period_source_family_catalog") else []),
     ])
 
 
@@ -593,6 +597,13 @@ def build_prompt(state: Mapping[str, Any], *,
     """
 
     output_schema = OUTPUT_SCHEMA if output_schema is None else output_schema
+    period_catalog = (state.get("numeric_context") or {}).get("period_source_family_catalog")
+    if period_catalog:
+        output_schema = copy.deepcopy(output_schema)
+        output_schema["properties"]["revenue_drivers"]["items"]["properties"]["basis_period_family_refs"] = {
+            "type": "array", "minItems": 1, "maxItems": 256,
+            "items": {"type": "string", "minLength": 1},
+            "description": "Explicit complete source-family refs for every original duration in this basis concept, including cumulative operands. Select the same complete families for every member in one sum; do not splice peers or omit old periods. Current basis_identity remains complete and explicit."}
     company = {
         key: state.get(key)
         for key in ("company_ref", "ticker", "entity_name", "cik", "filings")
@@ -1217,6 +1228,14 @@ def spec_from_response(
             "because": _text(item.get("because"), f"revenue_drivers[{index}].because",
                              limit=400, repairable_length=True),
         })
+        if "basis_period_family_refs" in item:
+            from .period_source_family import driver_bindings
+            drivers[-1]["basis_period_family_refs"] = item["basis_period_family_refs"]
+            try:
+                drivers[-1]["basis_period_family_bindings"] = driver_bindings(
+                    state.get("numeric_context"), drivers[-1])
+            except ValueError as exc:
+                raise CompanyModelSpecError(str(exc)) from exc
 
     expenses: list[dict[str, Any]] = []
     expense_refs: set[str] = set()
@@ -1450,6 +1469,8 @@ def spec_from_response(
         from .forecast_financial_execution import validate_driver_formulas
         try:
             spec["driver_formulas"] = validate_driver_formulas(body["driver_formulas"], drivers, statement_structure)
+            from .period_source_family import validate_sum_bindings
+            validate_sum_bindings(drivers, spec["driver_formulas"])
             used = {ref for formula in spec["driver_formulas"] for ref in formula["driver_refs"]}
             missing = sorted({driver["ref"] for driver in drivers} - used)
             if missing:

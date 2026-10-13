@@ -398,7 +398,7 @@ _DRIVER_FIELDS = frozenset({
     "ref", "kind", "label", "concept", "unit", "statement", "status", "role",
     "spec_rows", "note", "history",
 })
-_DRIVER_OPTIONAL_FIELDS = frozenset({"cost_driver_slots", "statement_identity"})
+_DRIVER_OPTIONAL_FIELDS = frozenset({"cost_driver_slots", "statement_identity", "statement_period_family_bindings"})
 _STRUCTURE_DRIVER_FIELDS = frozenset({
     "structure_line_ref", "forecast_method", "forecast_base_ref",
 })
@@ -4381,6 +4381,16 @@ def _normalize_driver(value: Any, name: str, *, schema_version: str) -> dict[str
     if wire.get("statement_identity") is not None:
         from .company_model_inputs import validate_statement_identity
         wire["statement_identity"]=validate_statement_identity(wire["statement_identity"])
+    if wire.get("statement_period_family_bindings") is not None:
+        from .period_source_family import identity_for_row
+        if not is_structured_schema(schema_version):
+            raise ForecastModelValidationError("period-family identity requires a structured execution")
+        # Structural validation here is followed by immutable spec/source
+        # binding verification during normal publication and durable replay.
+        try:
+            identity_for_row(wire, {})
+        except ValueError as exc:
+            raise ForecastModelValidationError(str(exc)) from exc
     wire["ref"] = _text(wire["ref"], f"{name}.ref")
     driver_kinds = (
         (*DRIVER_KINDS, "statement_line")
@@ -5275,6 +5285,7 @@ class ForecastModelAuthority:
                 raise ForecastModelValidationError(
                     "filing proof model history cites accessions outside its exact "
                     f"statement rows: {unknown_accessions}")
+            from .period_source_family import identity_for_row as period_identity_for_row
             for driver in wire.get("drivers") or []:
                 for cell in driver.get("history") or []:
                     cell_accessions = set(map(str, cell.get("accessions") or []))
@@ -5289,8 +5300,8 @@ class ForecastModelAuthority:
                             row.get("unit"), driver.get("unit"),
                             structured=is_structured_schema(wire.get("schema_version")),
                         )
-                        and ((row.get("dimensions")==driver["statement_identity"]["dimensions"]
-                              and row.get("statement")==driver["statement_identity"]["statement"])
+                        and ((row.get("dimensions")==((period_identity_for_row(driver, row) or {}).get("dimensions"))
+                              and row.get("statement")==((period_identity_for_row(driver, row) or {}).get("statement")))
                              if driver.get("statement_identity") else
                              (row.get("dimension_axis") is None and row.get("dimension_member") is None and not row.get("dimensions")))
                     ]

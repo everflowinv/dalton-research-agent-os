@@ -42,9 +42,15 @@ def _consumed(record, rows, filings):
         if filing is None:_refuse('unknown source ingest')
         by_accession.setdefault(str(filing['accession']),[]).append(row)
     for driver in record.get('drivers') or []:
+        from .period_source_family import identity_for_row
         identity=driver.get('statement_identity')
         dimensions=identity['dimensions'] if isinstance(identity,Mapping) else {}
         statement=identity['statement'] if isinstance(identity,Mapping) else driver.get('statement')
+        def matches_identity(row):
+            selected=identity_for_row(driver,row) if driver.get('statement_period_family_bindings') else identity
+            return (selected is not None and row.get('statement')==selected['statement']
+                    and (row.get('dimensions') or {})==selected['dimensions']) if identity else (
+                    row.get('statement')==statement and (row.get('dimensions') or {})==dimensions)
         for cell in driver.get('history') or []:
             concept=cell.get('concept') or driver.get('concept')
             if not concept or not cell.get('accessions'):continue
@@ -59,7 +65,7 @@ def _consumed(record, rows, filings):
             matched=[]
             for accession in request['accessions']:
                 candidates=[row for row in by_accession.get(accession,[]) if row.get('concept')==concept
-                    and row.get('statement')==statement and (row.get('dimensions') or {})==dimensions
+                    and matches_identity(row)
                     and not (not dimensions and (row.get('dimension_axis') or row.get('is_breakdown')))
                     and ((row.get('period_start')==start and row.get('period_end')==end)
                          if previous is None else
@@ -69,7 +75,12 @@ def _consumed(record, rows, filings):
                 matched.extend(candidates)
             for row in matched:
                 group=used.setdefault(_key(row),{})
-                group[content_hash(request)]=request
+                actual_request=request
+                if driver.get('statement_period_family_bindings'):
+                    selected_identity=identity_for_row(driver,row)
+                    if selected_identity is None:_refuse('consumed history has no explicitly selected period family')
+                    actual_request={**request,'dimensions':selected_identity['dimensions']}
+                group[content_hash(actual_request)]=actual_request
     return used
 
 

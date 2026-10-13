@@ -71,6 +71,11 @@ def _roots(record):
                 or driver.get("concept") != declaration.get("basis_concept")
                 or not driver.get("history")):
             _refuse("declared dimensional root lacks exact executed history")
+        from .period_source_family import validate_executed_binding
+        try:
+            validate_executed_binding(driver, declaration)
+        except ValueError as exc:
+            _refuse(str(exc))
     return sorted(drivers), content_hash({
         "structure": structure, "specification": specification,
         "cash_flow_companion": record.get("cash_flow_companion"),
@@ -78,7 +83,7 @@ def _roots(record):
     })
 
 
-def execution_scope(record, rows, source_groups, *, prior_partition_scope=None):
+def execution_scope(record, rows, source_groups, *, prior_partition_scope=None, period_bound=False):
     from .forecast_consumed_source_groups import RULE_REF as SOURCE_RULE, _wire as source_wire
     from .economic_invariants import (ADDITIVE_SEGMENT_AXES, CONSOLIDATION_ITEMS_AXES,
                                      OPERATING_SEGMENT_MEMBERS, segment_groups, _segment_sum, FAIL)
@@ -108,6 +113,12 @@ def execution_scope(record, rows, source_groups, *, prior_partition_scope=None):
                 _refuse("source consumer lacks complete dimensions")
             driver = next(d for d in record["drivers"] if d["ref"] == request["driver_ref"])
             identity = driver.get("statement_identity") or {}
+            if period_bound and driver.get("statement_period_family_bindings"):
+                from .period_source_family import identity_for_row
+                identity = identity_for_row(driver, {
+                    'ingest_id':key[0], 'statement_context_ref':key[1], 'concept':key[2],
+                    'period_start':key[3], 'period_end':key[4], 'statement':request.get('statement'),
+                }) or {}
             if (dict(dimensions) != identity.get("dimensions", {})
                     or request.get("statement") != identity.get("statement", driver.get("statement"))
                     or request.get("concept") != key[2]):
