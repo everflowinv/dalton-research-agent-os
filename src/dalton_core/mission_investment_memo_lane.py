@@ -57,6 +57,7 @@ def company_signature(frozen: Mapping[str, Any], launcher: Any) -> str:
     from .mission_deliverable import SECTION_NUMBERS_VALIDATION_CONTRACT, NUMBER_SOURCE_CONTRACT_VERSION
     from .derived_number_display import CONTRACT_REF as DERIVED_DISPLAY_REF
     from .investment_memo_scheduler_retry import CONTRACT_REF as SCHEDULER_RETRY_REF
+    from .investment_memo_failure_cost import COPY_PROTOCOL_CONTRACT
     from .investment_memo_question_gaps import CONTRACT_REF as QUESTION_GAPS_REF
     from .investment_memo_market_history import CONTRACT_REF as MARKET_HISTORY_REF
     from .investment_memo_second_maintenance import CONTRACT_REF as SECOND_MAINTENANCE_REF, scheduling_rounds
@@ -86,6 +87,9 @@ def company_signature(frozen: Mapping[str, Any], launcher: Any) -> str:
         "number_source_validation_contract": NUMBER_SOURCE_CONTRACT_VERSION,
         "derived_display_validation_contract": DERIVED_DISPLAY_REF,
         "scheduler_retry_validation_contract": SCHEDULER_RETRY_REF,
+        # Execution-only repair wakes held pre-call failures once. Macro,
+        # immutable Work and owner permissions still use their original keys.
+        "failure_reporter_copy_contract": COPY_PROTOCOL_CONTRACT,
         "key_question_gap_feedback_contract": QUESTION_GAPS_REF,
         "market_history_evidence_contract": MARKET_HISTORY_REF,
         "macro_accounting_contract": MACRO_ACCOUNTING_REF,

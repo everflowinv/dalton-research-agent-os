@@ -142,6 +142,9 @@ def failure_cost(model, exc, kwargs, *, watermark=None):
         return {**unknown, 'reason': type(error).__name__ + ': ' + str(error)}
 
 
+COPY_PROTOCOL_CONTRACT = 'memo-failure-reporter-delegate-copy:1'
+
+
 class MemoFailureCostReporter:
     """Observe exceptions only; delegate the original call and recovery behavior."""
     def __init__(self, model, *, watermarks=None):
@@ -156,7 +159,14 @@ class MemoFailureCostReporter:
         self.watermark = shared[key]
 
     def __getattr__(self, name):
-        return getattr(self.model, name)
+        # copy/pickle probes protocol methods on a newly allocated instance
+        # before restoring its dict. Looking up self.model through this same
+        # fallback would recursively re-enter __getattr__ on that empty object.
+        try:
+            delegate = object.__getattribute__(self, 'model')
+        except AttributeError:
+            raise AttributeError(name) from None
+        return getattr(delegate, name)
 
     def call(self, *, producer_route_decision_refs=None, **kwargs):
         try:
