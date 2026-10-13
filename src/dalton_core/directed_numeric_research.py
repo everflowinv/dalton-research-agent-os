@@ -46,7 +46,7 @@ def numeric_target_schema() -> dict[str, Any]:
         },
     }
 
-def normalize_targets(value: Any) -> list[dict[str, Any]]:
+def normalize_targets(value: Any, *, contract_ref: str = CONTRACT_REF) -> list[dict[str, Any]]:
     if not isinstance(value,list) or not 1<=len(value)<=MAX_TARGETS:
         raise DirectedNumericError('numeric_targets must contain 1..8 required targets')
     output=[];refs=set();identities=set();definitions={}
@@ -72,9 +72,10 @@ def normalize_targets(value: Any) -> list[dict[str, Any]]:
         definitions[target['metric_ref']]=digest
         if target['basis'] not in ALLOWED_BASES:raise DirectedNumericError('numeric target basis is unsupported')
         from .document_numeric_unit_contracts import numeric_units
-        if target['unit'] not in numeric_units(CONTRACT_REF):raise DirectedNumericError('numeric target unit is unsupported')
+        if target['unit'] not in numeric_units(contract_ref):raise DirectedNumericError('numeric target unit is unsupported')
         currency=target['currency']
-        if target['unit']=='currency':
+        from .operating_driver_units import CONTRACT_REF as OPERATING_REF, monetary
+        if target['unit']=='currency' or (contract_ref == OPERATING_REF and monetary(target['unit'])):
             if not isinstance(currency,str) or re.fullmatch(r'[A-Z]{3}',currency) is None:
                 raise DirectedNumericError('currency target needs an explicit currency')
         elif currency is not None:raise DirectedNumericError('non-currency target must not carry a currency')
@@ -84,28 +85,29 @@ def normalize_targets(value: Any) -> list[dict[str, Any]]:
         output.append({**dict(target),'metric_definition':dict(definition),'metric_definition_hash':digest})
     return output
 
-def unexecutable_period_targets(value: Any) -> list[dict[str, str]]:
+def unexecutable_period_targets(value: Any, *, contract_ref: str = CONTRACT_REF) -> list[dict[str, str]]:
     """A new-write preflight, separate from immutable historical normalization."""
     from .document_numeric_claim import _names_a_period
     return [{'target_ref': target['target_ref'], 'period': target['period']}
-            for target in normalize_targets(value) if not _names_a_period(target['period'])]
+            for target in normalize_targets(value, contract_ref=contract_ref) if not _names_a_period(target['period'])]
 
-def assert_executable_target_periods(value: Any) -> None:
-    missing = unexecutable_period_targets(value)
+def assert_executable_target_periods(value: Any, *, contract_ref: str = CONTRACT_REF) -> None:
+    missing = unexecutable_period_targets(value, contract_ref=contract_ref)
     if missing:
         raise DirectedNumericError('numeric_target_period_unspecified: ' +
             ', '.join(f"{item['target_ref']}={item['period']!r}" for item in missing) +
             '; name the exact year or quarter/half-year from the original disclosure before reading; do not guess a date')
 
 def coverage(targets:Sequence[Mapping[str,Any]], figures:Sequence[Mapping[str,Any]], *,
-             company_ref:str,document_ref:str,source_manifest_hash:str) -> dict[str,Any]:
+             company_ref:str,document_ref:str,source_manifest_hash:str,
+             contract_ref: str = CONTRACT_REF) -> dict[str,Any]:
     """Count only source-proved Figures mapped by the exact admitted definition.
 
     Execution replays these mappings from the succeeded independently verified
     Work. A bare ledger row or caller copy is not a completion binding.
     """
     completed=[];pending=[]
-    for target in normalize_targets(list(targets)):
+    for target in normalize_targets(list(targets), contract_ref=contract_ref):
         found=[f for f in figures if f.get('company_ref')==company_ref and f.get('document_ref')==document_ref
                and f.get('source_manifest_hash')==source_manifest_hash
                and isinstance(f.get('figure_id'),str) and f['figure_id']

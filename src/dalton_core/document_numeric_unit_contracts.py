@@ -20,6 +20,9 @@ _YEAR_AMOUNT = re.compile(r"(?<![\w.])(?P<value>[-+]?\d+(?:,\d{3})*(?:\.\d+)?)\s
 def numeric_units(contract_ref: str | None = None) -> tuple[str, ...]:
     if contract_ref is None:
         return LEGACY_NUMERIC_UNITS
+    from .operating_driver_units import CONTRACT_REF, UNITS
+    if contract_ref == CONTRACT_REF:
+        return (*LEGACY_NUMERIC_UNITS, 'years', *UNITS)
     if contract_ref != DIRECTED_NUMERIC_CONTRACT_REF:
         raise ValueError("unknown document numeric unit contract")
     return (*LEGACY_NUMERIC_UNITS, "years")
@@ -37,4 +40,7 @@ def figure_numeric_contract(verifier_ref: Any) -> str | None:
         return None
     if verifier_ref == DIRECTED_FIGURE_VERIFIER_REF:
         return DIRECTED_NUMERIC_CONTRACT_REF
+    from .operating_driver_units import CONTRACT_REF, FIGURE_VERIFIER_REF
+    if verifier_ref == FIGURE_VERIFIER_REF:
+        return CONTRACT_REF
     raise ValueError("figure numeric verifier contract is not recognized")

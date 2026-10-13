@@ -582,6 +582,52 @@ def _financial_note_table(state: Mapping[str, Any]) -> str:
     return canonical_json(held)
 
 
+def output_schema_for_state(state: Mapping[str, Any], *, output_schema=None) -> dict[str, Any]:
+    """The finite schema actually requested for this exact model input.
+
+    No-context callers retain the original object/serialization. Optional
+    source choices remain closed fields; their refs are independently bound
+    by the parser and current source owners, never inferred from this schema.
+    """
+    schema=OUTPUT_SCHEMA if output_schema is None else output_schema
+    operating=state.get('operating_driver_context') is not None
+    families=bool((state.get('numeric_context') or {}).get('period_source_family_catalog'))
+    if not operating and not families:
+        return schema
+    schema=copy.deepcopy(schema)
+    properties=schema['properties']['revenue_drivers']['items']['properties']
+    if operating:
+        properties['basis_operating_metric_ref']={'type':'string','minLength':1}
+    if families:
+        properties['basis_period_family_refs']={
+            'type':'array','minItems':1,'maxItems':256,
+            'items':{'type':'string','minLength':1},
+            'description':'Explicit complete source-family refs for every original duration in this basis concept, including cumulative operands. Select the same complete families for every member in one sum; do not splice peers or omit old periods. Current basis_identity remains complete and explicit.'}
+    return schema
+
+
+def checked_current_output_schema(schema):
+    """Reject arbitrary JSON-schema relaxation supplied inside a proof."""
+    for operating in (False,True):
+        for families in (False,True):
+            state={'numeric_context':{'period_source_family_catalog':[{}]} if families else {}}
+            if operating:state['operating_driver_context']={}
+            if schema==output_schema_for_state(state):
+                return copy.deepcopy(schema)
+    raise CompanyModelSpecError('model output schema differs from its finite current source contracts')
+
+
+def repair_output_schema_from_prompt(prompt):
+    """Current repair shape from an authenticated root, old shapes unchanged."""
+    try:
+        schema=json.JSONDecoder().raw_decode(prompt.split('OUTPUT_SCHEMA:\n',1)[1])[0]
+    except (IndexError,ValueError,TypeError) as exc:
+        raise CompanyModelSpecError('original model output schema is unavailable') from exc
+    if schema==prior_assessment_output_schema():
+        return OUTPUT_SCHEMA  # The original repair used the current shape.
+    return checked_current_output_schema(schema)
+
+
 def build_prompt(state: Mapping[str, Any], *,
                  output_schema: Mapping[str, Any] | None = None) -> str:
     """The four questions, plus the driver template this kind of company gets.
@@ -596,14 +642,7 @@ def build_prompt(state: Mapping[str, Any], *,
     considered one is worse than no frame.
     """
 
-    output_schema = OUTPUT_SCHEMA if output_schema is None else output_schema
-    period_catalog = (state.get("numeric_context") or {}).get("period_source_family_catalog")
-    if period_catalog:
-        output_schema = copy.deepcopy(output_schema)
-        output_schema["properties"]["revenue_drivers"]["items"]["properties"]["basis_period_family_refs"] = {
-            "type": "array", "minItems": 1, "maxItems": 256,
-            "items": {"type": "string", "minLength": 1},
-            "description": "Explicit complete source-family refs for every original duration in this basis concept, including cumulative operands. Select the same complete families for every member in one sum; do not splice peers or omit old periods. Current basis_identity remains complete and explicit."}
+    output_schema = output_schema_for_state(state,output_schema=output_schema)
     company = {
         key: state.get(key)
         for key in ("company_ref", "ticker", "entity_name", "cik", "filings")
@@ -809,6 +848,7 @@ def build_prompt(state: Mapping[str, Any], *,
         f"STATEMENTS:\n{_statement_table(state)}\n"
         f"\nNUMERIC_PERIODS:\n{_numeric_period_table(state)}\n"
         f"\nFINANCIAL_NOTE_EVIDENCE:\n{_financial_note_table(state)}\n"
+        + ("\nOPERATING_DRIVER_EVIDENCE=" + canonical_json(state["operating_driver_context"]) + "\nSelect basis_operating_metric_ref only from this verified reported context, with basis_concept null and the exact displayed unit; this is a separate reported source, not a filed GAAP concept. Preserve physical units, dates, scope and currency. Formulas are still your explicit economic choice and must pass full historical financial checks.\n" if state.get("operating_driver_context") is not None else "")
         + ("\nMATERIAL FORECAST DEVIATION REVIEW (frozen forecasts remain unchanged):\n"
            "Reassess the affected methods and assumptions using the exact comparison sources below. "
            "Do not copy a newer model as proof of correction, invent missing evidence, or change old forecasts. "
@@ -1216,7 +1256,20 @@ def spec_from_response(
             try:
                 identity=resolve_identity(state, item.get("basis_concept"), item["basis_identity"])
             except ValueError as exc: raise CompanyModelSpecError(str(exc)) from exc
+        operating = {}
+        if 'basis_operating_metric_ref' in item:
+            if item.get('basis_concept') is not None or item.get('basis_identity') is not None:
+                raise CompanyModelSpecError('an operating source cannot also claim a filed concept or dimensional identity')
+            from .operating_driver_context import metric_history
+            try:
+                series = metric_history(state.get('operating_driver_context'), company_ref=state['company_ref'], metric_ref=item['basis_operating_metric_ref'])
+            except (ValueError,TypeError,KeyError) as exc: raise CompanyModelSpecError(str(exc)) from exc
+            if item.get('unit') != series['unit']:
+                raise CompanyModelSpecError('operating driver unit differs from its exact source-reported unit')
+            operating = {'basis_operating_metric_ref':series['metric_ref'], 'basis_operating_context_hash':series['context_hash'],
+                'basis_operating_context_evidence_refs':series['context_evidence_refs']}
         drivers.append({
+            **operating,
             **({"basis_identity":identity} if item.get("basis_identity") is not None else {}),
             "ref": _ref(item.get("ref"), f"revenue_drivers[{index}].ref", driver_refs),
             "label": _text(item.get("label"), f"revenue_drivers[{index}].label", limit=120),

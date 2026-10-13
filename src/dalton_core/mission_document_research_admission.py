@@ -140,6 +140,14 @@ def open_mission_document_admission_authority(
             planner_router_connection=planner_router.connection,
             **({} if clock is None else {"clock": clock}),
         )
+        # Owner-derived operating reads are a separate proof origin. Their
+        # stored plan is never presented as a paid planner result.
+        def replay_model_source_plan(plan, source_mission):
+            from .operating_driver_source_plan import replay_plan
+            config = load_annual_report_model_config(state / 'initial-screen-model-config.json',
+                                                    'model source original configuration')
+            return replay_plan(authority, plan, source_mission, state_dir=state, model_config=config)
+        authority.model_source_plan_resolver = replay_model_source_plan
     except Exception as exc:
         setup_error = exc
     if setup_error is not None:

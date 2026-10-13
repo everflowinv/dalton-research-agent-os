@@ -65,6 +65,13 @@ def additional_drivers(spec: Mapping[str, Any], table: Mapping[str, Any],
                       for c in (spec.get("fcf_definition") or {}).get("components") or []
                       if c["role"] not in {"operating_cash_flow", "capital_expenditure"}]
     for declared in declared_rows:
+        if declared.get('basis_operating_metric_ref') is not None:
+            from .operating_driver_model import driver
+            matches=[r for r in table.get('operating_driver_lines') or [] if r['driver_ref']==declared['ref']]
+            if len(matches)!=1:
+                raise ValueError('economic operating driver lacks its freshly verified input series')
+            out.append(driver(declared=declared,series=matches[0]))
+            continue
         concept = declared.get("basis_concept")
         source = next((s for s in table.get("filed_identity_lines") or [] if s["driver_ref"]==declared["ref"] and s.get("status")=="filed"),None) if declared.get("basis_identity") else sources.get(concept)
         if source is None or (concept in concepts and (not spec.get("driver_formulas") or declared["ref"].startswith("fcf-"))):

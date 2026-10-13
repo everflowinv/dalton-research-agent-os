@@ -306,8 +306,8 @@ ROLE_STATEMENTS: dict[str, str] = {
 }
 
 DRIVER_KINDS: tuple[str, ...] = ("revenue", "expense", "cash_flow")
-DRIVER_STATUSES: tuple[str, ...] = (FILED, SHARED, ESTIMATED, NOT_FOUND, AMBIGUOUS)
-FORECASTABLE_STATUSES = frozenset({FILED, SHARED})
+DRIVER_STATUSES: tuple[str, ...] = (FILED, SHARED, ESTIMATED, NOT_FOUND, AMBIGUOUS, "verified_reported")
+FORECASTABLE_STATUSES = frozenset({FILED, SHARED, "verified_reported"})
 # What a cell is. ``estimate`` is what we thought, ``human`` is what a person
 # decided, ``actual`` is what the company filed. The three are never merged and
 # an ``actual`` never overwrites the ``estimate`` it replaced: reconciliation
@@ -398,7 +398,7 @@ _DRIVER_FIELDS = frozenset({
     "ref", "kind", "label", "concept", "unit", "statement", "status", "role",
     "spec_rows", "note", "history",
 })
-_DRIVER_OPTIONAL_FIELDS = frozenset({"cost_driver_slots", "statement_identity", "statement_period_family_bindings"})
+_DRIVER_OPTIONAL_FIELDS = frozenset({"cost_driver_slots", "statement_identity", "statement_period_family_bindings", "operating_source"})
 _STRUCTURE_DRIVER_FIELDS = frozenset({
     "structure_line_ref", "forecast_method", "forecast_base_ref",
 })
@@ -4560,6 +4560,12 @@ def _normalize_driver(value: Any, name: str, *, schema_version: str) -> dict[str
         raise ForecastModelValidationError(
             f"{name} has no filed concept and cannot carry filed history")
     wire["history"] = cells
+    if 'operating_source' in wire:
+        from .operating_driver_model import validate_driver
+        try: validate_driver(wire)
+        except ValueError as exc: raise ForecastModelValidationError(str(exc)) from exc
+    elif wire['status']=='verified_reported':
+        raise ForecastModelValidationError('reported operating driver lacks its explicit canonical source')
     return wire
 
 
@@ -5146,6 +5152,9 @@ class ForecastModelAuthority:
         record.setdefault("decision", None)
         record["content_hash"] = content_hash(record)
         wire = validate_forecast_model(record)
+        from .operating_driver_model import verify_model_sources
+        try: verify_model_sources(self,wire)
+        except ValueError as exc: raise ForecastModelValidationError(str(exc)) from exc
         from .forecast_source_accuracy import validate_originals
         validate_originals(self.connection, wire)
         if not duplicate_existing:
@@ -5276,7 +5285,7 @@ class ForecastModelAuthority:
             supplied_accessions = {str(row["accession"]) for row in found.values()}
             model_accessions = {
                 str(accession)
-                for driver in wire.get("drivers") or []
+                for driver in wire.get("drivers") or [] if "operating_source" not in driver
                 for cell in driver.get("history") or []
                 for accession in cell.get("accessions") or []
             }
@@ -5287,6 +5296,8 @@ class ForecastModelAuthority:
                     f"statement rows: {unknown_accessions}")
             from .period_source_family import identity_for_row as period_identity_for_row
             for driver in wire.get("drivers") or []:
+                if "operating_source" in driver:
+                    continue  # complete canonical/source replay already checked above
                 for cell in driver.get("history") or []:
                     cell_accessions = set(map(str, cell.get("accessions") or []))
                     matches = [row for row in statement_wire
@@ -5646,6 +5657,9 @@ class ForecastModelAuthority:
             or wire["content_hash"] != row["content_hash"]
         ):
             raise ForecastModelConflict("forecast model authority drifted")
+        from .operating_driver_model import verify_model_sources
+        try: verify_model_sources(self,wire)
+        except ValueError as exc: raise ForecastModelConflict(str(exc)) from exc
         return wire
 
     def latest(self, company_ref: str) -> dict[str, Any] | None:

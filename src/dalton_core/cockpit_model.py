@@ -1427,16 +1427,22 @@ def _validate_structured_output_repair_authority(
     if binding["validation_error"]["code"] in (BUNDLE_CODE, JOINT_CODE):
         try:
             parent_body = parse_response(parent_text)
+            from .company_model_spec import repair_output_schema_from_prompt,OUTPUT_SCHEMA
+            repair_schema=(repair_output_schema_from_prompt(root_work['question'])
+                if 'OUTPUT_SCHEMA:\n' in root_work['question'] else OUTPUT_SCHEMA)
+            if bundle.get('output_schema',OUTPUT_SCHEMA)!=repair_schema:
+                raise ValueError('diagnostic schema differs from its exact root Work')
             if binding["validation_error"]["code"] == JOINT_CODE:
                 validate_joint_parent(parent_body, bundle, state_hash=root_identity['state_hash'],
                                       root_prompt=root_work['question'])
                 from .model_spec_joint_field_diagnostics import classification_from_prompt
                 diagnosed = joint_error_for(parent_body, {
                     'state_hash': root_identity['state_hash'],
-                    'industry_classification': classification_from_prompt(root_work['question'])})
+                    'industry_classification': classification_from_prompt(root_work['question'])},
+                    output_schema=repair_schema)
             else:
                 validate_bundle_parent(parent_body, bundle)
-                diagnosed = error_for(parent_body)
+                diagnosed = error_for(parent_body,output_schema=repair_schema)
             if binding["validation_error"] != {"code": diagnosed.code, "message": str(diagnosed)}:
                 raise ValueError("diagnostic error message differs")
             if repair_slot_used(scheduler.connection, root_proof, exclude_work=child_work.id, same_binding=binding, config=config):
@@ -1461,7 +1467,10 @@ def _validate_structured_output_repair_authority(
         binding["validation_error"]["message"],
         code=binding["validation_error"]["code"], proof=transported_proof,
     )
-    if child_work.question != _repair_prompt(parent_text, error):
+    from .company_model_spec import repair_output_schema_from_prompt,OUTPUT_SCHEMA
+    repair_schema=(repair_output_schema_from_prompt(root_work['question'])
+        if 'OUTPUT_SCHEMA:\n' in root_work['question'] else OUTPUT_SCHEMA)
+    if child_work.question != _repair_prompt(parent_text, error,output_schema=repair_schema):
         raise CockpitModelError("structured output repair prompt differs from its parent")
 
 

@@ -38,7 +38,7 @@ def _scope(strategy):
     # requested financial fact. Unknown fields and forged definition hashes fail.
     rows = [{k: t[k] for k in ('metric_ref', 'metric_definition_hash', 'period',
                               'unit', 'currency', 'basis')}
-            for t in normalize_targets(strategy['numeric_targets'])]
+            for t in normalize_targets(strategy['numeric_targets'], contract_ref=(strategy['strategy_version'] if strategy.get('strategy_version') == 'directed-document-operating-numeric:0.1' else 'directed-document-numeric:0.1'))]
     return tuple(sorted(canonical_json(row) for row in rows))
 
 

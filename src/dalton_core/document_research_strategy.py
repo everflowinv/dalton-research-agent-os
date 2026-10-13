@@ -185,7 +185,9 @@ def normalize_strategy(value: Any, *, max_query_terms: int,
         strategy["evidence_target"] = normalize_evidence_target(strategy["evidence_target"])
     if numeric:
         try:
-            strategy["numeric_targets"] = normalize_targets(strategy["numeric_targets"])
+            from .operating_driver_units import CONTRACT_REF as OPERATING_REF
+            strategy["numeric_targets"] = normalize_targets(strategy["numeric_targets"],
+                contract_ref=OPERATING_REF if strategy['strategy_version'] == OPERATING_REF else CONTRACT_REF)
             if strategy["strategy_version"] == SPOKEN_CONTRACT_REF and any(t["basis"] != "management-reported" for t in strategy["numeric_targets"]):
                 raise DocumentResearchStrategyError("spoken numeric targets must retain management-reported basis")
         except ValueError as exc:

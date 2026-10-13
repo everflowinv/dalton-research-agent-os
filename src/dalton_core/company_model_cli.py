@@ -492,6 +492,9 @@ def _repair_prompt(original_text: str, error: CompanyModelSpecError, *,
                    contract: Mapping[str, Any] | None = None,
                    output_schema: Mapping[str, Any] | None = None) -> str:
     contract = REPAIR_CONTRACT if contract is None else contract
+    from .company_model_spec import checked_current_output_schema
+    if output_schema is None and isinstance(getattr(error,'proof',None),Mapping) and 'output_schema' in error.proof:
+        output_schema=checked_current_output_schema(error.proof['output_schema'])
     output_schema = OUTPUT_SCHEMA if output_schema is None else output_schema
     if error.code == FILED_TIE_CODE:
         validate_filed_tie_parent(parse_response(original_text),getattr(error,'proof',None))
@@ -786,6 +789,7 @@ def _validated_spec_with_repair(
     financial_validator: Any | None = None,
     source_sign_projection: Any | None = None,
 ) -> tuple[dict[str, Any], list[dict[str, Any]], dict[str, Any]]:
+    from .company_model_spec import output_schema_for_state
     root_call = dict(original_call)
     current_call = dict(original_call)
     repairs = [] if repair_attempts is None else repair_attempts
@@ -917,7 +921,7 @@ def _validated_spec_with_repair(
                 continue
             try:
                 bundled_error = (None if error.code == JOINT_FIELDS_CODE else
-                    complete_diagnostics_error(parse_response(current_call["text"])))
+                    complete_diagnostics_error(parse_response(current_call["text"]),output_schema=output_schema_for_state(state)))
             except CompanyModelSpecError:
                 bundled_error = None  # The existing malformed-JSON rule remains unchanged.
             if bundled_error is not None:
@@ -949,7 +953,7 @@ def _validated_spec_with_repair(
                     or signed_repair_attempted
                     or (error.code in (SIGNED_EXPENSE_REPAIR_CODE, *TYPED_FIELD_ERROR_CODES) and contract_calls >= 1)):
                 raise
-            prompt = _repair_prompt(current_call["text"], error)
+            prompt = _repair_prompt(current_call["text"], error,output_schema=output_schema_for_state(state))
             binding = {
                 "schema_version": "company-model-spec-repair-binding-0.1",
                 "root_original": {
@@ -1316,6 +1320,7 @@ def choose_company(
     prompt_byte_limit: int = MAX_INPUT_TOKENS,
     exclude_company_refs: frozenset[str] = frozenset(),
     financial_note_context: Any | None = None,
+    operating_driver_context: Any | None = None,
 ) -> tuple[str | None, dict[str, Any] | None]:
     """The company to decide about, and the disclosure to decide from.
 
@@ -1369,6 +1374,7 @@ def choose_company(
                     None if financial_note_context is None
                     else financial_note_context.projection(held)
                 ),
+                operating_driver_context=(None if operating_driver_context is None else operating_driver_context.projection(held)),
             )
         except CompanyModelPromptBudgetError:
             raise
@@ -1436,6 +1442,8 @@ def run_model_spec(
     store = DaltonStore(str(state_dir / "core.sqlite"))
     from .financial_note_context import FinancialNoteReadContext
     note_context = FinancialNoteReadContext(store=store, state_dir=state_dir)
+    from .operating_driver_context import OperatingDriverReadContext
+    operating_context = OperatingDriverReadContext(store=store, state_dir=state_dir)
     try:
         missions = CoverageMissionAuthority(store)
         pointer = store.connection.execute(
@@ -1466,6 +1474,7 @@ def run_model_spec(
                 numeric_context_policy=numeric_policy,
                 prompt_byte_limit=prompt_byte_limit,
                 financial_note_context=note_context,
+                operating_driver_context=operating_context,
             )
         except CompanyModelPromptBudgetError as exc:
             summary.update({
@@ -1502,7 +1511,8 @@ def run_model_spec(
                 missions, chosen, ticker=next((member.get("ticker") for member in mission["universe"] if member["company_ref"] == chosen), None),
                 industry_classification=filed_classifications(store).get(chosen),
                 numeric_context_policy=numeric_policy, prompt_byte_limit=prompt_byte_limit,
-                financial_note_context=note_context.projection(chosen))
+                financial_note_context=note_context.projection(chosen),
+                operating_driver_context=operating_context.projection(chosen))
         if config_path is not None and raw_model_config is None:
             # Preserve the no-work fast path above. A selected paid run still
             # requires the configured file and surfaces its absence exactly.
@@ -1800,6 +1810,7 @@ def run_model_spec(
         try:
             _write_owner_only(summary_dir / "summary.json", summary)
         finally:
+            operating_context.__exit__(None,None,None)
             note_context.close()
             store.close()
 

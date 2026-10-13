@@ -288,8 +288,11 @@ class MissionModelSpecLaneCoordinator:
             try:
                 from .financial_note_context import FinancialNoteReadContext
                 note_context = None
+                operating_context = None
                 if (getattr(self.missions, "store", None) is not None
                         and getattr(self.launcher, "state_dir", None) is not None):
+                    from .operating_driver_context import OperatingDriverReadContext
+                    operating_context = OperatingDriverReadContext(store=self.missions.store,state_dir=self.launcher.state_dir)
                     note_context = FinancialNoteReadContext(
                         store=self.missions.store,
                         state_dir=self.launcher.state_dir,
@@ -301,8 +304,10 @@ class MissionModelSpecLaneCoordinator:
                         numeric_context_policy=numeric_context_policy,
                         prompt_byte_limit=prompt_byte_limit,
                         exclude_company_refs=frozenset(excluded),
-                        financial_note_context=note_context)
+                        financial_note_context=note_context, operating_driver_context=operating_context)
                 finally:
+                    if operating_context is not None:
+                        operating_context.__exit__(None,None,None)
                     if note_context is not None:
                         note_context.close()
             except CompanyModelPromptBudgetError as exc:

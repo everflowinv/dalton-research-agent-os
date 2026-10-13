@@ -43,13 +43,15 @@ def classification_from_prompt(prompt):
     return classification
 
 
-def diagnose(body, *, state_hash, classification):
-    from .company_model_spec import OUTPUT_SCHEMA, MAX_EXPENSE_LINES
+def diagnose(body, *, state_hash, classification, output_schema=None):
+    from .company_model_spec import OUTPUT_SCHEMA, MAX_EXPENSE_LINES, checked_current_output_schema
+    schema=checked_current_output_schema(OUTPUT_SCHEMA if output_schema is None else output_schema)
     from .driver_template import cost_slot_ids
     report = {'contract_ref': CONTRACT_REF, 'parent_body_hash': content_hash(body),
               'state_hash': state_hash, 'classification': classification,
               'status': 'blocked', 'reason': 'closed_shape_or_refs_unproved',
               'findings': [], 'missing_driver_refs': []}
+    if schema!=OUTPUT_SCHEMA:report['output_schema']=schema
     if not isinstance(body, dict):
         return report
     view = copy.deepcopy(body)
@@ -77,10 +79,10 @@ def diagnose(body, *, state_hash, classification):
                              'original_values': [_value(body, path)],
                              'choices': 'omit the empty optional reason; retain the exact original bound slot'})
             del line['cost_driver_unbound_reason']
-    if not independent._shape(view, OUTPUT_SCHEMA) or not independent._closed_refs(view):
+    if not independent._shape(view, schema) or not independent._closed_refs(view):
         return report
     # Never turn the diagnostic view into an accepted financial proposal.
-    settings = independent.diagnose(view)
+    settings = independent.diagnose(view,output_schema=schema)
     if settings['status'] != 'complete':
         return {**report, 'reason': 'independent_settings_unproved_or_overflow'}
     if not findings:
@@ -110,15 +112,17 @@ def diagnose(body, *, state_hash, classification):
             'cash_base_contract_ref': settings['cash_base_contract_ref']}
 
 
-def from_state(body, state):
+def from_state(body, state, *, output_schema=None):
     from .driver_template import template_for
+    from .company_model_spec import output_schema_for_state
     return diagnose(body, state_hash=state['state_hash'],
-                    classification=template_for(state.get('industry_classification'))['classification'])
+                    classification=template_for(state.get('industry_classification'))['classification'],
+                    output_schema=output_schema_for_state(state) if output_schema is None else output_schema)
 
 
-def error_for(body, state):
+def error_for(body, state, *, output_schema=None):
     from .company_model_spec import CompanyModelSpecError
-    report = from_state(body, state)
+    report = from_state(body, state,output_schema=output_schema)
     if report['status'] == 'complete' and report['findings']:
         # These exact filed sources are outside every allowed annotation or
         # settings path. Do not spend the one repair slot when the current
@@ -171,7 +175,7 @@ def error_for(body, state):
 
 def validate_parent(body, proof):
     from .company_model_spec import CompanyModelSpecError
-    expected = diagnose(body, state_hash=proof.get('state_hash'), classification=proof.get('classification'))
+    expected = diagnose(body, state_hash=proof.get('state_hash'), classification=proof.get('classification'),output_schema=proof.get('output_schema'))
     if expected['status'] != 'complete' or not expected['findings'] or canonical_json(expected) != canonical_json(proof):
         raise CompanyModelSpecError('joint diagnostic proof differs from its exact parent')
 
@@ -179,6 +183,9 @@ def validate_parent(body, proof):
 def validate_frozen_parent(body, proof, *, state_hash, root_prompt):
     if proof.get('state_hash') != state_hash or proof.get('classification') != classification_from_prompt(root_prompt):
         raise ValueError('joint diagnostic input binding differs')
+    from .company_model_spec import OUTPUT_SCHEMA,repair_output_schema_from_prompt
+    if proof.get('output_schema',OUTPUT_SCHEMA)!=repair_output_schema_from_prompt(root_prompt):
+        raise ValueError('joint diagnostic schema differs from its authenticated root input')
     validate_parent(body, proof)
 
 

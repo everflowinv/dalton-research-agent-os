@@ -5610,7 +5610,7 @@ class MissionDocumentResearchExecutor:
             raise MissionDocumentResearchExecutorError("effective recovery Work drifted")
         if admission.get('numeric_authority'):
             from .directed_numeric_research import unexecutable_period_targets
-            missing = unexecutable_period_targets(admission['numeric_authority']['targets'])
+            missing = unexecutable_period_targets(admission['numeric_authority']['targets'], contract_ref=admission['numeric_authority']['contract_ref'])
             if missing:
                 recovery = {'status': 'stopped', 'reason': 'numeric_target_period_unspecified',
                     'eligible': False, 'used_fresh_work_orders': len(links),

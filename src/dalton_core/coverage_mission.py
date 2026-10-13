@@ -2576,10 +2576,12 @@ class CoverageMissionAuthority:
     def latest_research_plan(self, mission_version_ref: str) -> dict[str, Any] | None:
         """The most recent plan for this mission version, or None."""
 
+        from .operating_driver_source_plan import TASK_REF as OPERATING_TASK
         row = self.connection.execute(
             "SELECT * FROM coverage_mission_research_plans WHERE mission_version_ref=? "
+            "AND (plan_json IS NULL OR COALESCE(json_extract(plan_json,'$.task_ref'),'')!=?) "
             "ORDER BY created_at DESC, plan_id DESC LIMIT 1",
-            (_text(mission_version_ref, "mission_version_ref"),),
+            (_text(mission_version_ref, "mission_version_ref"), OPERATING_TASK),
         ).fetchone()
         return None if row is None else self._plan_row(row)
 
@@ -2677,6 +2679,7 @@ class CoverageMissionAuthority:
         figures: Sequence[Mapping[str, Any]],
         observed_by: str,
         numeric_contract_ref: str | None = None,
+        operating_source_proof: Mapping[str, Any] | None = None,
     ) -> dict[str, Any]:
         """Journal figures read out of one document's window.
 
@@ -2696,6 +2699,7 @@ class CoverageMissionAuthority:
         from .document_numeric_unit_contracts import (
             DIRECTED_NUMERIC_CONTRACT_REF, DIRECTED_FIGURE_VERIFIER_REF, numeric_units,
         )
+        from .operating_driver_units import CONTRACT_REF as OPERATING_REF, FIGURE_VERIFIER_REF as OPERATING_VERIFIER
         try:
             numeric_units(numeric_contract_ref)
         except ValueError as exc:
@@ -2729,7 +2733,7 @@ class CoverageMissionAuthority:
             try:
                 wires.append(verify_numeric_candidate(
                     candidate, {candidate["quote_id"]: citation},
-                    numeric_contract_ref=numeric_contract_ref))
+                    numeric_contract_ref=numeric_contract_ref, operating_source_proof=operating_source_proof))
             except NumericCandidateError as exc:
                 raise CoverageMissionValidationError(
                     f"figure is not supported by the quote it cites: {exc}"
@@ -2786,7 +2790,7 @@ class CoverageMissionAuthority:
                     "unit": wire["unit"], "currency": wire["currency"],
                     "scale": wire["scale"], "basis": wire["basis"],
                     "source_grade": source_grade,
-                    "verified_by": (DIRECTED_FIGURE_VERIFIER_REF
+                    "verified_by": (OPERATING_VERIFIER if numeric_contract_ref == OPERATING_REF else DIRECTED_FIGURE_VERIFIER_REF
                                     if numeric_contract_ref == DIRECTED_NUMERIC_CONTRACT_REF
                                     else DOCUMENT_FIGURE_VERIFIER_REF),
                     "observed_by": observed_by, "created_at": now,

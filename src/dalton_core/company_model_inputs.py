@@ -140,6 +140,7 @@ def _rows_of(spec: Mapping[str, Any]) -> list[dict[str, Any]]:
             "basis_concept": item.get("basis_concept"),
             "driver_kind": item.get("kind"), "unit": item.get("unit"),
             "because": item.get("because"),
+            **({k:item[k] for k in ("basis_operating_metric_ref","basis_operating_context_hash","basis_operating_context_evidence_refs")} if "basis_operating_metric_ref" in item else {}),
         })
     for item in spec.get("expense_lines") or []:
         row = {
@@ -493,6 +494,7 @@ def _input_statement_reader(missions: Any) -> Any:
 
 def build_model_inputs(
     missions: Any, spec: Mapping[str, Any], *, max_periods: int = MAX_PERIODS,
+    operating_driver_context: Mapping[str, Any] | None = None,
 ) -> dict[str, Any]:
     """One company's model rows, its filed history, and what still has to be estimated."""
 
@@ -724,6 +726,27 @@ def build_model_inputs(
                 missions, company_ref, set(concepts)),
         },
     }
+    operating_rows = [r for r in rows if r.get('basis_operating_metric_ref')]
+    if operating_rows:
+        from .operating_driver_context import OperatingDriverReadContext, metric_history
+        from pathlib import Path
+        if operating_driver_context is None:
+            database = source_authority.connection.execute('PRAGMA database_list').fetchall()
+            core_path = next(r[2] for r in database if r[1] == 'main')
+            with OperatingDriverReadContext(store=source_authority.store, state_dir=Path(core_path).parent) as reader:
+                bindings={r['ref']:r for row in operating_rows for r in row['basis_operating_context_evidence_refs']}
+                operating_driver_context = reader.projection(company_ref,evidence_bindings=list(bindings.values()))
+        lines = []
+        for row in operating_rows:
+            from .operating_driver_context import selected_context
+            selected=selected_context(operating_driver_context,row['basis_operating_context_evidence_refs'],row['basis_operating_context_hash'])
+            series = metric_history(selected, company_ref=company_ref, metric_ref=row['basis_operating_metric_ref'], expected_hash=row['basis_operating_context_hash'])
+            if series['unit'] != row['unit']:
+                raise ModelInputError('operating model unit differs from source history')
+            row.update(status='verified_reported', reason='Independent reported operating source; not a filed statement line.')
+            lines.append({**series,'driver_ref':row['ref'],'status':'verified_reported'})
+        result['operating_driver_lines'] = lines
+        result['readiness'].update(readiness(rows, filed_lines, periods))
     if any(line.get("statement_scope") for line in filed_lines):
         result["statement_identity_rule_ref"] = STATEMENT_IDENTITY_RULE_REF
     if cost_template is not None:

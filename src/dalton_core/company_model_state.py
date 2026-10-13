@@ -490,6 +490,7 @@ def build_company_model_state(
     numeric_context_policy: Mapping[str, Any] | None = None,
     prompt_byte_limit: int = DEFAULT_MODEL_SPEC_PROMPT_BYTES,
     financial_note_context: Mapping[str, Any] | None = None,
+    operating_driver_context: Mapping[str, Any] | None = None,
 ) -> dict[str, Any]:
     """Project one company's filed statements down to the structure of them.
 
@@ -622,6 +623,9 @@ def build_company_model_state(
         body["financial_note_context"] = validate_financial_note_context(
             financial_note_context, company_ref=company_ref,
         )
+    if operating_driver_context is not None:
+        from .operating_driver_context import validate_context
+        body['operating_driver_context'] = validate_context(operating_driver_context, company_ref=company_ref)
     # F10: proxy evidence is a separate authority and never enters statement
     # rows. The specification is told which proxies exist and how far each sits
     # from the company (2026-10-07: identity only). Carrying the source-series

@@ -127,9 +127,28 @@ def run_admissions(
         day = now.date().isoformat()
         summary["pool"] = pool_state(
             authority, mission, day=day, budget_db=budget_db)
+        from .operating_driver_source_plan import found_requests, admit_found_materials
+        operating_handoffs = []
+        if not dry_run and planner_scheduler_db is not None and planner_model_config_path is not None and found_requests(state_dir):
+            from .mission_document_research_admission import open_mission_document_admission_authority
+            from .annual_report_runtime import load_annual_report_model_config
+            try:
+                with open_mission_document_admission_authority(store=store,state_dir=state_dir,mission=mission,
+                        planner_scheduler_db=planner_scheduler_db,planner_model_config_path=planner_model_config_path,
+                        draft_model_config_path=document_draft_model_config_path,verifier_model_config_path=document_verifier_model_config_path) as (owner,registrations):
+                    operating_handoffs = admit_found_materials(authority=owner,registrations=registrations,
+                        backlog=ResearchQuestionBacklog(store),mission=mission,state_dir=state_dir,
+                        model_config=load_annual_report_model_config(state_dir/'initial-screen-model-config.json','model source original configuration'),
+                        limit=(1 if max_admissions == 1 and (missions.latest_research_plan(mission['id']) is None
+                            or int(now.timestamp() // 300) % 2 == 0) else min(2,max(0,max_admissions-1))))
+            except ValueError as exc:
+                operating_handoffs = [{'status':'refused','reason':f'{type(exc).__name__}: {exc}'}]
+        summary['operating_source_handoffs'] = operating_handoffs
+        summary['tasks'] = [r for r in operating_handoffs if r['status'] in {'fresh','duplicate'}]
+        summary['admitted'] = sum(r['status']=='fresh' for r in operating_handoffs)
         plan = missions.latest_research_plan(mission["id"])
         if plan is None:
-            summary.update({"status": "idle", "failure_reason": "no_research_plan"})
+            summary.update({"status": "succeeded" if summary["tasks"] else "idle", "failure_reason": None if summary["tasks"] else "no_research_plan"})
             return summary
         summary["plan_ref"] = plan["plan_id"]
         has_directed = any(
@@ -160,8 +179,8 @@ def run_admissions(
         if not dry_run:
             summary["material_requests"] = _material_requests_for_gaps(state_dir, mission, plan, entries)
         backlog = ResearchQuestionBacklog(store)
-        admitted: list[dict[str, Any]] = []
-        slots_used = 0
+        admitted: list[dict[str, Any]] = list(summary["tasks"])
+        slots_used = summary["admitted"]
         with ExitStack() as resources:
             document_runtime = None
             document_failure = None

@@ -249,7 +249,9 @@ def validate_numeric_candidate(
     if basis not in allowed:
         raise NumericCandidateError(f"basis must be one of {list(allowed)}")
     currency = value["currency"]
-    if unit == "currency":
+    from .operating_driver_units import CONTRACT_REF as OPERATING_REF, monetary
+    monetary_unit = unit == 'currency' or (numeric_contract_ref == OPERATING_REF and monetary(unit))
+    if monetary_unit:
         if not isinstance(currency, str) or not re.fullmatch(r"[A-Z]{3}", currency):
             raise NumericCandidateError("a currency figure must name an ISO-4217 currency")
     elif currency is not None:
@@ -348,7 +350,7 @@ def _candidate_values(candidate: Mapping[str, Any]) -> set[Decimal]:
 
 def verify_numeric_candidate(
     candidate: Mapping[str, Any], quotes: Mapping[str, str], *, grade: Any = None,
-    numeric_contract_ref: str | None = None
+    numeric_contract_ref: str | None = None, operating_source_proof: Mapping[str, Any] | None = None
 ) -> dict[str, Any]:
     """Refuse any candidate whose number is not in the bytes it cited.
 
@@ -363,7 +365,9 @@ def verify_numeric_candidate(
     if not isinstance(quote, str) or not quote:
         raise NumericCandidateError("numeric candidate cites a quote that was not supplied")
     present = numbers_in(quote)
-    if not _candidate_values(wire) & present:
+    from .operating_driver_units import CONTRACT_REF as OPERATING_REF, UNITS as OPERATING_UNITS
+    strict_operating = numeric_contract_ref == OPERATING_REF and wire['unit'] in OPERATING_UNITS
+    if not strict_operating and not _candidate_values(wire) & present:
         raise NumericCandidateError(
             "numeric candidate asserts a value its citation does not contain"
         )
@@ -376,6 +380,17 @@ def verify_numeric_candidate(
     if wire["unit"] == "years":
         try:
             verify_years_quantity(wire["value"], quote, currency=wire["currency"], scale=wire["scale"])
+        except ValueError as exc:
+            raise NumericCandidateError(str(exc)) from exc
+    from .operating_driver_units import CONTRACT_REF as OPERATING_REF, verify_reported_unit
+    if numeric_contract_ref == OPERATING_REF:
+        try:
+            from .operating_driver_units import verify_reported_period
+            from .operating_source_measurements import verify_native_measurement
+            if not verify_native_measurement(wire, quote, operating_source_proof):
+                verify_reported_period(wire['period'], quote)
+                verify_reported_unit(wire['value'], quote, unit=wire['unit'], currency=wire['currency'],
+                                     scale=wire['scale'], label=wire['as_reported_label'])
         except ValueError as exc:
             raise NumericCandidateError(str(exc)) from exc
     verified = {

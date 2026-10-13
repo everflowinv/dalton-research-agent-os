@@ -111,12 +111,14 @@ def _cash_capability(structure, ref):
     return derived_base_is_forecastable(structure, ref)
 
 
-def diagnose(body):
+def diagnose(body, *, output_schema=None):
     """No edits; malformed/ambiguous dependencies never authorize a bundle."""
-    from .company_model_spec import OUTPUT_SCHEMA
+    from .company_model_spec import OUTPUT_SCHEMA, checked_current_output_schema
+    schema=checked_current_output_schema(OUTPUT_SCHEMA if output_schema is None else output_schema)
     report = {"contract_ref": CONTRACT_REF, "parent_body_hash": content_hash(body),
               "status": "blocked", "reason": "closed_shape_or_refs_unproved", "findings": []}
-    if not _shape(body, OUTPUT_SCHEMA) or not _closed_refs(body):
+    if schema!=OUTPUT_SCHEMA:report["output_schema"]=schema
+    if not _shape(body, schema) or not _closed_refs(body):
         return report
     findings = []
     def add(rule, paths, choices):
@@ -173,7 +175,7 @@ def _at(body, path):
 
 def validate_parent(body, proof, *, minimum_findings=2):
     from .company_model_spec import CompanyModelSpecError
-    expected = diagnose(body)
+    expected = diagnose(body,output_schema=proof.get("output_schema"))
     if (expected["status"] != "complete" or len(expected["findings"]) < minimum_findings
             or canonical_json(expected) != canonical_json(proof)):
         raise CompanyModelSpecError("independent diagnostic bundle differs from its exact parent")
@@ -210,9 +212,9 @@ def assert_only_allowed_changed(original, repaired, proof, *, minimum_findings=2
         raise CompanyModelSpecError("bundle repair changed fields outside its exact allowed paths") from exc
 
 
-def error_for(body):
+def error_for(body, *, output_schema=None):
     from .company_model_spec import CompanyModelSpecError
-    proof = diagnose(body)
+    proof = diagnose(body,output_schema=output_schema)
     if proof["status"] == "overflow":
         return CompanyModelSpecError("independent settings diagnostics exceed the fixed finding limit", proof=proof)
     if proof["status"] == "complete" and len(proof["findings"]) >= 2:

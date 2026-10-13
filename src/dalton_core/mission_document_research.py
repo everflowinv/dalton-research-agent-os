@@ -119,12 +119,14 @@ def _exact_plan(
         "mission_version_ref": row["mission_version_ref"],
         "state_hash": row["state_hash"],
     })[:32]
+    from .operating_driver_source_plan import TASK_REF as OPERATING_TASK, SCHEMA_VERSION as OPERATING_SCHEMA
+    owner_derived = wire.get('task_ref') == OPERATING_TASK
     if (
         digest != content_hash(body)
         or row["content_hash"] != digest
         or row["plan_id"] != expected_ref
-        or wire.get("schema_version") != PLANNER_SCHEMA_VERSION
-        or wire.get("task_ref") != TASK_REF
+        or wire.get("schema_version") != (OPERATING_SCHEMA if owner_derived else PLANNER_SCHEMA_VERSION)
+        or wire.get("task_ref") != (OPERATING_TASK if owner_derived else TASK_REF)
         or wire.get("state_hash") != row["state_hash"]
         or wire.get("mission_version_ref") != row["mission_version_ref"]
         or wire.get("assessment") != row["assessment"]
@@ -246,6 +248,7 @@ class MissionDocumentResearchAuthority:
         planner_scheduler_connection: sqlite3.Connection,
         planner_router_connection: sqlite3.Connection,
         clock: Callable[[], datetime] = _now,
+        model_source_plan_resolver: Callable[[Mapping[str, Any], Mapping[str, Any]], Mapping[str, Any]] | None = None,
     ) -> None:
         if not isinstance(store, DaltonStore):
             raise TypeError("store must be DaltonStore")
@@ -265,6 +268,7 @@ class MissionDocumentResearchAuthority:
         self.planner_scheduler_connection = planner_scheduler_connection
         self.planner_router_connection = planner_router_connection
         self.clock = clock
+        self.model_source_plan_resolver = model_source_plan_resolver
         self._authorization_flag = authorization_flag(
             self.connection, "dalton_mission_document_research_authorized"
         )
@@ -280,6 +284,17 @@ class MissionDocumentResearchAuthority:
         inquiry: Mapping[str, Any], mission: Mapping[str, Any],
     ) -> None:
         """Require the selected inquiry in the exact successful planner output."""
+
+        from .operating_driver_source_plan import TASK_REF as OPERATING_TASK
+        if plan.get('task_ref') == OPERATING_TASK:
+            if self.model_source_plan_resolver is None:
+                raise MissionDocumentResearchError('model source owner origin reader is unavailable')
+            expected = self.model_source_plan_resolver(plan, mission)
+            if (row.get('decided_by') != mission['autonomy']['automation_principal']
+                    or row.get('work_order_ref') is not None or row.get('model_profile_ref') is not None
+                    or canonical_json(expected) != canonical_json({k:v for k,v in plan.items() if k != 'plan_id'})):
+                raise MissionDocumentResearchError('model source owner plan origin differs')
+            return
 
         if (
             row.get("decided_by") != mission["autonomy"]["automation_principal"]
@@ -568,9 +583,16 @@ class MissionDocumentResearchAuthority:
             raise MissionDocumentResearchError("inquiry is absent or ambiguous in the exact plan")
         ordinal, inquiry, inquiry_hash = matches[0]
         strategy = inquiry.get("directed_document")
+        from .operating_driver_source_plan import TASK_REF as OPERATING_TASK
+        from .operating_driver_units import CONTRACT_REF as OPERATING_REF
+        if (isinstance(strategy, Mapping) and strategy.get('strategy_version') == OPERATING_REF
+                and plan.get('task_ref') != OPERATING_TASK):
+            raise MissionDocumentResearchError('operating numeric strategy needs its exact owner-derived source plan')
         if isinstance(strategy, Mapping) and strategy.get("numeric_targets") is not None:
             from .directed_numeric_research import normalize_targets
-            if normalize_targets(strategy.get("numeric_targets")) != strategy.get("numeric_targets"):
+            from .operating_driver_units import CONTRACT_REF as OPERATING_REF
+            numeric_contract = OPERATING_REF if strategy['strategy_version'] == OPERATING_REF else 'directed-document-numeric:0.1'
+            if normalize_targets(strategy.get("numeric_targets"), contract_ref=numeric_contract) != strategy.get("numeric_targets"):
                 raise MissionDocumentResearchError("stored numeric target normalization differs")
         if not isinstance(strategy, Mapping):
             raise MissionDocumentResearchError("planner inquiry has no directed document strategy")
@@ -807,7 +829,7 @@ class MissionDocumentResearchAuthority:
             "model_execution": executions,
             "model_authority": model_authority,
             **({"numeric_authority": {
-                "contract_ref": "directed-document-numeric:0.1",
+                "contract_ref": (strategy['strategy_version'] if strategy['strategy_version'] == 'directed-document-operating-numeric:0.1' else "directed-document-numeric:0.1"),
                 **({"answer_contract_ref": SPOKEN_CONTRACT_REF}
                    if strategy["strategy_version"] == SPOKEN_CONTRACT_REF else {}),
                 "capability_upgrade_proofs":numeric_upgrades,
@@ -864,7 +886,7 @@ class MissionDocumentResearchAuthority:
         # Historical identities/replay remain governed by their original rules.
         if identity.get("numeric_authority") is not None:
             from .directed_numeric_research import assert_executable_target_periods
-            assert_executable_target_periods(identity["numeric_authority"]["targets"])
+            assert_executable_target_periods(identity["numeric_authority"]["targets"], contract_ref=identity["numeric_authority"]["contract_ref"])
         equivalent = self.equivalent_open_admission(identity)
         if equivalent is not None:
             raise MissionDocumentResearchEquivalentPending(equivalent)
