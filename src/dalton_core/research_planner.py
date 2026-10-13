@@ -457,6 +457,8 @@ def prompt_size_report(
     """
 
     prompt_bytes = len(build_prompt(state).encode("utf-8"))
+    from .planner_note_options import prompt_state
+    state, _ = prompt_state(state)
     top_level = sorted(
         ({"field": str(key), "bytes": _wire_bytes(value)}
          for key, value in state.items()),
@@ -1325,12 +1327,12 @@ def typed_note_directory_contract(state: Mapping[str, Any]) -> dict[str, str] | 
                 "targets": sorted(targets, key=canonical_json)})
     if not directory:
         return None
-    return {"rule_ref": "rule:research-plan-input-projection:typed-note-directory-1",
+    return {"rule_ref": "rule:research-plan-input-projection:typed-note-directory-2",
             "directory_hash": content_hash(sorted(directory, key=canonical_json))}
 
 
 def _projection_ref_for_state(state: Mapping[str, Any]) -> str:
-    return ("rule:research-plan-input-projection:typed-note-directory-1"
+    return ("rule:research-plan-input-projection:typed-note-directory-2"
             if _has_note_targets(state) else PROMPT_PROJECTION_REF)
 
 
@@ -1389,6 +1391,24 @@ def _history_note_prompt_schema(state: Mapping[str, Any]) -> dict[str, Any]:
 def build_prompt(state: Mapping[str, Any]) -> str:
     output_schema = _history_note_prompt_schema(state)
     note_original = "filing" if output_schema is not OUTPUT_SCHEMA else "10-K"
+    from .planner_note_options import prompt_state
+    rendered_state, option_count = prompt_state(state)
+    option_notice = ""
+    if option_count:
+        import copy
+        output_schema = copy.deepcopy(output_schema)
+        props = output_schema["properties"]["inquiries"]["items"]["properties"]["directed_document"]["properties"]
+        # Full targets remain accepted by the normal validator for original
+        # saved responses, but this prompt asks only for the compact choice.
+        props.pop("evidence_target", None)
+        props["evidence_target_ref"] = {"type": "string", "minLength": 1,
+            "description": "Copy one exact evidence_target_options.option_ref for this company/document/version; omit evidence_target."}
+        option_notice = (
+            "For evidence_target_options, copy its exact option_ref as directed_document.evidence_target_ref "
+            "and omit evidence_target. The system restores the complete original target and source lineage "
+            "from this exact full research state before validation. Each option retains its own filing, "
+            "period and purpose; do not borrow options across companies, documents or versions. Options "
+            "authorize only the listed note reading, not a numeric answer or new source authority.\n\n")
     validation_notice = (
         "initial_screen_validation_feedback: verified draft defects, not evidence or retry authority. "
         "Fix cited defects within normal gates; invent no facts or unrelated material requests. "
@@ -1450,7 +1470,7 @@ def build_prompt(state: Mapping[str, Any]) -> str:
           f"retrieval/context when warranted. Copy only an exact listed evidence_target: cited {note_original} "
           "diluted-EPS-numerator note text for its bound company/document/filing/period, not numeric/formula "
           "authority. Never retag it; omit for ordinary qualitative work.\n\n"
-        f"{numeric_notice}"
+        f"{option_notice}{numeric_notice}"
         "An unavailable_evidence_targets entry is an explicit authority gap, not a target you may select or a "
         "reason to infer a value from labels.\n\nNumeric questions require the original authority's source_grade: directed-document-numeric:0.1 for company-filed-document; directed-document-spoken-numeric:0.1 for earnings-call-transcript. Spoken answers preserve management attribution, exact quote and source-provided date (explicitly unknown if missing) and never become filed financial facts. Unknown grades cannot authorize numeric research. Numeric questions require typed targets and ALL "
         "numeric_targets: target_ref/metric_ref, question-scoped metric_definition {label,meaning}, "
@@ -1515,7 +1535,7 @@ def build_prompt(state: Mapping[str, Any]) -> str:
         "Inventing either voids the whole plan. Return fewer directives, never padding.\nReturn raw strict JSON "
         "matching OUTPUT_SCHEMA, no markdown fence and no prose outside it.\n"
         f"OUTPUT_SCHEMA={canonical_json(output_schema)}\n"
-        f"RESEARCH_STATE={canonical_json(state)}"
+        f"RESEARCH_STATE={canonical_json(rendered_state)}"
     )
 
 
@@ -1748,7 +1768,10 @@ def plan_from_response(
             except ValueError as exc:
                 raise ResearchPlanError(f"inquiry {index}: {exc}") from exc
             try:
-                strategy, _ = resolve_strategy(inquiry["directed_document"],
+                from .planner_note_options import expand_selection
+                directed = expand_selection(inquiry["directed_document"],
+                                             company_ref=company_ref, state=state)
+                strategy, _ = resolve_strategy(directed,
                                                company_ref=company_ref, state=state)
             except DocumentResearchStrategyError as exc:
                 raise ResearchPlanError(f"inquiry {index}: {exc}") from exc
