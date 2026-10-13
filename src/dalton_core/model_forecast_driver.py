@@ -3569,7 +3569,12 @@ def _cash_companion_definition(value: Mapping[str, Any]) -> dict[str, Any]:
 
     wire = validate_cash_flow_companion(value)
     lines = [{key: item[key] for key in item
-              if key not in {"source", "source_hash"}} for item in wire["lines"]]
+              if key not in {"source", "source_hash", "historical_base"}} for item in wire["lines"]]
+    if wire["schema_version"] == "cash-flow-companion-0.2":
+        for definition, item in zip(lines, wire["lines"]):
+            basis = item["historical_base"]
+            definition["historical_base_identity"] = (None if basis is None else {
+                key:basis[key] for key in ("rule_ref", "source_basis", "base_ref", "tie_out_concept")})
     return {
         key: (lines if key == "lines" else wire[key])
         for key in wire

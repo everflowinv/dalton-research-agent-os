@@ -158,3 +158,37 @@ class FiledTieCashBaseTests(unittest.TestCase):
             else:a['driver_ref']='concept:foreign'
             with self.subTest(wrong=wrong),self.assertRaises(ForecastModelValidationError):
                 validate_assumptions(body['cash_flow_companion'],[a])
+
+    def test_source_history_change_is_not_a_cash_method_topology_change(self):
+        from dalton_core.model_forecast_driver import _cash_companion_definition
+        inputs,spec,structure,_,_,source=fixture()
+        first=build_cash_flow_companion(spec,inputs,structure)
+        first_end=min(source['cells']);source['cells'][first_end]['value']='101'
+        source['duration_facts'][0]['value']='101'
+        second=build_cash_flow_companion(spec,inputs,structure)
+        self.assertNotEqual(first['content_hash'],second['content_hash'])
+        # The first frozen companion cannot share mutable filed cells/facts
+        # with a caller that prepares the next input snapshot.
+        from dalton_core.model_forecast_driver import validate_cash_flow_companion
+        validate_cash_flow_companion(first)
+        self.assertEqual(_cash_companion_definition(first),_cash_companion_definition(second))
+        # A different actual model choice still creates a distinct topology.
+        changed=copy.deepcopy(second);changed['specification']['lines'][0]['because']='Different model choice'
+        changed['specification_hash']=content_hash(changed['specification'])
+        changed['content_hash']=content_hash({k:v for k,v in changed.items()if k!='content_hash'})
+        self.assertNotEqual(_cash_companion_definition(first),_cash_companion_definition(changed))
+
+    def test_file_tie_identity_change_remains_distinct_even_if_amounts_equal(self):
+        from dalton_core.model_forecast_driver import _cash_companion_definition
+        inputs,spec,structure,_,_,source=fixture()
+        first=build_cash_flow_companion(spec,inputs,structure)
+        changed=copy.deepcopy(first);basis=changed['lines'][0]['historical_base']
+        basis['tie_out_concept']='other:reported-total'
+        basis['content_hash']=content_hash({k:v for k,v in basis.items()if k!='content_hash'})
+        changed['content_hash']=content_hash({k:v for k,v in changed.items()if k!='content_hash'})
+        self.assertNotEqual(_cash_companion_definition(first),_cash_companion_definition(changed))
+        # Changing identity here does not certify it against the old structure.
+        from dalton_core.cash_flow_filed_tie_base import validate
+        from dalton_core.model_forecast_driver import build_structure_drivers
+        with self.assertRaises(ForecastModelValidationError):
+            validate(changed,structure,build_structure_drivers(inputs,structure))

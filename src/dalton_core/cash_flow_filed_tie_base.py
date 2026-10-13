@@ -5,6 +5,7 @@ carried as a separate, non-forecast driver, and every computable formula period
 must agree exactly. The old formula-derived cash contract remains unchanged.
 """
 from __future__ import annotations
+from copy import deepcopy
 from datetime import date, timedelta
 from decimal import Decimal
 from typing import Any, Mapping, Sequence
@@ -124,7 +125,7 @@ def derive(structure: Mapping[str, Any], base_ref: str, cash_source: Mapping[str
     target_periods = sorted(set(by_end) | {str(c["period_end"]) for d in actual
         if d.get("statement") == "income" for c in d.get("history") or [] if c.get("period_start")})
     body = {"schema_version": "0.1", "rule_ref": RULE_REF, "source_basis": "independent_reported_tie",
-        "base_ref": base_ref, "tie_out_concept": source["concept"], "source": dict(source),
+        "base_ref": base_ref, "tie_out_concept": source["concept"], "source": deepcopy(dict(source)),
         "source_hash": content_hash(source), "driver": source_driver, "driver_hash": content_hash(source_driver),
         "comparisons": comparisons, "target_periods": target_periods,
         "cash_window_periods": [c["period_end"] for c in targets],
