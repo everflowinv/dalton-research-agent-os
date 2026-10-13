@@ -214,7 +214,7 @@ _COMPANY_CORE_FIELDS: tuple[str, ...] = (
     "filed_statement_figures", "reading_pipeline",
     "readable_documents", "readable_documents_summary",
     "document_execution_availability", "document_execution_failures", "numeric_reading_requirements", "canonical_document_questions",
-    "model_execution_failures", "model_execution_failure_summary", "memo_question_feedback", "initial_screen_validation_feedback", "initial_screen_quality_feedback",
+    "model_execution_failures", "model_execution_failure_summary", "model_history_note_priority", "model_history_note_priority_unavailable", "memo_question_feedback", "initial_screen_validation_feedback", "initial_screen_quality_feedback",
     "document_research_feedback_summary",
     "document_research_reopened", "document_research_reopened_omitted",
 )
@@ -975,6 +975,8 @@ def project_state_for_prompt(
                 ordered = sorted(
                     documents,
                     key=lambda document: (
+                        document.get("document_ref") in {o['document_ref'] for o in
+                            (company.get('model_history_note_priority') or {}).get('note_options',())},
                         document.get("document_ref") in reopened_refs,
                         str(document.get("doc_date") or ""),
                         str(document.get("document_ref") or ""),
@@ -1335,8 +1337,13 @@ def typed_note_directory_contract(state: Mapping[str, Any]) -> dict[str, str] | 
                 "targets": sorted(targets, key=canonical_json)})
     if not directory:
         return None
-    return {"rule_ref": "rule:research-plan-input-projection:typed-note-directory-2",
-            "directory_hash": content_hash(sorted(directory, key=canonical_json))}
+    result = {"rule_ref": "rule:research-plan-input-projection:typed-note-directory-2",
+              "directory_hash": content_hash(sorted(directory, key=canonical_json))}
+    priorities = [c['model_history_note_priority']['content_hash'] for c in state.get('companies',())
+                  if c.get('model_history_note_priority')]
+    if priorities:
+        result['model_history_note_priorities_hash'] = content_hash(priorities)
+    return result
 
 
 def _projection_ref_for_state(state: Mapping[str, Any]) -> str:
@@ -1356,6 +1363,8 @@ def _projection_hash_for_state(state: Mapping[str, Any]) -> str:
     if _has_note_targets(state):
         rule = {**rule, "ref": _projection_ref_for_state(state),
                 "typed_note_directory": "retain all normalized exact source/version/period targets before recent documents"}
+    if any(c.get('model_history_note_priority') for c in state.get('companies',())):
+        rule = {**rule, 'model_history_note_priority': 'retain exact source-replayed discrepancy and source-bound option refs'}
     return content_hash(rule)
 
 
@@ -1417,6 +1426,11 @@ def build_prompt(state: Mapping[str, Any]) -> str:
             "from this exact full research state before validation. Each option retains its own filing, "
             "period and purpose; do not borrow options across companies, documents or versions. Options "
             "authorize only the listed note reading, not a numeric answer or new source authority.\n\n")
+    if any(c.get('model_history_note_priority') for c in state.get('companies',())):
+        option_notice += (
+            "model_history_note_priority links a source-replayed formula/period failure to existing exact note option_refs. "
+            "Address that current model blocker before unrelated disclosure questions. Read its EPS-note numerator basis; "
+            "never change filed EPS/shares, invent a residual or treat this operations feedback as retry authority.\n\n")
     validation_notice = (
         "initial_screen_quality_feedback names current formal quality defects and exact material gaps; reuse existing requests under current permissions. It grants no new content repair attempt and is not financial evidence. "
         "initial_screen_validation_feedback: verified draft defects, not evidence or retry authority. "

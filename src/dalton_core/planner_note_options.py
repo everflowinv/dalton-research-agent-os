@@ -29,6 +29,15 @@ def prompt_state(state):
     result = copy.deepcopy(state)
     count = 0
     for company in result.get("companies", ()):
+        # The complete state keeps the financial-reader projection and its
+        # company-level operations feedback. Show a shared proof once, with
+        # an explicit link; never replace either in the execution state.
+        priority = company.get('model_history_note_priority')
+        financial = company.get('financial_model')
+        if (isinstance(priority, Mapping) and isinstance(financial, dict)
+                and financial.get('model_history_note_priority') == priority):
+            del financial['model_history_note_priority']
+            financial['model_history_note_priority_ref'] = priority['content_hash']
         for document in company.get("readable_documents", ()):
             targets = document.get("evidence_targets")
             if not isinstance(targets, list) or not targets:

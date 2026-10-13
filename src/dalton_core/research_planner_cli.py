@@ -344,6 +344,24 @@ def build_state(store: DaltonStore, missions: CoverageMissionAuthority,
         except Exception as exc:  # preserve ordinary planning, disclose unavailable original reads
             document_inventory = {"status": "unavailable", "reason": type(exc).__name__}
 
+    # Exact source-replayed history failures can point at already admitted
+    # reading capabilities. The hint creates no admission or repair permission.
+    from .model_history_note_priority import read as read_history_note_priority
+    for entry in checklist:
+        company_ref = entry['company_ref']
+        try:
+            priority = read_history_note_priority(missions=missions, mission=mission,
+                state_dir=state_dir, company_ref=company_ref, ticker=entry.get('ticker'),
+                documents=(document_inventory.get('readable_documents_by_company') or {}).get(company_ref,()),
+                failures=financial_models[company_ref].get('model_execution_failures',()))
+            if priority is not None:
+                financial_models[company_ref]['model_history_note_priority'] = priority
+            elif any('does not tie to filed history' in str(f.get('reason',''))
+                     for f in financial_models[company_ref].get('model_execution_failures',())):
+                financial_models[company_ref]['model_history_note_priority_unavailable'] = 'current_root_or_exact_note_target_not_proved'
+        except (OSError, ValueError, KeyError, TypeError, RuntimeError, sqlite3.Error) as exc:
+            financial_models[company_ref]['model_history_note_priority_unavailable'] = type(exc).__name__
+
     from .initial_screen_failure_feedback import read_feedback
     try:
         failure_config = json.loads((state_dir/'initial-screen-model-config.json').read_text())

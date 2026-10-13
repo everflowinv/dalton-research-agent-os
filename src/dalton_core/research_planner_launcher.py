@@ -386,6 +386,7 @@ class ResearchPlannerCoordinator:
         from .research_planner import TASK_HASH
         from .research_planner_cli import MAX_WORK_ORDER_PROMPT_BYTES, planner_input_byte_bound
         from .planner_structural_revalidation import CONTRACT as STRUCTURAL_REVALIDATION, input_signature
+        from .model_history_note_priority import signature as note_priority_signature
 
         model_path = getattr(self.launcher, "model_config_path", None)
         input_bound = (planner_input_byte_bound(state_dir=self.launcher.state_dir,
@@ -399,6 +400,7 @@ class ResearchPlannerCoordinator:
             "planner_task_hash": TASK_HASH,
             "planner_structural_revalidation": STRUCTURAL_REVALIDATION,
             "current_product_inputs": input_signature(self.store.connection),
+            "model_history_note_priority": note_priority_signature(self.store.connection, Path(self.store.path).parent),
             "planner_input_byte_bound": input_bound,
             # What is held, and what has been read out of it.
             "documents": count("SELECT COUNT(*) FROM coverage_mission_discovered_documents"),

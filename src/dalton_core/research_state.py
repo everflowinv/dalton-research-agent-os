@@ -104,9 +104,14 @@ def company_state(
     failed = compact_failures(document_research_feedback)
     if failed['failures']:
         extra['document_execution_failures'] = failed
-    for key in ("model_execution_failures", "model_execution_failure_summary"):
+    for key in ("model_execution_failures", "model_execution_failure_summary", "model_history_note_priority", "model_history_note_priority_unavailable"):
         if key in (financial_model or {}):
             extra[key] = (financial_model or {})[key]
+    priority = extra.get('model_history_note_priority')
+    if priority:
+        choices={(o['document_ref'],o['document_version_hash']) for o in priority['note_options']}
+        readable_documents=sorted(readable_documents,key=lambda d:
+            (d.get('document_ref'),d.get('document_version_hash')) not in choices)
     numeric = numeric_requirements(document_research_feedback)
     if numeric["requirements"]:
         extra["numeric_reading_requirements"] = numeric
@@ -471,7 +476,7 @@ def _material_subject(subject: Mapping[str, Any] | None) -> dict[str, Any] | Non
         **({'document_execution_failures': content_hash(subject['document_execution_failures'])}
            if 'document_execution_failures' in subject else {}),
         **({key: content_hash(subject[key]) for key in (
-            "model_execution_failures", "model_execution_failure_summary") if key in subject}),
+            "model_execution_failures", "model_execution_failure_summary", "model_history_note_priority") if key in subject}),
         **({"initial_screen_validation_feedback": sorted(item["semantic_hash"] for item in
             (subject["initial_screen_validation_feedback"].get("items") or []))}
            if (subject.get("initial_screen_validation_feedback") or {}).get("items") else {}),
