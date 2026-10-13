@@ -81,6 +81,19 @@ class AutomatedModelTests(unittest.TestCase):
             self.auth.observe(group,state='completed',reason='A later model exists.',evidence={'ref':'model:new','hash':'a'*64})
         self.assertEqual(latest(self.c,group['group_ref']),None)
 
+    def test_model_context_scopes_group_reads_and_preserves_exact_groups(self):
+        self.actual()
+        company = financial_fixture.ACN
+        expected = [g for g in groups(self.c) if g['company_ref'] == company]
+        self.assertEqual(groups(self.c, company_ref=company), expected)
+        self.assertEqual(groups(self.c, company_ref='company:absent'), [])
+        with patch('dalton_core.research_followup_automation.groups', wraps=groups) as read:
+            before = self.c.total_changes
+            context = model_redraft_context(self.c, company)
+            read.assert_called_once_with(self.c, company_ref=company)
+            self.assertEqual(self.c.total_changes, before)
+        self.assertEqual([g['group_ref'] for g in context['groups']], [g['group_ref'] for g in expected])
+
     def test_later_formal_model_without_exact_redraft_input_receipt_remains_pending(self):
         self.actual(); before=groups(self.c)
         self.f.record_spec()  # Formal new specification, but no consume receipt.

@@ -79,9 +79,9 @@ def reflection_route(connection, request):
         return 'needs_review'
 
 
-def groups(connection, *, include_human_closed=False):
+def groups(connection, *, include_human_closed=False, company_ref=None):
     output = {}
-    for request in requests(connection):
+    for request in requests(connection, company_ref=company_ref):
         if request['state'] in TERMINAL and not include_human_closed: continue
         # An actual human assignment is an instruction; automatic owner binding
         # at creation is not a human review decision.
@@ -121,7 +121,7 @@ def model_redraft_context(connection, company_ref):
     No record is added when there is no exact source-bound comparison.
     """
     entries=[]
-    for group in groups(connection):
+    for group in groups(connection, company_ref=company_ref):
         if group['company_ref'] != company_ref or group['route'] != 'model_redraft': continue
         comparisons=[]
         for item in group['requests']:
