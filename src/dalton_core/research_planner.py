@@ -331,12 +331,12 @@ OUTPUT_SCHEMA = {
                                 "required":["admission_ref","admission_hash","numeric_result_hash"],
                                 "properties":{k:{"type":"string"} for k in ("admission_ref","admission_hash","numeric_result_hash")}},
                             "replaces_numeric_rejection": {
-                                "description": "Required inside directed_document when continuing a matching numeric_reading_requirements entry; copy its entire four-field object exactly.",
+                                "description": "Required inside directed_document when continuing a matching numeric_reading_requirements entry; copy its entire four-field object exactly. Omit when using replaces_numeric_contract_failure: a period replacement continues its own failed numeric admission, not the earlier capability rejection.",
                                 "type":"object","additionalProperties":False,
                                 "required":["admission_ref","admission_hash","rejection_ref","rejection_hash"],
                                 "properties":{k:{"type":"string"} for k in ("admission_ref","admission_hash","rejection_ref","rejection_hash")}},
                             "replaces_numeric_contract_failure": {
-                                "description": "Copy an exact source-period replacement binding from document execution feedback. Keep its original question/source and all targets; only make formerly unspecified periods explicit from the original excerpts.",
+                                "description": "Copy an exact source-period replacement binding from document execution feedback. Keep its original question/source and all targets; only make formerly unspecified periods explicit from the original excerpts. Never combine with replaces_numeric_rejection or resumes_numeric_result in the same directed_document.",
                                 "type":"object", "additionalProperties":False,
                                 "required":["admission_ref","admission_hash","failure_ref","failure_hash"],
                                 "properties":{k:{"type":"string"} for k in ("admission_ref","admission_hash","failure_ref","failure_hash")}},
@@ -1546,6 +1546,7 @@ def build_prompt(state: Mapping[str, Any]) -> str:
         "Cleared/superseded failures are omitted. "
         "document_execution_failures preserves exact failed/recovery-pending executions, not answers or source absence. "
         "A replaces_numeric_contract_failure binding permits only one normal-plan source-period replacement: copy the entire binding inside directed_document, preserve the original question/wants/source and every target, and replace only the listed unspecified periods using explicit dates in the held excerpts. No renamed/rephrased duplicate, changed values, unit, metric or basis is permitted. This never retries or rewrites the failed task. "
+        "Choose the operation for the exact admission you are continuing: replaces_numeric_contract_failure cannot coexist with replaces_numeric_rejection or resumes_numeric_result in one directed_document. A failed numeric admission may follow an older capability rejection for the same question; when replacing its unspecified periods, copy only that failed admission's period-replacement binding, not its ancestor's rejection binding. If the supplied state does not prove which operation is eligible, omit that directed read and continue other actionable work. "
         "Use the existing bounded recovery or exact new-source/revision gates; do not buy an equivalent duplicate. "
         "document_research_feedback_summary aggregates tried history only to fit input; the summary is not a "
         "finding.\n\nContinue canonical_document_questions with exact canonical_question version_ref/content_hash "
