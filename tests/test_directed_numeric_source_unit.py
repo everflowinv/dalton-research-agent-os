@@ -111,6 +111,30 @@ class SourceUnitTests(unittest.TestCase):
         with self.assertRaises(Exception):ex.run_once(admission['id'])
         self.assertEqual((p.calls,v.calls),(1,1))
 
+    def test_rehashed_source_metadata_cannot_turn_filed_into_spoken_or_swap_review_actor_time(self):
+        from dalton_core.directed_numeric_source_unit import TABLE
+        from dalton_core.store import canonical_json
+        h,w,f,a,admission,ex,p,v,works,old,args=self.unit_fixture()
+        done=self.call(ex,admission);mapping=done['numeric_result']['source_unit_clarifications'][0]['mapping']
+        ref=mapping['figure_ref'];row=ex.connection.execute('SELECT * FROM '+TABLE+' WHERE figure_ref=?',(ref,)).fetchone()
+        h.corruptible_copy(ex.connection,TABLE)
+        for field,value in (('source_grade','management-spoken'),('source_grade','earnings-call-transcript'),
+                            ('review_ref','review:foreign'),('observed_by','automation:foreign'),
+                            ('created_at','2020-01-01T00:00:00+00:00')):
+            with self.subTest(field=field,value=value):
+                changed=json.loads(row['record_json']);changed[field]=value
+                changed['content_hash']=content_hash({k:v for k,v in changed.items() if k!='content_hash'})
+                ex.connection.execute('UPDATE '+TABLE+' SET record_json=?,content_hash=? WHERE figure_ref=?',
+                    (canonical_json(changed),changed['content_hash'],ref));ex.connection.commit()
+                with self.assertRaisesRegex(DirectedNumericError,'source metadata'):
+                    MissionFigureAuthorityResolver(ex.connection).figure(ref)
+                with self.assertRaisesRegex(DirectedNumericError,'source metadata'):
+                    verify(mapping,**{**args,'figure':changed})
+        ex.connection.execute('UPDATE '+TABLE+' SET record_json=?,content_hash=? WHERE figure_ref=?',
+            (row['record_json'],row['content_hash'],ref));ex.connection.commit()
+        self.assertEqual(ex.run_once(admission['id'])['numeric_result'],done['numeric_result'])
+        self.assertEqual((p.calls,v.calls),(1,1))
+
     def test_proof_rehash_foreign_source_and_missing_independent_prefix_refuse(self):
         h,w,f,a,admission,ex,p,v,works,old,args=self.unit_fixture()
         done=self.call(ex,admission);mapping=done['numeric_result']['source_unit_clarifications'][0]['mapping']

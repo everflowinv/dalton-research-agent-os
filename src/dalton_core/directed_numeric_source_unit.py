@@ -11,12 +11,36 @@ PREFIX = 'mission-document-figure:source-unit:'
 TABLE = 'mission_document_numeric_source_units'
 
 
+def _created_at(auth):
+    from datetime import datetime, timezone
+    return datetime.fromisoformat(auth['created_at']).astimezone(timezone.utc).isoformat(timespec='microseconds')
+
+
 def _identity(conflict):
     new=conflict['verified_answer']
     return {'schema_version': CONTRACT, 'company_ref': conflict['company_ref'],
         'document_ref': conflict['document_ref'], 'source_manifest_hash': conflict['source_manifest_hash'],
         'quote_id':conflict['answer_quote_id'], 'quote_hash':conflict['answer_quote_hash'],
         **{k: new[k] for k in ('metric_ref', 'period', 'as_reported_label', 'unit', 'currency', 'scale', 'basis')}}
+
+
+def _source_metadata(connection, auth):
+    """Rebuild metadata from this exact admission, not a nearby older review."""
+    import json
+    from .directed_numeric_executor import _admitted_source_binding
+    row=connection.execute('SELECT record_json,content_hash FROM mission_document_research_admissions WHERE admission_id=?',
+        (auth['admission_ref'],)).fetchone()
+    if row is None:raise DirectedNumericError('source unit original admission is absent')
+    admission=json.loads(row['record_json'])
+    if (canonical_json(admission)!=row['record_json'] or admission['id']!=auth['admission_ref']
+            or admission['content_hash']!=row['content_hash'] or row['content_hash']!=auth['admission_hash']
+            or content_hash({k:v for k,v in admission.items() if k!='content_hash'})!=row['content_hash']):
+        raise DirectedNumericError('source unit original admission binding differs')
+    source=_admitted_source_binding(connection,admission)
+    return {'company_ref':admission['company_ref'], 'review_ref':source['review_id'],
+        'document_ref':source['document_ref'],'source_manifest_hash':source['source_manifest_hash'],
+        'source_grade':source['source_grade'],'observed_by':admission['actor_ref'],
+        'created_at':_created_at(auth)}
 
 
 def candidate_figures(connection, admission, search_proof, draft, verifier):
@@ -106,6 +130,9 @@ def read(connection, figure_ref):
             or auth['id']!=row['authorization_ref']
             or {'kind':'source_unit_clarification','proof':mapping} not in auth['repair_evidence']):
         raise DirectedNumericError('source unit authorization binding differs')
+    metadata=_source_metadata(connection,auth)
+    if any(value[k]!=v for k,v in metadata.items()):
+        raise DirectedNumericError('source unit Figure source metadata differs from its original admission')
     # Full paid/source replay remains mandatory in the numeric receipt reader.
     # This resolver also refuses a self-rehashed typed value that differs from
     # the exact independently verified fact stored in that authorization.
@@ -152,6 +179,12 @@ def verify(mapping, *, figure, persisted=True, **kwargs):
     if canonical_json(rebuilt) != canonical_json(mapping):
         raise DirectedNumericError('source unit clarification does not replay')
     if persisted:resolver.verify_figure(figure)
+    if not persisted:
+        from .directed_numeric_executor import _admitted_source_binding
+        source=_admitted_source_binding(kwargs['connection'],kwargs['admission'])
+        if (figure['review_ref']!=source['review_id'] or figure['source_grade']!=source['source_grade']
+                or figure['observed_by']!=kwargs['admission']['actor_ref']):
+            raise DirectedNumericError('clarified Figure source metadata differs from its admitted original')
     if (figure['figure_id'] != rebuilt['figure_ref']
             or figure['company_ref'] != kwargs['admission']['company_ref']
             or figure['document_ref'] != rebuilt['conflict_proof']['document_ref']
@@ -185,7 +218,7 @@ def record(executor, *, works, figure, expected, **kwargs):
         **{k: expected[k] for k in ('quote_id','metric_ref','as_reported_label','period','value','unit','currency','scale','basis')},
         'citation_text': quotes(kwargs['search_proof'])[expected['quote_id']],
         'verified_by': DIRECTED_FIGURE_VERIFIER_REF, 'observed_by': admission['actor_ref'],
-        'created_at': executor.clock().isoformat(timespec='microseconds')}
+        'created_at': _created_at(auth)}
     value['content_hash'] = content_hash(value)
     verify(mapping, figure=value, persisted=False, connection=executor.connection, registry=executor.registry, **kwargs)
     with executor.authority._transaction() as cur:
