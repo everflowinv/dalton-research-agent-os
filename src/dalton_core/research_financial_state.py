@@ -16,7 +16,7 @@ def financial_state(connection: Any, company_ref: str,
         from .model_execution_failure_feedback import CONTRACT_REF, last_failures
         try:
             feedback = last_failures(connection, state_dir=state_dir,
-                                     company_ref=company_ref, checked_forecast=checked_forecast)
+                                     company_ref=company_ref, checked_forecast=checked_forecast, mission=mission)
         except (OSError, ValueError, RuntimeError, sqlite3.Error) as exc:
             feedback = {"contract_ref": CONTRACT_REF, "status": "unavailable",
                         "reason": "operations_failure_ledger_could_not_be_verified",

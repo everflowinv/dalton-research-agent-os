@@ -65,7 +65,8 @@ def _latest_spec_completion(connection: Any, company_ref: str) -> Mapping[str, A
 
 
 def last_failures(connection: Any, *, state_dir: str | Path, company_ref: str,
-                  checked_forecast: Mapping[str, Any] | None = None) -> dict[str, Any]:
+                  checked_forecast: Mapping[str, Any] | None = None,
+                  mission: Mapping[str, Any] | None = None) -> dict[str, Any]:
     if not isinstance(company_ref, str) or not company_ref or "|" in company_ref:
         raise ValueError("model execution feedback needs an exact company ref")
     path = Path(state_dir) / "lane-failure-ledger.sqlite"
@@ -123,6 +124,15 @@ def last_failures(connection: Any, *, state_dir: str | Path, company_ref: str,
                     "rule": chosen["rule"], "scope": "operations_last_failure_only",
                     "financial_evidence": False, "retry_authority": False,
                     "work_formal_binding": "not_linked_by_this_ledger"})
+                if lane == 'mission_model_forecast' and chosen['reason'].startswith('family-diagnostics:'):
+                    from .forecast_family_failure_feedback import read as read_family_feedback
+                    try:
+                        detail = read_family_feedback(connection, state_dir=state_dir,
+                            company_ref=company_ref, mission=mission, event=chosen)
+                        if detail is not None:
+                            items[-1]['family_partition_failures'] = detail
+                    except (OSError, ValueError, KeyError, TypeError, RuntimeError, sqlite3.Error) as exc:
+                        items[-1]['family_partition_feedback_unavailable'] = type(exc).__name__
             omitted = [event["content_hash"] for event in active[1:]]
             summaries.append({"lane": lane, "events_read": len(events),
                 "event_window_truncated": len(events) > MAX_EVENTS_PER_LANE,

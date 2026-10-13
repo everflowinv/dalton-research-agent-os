@@ -323,6 +323,9 @@ def run_model_forecast(
                 "forecast_status": "unavailable:economic_invariants",
                 "failure_reason": "; ".join(exc.report.reasons),
             })
+            detail = getattr(exc, 'family_partition_failures', None)
+            if detail is not None:
+                summary['family_partition_failures'] = detail
             return summary
         except ForecastDriverExecutionRefused as exc:
             # This report passed deterministic replay but failed publication.

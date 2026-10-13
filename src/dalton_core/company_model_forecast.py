@@ -193,6 +193,8 @@ def model_digest(
         digest_body["filed_execution_statement_scope_rule"] = EXECUTION_STATEMENT_SCOPE_RULE
         from .forecast_source_accuracy import RULE_REF as SOURCE_ACCURACY_RULE
         digest_body["filed_source_accuracy_rule"] = SOURCE_ACCURACY_RULE
+        from .forecast_family_failure_feedback import CONTRACT_REF as FAMILY_FEEDBACK_RULE
+        digest_body["filed_family_failure_feedback_rule"] = FAMILY_FEEDBACK_RULE
         from .company_financial_statement_structure import (
             CASH_LEAF_DURATION_UNIT_VALIDATION_REF, _TYPED_NOTE_STRUCTURE_VERSIONS,
         )

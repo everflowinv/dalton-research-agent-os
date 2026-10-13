@@ -5180,8 +5180,20 @@ class ForecastModelAuthority:
                     record, scope=model_statement_scope, **kwargs)
         candidate_report = evaluate_bound(
             wire, statement_rows=scoped_rows, solver_results=solver_results)
-        gate(self.store, candidate_report,
-             mission_version_ref=wire.get("mission_version_ref"))
+        try:
+            gate(self.store, candidate_report,
+                 mission_version_ref=wire.get("mission_version_ref"))
+        except Exception as exc:
+            from .economic_invariants import EconomicInvariantRefused
+            if isinstance(exc, EconomicInvariantRefused):
+                from .forecast_family_failure_feedback import build as family_feedback
+                try:
+                    exc.family_partition_failures = family_feedback(wire, scoped_rows, model_statement_scope)
+                except (ValueError, KeyError, TypeError, ForecastModelError):
+                    # Diagnostic failure cannot weaken or replace the original
+                    # economic refusal, nor authorize a retry.
+                    exc.family_partition_failures = None
+            raise
         statement_wire = sorted(
             [_statement_line_proof_row(row) for row in statement_rows],
             key=lambda row: (str(row.get("ingest_id") or ""),
