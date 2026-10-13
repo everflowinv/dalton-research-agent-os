@@ -2671,8 +2671,24 @@ class MissionSourceDiscoveryCoordinator:
         ):
             return None
         continuation=_next_page_binding(discoveries[0], envelope, self.plan)
+        def fresh_cursor(binding):
+            if binding is None:
+                return None
+            from .alphaengine_cursor_recovery import CURSOR_LIFETIME
+            try:
+                cursor_age = self.clock() - _parse_wire_time(envelope['created_at'])
+            except (KeyError, TypeError, ValueError):
+                return None
+            if cursor_age < timedelta(0):
+                return None
+            if cursor_age >= CURSOR_LIFETIME:
+                # The exact page is still evidence, but its opaque provider
+                # cursor is not reusable after selection consumed its TTL.
+                # The existing selection gate below still has to finish.
+                return {**binding, 'cursor': None}
+            return binding
         if self.plan['schema_version'] != DISCOVERY_PLAN_SCHEMA_VERSION_V6:
-            return continuation
+            return fresh_cursor(continuation)
         prior=discoveries[0]['parameters']; as_of=date.fromisoformat(prior['filters']['date_to'])
         spec=plan_spec(self.plan,spec_ref); variant_index=None
         for index in range(len(spec['query_variants'])):
@@ -2711,6 +2727,9 @@ class MissionSourceDiscoveryCoordinator:
             finished={*current,*self._quarantined_discoveries()}
             if discoveries[0]['id'] not in finished and envelope.get('source_record_refs'):
                 return None
+        # Selection can itself take time: recheck the exact source's age
+        # after it finishes, rather than freezing freshness before the wait.
+        continuation = fresh_cursor(continuation)
         if continuation is not None:
             return {**continuation,'variant_index':variant_index}
         # A page without a cursor advances only after candidate selection has
@@ -2865,6 +2884,13 @@ class MissionSourceDiscoveryCoordinator:
             verdict = self._login_failure_block(row, age)
             if verdict is not _NOT_A_LOGIN_FAILURE:
                 return verdict
+        if row['status'] == 'failed' and self.source_ref == ALPHAENGINE_SOURCE_REF:
+            from .alphaengine_cursor_recovery import expired_cursor_restart_available
+            if expired_cursor_restart_available(self, row):
+                # Only the latest exact cursor-bound terminal refusal gets
+                # this exception. The new cursor-free dispatch owns normal
+                # cadence, authorization, selection and budget thereafter.
+                return None
         if age < timedelta(days=retry_days):
             recover = getattr(self.search_launcher, "provider_recovery_available", None)
             if self.source_ref == WEB_SEARCH_SOURCE_REF and callable(recover):
