@@ -70,6 +70,13 @@ def normalizer_hash() -> str:
                          "supplementary_source_sha256": hashlib.sha256(Path(statement_companyfacts_context.__file__).read_bytes()).hexdigest()})
 
 
+def _native_unit_normalizer_hash() -> str:
+    from . import sec_native_filing_units
+    return content_hash({'domestic_normalizer_hash':normalizer_hash(),
+        'native_unit_contract':sec_native_filing_units.CONTRACT,
+        'native_unit_source_sha256':hashlib.sha256(Path(sec_native_filing_units.__file__).read_bytes()).hexdigest()})
+
+
 def _filing(connection: Any, ingest_id: str) -> dict[str, Any]:
     row = connection.execute("SELECT * FROM coverage_mission_statement_filings WHERE ingest_id=?", (ingest_id,)).fetchone()
     if row is None:
@@ -184,20 +191,34 @@ def prepare_context(connection: Any, state_dir: str | Path, ingest_id: str, *,
                         supplementary_original_revenue=revenue_proof,
                         reason="independent snapshot includes exact original revenue concept/duration/dimensions")
         from .sec_filing_units import supplemental_unit_lines, validate_unit_supplement
-        resolved, unit_proof = supplemental_unit_lines(connection, state_dir, filing, complete_lines)
+        from .sec_native_annual import ANNUAL_FORMS
+        from .sec_filing_units import unresolved_unit_refs
+        native_units = filing['form'] in ANNUAL_FORMS and bool(unresolved_unit_refs(complete_lines))
+        if native_units:
+            from .sec_native_filing_units import supplemental_native_unit_lines, CONTRACT
+            base.update(native_unit_contract=CONTRACT, normalizer_hash=_native_unit_normalizer_hash())
+            resolved, unit_proof = supplemental_native_unit_lines(connection, state_dir, filing, complete_lines)
+        else:
+            resolved, unit_proof = supplemental_unit_lines(connection, state_dir, filing, complete_lines)
         if unit_proof is not None:
             base.pop("mapping", None)
             base.update(kind="complete_snapshot", lines=resolved, mapping_hash=content_hash(resolved),
-                        supplementary_units=unit_proof,
                         reason="independent snapshot includes exact original XML unit/context/fact proofs")
+            base['supplementary_native_units' if native_units else 'supplementary_units'] = unit_proof
             if supplement is not None:
                 # Both original-source proofs must pass before composing final
                 # hashes. The normalizer's companyfacts source hash versions
                 # this new record; old contexts remain immutable and strict.
-                validate_unit_supplement(connection, base, filing)
-                base["supplementary_companyfacts"] = rebind_supplement_after_units(
-                    supplement, complete_lines, resolved, unit_proof, filing,
-                )
+                if native_units:
+                    from .sec_native_filing_units import validate_native_unit_supplement, rebind_companyfacts
+                    validate_native_unit_supplement(connection, base, filing)
+                    base['supplementary_companyfacts'] = rebind_companyfacts(
+                        supplement, complete_lines, resolved, unit_proof, filing)
+                else:
+                    validate_unit_supplement(connection, base, filing)
+                    base["supplementary_companyfacts"] = rebind_supplement_after_units(
+                        supplement, complete_lines, resolved, unit_proof, filing,
+                    )
         from .sec_filing_units import unresolved_unit_refs
         missing_units = unresolved_unit_refs(resolved)
         if missing_units:
@@ -239,6 +260,8 @@ def context_record(connection: Any, version_id: str) -> dict[str, Any]:
     validate_supplement(record, filing)
     from .sec_filing_units import validate_unit_supplement
     validate_unit_supplement(connection, record, filing)
+    from .sec_native_filing_units import validate_native_unit_supplement
+    validate_native_unit_supplement(connection, record, filing)
     from .statement_original_revenue_context import validate_revenue_supplement
     validate_revenue_supplement(connection, record, filing)
     if "unresolved_unit_refs" in record:
@@ -321,7 +344,7 @@ class StatementContextAuthority:
             cur.execute("INSERT OR IGNORE INTO statement_context_versions(version_id,ingest_id,status,record_json,content_hash,created_at) "
                         "VALUES(?,?,?,?,?,?)", (record["version_id"], ingest_id, record["status"], canonical_json(record),
                                                 record["content_hash"], datetime.now(timezone.utc).isoformat()))
-        from .sec_filing_units import open_unit_gap_request
+        from .sec_native_filing_units import open_unit_gap_request
         open_unit_gap_request(state_dir, _filing(self.connection, ingest_id), record)
         return record
 
@@ -355,7 +378,12 @@ def refresh_company_contexts(store: Any, state_dir: str | Path, company_ref: str
         if version_id:
             previous = context_record(connection, version_id)
             supplement = previous.get("supplementary_companyfacts") or {}
-            if (not force and previous.get("normalizer_hash") == contract_hash
+            from .sec_native_annual import ANNUAL_FORMS
+            from .sec_filing_units import unresolved_unit_refs
+            native = _filing(connection, ingest_id)['form'] in ANNUAL_FORMS
+            expected_hash = (_native_unit_normalizer_hash() if native and unresolved_unit_refs(base_statement_rows(connection, ingest_id))
+                             else contract_hash)
+            if (not force and previous.get("normalizer_hash") == expected_hash
                     and ((source is None and not supplement)
                          or (source is not None and supplement.get("raw_hash") == source["raw_hash"]))):
                 results.append({"ingest_id": ingest_id, "version_id": version_id,

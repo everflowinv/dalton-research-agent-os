@@ -19,6 +19,10 @@ def unit_gap_request_fields(filing, record):
     whole-file hash versions financial normalizer snapshots. No financial
     input identity should change merely to add scheduling opportunities.
     """
+    from .sec_native_annual import ANNUAL_FORMS
+    if filing['form'] in ANNUAL_FORMS:
+        from .sec_native_filing_units import unit_gap_request_fields as native
+        return native(filing, record)
     if record.get('status')!='available' or not (unresolved_unit_refs(record.get('lines')or[])or record.get('unresolved_unit_refs')):return None
     return dict(requester={'lane':'statement_context','product_ref':filing['ingest_id'],'run_ref':record['version_id'],'section':'exact_xml_units'},
         subject=filing['company_ref'],period=filing['report_date'],
@@ -88,9 +92,10 @@ def unit_input_still_current(connection, proof):
     """Recheck immutable input pointers; source/financial checks are not skipped."""
     from .statement_context import _latest
     identity=proof['unit_input']
-    row=connection.execute('SELECT company_ref,content_hash,accession,cik,report_date,filed,form FROM coverage_mission_statement_filings WHERE ingest_id=?',
+    row=connection.execute('SELECT company_ref,content_hash,accession,cik,report_date,filed,form,governance_ref FROM coverage_mission_statement_filings WHERE ingest_id=?',
                            (identity['ingest_ref'],)).fetchone()
-    if row is None or tuple(row)!=(proof['company_ref'],identity['filing_hash'],identity['accession'],identity['cik'],identity['period'],identity['filed'],identity['form']):return False
+    if row is None or tuple(row)[:7]!=(proof['company_ref'],identity['filing_hash'],identity['accession'],identity['cik'],identity['period'],identity['filed'],identity['form']):return False
+    governance_ref=row[7]
     if _latest(connection,identity['ingest_ref'])!=identity['context_ref']:return False
     row=connection.execute('SELECT record_json,content_hash FROM statement_context_versions WHERE version_id=?',
                            (identity['context_ref'],)).fetchone()
@@ -103,4 +108,4 @@ def unit_input_still_current(connection, proof):
     return wire.get('status')=='available' and unit_gap_request_fields({
         'company_ref':proof['company_ref'],'ingest_id':identity['ingest_ref'],
         'accession':identity['accession'],'cik':identity['cik'],'report_date':identity['period'],
-        'filed':identity['filed'],'form':identity['form']},wire)is not None
+        'filed':identity['filed'],'form':identity['form'],'governance_ref':governance_ref},wire)is not None

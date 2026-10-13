@@ -155,6 +155,10 @@ SEC_SPECS: Mapping[str, str] = {
     "sec_8k": "current-report-8k",
     "sec_10k": "annual-report-10k",
     "sec_10q": "quarterly-report-10q",
+    "sec_20f": "annual-report-20f",
+    "sec_20f_amendment": "annual-report-20f-amendment",
+    "sec_40f": "annual-report-40f",
+    "sec_40f_amendment": "annual-report-40f-amendment",
 }
 #: Data-item phrasings: what a passage says when it reports the item.  Keyed
 #: by a normalised item name; the item's own words are always included.
@@ -587,7 +591,7 @@ def evaluate_acceptance(state_dir: str | Path, request: Mapping[str, Any], *,
     if kind == "model":
         return {"met": False, "partial": False, "items": [], "reason": "模型数据由预测模型更新，不从资料中检索"}
     if kind == "document" and acceptance.get("unit_proof_rule_ref"):
-        from .sec_filing_units import unit_requirement_status
+        from .sec_native_filing_units import unit_requirement_status
         return unit_requirement_status(state_dir, request)
     if kind == "document" and acceptance.get("document_ref"):
         # F's event body: this exact document, read into the index.

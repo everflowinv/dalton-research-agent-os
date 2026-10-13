@@ -1362,7 +1362,7 @@ def run_model_spec(
             # asked for already does. Both are "nothing to decide".
             summary.update({"status": "idle", "spec_status": "nothing_to_decide"})
             return summary
-        from .sec_filing_units import prepare_model_unit_inputs
+        from .sec_native_filing_units import prepare_model_unit_inputs
         unit_inputs = prepare_model_unit_inputs(missions, state_dir, chosen)
         if unit_inputs["unresolved"]:
             summary.update({"status": "succeeded", "spec_status": "refused",
