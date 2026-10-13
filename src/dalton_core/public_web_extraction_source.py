@@ -504,6 +504,13 @@ def _render_json(decoded: str, *, byte_count: int) -> str:
     return "\n".join(lines)
 
 
+from .pure_source_parse_cache import cache_byte_parser
+
+
+@cache_byte_parser('public-web-pure-html-parse:1', eligible=lambda values:
+    isinstance(values['raw_media_type'], str)
+    and values['raw_media_type'].split(';', 1)[0].strip().lower()
+        in {'text/html', 'application/xhtml+xml'})
 def render_public_web_text(raw: bytes, *, raw_media_type: str,
                            max_source_chars: int = MAX_SOURCE_CHARS,
                            max_pdf_pages: int = MAX_PDF_PAGES,

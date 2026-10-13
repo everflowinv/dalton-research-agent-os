@@ -48,17 +48,25 @@ _UNIT_MATERIAL_ONLY_SOURCE_ALIAS = {
     "0e77fa7a3518ff1f77221495dd92b1cc8e65b4fed23d4d75debe58bb42575073": "f45625e3e5fe70f2fc6451224fbef90727d58eac4c5cb937736b721680dd14ff",
 }
 
+# Exact performance-only compatibility. The original parser body/defaults and
+# errors are byte-identical; only the pure byte-cache decorator/import changed.
+# Map directly to the already effective identity, never a permissive rule.
+_UNIT_PURE_PARSE_CACHE_SOURCE_ALIAS = {
+    "71014cf54ab1df0c288e40f9b4dedd14d00aca4bbe76d637d32a3a5d221a423c": "6af256a98dfdfd9f63d54b15259b8a2f29784bd3ba112775faed6fe9b799a91b",
+}
+
 
 def normalizer_hash() -> str:
     from .sec_financials_core import sec_financials_schema_hash
     from . import sec_financials_normalise, statement_companyfacts_context, sec_filing_units
+    unit_source = hashlib.sha256(Path(sec_filing_units.__file__).read_bytes()).hexdigest()
+    unit_identity = _UNIT_PURE_PARSE_CACHE_SOURCE_ALIAS.get(
+        unit_source, _UNIT_MATERIAL_ONLY_SOURCE_ALIAS.get(unit_source, unit_source))
     return content_hash({"rule_ref": NORMALIZER_REF,
                          "source_sha256": hashlib.sha256(Path(sec_financials_normalise.__file__).read_bytes()).hexdigest(),
                          "schema_hash": sec_financials_schema_hash(version=4),
                          "unit_rule_ref": sec_filing_units.RULE_REF,
-                         "unit_source_sha256": _UNIT_MATERIAL_ONLY_SOURCE_ALIAS.get(
-                             hashlib.sha256(Path(sec_filing_units.__file__).read_bytes()).hexdigest(),
-                             hashlib.sha256(Path(sec_filing_units.__file__).read_bytes()).hexdigest()),
+                         "unit_source_sha256": unit_identity,
                          "supplementary_source_sha256": hashlib.sha256(Path(statement_companyfacts_context.__file__).read_bytes()).hexdigest()})
 
 

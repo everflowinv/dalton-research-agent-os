@@ -9,6 +9,7 @@ from decimal import Decimal,InvalidOperation,localcontext
 from xml.etree import ElementTree as ET
 from typing import Any,Mapping,Sequence
 from .store import content_hash
+from .pure_source_parse_cache import cache_byte_parser
 LEGACY_RULE_REF='sec-filing-units:exact-definition-and-fact:1'
 RULE_REF=LEGACY_RULE_REF
 NUMERIC_RULE_REF='sec-filing-units:exact-definition-and-fact:2'
@@ -37,6 +38,7 @@ def _measure(node,scopes):
     if q.startswith('{'+ISO+'}') and re.fullmatch('[A-Z]{3}',q.split('}',1)[1]):return q.split('}',1)[1]
     raise FilingUnitError('unit measure is not a supported currency/share measure')
 
+@cache_byte_parser('sec-filing-units-pure-parse:1', byte_arguments=('raw','resource_raw'))
 def parse_filing_units(raw:bytes, *, resource_raw:bytes|None=None, rule_ref:str=LEGACY_RULE_REF)->dict[str,Any]:
     # Unversioned historical consumers retain exactly the v1 parse. New source
     # proofs opt into v2 and bind this choice for every future strong replay.
