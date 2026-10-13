@@ -94,6 +94,17 @@ class AutomatedModelTests(unittest.TestCase):
             self.assertEqual(self.c.total_changes, before)
         self.assertEqual([g['group_ref'] for g in context['groups']], [g['group_ref'] for g in expected])
 
+    def test_company_lane_without_selection_does_not_rescan_unrelated_history(self):
+        with patch('dalton_core.research_followup_automation.groups', side_effect=AssertionError('unrelated scan')):
+            for operation in ('dispatch_company_model_spec', 'dispatch_company_model_forecast', 'dispatch_company_dossier'):
+                self.assertEqual(self.auth.observe_lane(operation, {'status':'idle'}), [])
+
+    def test_company_lane_observation_uses_exact_company_scope(self):
+        self.actual()
+        with patch('dalton_core.research_followup_automation.groups', wraps=groups) as read:
+            self.auth.observe_lane('dispatch_company_model_spec', {'status':'launched','company_ref':financial_fixture.ACN})
+        self.assertTrue(all(call.kwargs.get('company_ref') == financial_fixture.ACN for call in read.call_args_list))
+
     def test_later_formal_model_without_exact_redraft_input_receipt_remains_pending(self):
         self.actual(); before=groups(self.c)
         self.f.record_spec()  # Formal new specification, but no consume receipt.

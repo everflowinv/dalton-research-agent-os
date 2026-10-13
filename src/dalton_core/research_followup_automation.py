@@ -276,7 +276,8 @@ class FollowupAutomationAuthority:
     def observe(self, group, *, state, reason, evidence=None):
         if state not in {'pending','running','waiting_budget','waiting_evidence','administrator','optional_feedback','completed','needs_review'} or not str(reason).strip():
             raise ValueError('followup automation needs an explicit declared state')
-        current=next((g for g in groups(self.connection) if g['group_ref']==group['group_ref']),None)
+        current=next((g for g in groups(self.connection, company_ref=group.get('company_ref'))
+                      if g['group_ref']==group['group_ref']),None)
         if current != group: raise ValueError('automation group source changed or human already decided')
         if state=='completed':
             if not evidence:raise ValueError('automatic completion requires an exact verified model redraft')
@@ -448,10 +449,17 @@ class FollowupAutomationAuthority:
                 'dispatch_company_model_forecast':{'model_redraft'},
                 'dispatch_company_dossier':{'dossier_repair'},'dispatch_industry_framework':{'framework_repair'}}
         if operation not in routes or not isinstance(result,Mapping):return []
+        company = None
+        if routes[operation] <= {'model_redraft', 'dossier_repair'}:
+            company = result.get('company_ref')
+            # A company-scoped lane without a selected company cannot observe
+            # any company's followup. Avoid scanning all reflection history.
+            if not isinstance(company, str) or not company:
+                return []
         output=[]; status=str(result.get('status') or '')
         lane_evidence={'kind':'lane_observation','operation':operation,'result_hash':content_hash(result),
                        'result':dict(result)}
-        for group in groups(self.connection):
+        for group in groups(self.connection, company_ref=company):
             if group['route'] not in routes[operation]:continue
             if group['route'] in {'model_redraft','dossier_repair'} and result.get('company_ref') != group['company_ref']:continue
             if group['route']=='framework_repair':
