@@ -6,7 +6,7 @@ from pathlib import Path
 from dalton_core.mission_quality_score_lane import pending_targets, run_digest
 from dalton_core.research_product_quality import product_artefact, product_quality
 from dalton_core.research_quality_rubrics import rubric
-from dalton_core.research_quality_score import QualityScoreAuthority, run_deterministic
+from dalton_core.research_quality_score import QualityScoreAuthority, run_deterministic, SCORER_VERSION
 from dalton_core.store import DaltonStore
 
 
@@ -66,15 +66,19 @@ class ProductQualityTests(unittest.TestCase):
           CREATE TABLE company_dossier_versions(company_ref TEXT,record_json TEXT,created_at TEXT);
           CREATE TABLE debate_map_versions(subject_ref TEXT,record_json TEXT,created_at TEXT);
           CREATE TABLE event_judgements(company_ref TEXT,record_json TEXT,created_at TEXT);
-          CREATE TABLE research_quality_score_versions(target_ref TEXT,target_hash TEXT,rubric_ref TEXT,rubric_hash TEXT,judge_status TEXT);
+          CREATE TABLE research_quality_score_versions(target_ref TEXT,target_hash TEXT,rubric_ref TEXT,rubric_hash TEXT,judge_status TEXT,scorer_version TEXT);
         """)
         for table,kind in (("company_dossier_versions","company_dossier"),("debate_map_versions","debate_map"),("event_judgements","event_judgement")):
             record={"id":kind+":v1","content_hash":"a"*64}
             core.execute(f"INSERT INTO {table} VALUES(?,?,?)",("company:SYN",json.dumps(record),"2026-10-09"))
         self.assertEqual({x["rubric"] for x in pending_targets(core)}, {"company_dossier","debate_map","event_judgement"})
         standard = rubric("debate_map")
-        core.execute("INSERT INTO research_quality_score_versions VALUES(?,?,?,?,?)",("debate_map:v1","a"*64,standard.rubric_ref,"old-rules","scored"))
+        core.execute("INSERT INTO research_quality_score_versions VALUES(?,?,?,?,?,?)",("debate_map:v1","a"*64,standard.rubric_ref,"old-rules","scored",SCORER_VERSION))
         self.assertEqual(len(pending_targets(core)),3)
-        core.execute("INSERT INTO research_quality_score_versions VALUES(?,?,?,?,?)",("debate_map:v1","a"*64,standard.rubric_ref,standard.content_hash,"scored"))
+        core.execute("INSERT INTO research_quality_score_versions VALUES(?,?,?,?,?,?)",("debate_map:v1","a"*64,standard.rubric_ref,standard.content_hash,"scored","historical-scorer"))
+        pending=pending_targets(core)
+        self.assertEqual(len(pending),3)
+        self.assertTrue(next(x for x in pending if x['rubric']=='debate_map')['deterministic_refresh'])
+        core.execute("INSERT INTO research_quality_score_versions VALUES(?,?,?,?,?,?)",("debate_map:v1","a"*64,standard.rubric_ref,standard.content_hash,"scored",SCORER_VERSION))
         self.assertEqual(len(pending_targets(core)),2)
         self.assertNotEqual(run_digest("same","a"*64,"initial_screen"),run_digest("same","a"*64,"initial_screen_strl"))
