@@ -43,3 +43,26 @@ class QuestionGapTests(unittest.TestCase):
                 lambda v:v.update(items=[]),lambda v:v.update(material_hash='f'*64)):
             bad=copy.deepcopy(proof);mutate(bad)
             with self.assertRaises(ValueError):validate(bad,frozen=f,answers=a,calls=c)
+
+    def test_old_unknown_without_action_preserves_full_run_refusal_and_fees(self):
+        from types import SimpleNamespace
+        from tests.test_investment_memo_group_early_validation import EarlyMemoValidationTests
+        from tests.test_investment_memo_draft import FakeModel
+        from dalton_core.investment_memo_cli import run_memo
+        fixture=EarlyMemoValidationTests()
+        frozen=fixture.frozen()
+        frozen['mission'].update(id='mission:exact',content_hash='a'*64)
+        frozen['playbook'].update(id='playbook:exact',content_hash='b'*64)
+        payloads=[fixture.payload(i) for i in range(4)]
+        payloads[1]['key_questions'][0].update(answer='',refs=[],unknown=True,falsifier='')
+        model=FakeModel(payloads);verifier=FakeModel([])
+        result=run_memo(store=SimpleNamespace(),frozen=frozen,model=model,verifier_model=verifier)
+        self.assertEqual(result['memo_status'],'deterministic_gate_failed')
+        self.assertEqual(result['status'],'refused')
+        self.assertEqual(result['cost_micros'],40)
+        self.assertEqual(len(model.calls),4);self.assertEqual(verifier.calls,[])
+        self.assertNotIn('key_question_gaps',result)
+        unavailable=result['key_question_gaps_unavailable']
+        self.assertEqual(unavailable['contract_ref'],CONTRACT_REF)
+        self.assertEqual(unavailable['unknown_question_refs'],['memo_q04'])
+        self.assertIn('missing research action',unavailable['reason'])

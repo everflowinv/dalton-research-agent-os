@@ -642,10 +642,20 @@ def run_memo(*, store: DaltonStore, frozen: Mapping[str, Any], model: Any, verif
                 "reason": str(exc), "cost_micros": cost_micros}
     checks = _checks(sections, answers, frozen["material"])
     if any(check["status"] != "pass" for check in checks):
-        from .investment_memo_question_gaps import build as question_gaps
-        return {"status": "refused", "memo_status": "deterministic_gate_failed", "checks": checks,
-                "key_question_gaps": question_gaps(frozen, answers, calls),
-                "cost_micros": cost_micros}
+        from .investment_memo_question_gaps import CONTRACT_REF as gap_contract, build as question_gaps
+        refused = {"status": "refused", "memo_status": "deterministic_gate_failed", "checks": checks,
+                   "cost_micros": cost_micros}
+        try:
+            refused["key_question_gaps"] = question_gaps(frozen, answers, calls)
+        except (ValueError, KeyError, TypeError) as exc:
+            # Older valid group answers can omit an unknown's research action.
+            # Summary enrichment cannot change the original refusal, purchase
+            # a correction, or promote incomplete evidence to an available gap.
+            refused["key_question_gaps_unavailable"] = {
+                "contract_ref": gap_contract, "reason": str(exc)[:300],
+                "unknown_question_refs": [str(answer.get("question_ref")) for answer in answers
+                    if isinstance(answer, Mapping) and answer.get("unknown") is True][:12]}
+        return refused
     summary = "Investment Memo candidate; human approval is still required."
     fields = {"kind": "investment_memo", "subject_ref": company["company_ref"],
               "mission_version_ref": mission["id"], "mission_version_hash": mission["content_hash"],
