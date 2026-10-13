@@ -186,6 +186,8 @@ class ValidatorRecoveryTests(unittest.TestCase):
                     'summary':{'status':'held','reason_code':reason,'drafted':self.f.company}}
                 coordinator=InitialScreenCoordinator(store=self.f.store,launcher=launcher,clock=self.model.clock)
                 signature={**coordinator._signature(),'validator_recheck':rec.validator_fingerprint()}
+                from dalton_core.initial_screen_content_maintenance import CONTRACT
+                signature['content_maintenance']=CONTRACT
                 feedback._write(launcher.tickets_dir/'latest.json',{'ticket_ref':self.q.ticket['id'],
                     'idle_signature':signature,'idle_at':self.model.clock().isoformat()})
                 self.assertEqual(coordinator.dispatch_once()['status'],'held')

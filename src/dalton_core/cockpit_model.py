@@ -2608,6 +2608,15 @@ class CockpitModel:
             max_total_lease_seconds=lease_seconds * 2,
         ) as scheduler:
             work = _preserve_legacy_model_spec_transport_work(scheduler, work)
+            from .initial_screen_content_maintenance import MARKER as SCREEN_MAINTENANCE_MARKER, Authority as ScreenMaintenanceAuthority
+            if SCREEN_MAINTENANCE_MARKER in work.metadata.get('request_id', ''):
+                authority = getattr(self, '_initial_screen_content_maintenance_authority', None)
+                if not isinstance(authority, ScreenMaintenanceAuthority):
+                    raise CockpitModelError('screen content maintenance requires the live owner authority')
+                try:
+                    authority.verify_child(scheduler, work)
+                except (ValueError, KeyError, TypeError, OSError, sqlite3.Error) as exc:
+                    raise CockpitModelError('screen content maintenance authority differs: '+str(exc)) from exc
             from .investment_memo_terminal_maintenance import MARKER as MEMO_TERMINAL_MARKER, Authority as MemoTerminalAuthority
             from .coverage_mission import CoverageMissionError
             if MEMO_TERMINAL_MARKER in work.metadata.get("request_id", ""):

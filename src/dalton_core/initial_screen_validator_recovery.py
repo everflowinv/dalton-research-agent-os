@@ -217,6 +217,7 @@ def verifier(result, *, model, mission, state, summary_dir=None):
     if [work['id'] for work in current_works]!=[slot[0]['id'] for slot in result['slots'].values()]:
         raise ValueError('initial-screen verifier inventory changed before admission')
     routes=[slot[2]['route_decision_ref'] for role,slot in result['slots'].items() if not role.startswith('verify:')]
+    routes+=result.get('maintenance_route_refs',[])
     if role in result['slots']:
         work,value,call=result['slots'][role]
         if work['question']!=prompt or sorted(work['metadata'].get('producer_route_decision_refs',[]))!=sorted(set(routes)):
@@ -303,7 +304,11 @@ def read_feedback(authority, *, state, mission, model, company_ref):
                 raise ValueError('initial-screen recheck completion identity differs')
             if latest.get('mission_version_ref')==mission['id'] and datetime.fromisoformat(latest['created_at'])>=datetime.fromisoformat(ticket['completed_at']):
                 return {'status':'cleared_by_published_product','items':[]}
-        current=qualify(state=state,binding=record['binding'],previous=record['previous'],mission=mission,model=model,authority=authority)['record']
+        reconstructed=qualify(state=state,binding=record['binding'],previous=record['previous'],mission=mission,model=model,authority=authority)
+        from .initial_screen_content_maintenance import read_feedback as maintenance_feedback
+        maintained=maintenance_feedback(authority,state=state,mission=mission,model=model,original=reconstructed)
+        if maintained is not None:return maintained
+        current=reconstructed['record']
         if current!=record:raise ValueError('initial-screen current diagnostic proof differs')
         if not current['findings']:return {'status':'deterministic_pass_verifier_pending','items':[]}
         from .initial_screen_failure_feedback import _compact_findings

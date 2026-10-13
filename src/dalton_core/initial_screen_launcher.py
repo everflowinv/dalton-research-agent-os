@@ -307,6 +307,8 @@ class InitialScreenCoordinator:
         if last.get('reason_code')=='initial_screen_unchanged_failure' or guarded_failure:
             from .initial_screen_validator_recovery import validator_fingerprint
             signature['validator_recheck']=validator_fingerprint()
+            from .initial_screen_content_maintenance import CONTRACT as CONTENT_MAINTENANCE_CONTRACT
+            signature['content_maintenance']=CONTENT_MAINTENANCE_CONTRACT
         if resumed_from is None and latest is not None and latest.get("idle_signature") == signature:
             held_since = latest.get("idle_at")
             if held_since:

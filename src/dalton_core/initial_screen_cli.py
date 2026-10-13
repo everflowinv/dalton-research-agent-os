@@ -881,7 +881,18 @@ def _run_strl_body(
                     summary.update(reason_code='initial_screen_revalidated_content_refused',
                         findings=receipt['findings'][:40],failure_reason='当前完整核验仍拒绝：'+
                         '、'.join(sorted({str(row.get('code')) for row in receipt['findings']})))
-                    return summary
+                    from . import initial_screen_content_maintenance as maintenance
+                    try:
+                        result=maintenance.run(result,model=model,state=state,mission=mission,
+                            authority=deliverable_authority,summary_dir=args.summary_dir)
+                        summary['content_maintenance']={'contract_ref':maintenance.CONTRACT,
+                            'permission_ref':maintenance.permission(result),'findings':result['record']['findings'][:40]}
+                    except (*recovery.PROOF_ERRORS,CockpitModelError) as exc:
+                        summary['content_maintenance']={'status':'refused','reason':str(exc)[:600]}
+                        return summary
+                    if result['record']['findings']:
+                        summary['findings']=result['record']['findings'][:40]
+                        return summary
                 verdict,verified_call=recovery.verifier(result,model=model,mission=mission,state=state,summary_dir=args.summary_dir)
                 if verdict['verdict']!='pass':
                     summary.update(reason_code='initial_screen_revalidated_verifier_refused',
