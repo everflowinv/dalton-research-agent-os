@@ -206,3 +206,19 @@ class CashRatioApplicabilityTests(unittest.TestCase):
         structure,_=materialize_financial_statement_structure(spec,inputs)
         error=proof_for(inputs,spec,structure)
         self.assertNotIn('nci',error.proof['allowed_base_refs'])
+
+    def test_same_input_legacy_companion_definition_is_not_a_source_hash_cache_hit(self):
+        from dalton_core.model_forecast_driver import validate_cash_flow_companion
+        inputs,spec,structure,_,_,_=filed_fixture()
+        current=build_cash_flow_companion(spec,inputs,structure)
+        self.assertEqual(current['schema_version'],'cash-flow-companion-0.2')
+        legacy=copy.deepcopy(current);legacy['schema_version']='cash-flow-companion-0.1'
+        for line in legacy['lines']:line.pop('historical_base')
+        legacy['content_hash']=content_hash({k:v for k,v in legacy.items()if k!='content_hash'})
+        validate_cash_flow_companion(legacy)  # Exact closed legacy wrapper/hash.
+        self.assertEqual(legacy['income_structure_hash'],current['income_structure_hash'])
+        self.assertEqual(legacy['financial_input_hash'],current['financial_input_hash'])
+        before=canonical_json(inputs)
+        self.assertTrue(cash_companion_topology_changed({'cash_flow_companion':legacy},spec,inputs,structure))
+        self.assertFalse(cash_companion_topology_changed({'cash_flow_companion':current},spec,inputs,structure))
+        self.assertEqual(canonical_json(inputs),before)

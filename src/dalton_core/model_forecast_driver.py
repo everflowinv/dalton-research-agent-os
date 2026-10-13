@@ -3596,9 +3596,8 @@ def _cash_companion_definition(value: Mapping[str, Any]) -> dict[str, Any]:
 def cash_companion_topology_changed(prior, spec, table, structure):
     held=prior.get('cash_flow_companion')
     if not isinstance(held, Mapping):return False
-    if (held.get('income_structure_hash')==structure.get('content_hash')
-            and held.get('financial_input_hash')==content_hash({'cash_flow_inputs':list(table.get('cash_flow_inputs')or [])})):
-        return False
+    # Equal source hashes do not prove equal calculation contracts. Rebuild
+    # from the current in-memory authority, including same-input upgrades.
     current=build_cash_flow_companion(spec,table,structure)
     return _cash_companion_definition(held)!=_cash_companion_definition(current)
 
