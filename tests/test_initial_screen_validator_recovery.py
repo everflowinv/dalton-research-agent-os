@@ -103,7 +103,7 @@ class ValidatorRecoveryTests(unittest.TestCase):
         self.assertEqual(publish.call_args.kwargs['verdict']['verdict'],'pass')
     def test_coordinator_validator_change_wakes_old_hold_once_without_adding_retry_authority(self):
         from dalton_core.initial_screen_launcher import InitialScreenCoordinator
-        launcher=mock.Mock();launcher.tickets_dir=self.state/'initial-screens';launcher.status.return_value={'id':'initial-screen:'+'b'*24,'status':'succeeded','summary':{'status':'held','reason_code':'initial_screen_unchanged_failure'}}
+        launcher=mock.Mock();launcher.tickets_dir=self.state/'initial-screens';launcher.state_dir=self.state;launcher.status.return_value={'id':'initial-screen:'+'b'*24,'status':'succeeded','summary':{'status':'held','reason_code':'initial_screen_unchanged_failure'}}
         coordinator=InitialScreenCoordinator(store=self.f.store,launcher=launcher,clock=self.model.clock)
         old=coordinator._signature();feedback._write(launcher.tickets_dir/'latest.json',{'ticket_ref':launcher.status.return_value['id'],'idle_signature':old,'idle_at':self.model.clock().isoformat()})
         launcher.start.return_value={'id':'initial-screen:'+'c'*24,'started_at':self.model.clock().isoformat()}
@@ -140,8 +140,8 @@ class ValidatorRecoveryTests(unittest.TestCase):
     def test_natural_coordinator_to_cli_to_original_verifier_has_no_new_draft_or_repair(self):
         from dalton_core.initial_screen_launcher import InitialScreenCoordinator
         args=SimpleNamespace(dry_run=False,as_of=None,summary_dir=str(self.q.path),timeout_seconds=180)
-        before=len(self.f.adapter.served);launcher=mock.Mock();launcher.tickets_dir=self.state/'initial-screens'
-        launcher.status.return_value={'id':self.q.ticket['id'],'status':'failed','summary':{'status':'failed'}}
+        before=len(self.f.adapter.served);launcher=mock.Mock();launcher.tickets_dir=self.state/'initial-screens';launcher.state_dir=self.state
+        launcher.status.return_value={'id':self.q.ticket['id'],'status':'failed','summary':{'status':'failed','drafted':self.f.company}}
         coordinator=InitialScreenCoordinator(store=self.f.store,launcher=launcher,clock=self.model.clock)
         feedback._write(launcher.tickets_dir/'latest.json',{'ticket_ref':self.q.ticket['id'],'idle_signature':coordinator._signature(),'idle_at':self.model.clock().isoformat()})
         results=[]

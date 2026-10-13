@@ -296,7 +296,12 @@ class InitialScreenCoordinator:
         signature = self._signature()
         # A validator change wakes only an existing failed/held screen for
         # exact local revalidation. It is not a new drafting/repair permission.
-        if (result.get('last') or {}).get('summary_status') in {'failed','held'}:
+        last=result.get('last') or {}
+        company=(last.get('drafted') or {}).get('company_ref')
+        from .initial_screen_failed_input import _path as failed_input_path
+        guarded_failure=(last.get('summary_status')=='failed' and isinstance(company,str)
+            and failed_input_path(self.launcher.state_dir,company).is_file())
+        if last.get('reason_code')=='initial_screen_unchanged_failure' or guarded_failure:
             from .initial_screen_validator_recovery import validator_fingerprint
             signature['validator_recheck']=validator_fingerprint()
         if resumed_from is None and latest is not None and latest.get("idle_signature") == signature:
