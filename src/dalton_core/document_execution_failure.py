@@ -65,6 +65,13 @@ def failure_from_observations(connection, admission, observations):
     diagnostic = (envelope.get('metadata') or {}).get('rejected_model_output') or {}
     error_message = (diagnostic.get('error_message') if diagnostic.get('diagnostic_only') is True
                      else (envelope.get('error') or {}).get('message'))
+    if error_code == 'NUMERIC_REPEATED_CONTRACT_FAILURE':
+        from .directed_numeric_failure_diagnostics import repeated_before_admission
+        repeated = repeated_before_admission(connection, proof_work['work_order'],
+            before_attempt=formal['attempt_number'])
+        if repeated != envelope.get('metadata', {}).get('numeric_repeated_contract_failure'):
+            raise ValueError('numeric repeated failure feedback proof differs')
+        error_message = repeated['diagnostic']
     formal_ref = formal.get('id', formal.get('result_record_id'))
     formal_hash = _formal_hash(formal)
     result_ref, result_hash = envelope['id'], formal['result_envelope_hash']
@@ -89,6 +96,20 @@ def failure_from_observations(connection, admission, observations):
         'recovery': {key: recovery.get(key) for key in ('status', 'reason', 'retry_at', 'deadline')},
         'created_at': formal['created_at'],
         'meaning': 'Execution failed or awaits its existing recovery; no answer or source absence is established. Do not buy a duplicate inquiry.'}
+    if admission.get('numeric_authority'):
+        from .directed_numeric_research import unexecutable_period_targets
+        missing = unexecutable_period_targets(admission['numeric_authority']['targets'])
+        body['numeric_failure_diagnostics'] = {
+            'error_code': error_code, 'diagnostic': str(error_message)[:1000] if error_message else None,
+            'unexecutable_period_targets': missing,
+            'label_requirement': 'Use a verbatim line label contained in the exact excerpt, not a translation or a restated amount.',
+            'next_action': ('Keep the exact question/source and all target fields; specify source-supported periods for the listed targets in a bound replacement plan.'
+                if missing else 'Read the retained exact answer and source; correct the typed error through existing authorized recovery only. Do not repeat the same question/failure.')}
+        if missing:
+            body['numeric_failure_diagnostics']['replacement_template'] = {
+                'question': admission['planner_inquiry']['question'],
+                'wants': admission['planner_inquiry']['wants'],
+                'directed_document': admission['planner_inquiry']['directed_document']}
     return {**body, 'content_hash': content_hash(body)}
 
 
@@ -112,5 +133,6 @@ def compact_failures(feedback):
               'formal_result_hash', 'result_envelope_hash',
               'question', 'stage', 'execution_state', 'error_code', 'error_message',
               'error_message_hash', 'recovery', 'content_hash')
-    return {'failures': [{key: item[key] for key in fields} for item in rows[:3]],
+    fields += ('numeric_failure_diagnostics', 'replaces_numeric_contract_failure')
+    return {'failures': [{key: item[key] for key in fields if key in item} for item in rows[:3]],
             'omitted_count': len(rows[3:]), 'omitted_hash': content_hash(rows[3:])}

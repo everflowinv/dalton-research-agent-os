@@ -551,6 +551,38 @@ class RoutedTranscriptPolishModelWorker:
         )
         route_replayed = recovery_route is not None
         chain_observed_provider = False
+        if recovery_route is None and work.metadata.get('numeric_contract_ref') == 'directed-document-numeric:0.1':
+            from .directed_numeric_research import unexecutable_period_targets
+            missing = unexecutable_period_targets(work.metadata['numeric_targets'])
+            if missing:
+                # Existing paid routes still replay/account normally above.
+                # An immutable historical target cannot be repaired by a new
+                # provider attempt that is required to copy it unchanged.
+                result = self._control_result(work, attempt_number,
+                    code='NUMERIC_TARGET_PERIOD_UNSPECIFIED', status='failed')
+                wire = result.to_dict()
+                wire['error']['message'] = 'Specify the exact source-supported year or quarter/half-year in a replacement plan; do not infer a period or retry this frozen target.'
+                wire['metadata']['unexecutable_period_targets'] = missing
+                result = ResultEnvelope.from_dict(wire)
+                completion = self.scheduler.complete(work.id, attempt_number,
+                    self.worker_ref, lease['lease_token'], result,
+                    idempotency_key=f'{self.namespace}-complete:{work.id}:{attempt_number}')
+                return {'status': 'failed', 'work_order_ref': work.id,
+                    'result': result.to_dict(), 'completion': completion}
+            from .directed_numeric_failure_diagnostics import repeated_before_admission
+            repeated = repeated_before_admission(self.scheduler.connection,
+                work.to_dict(), before_attempt=attempt_number)
+            if repeated:
+                result = self._control_result(work, attempt_number,
+                    code='NUMERIC_REPEATED_CONTRACT_FAILURE', status='failed')
+                wire = result.to_dict()
+                wire['metadata']['numeric_repeated_contract_failure'] = repeated
+                result = ResultEnvelope.from_dict(wire)
+                completion = self.scheduler.complete(work.id, attempt_number,
+                    self.worker_ref, lease['lease_token'], result,
+                    idempotency_key=f'{self.namespace}-complete:{work.id}:{attempt_number}')
+                return {'status':'failed', 'work_order_ref':work.id,
+                    'result':result.to_dict(), 'completion':completion}
         if recovery_route is not None:
             route = recovery_route
             profile = self.router.get_profile(
@@ -906,11 +938,15 @@ class RoutedTranscriptPolishModelWorker:
                 self._parse_candidate(text, work)
             except Exception as exc:
                 output_error = type(exc).__name__
+                from .directed_numeric_failure_diagnostics import prior_same_failure
+                repeated = prior_same_failure(self.scheduler.connection, work.to_dict(),
+                    before_attempt=attempt_number, error_type=type(exc).__name__,
+                    message=str(exc))
                 result = self._control_result(
                     work,
                     attempt_number,
                     code="MODEL_OUTPUT_CONTRACT_REJECTED",
-                    status=self._bounded_failure_status(lease),
+                    status="failed" if repeated else self._bounded_failure_status(lease),
                     invocation_ref=invocation.id,
                     route_ref=route["id"],
                     usage_refs=adapter_result.usage_refs,
@@ -923,6 +959,7 @@ class RoutedTranscriptPolishModelWorker:
                 rejected = result.to_dict()
                 rejected["metadata"] = {
                     **dict(result.metadata),
+                    **({"numeric_repeated_contract_failure": repeated} if repeated else {}),
                     "rejected_model_output": {
                         "diagnostic_only": True,
                         "adapter_result_ref": adapter_result.id,

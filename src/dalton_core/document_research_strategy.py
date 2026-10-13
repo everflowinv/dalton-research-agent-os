@@ -27,7 +27,7 @@ _STRATEGY_REQUIRED_FIELDS = frozenset({
     "strategy_version", "document_ref", "document_version_hash",
     "query_terms", "query_rationale",
 })
-STRATEGY_FIELDS = _STRATEGY_REQUIRED_FIELDS | {"evidence_target", "numeric_targets", "replaces_numeric_rejection", "resumes_numeric_result"}
+STRATEGY_FIELDS = _STRATEGY_REQUIRED_FIELDS | {"evidence_target", "numeric_targets", "replaces_numeric_rejection", "resumes_numeric_result", "replaces_numeric_contract_failure"}
 FINANCIAL_NOTE_TARGET_FIELDS = frozenset({
     "schema_version", "target_ref", "kind", "statement_ingest_ref",
     "statement_filing_hash", "accession", "form", "applicability_kind",
@@ -197,6 +197,14 @@ def normalize_strategy(value: Any, *, max_query_terms: int,
         if any(not isinstance(upgrade[k],str) or not upgrade[k] for k in ("admission_ref","rejection_ref")) or any(not isinstance(upgrade[k],str) or _HASH.fullmatch(upgrade[k]) is None for k in ("admission_hash","rejection_hash")):
             raise DocumentResearchStrategyError("numeric capability upgrade binding is invalid")
     resume = strategy.get("resumes_numeric_result")
+    replacement = strategy.get("replaces_numeric_contract_failure")
+    if replacement is not None:
+        from .directed_numeric_period_replacement import BINDING_FIELDS
+        if (not numeric or not isinstance(replacement, Mapping) or set(replacement) != BINDING_FIELDS
+                or any(not isinstance(replacement[k], str) or not replacement[k] for k in BINDING_FIELDS)
+                or any(_HASH.fullmatch(replacement[k]) is None for k in ('admission_hash','failure_hash'))
+                or upgrade is not None or resume is not None):
+            raise DocumentResearchStrategyError('numeric period replacement binding is invalid')
     if resume is not None:
         if not numeric or not isinstance(resume,Mapping) or set(resume)!={"admission_ref","admission_hash","numeric_result_hash"}:
             raise DocumentResearchStrategyError("numeric source resume has invalid closed shape")

@@ -202,6 +202,8 @@ FEEDBACK_KEEP_LADDER: tuple[int, ...] = (READABLE_KEEP_PER_COMPANY, 4, 2, 1, 0)
 _FEEDBACK_PLANNER_FIELDS: tuple[str, ...] = (
     "id", "created_at", "outcome", "stage", "document_ref", "question", "wants",
     "tried_query_terms", "missing_evidence", "recovery", "candidate_claim_ref",
+    "numeric_failure_diagnostics", "replaces_numeric_contract_failure",
+    "replacement_admission_ref", "original_outcome",
 )
 
 # Stage "compact_company_detail" keeps these fields of every company.
@@ -333,6 +335,11 @@ OUTPUT_SCHEMA = {
                                 "type":"object","additionalProperties":False,
                                 "required":["admission_ref","admission_hash","rejection_ref","rejection_hash"],
                                 "properties":{k:{"type":"string"} for k in ("admission_ref","admission_hash","rejection_ref","rejection_hash")}},
+                            "replaces_numeric_contract_failure": {
+                                "description": "Copy an exact source-period replacement binding from document execution feedback. Keep its original question/source and all targets; only make formerly unspecified periods explicit from the original excerpts.",
+                                "type":"object", "additionalProperties":False,
+                                "required":["admission_ref","admission_hash","failure_ref","failure_hash"],
+                                "properties":{k:{"type":"string"} for k in ("admission_ref","admission_hash","failure_ref","failure_hash")}},
                             "numeric_targets": numeric_target_schema(),
                             "evidence_target": {
                                 "type": "object", "additionalProperties": False,
@@ -1523,6 +1530,7 @@ def build_prompt(state: Mapping[str, Any]) -> str:
         "Respect unlinked Work/formal status. Check held originals for driver/period gaps. "
         "Cleared/superseded failures are omitted. "
         "document_execution_failures preserves exact failed/recovery-pending executions, not answers or source absence. "
+        "A replaces_numeric_contract_failure binding permits only one normal-plan source-period replacement: copy the entire binding inside directed_document, preserve the original question/wants/source and every target, and replace only the listed unspecified periods using explicit dates in the held excerpts. No renamed/rephrased duplicate, changed values, unit, metric or basis is permitted. This never retries or rewrites the failed task. "
         "Use the existing bounded recovery or exact new-source/revision gates; do not buy an equivalent duplicate. "
         "document_research_feedback_summary aggregates tried history only to fit input; the summary is not a "
         "finding.\n\nContinue canonical_document_questions with exact canonical_question version_ref/content_hash "

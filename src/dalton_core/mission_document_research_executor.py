@@ -5158,6 +5158,14 @@ class MissionDocumentResearchExecutor:
                 "The model stage failed without authority for a safe replay; its send and "
                 "charging state remains frozen for review."
                 if reason == LEGACY_UNPROVED_SEND_REASON else
+                "The immutable numeric target has no explicit executable period. Do not repeat "
+                "this task. Preserve all original fees and request a source-bound normal-plan "
+                "period replacement using the exact failure binding."
+                if reason == 'numeric_target_period_unspecified' else
+                "The same immutable question produced the same typed validation failure. "
+                "No further identical automatic repair is useful. Preserve all original fees; "
+                "the exact retained answer and validator diagnostic identify the research gap."
+                if reason == 'numeric_repeated_contract_failure' else
                 "The model stage did not send a chargeable request and may use a fresh "
                 "bounded WorkOrder when its recorded retry conditions permit."
             ),
@@ -5264,6 +5272,17 @@ class MissionDocumentResearchExecutor:
         stage = work["metadata"]["stage"]
         authorization = self._existing_automatic_authorization(
             work["id"], AUTOMATIC_CONTRACT_RETRY_CLASSIFICATION)
+        if authorization is None and admission.get('numeric_authority'):
+            from .directed_numeric_recovery import build_numeric_output_repair
+            repair = build_numeric_output_repair(work, formal)
+            if repair is not None and repair['replacement_prompt'] == work['question']:
+                recovery = {'status': 'stopped', 'reason': 'numeric_repeated_contract_failure',
+                    'eligible': False, 'used_fresh_work_orders': len(links),
+                    'max_fresh_work_orders': 0, 'retry_at': None,
+                    'deadline': _time(deadline), 'proof': paid}
+                self._recovery_observation(admission, work, formal, index, recovery)
+                return {'status': 'stopped', 'reason': recovery['reason'],
+                    'work_order_ref': work['id'], 'stage': stage}
         spent = self._contract_retry_disposition(links)
         if spent is None and authorization is None and self.connection.execute(
             "SELECT 1 FROM mission_document_research_controlled_recovery_authorizations "
@@ -5589,6 +5608,38 @@ class MissionDocumentResearchExecutor:
             self.authority, self.scheduler, admission, index, worker=worker)
         if canonical_json(current) != canonical_json(work):
             raise MissionDocumentResearchExecutorError("effective recovery Work drifted")
+        if admission.get('numeric_authority'):
+            from .directed_numeric_research import unexecutable_period_targets
+            missing = unexecutable_period_targets(admission['numeric_authority']['targets'])
+            if missing:
+                recovery = {'status': 'stopped', 'reason': 'numeric_target_period_unspecified',
+                    'eligible': False, 'used_fresh_work_orders': len(links),
+                    'max_fresh_work_orders': 0, 'retry_at': None,
+                    'unexecutable_period_targets': missing,
+                    'proof': {'formal_result_ref': _formal_ref(formal),
+                        'formal_result_hash': _formal_hash(formal),
+                        'result_envelope_ref': formal['result_envelope_id'],
+                        'result_envelope_hash': formal['result_envelope_hash']}}
+                self._recovery_observation(admission, work, formal, index, recovery)
+                return {'status': 'stopped', 'reason': recovery['reason'],
+                    'work_order_ref': work['id'], 'stage': work['metadata']['stage']}
+            envelope = formal['result_envelope']
+            if (envelope.get('error') or {}).get('code') == 'NUMERIC_REPEATED_CONTRACT_FAILURE':
+                from .directed_numeric_failure_diagnostics import repeated_before_admission
+                repeated = repeated_before_admission(self.scheduler.connection, work,
+                    before_attempt=formal['attempt_number'])
+                if repeated != envelope.get('metadata', {}).get('numeric_repeated_contract_failure'):
+                    raise MissionDocumentResearchExecutorError('numeric repeated failure proof differs')
+                recovery = {'status':'stopped','reason':'numeric_repeated_contract_failure',
+                    'eligible':False,'used_fresh_work_orders':len(links),
+                    'max_fresh_work_orders':0,'retry_at':None,'proof':{**repeated,
+                        'formal_result_ref':_formal_ref(formal),
+                        'formal_result_hash':_formal_hash(formal),
+                        'result_envelope_ref':formal['result_envelope_id'],
+                        'result_envelope_hash':formal['result_envelope_hash']}}
+                self._recovery_observation(admission, work, formal, index, recovery)
+                return {'status':'stopped','reason':recovery['reason'],
+                    'work_order_ref':work['id'],'stage':work['metadata']['stage']}
         if admission.get("numeric_authority") is not None:
             from .directed_numeric_maintenance import attempt
             technical = attempt(self, admission, work, formal, index, links)

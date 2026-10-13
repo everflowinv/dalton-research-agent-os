@@ -26,7 +26,21 @@ def read_document_research_feedback(core: Any, mission: Mapping[str, Any]) -> di
                     for item in observations if item.get('outcome') == 'numeric_targets_completed'
                     for binding in item.get('resolved_numeric_rejections') or ()}
         grouped = {ref: [] for ref in sorted(companies)}
+        from .directed_numeric_period_replacement import superseding_admission
+        from .mission_document_research import MissionDocumentResearchAuthority
+        replacements = {}
         for observation in observations:
+            ref=observation.get('admission_ref')
+            if ref and ref not in replacements:
+                row=core.connection.execute('SELECT * FROM mission_document_research_admissions WHERE admission_id=?',(ref,)).fetchone()
+                replacements[ref]=(superseding_admission(core.connection,
+                    MissionDocumentResearchAuthority._read_row(None,row)) if row is not None else None)
+            replacement=replacements.get(ref)
+            if replacement is not None:
+                observation={**observation,'original_outcome':observation['outcome'],
+                    'outcome':'numeric_period_replacement_admitted',
+                    'replacement_admission_ref':replacement,
+                    'meaning':'The original failed period task is superseded by one normal-plan admission; the new admission still requires complete execution and verification. Original results and fees are unchanged.'}
             from .directed_numeric_research import numeric_rejection
             rejection=numeric_rejection(core.connection,observation["admission_ref"]) if observation.get("admission_ref") else None
             if rejection is not None and (observation['company_ref'], content_hash(
@@ -50,6 +64,8 @@ def read_document_research_feedback(core: Any, mission: Mapping[str, Any]) -> di
         from .mission_document_research import MissionDocumentResearchAuthority
         for ref in sorted({item['admission_ref'] for item in observations
                            if item.get('outcome') == 'recovery_required'}):
+            if replacements.get(ref) is not None:
+                continue
             row = core.connection.execute(
                 'SELECT * FROM mission_document_research_admissions WHERE admission_id=?', (ref,)).fetchone()
             if row is None:
@@ -57,7 +73,15 @@ def read_document_research_feedback(core: Any, mission: Mapping[str, Any]) -> di
             admission = MissionDocumentResearchAuthority._read_row(None, row)
             failure = failure_from_observations(core.connection, admission, observations)
             if failure is not None:
+                if failure.get('numeric_failure_diagnostics', {}).get('unexecutable_period_targets'):
+                    from .directed_numeric_period_replacement import binding_for, consumer
+                    binding = binding_for(core.connection, ref)
+                    if binding is not None and consumer(core.connection, binding) is None:
+                        failure = {**failure, 'replaces_numeric_contract_failure': binding}
                 grouped[admission['company_ref']].append(failure)
+        from .directed_numeric_period_replacement import historical_feedback
+        for failure in historical_feedback(core, mission):
+            grouped[failure['company_ref']].append(failure)
         body = {"status": "available", "by_company": grouped}
     except Exception as exc:
         body = {"status": "unavailable", "by_company": {}, "reason": type(exc).__name__}

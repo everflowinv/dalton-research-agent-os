@@ -552,6 +552,15 @@ class MissionDocumentResearchCoordinator:
         order = {admission["id"]: index for index, admission in enumerate(admissions)}
         detail = []
         for admission_ref, held in holds.items():
+            from .directed_numeric_period_replacement import superseding_admission
+            row=self.store.connection.execute('SELECT * FROM mission_document_research_admissions WHERE admission_id=?',(admission_ref,)).fetchone()
+            if row is not None:
+                original=json.loads(row['record_json'])
+                if original.get('numeric_authority'):
+                    from .mission_document_research import MissionDocumentResearchAuthority
+                    original=MissionDocumentResearchAuthority._read_row(None,row)
+                    if superseding_admission(self.store.connection,original) is not None:
+                        continue
             started = self._started(admission_ref)
             # An admission that never started sent nothing and cost nothing, so
             # reopening it is free and the lane may do it.  One that started may
@@ -892,7 +901,9 @@ class MissionDocumentResearchCoordinator:
                 raise MissionDocumentResearchLaneError(
                     "document research admission authority drifted"
                 )
-            result.append(wire)
+            from .directed_numeric_period_replacement import superseding_admission
+            if superseding_admission(self.store.connection,wire) is None:
+                result.append(wire)
         return result
 
     def _latest_plan_row(self) -> dict[str, Any] | None:
@@ -1567,6 +1578,12 @@ class MissionDocumentResearchCoordinator:
                 "document research recovery observation has an invalid state"
             )
         recovery = selected["recovery"]
+        if admission.get('numeric_authority'):
+            from .directed_numeric_period_replacement import binding_for
+            replacement = binding_for(self.store.connection, admission['id'])
+            if replacement is not None:
+                return {'action': 'terminal_hold', 'reason': 'numeric_target_period_unspecified',
+                    'work_order_ref': work_ref, 'replaces_numeric_contract_failure': replacement}
         from .mission_document_research_executor import (
             AUTOMATIC_BUDGET_CORRECTION_REASON,
             AUTOMATIC_UNPROVED_SEND_RETRY_REASON,
@@ -2236,8 +2253,18 @@ class MissionDocumentResearchCoordinator:
         # dispatch queue, and must also retire the older advisory hold.
         from .document_numeric_completion import completed_numeric_admission
         numeric_completion_errors = []
+        replaced_refs=set()
         for admission_ref in holds:
             try:
+                from .directed_numeric_period_replacement import superseding_admission
+                row=self.store.connection.execute('SELECT * FROM mission_document_research_admissions WHERE admission_id=?',(admission_ref,)).fetchone()
+                if row is not None:
+                    original=json.loads(row['record_json'])
+                    if original.get('numeric_authority'):
+                        from .mission_document_research import MissionDocumentResearchAuthority
+                        original=MissionDocumentResearchAuthority._read_row(None,row)
+                        if superseding_admission(self.store.connection,original) is not None:
+                            replaced_refs.add(admission_ref)
                 if completed_numeric_admission(self.store.connection, admission_ref):
                     completed_refs.add(admission_ref)
             except (ValueError, KeyError, TypeError) as exc:
@@ -2245,13 +2272,13 @@ class MissionDocumentResearchCoordinator:
                     "error":"numeric_completion_unproved:"+str(exc)})
         admissions = [
             admission for admission in admissions
-            if admission["id"] not in completed_refs
+            if admission["id"] not in completed_refs | replaced_refs
         ]
-        if any(admission_ref in holds for admission_ref in completed_refs):
+        if any(admission_ref in holds for admission_ref in completed_refs | replaced_refs):
             holds = {
                 admission_ref: held
                 for admission_ref, held in holds.items()
-                if admission_ref not in completed_refs
+                if admission_ref not in completed_refs | replaced_refs
             }
             _write_holds(self.holds_path, holds)
         # 2026-09-30: an admission its owner withdrew is closed for good.  It

@@ -623,6 +623,7 @@ class MissionDocumentResearchAuthority:
         self, *, plan_ref: str, inquiry_ref: str, question_version_ref: str,
         document_authority_ref: str, frozen_numeric_upgrades: list[dict[str, Any]] | None = None,
         frozen_target_revision: Any = _AUTO_TARGET_REVISION,
+        frozen_period_replacement: Any = None,
     ) -> dict[str, Any]:
         origin = self.question_origin_from_plan(
             plan_ref=plan_ref, inquiry_ref=inquiry_ref,
@@ -716,6 +717,9 @@ class MissionDocumentResearchAuthority:
                 raise MissionDocumentResearchError("numeric resume needs the same question and complete required targets")
             numeric_resume_proof=dict(selected_resume)
         from .numeric_target_revision import derive_revision_proof, verify_revision_proof
+        from .directed_numeric_period_replacement import derive as derive_period_replacement
+        period_replacement = derive_period_replacement(self, mission['mission_ref'], inquiry,
+            frozen=frozen_period_replacement)
         if frozen_target_revision is _AUTO_TARGET_REVISION:
             target_revision = derive_revision_proof(self, mission["mission_ref"], inquiry)
         elif frozen_target_revision is None:
@@ -795,6 +799,7 @@ class MissionDocumentResearchAuthority:
                 "capability_upgrade_proofs":numeric_upgrades,
                 "resume_proof":numeric_resume_proof,
                 **({"target_revision_proof": target_revision} if target_revision else {}),
+                **({"period_replacement_proof": period_replacement} if period_replacement else {}),
                 "targets": strategy["numeric_targets"],
                 "source_binding": source_binding(
                     self.connection, registration, inquiry["company_ref"],
@@ -853,6 +858,14 @@ class MissionDocumentResearchAuthority:
                 "identity_hash": identity_hash}
         wire["content_hash"] = content_hash(wire)
         with self._transaction() as cursor:
+            replacement = identity.get('numeric_authority', {}).get('period_replacement_proof')
+            if replacement is not None:
+                from .directed_numeric_period_replacement import consumer as period_consumer
+                used = period_consumer(self.connection, replacement)
+                if used is not None:
+                    raise MissionDocumentResearchEquivalentPending({'admission_ref': used,
+                        'state': 'numeric_period_replacement_already_admitted',
+                        'rule_ref': replacement['contract_ref']})
             # BEGIN IMMEDIATE serializes this one-result revision allowance.
             # Withdrawals remain in the immutable admission table and count as
             # having consumed it; neither a new plan nor owner closure resets it.
@@ -921,6 +934,11 @@ class MissionDocumentResearchAuthority:
         if "numeric_authority" not in identity and identity.get("mission_ref"):
             revision = derive_revision_proof(self, identity["mission_ref"], inquiry)
         consumer = revision_consumer(self, revision, company_ref=company_ref) if revision else None
+        from .directed_numeric_period_replacement import derive as derive_period_replacement, consumer as period_consumer
+        replacement = identity.get('numeric_authority', {}).get('period_replacement_proof')
+        if 'numeric_authority' not in identity and identity.get('mission_ref'):
+            replacement = derive_period_replacement(self, identity['mission_ref'], inquiry)
+        replacement_consumer = period_consumer(self.connection, replacement) if replacement else None
         withdrawn = read_withdrawals(self.connection)
         rows = self.connection.execute(
             "SELECT admission_id, record_json, created_at "
@@ -949,6 +967,12 @@ class MissionDocumentResearchAuthority:
                             for k in ("document_ref", "document_version_hash"))):
                     matched = "canonical_question"
             if matched is not None:
+                if replacement and replacement['admission_ref'] == admission_id:
+                    if replacement_consumer is None:
+                        continue
+                    return {'admission_ref': replacement_consumer,
+                        'state': 'numeric_period_replacement_already_admitted',
+                        'rule_ref': replacement['contract_ref']}
                 from .directed_numeric_research import numeric_rejection, CONTRACT_REF
                 from .directed_numeric_source_capabilities import NUMERIC_STRATEGIES
                 rejection = numeric_rejection(self.connection, admission_id)
@@ -1100,6 +1124,7 @@ class MissionDocumentResearchAuthority:
             document_authority_ref=wire["document_authority_ref"],
             frozen_numeric_upgrades=wire.get("numeric_authority", {}).get("capability_upgrade_proofs"),
             frozen_target_revision=wire.get("numeric_authority", {}).get("target_revision_proof"),
+            frozen_period_replacement=wire.get('numeric_authority', {}).get('period_replacement_proof'),
         )
         stored_identity = {
             key: wire[key] for key in wire
