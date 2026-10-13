@@ -20,12 +20,12 @@ class PlannerStorageBoundTests(unittest.TestCase):
             plans_dir=self.fx.state/'discovery-plans',as_of='2026-09-11T12:01:00+00:00')
         self.config=self.fx.root/'model.json';self.config.write_text('{}')
 
-    def inventory(self,count):
+    def inventory(self,count,question_padding=430):
         s=copy.deepcopy(self.base)
         s['reflection_followup_context']={'groups':[],'backlog_questions':[
             {'company_ref':s['companies'][-1]['company_ref'],
              'question_ref':f'question:synthetic:{i}',
-             'question':'What source-bound fact remains unresolved? '+'Q'*430,'state':'open'}
+             'question':'What source-bound fact remains unresolved? '+'Q'*question_padding,'state':'open'}
              for i in range(count)]}
         return self.rebind(s)
 
@@ -38,8 +38,10 @@ class PlannerStorageBoundTests(unittest.TestCase):
 
     def exact_96000(self):
         # A fixed sample above the retired64KB gate and below128KB.
-        # New static contracts changed the old64844-byte sample baseline.
-        s=self.inventory(100)
+        # Keep all 100 required questions. Measure current instructions before
+        # adding controllable filler, so contract growth cannot make the seed
+        # exceed the intended exact-size fixture.
+        s=self.inventory(100,question_padding=0)
         measured=len(build_prompt(project_state_for_prompt(s,max_input_bytes=MAX_WORK_ORDER_PROMPT_BYTES)).encode())
         remaining=96000-measured
         self.assertGreaterEqual(remaining,0)

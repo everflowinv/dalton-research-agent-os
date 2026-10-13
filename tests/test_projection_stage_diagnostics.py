@@ -16,8 +16,23 @@ class ProjectionStageTests(unittest.TestCase):
         self.destination=self.root/'timed-projection.sqlite'
 
     def events(self,stream):
+        # stderr also carries fold diagnostics and unrelated runtime warnings.
+        # Select this emitter's fixed prefix before JSON decoding; malformed
+        # projection-stage records still fail rather than being suppressed.
         return [row for line in stream.getvalue().splitlines()
+                if line.startswith('{"event":"projection_stage"')
                 if (row:=json.loads(line)).get('event')=='projection_stage']
+
+    def test_event_reader_isolates_unrelated_stderr_but_rejects_broken_stage_json(self):
+        stream=io.StringIO()
+        with redirect_stderr(stream):
+            diagnostics.sys.stderr.write('ResourceWarning: unrelated SQLite cleanup\n\n')
+            diagnostics.sys.stderr.write('{"event":"projection_fold_completed","rows":1}\n')
+            with diagnostics.stage_timing('projection_write'):pass
+        self.assertEqual([(e['stage'],e['status'])for e in self.events(stream)],
+                         [('projection_write','started'),('projection_write','completed')])
+        stream.write('{"event":"projection_stage","stage":\n')
+        with self.assertRaises(json.JSONDecodeError):self.events(stream)
 
     def test_real_build_and_atomic_write_results_unchanged_and_logs_redacted(self):
         with patch.object(diagnostics,'_emit'):
