@@ -113,7 +113,7 @@ class ForeignProfileTests(unittest.TestCase):
         co = SimpleNamespace(search_launcher=launcher, missions=missions, store=self.core,
             source_ref='source:sec-edgar', spool_dir=self.state/'connector-spool', plan=plan,
             clock=lambda: datetime.now(timezone.utc), _health_hold=lambda: None,
-            _spec_block=lambda *args: None, _budget=budget, _missing_periods=lambda *args: [],
+            _spec_block=lambda *args: None, _budget=budget, _missing_periods=lambda *args: [], _period_state=lambda *args: ((), frozenset()),
             _continuation_page=lambda *a, **k: None)
         result=MissionSourceDiscoveryCoordinator.launch_discovery(co)
         self.assertEqual(result['status'], 'launched')
@@ -131,7 +131,7 @@ class ForeignProfileTests(unittest.TestCase):
         co=SimpleNamespace(search_launcher=launcher,missions=CoverageMissionAuthority(self.core),store=self.core,
             source_ref='source:sec-edgar',spool_dir=self.state/'connector-spool',plan=plan,
             clock=lambda:datetime.now(timezone.utc),_health_hold=lambda:None,_spec_block=lambda *a:None,
-            _budget=budget,_missing_periods=lambda *a:[],_continuation_page=lambda *a,**k:None)
+            _budget=budget,_missing_periods=lambda *a:[],_period_state=lambda *a:((),frozenset()),_continuation_page=lambda *a,**k:None)
         result=MissionSourceDiscoveryCoordinator.launch_discovery(co)
         self.assertEqual(result['spec_ref'],'owner-custom-report')
         self.assertNotIn('reporting_profile',launcher.start.call_args.kwargs)
@@ -256,7 +256,7 @@ class ForeignProfileTests(unittest.TestCase):
         co=SimpleNamespace(search_launcher=launcher, missions=CoverageMissionAuthority(self.core),store=self.core,
             source_ref='source:sec-edgar',spool_dir=self.state/'connector-spool',plan=effective_sec_plan(fixture.sec_plan()),
             clock=lambda:datetime.now(timezone.utc),_health_hold=lambda:None,_spec_block=lambda *a:None,
-            _budget=lambda cap:{'remaining':1},_missing_periods=lambda *a:[],_continuation_page=lambda *a,**k:None)
+            _budget=lambda cap:{'remaining':1},_missing_periods=lambda *a:[],_period_state=lambda *a:((),frozenset()),_continuation_page=lambda *a,**k:None)
         with patch.object(profiles,'current_profile',side_effect=profiles.SecReportingProfileUnavailable('original unavailable')):
             result=MissionSourceDiscoveryCoordinator.launch_discovery(co)
         self.assertEqual(result['spec_ref'],'annual-report-10k')
@@ -268,7 +268,7 @@ class ForeignProfileTests(unittest.TestCase):
         co=SimpleNamespace(search_launcher=launcher,missions=CoverageMissionAuthority(self.core),store=self.core,
             source_ref='source:sec-edgar',spool_dir=self.state/'connector-spool',plan=effective_sec_plan(fixture.sec_plan()),
             clock=lambda:datetime.now(timezone.utc),_health_hold=lambda:None,_spec_block=lambda *a:None,
-            _budget=lambda cap:{'remaining':0},_missing_periods=lambda *a:[],_continuation_page=lambda *a,**k:None)
+            _budget=lambda cap:{'remaining':0},_missing_periods=lambda *a:[],_period_state=lambda *a:((),frozenset()),_continuation_page=lambda *a,**k:None)
         self.assertEqual(MissionSourceDiscoveryCoordinator.launch_discovery(co)['status'],'budget_exhausted')
         launcher.start.assert_not_called()
         co._health_hold=lambda:{'status':'health_hold','reason':'held'}

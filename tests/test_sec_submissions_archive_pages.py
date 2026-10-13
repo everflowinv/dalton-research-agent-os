@@ -17,9 +17,9 @@ class SecArchivePagesTests(unittest.TestCase):
         self.request=mr.open_request(self.state,requester={'lane':'statement_context','section':'exact_xml_units'},subject=fixture.ACN,
             need={'kind':'document','doc_kinds':['sec_10k']},acceptance={'accession':'0001467373-24-000049','cik':fixture.CIK,
                 'document_ref':'sec:filing:0001467373-24-000049','date_from':'2024-04-25','date_to':'2024-04-25'},
-            source_priority=['sec_edgar'],now='2026-09-06T00:00:00+00:00')
+            source_priority=['sec_edgar'],now='2026-09-08T00:00:00+00:00')
         self.query=ma.enqueue_targeted_query(self.state,request_id=self.request['id'],source='sec_edgar',company_ref=fixture.ACN,
-            spec_ref='annual-report-10k',phrasings=ma.build_queries(self.request,ma.identity_for(self.state,fixture.ACN),now='2026-09-06T00:00:00+00:00'),now='2026-09-06T00:00:00+00:00')
+            spec_ref='annual-report-10k',phrasings=ma.build_queries(self.request,ma.identity_for(self.state,fixture.ACN),now='2026-09-08T00:00:00+00:00'),now='2026-09-08T00:00:00+00:00')
         self.params,self.binding=targeted_sec_parameters(self.state,plan=self.plan,company_ref=fixture.ACN,spec_ref='annual-report-10k',as_of=date(2026,9,8),
             mission_version_ref=self.mission['id'],mission_version_hash=self.mission['content_hash'],query_ref=self.query['query_id'])
         self.root=json.loads(fixture.submissions_body());self.root['filings']['files']=[{'name':'CIK'+fixture.CIK+'-submissions-001.json','filingFrom':'2020-01-01','filingTo':'2025-08-03','filingCount':100}]
@@ -93,6 +93,9 @@ class SecArchivePagesTests(unittest.TestCase):
         context=ma.RungContext(self.state,self.request,ma.identity_for(self.state,fixture.ACN),[],
             '2026-09-08T00:05:00+00:00',{'created_at':'2026-09-08T00:00:00+00:00','query':{'targeted_query':self.query['query_id']}})
         self.assertEqual(ma.TargetedSourceRung('sec_edgar').settle(context).outcome,'waiting')
+        from dataclasses import replace
+        expired = replace(context, now='2026-09-10T00:05:00+00:00')
+        self.assertEqual(ma.TargetedSourceRung('sec_edgar').settle(expired).outcome, 'empty')
 
         # A normal busy/budget deferral must keep the same root continuation.
         ma.record_targeted_event(self.state,self.query['query_id'],status='deferred',kind='budget',reason='synthetic limit')

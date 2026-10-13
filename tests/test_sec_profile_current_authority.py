@@ -44,7 +44,7 @@ class CurrentAuthorityTests(unittest.TestCase):
             store=self.core,source_ref='source:sec-edgar',spool_dir=self.state/'connector-spool',
             plan=effective_sec_plan(fixture.sec_plan()),clock=lambda:datetime.now(timezone.utc),
             _health_hold=lambda:None,_spec_block=lambda *a:None,_budget=budget,
-            _missing_periods=lambda *a:[],_continuation_page=lambda *a,**k:None)
+            _missing_periods=lambda *a:[],_period_state=lambda *a:((),frozenset()),_continuation_page=lambda *a,**k:None)
         return co,launcher,budget
 
     def test_revision_reuses_exact_old_facts_but_dispatch_and_child_bind_new_authority(self):

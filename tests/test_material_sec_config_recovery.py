@@ -175,5 +175,8 @@ class CurrentUnitNeedTests(unittest.TestCase):
             cursor.execute('INSERT INTO statement_context_versions VALUES(?,?,?,?,?,?)',
                 ('context:new',fx.filing['ingest_id'],'available',canonical_json({'status':'available','lines':[],'unresolved_unit_refs':[]}),'f'*64,'2100-01-01'))
         # Latest pointer changes/fulfilled context cannot authorize old need.
-        with self.assertRaisesRegex(ValueError,'hash drifted'):
-            unit_input_proof(c,request,mission,contract_ref=recovery.RULE_REF,cache={})
+        self.assertIsNone(unit_input_proof(c,request,mission,contract_ref=recovery.RULE_REF,cache={}))
+        # Matching a malformed current context still fails strong verification.
+        from dalton_core.statement_context import context_record
+        with self.assertRaisesRegex(ValueError, 'hash drifted'):
+            context_record(c, 'context:new')

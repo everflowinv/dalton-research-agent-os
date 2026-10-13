@@ -57,7 +57,7 @@ class FamilyFeedbackTests(unittest.TestCase):
         for row in rows:
             if not row['dimensions'] and row['ingest_id']=='ingest:old': row['value']='101'
         # Rebuild the strong manifests after changing private fixture inputs.
-        from .test_forecast_source_family_partition import SourceFamilyPartitionTests
+        from tests.test_forecast_source_family_partition import SourceFamilyPartitionTests
         r, filings, sources = SourceFamilyPartitionTests('runTest').fixture(fixed=True)
         r.update(mission_version_ref=record['mission_version_ref'],spec_ref=record['spec_ref'],spec_hash=record['spec_hash'],inputs_hash=record['inputs_hash'])
         for row in sources['ingest:old']:

@@ -141,7 +141,7 @@ class CompleteElementAuditTests(unittest.TestCase):
         old_hash, new_hash = content_hash(prior), content_hash(current)
         self.assertNotEqual(old_hash, new_hash)
         self.assertEqual(TASK_HASH,'608338bcd6cf70cbe6e012acd5f579b99d34f9d990d5bc846c4059a198eda9af')
-        self.assertEqual(REPAIR_CONTRACT_HASH,'3c5fa10ea1a061644a44bf9f49edc6a290ee39e34b616a86269ad4a481ec1679')
+        self.assertEqual(REPAIR_CONTRACT_HASH,'565f498cca6064b60f79b3279cc79c667310e0155fe18cb3a6609e55f3c621df')
         missions = fixture.FakeMissions([fixture.IBM]); launcher = fixture.FakeLauncher()
         launcher.financial_validation_contract_hash = lambda:old_hash
         mission = {'id':'coverage-mission-version:test:1','universe':[{'company_ref':fixture.IBM,'ticker':'IBM'}]}
