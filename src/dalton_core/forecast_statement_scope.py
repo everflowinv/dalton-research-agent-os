@@ -148,11 +148,11 @@ def statement_scope(record: Mapping[str, Any], rows: Sequence[Mapping[str, Any]]
     The original explicit-partition validator still checks all declared members
     and source presentation proofs before a new execution scope is constructed.
     """
-    from .forecast_execution_statement_scope import RULE_REF as EXECUTION_SCOPE_RULE, execution_scope
+    from .forecast_execution_statement_scope import SUPPORTED_RULE_REFS, execution_scope
     from .model_forecast_driver import ForecastModelValidationError
     if frozen_scope is not None and frozen_scope.get("rule_ref") == RULE_REF:
         return _legacy_statement_scope(record, rows, connection, frozen_scope=frozen_scope)
-    if frozen_scope is not None and frozen_scope.get("rule_ref") != EXECUTION_SCOPE_RULE:
+    if frozen_scope is not None and frozen_scope.get("rule_ref") not in SUPPORTED_RULE_REFS:
         raise ForecastModelValidationError("unknown frozen forecast statement scope")
     if frozen_scope is not None and frozen_scope.get("content_hash") != content_hash({
             k: v for k, v in frozen_scope.items() if k != "content_hash"}):
@@ -170,4 +170,5 @@ def statement_scope(record: Mapping[str, Any], rows: Sequence[Mapping[str, Any]]
     _, prior_partition_scope = _legacy_statement_scope(
         record, rows, connection, frozen_scope=legacy_frozen)
     return execution_scope(record, rows, source_groups,
-                           prior_partition_scope=prior_partition_scope)
+                           prior_partition_scope=prior_partition_scope,
+                           **({"rule_ref": frozen_scope["rule_ref"]} if frozen_scope is not None else {}))

@@ -5174,8 +5174,8 @@ class ForecastModelAuthority:
         scoped_rows, model_statement_scope = statement_scope(
             wire, statement_rows, self.connection, source_groups=source_groups)
         if model_statement_scope is not None:
-            from .forecast_execution_statement_scope import RULE_REF as EXECUTION_SCOPE_RULE, evaluate_execution
-            if model_statement_scope.get("rule_ref") == EXECUTION_SCOPE_RULE:
+            from .forecast_execution_statement_scope import SUPPORTED_RULE_REFS, evaluate_execution
+            if model_statement_scope.get("rule_ref") in SUPPORTED_RULE_REFS:
                 evaluate_bound = lambda record, **kwargs: evaluate_execution(
                     record, scope=model_statement_scope, **kwargs)
         candidate_report = evaluate_bound(
@@ -5477,8 +5477,8 @@ class ForecastModelAuthority:
             except ForecastModelValidationError as exc:
                 raise ForecastModelConflict(str(exc)) from exc
             evaluate_bound = evaluate_grouped
-        from .forecast_execution_statement_scope import RULE_REF as EXECUTION_SCOPE_RULE
-        if (wire.get("model_statement_scope") or {}).get("rule_ref") == EXECUTION_SCOPE_RULE:
+        from .forecast_execution_statement_scope import SUPPORTED_RULE_REFS
+        if (wire.get("model_statement_scope") or {}).get("rule_ref") in SUPPORTED_RULE_REFS:
             from .forecast_execution_statement_scope import evaluate_execution
             evaluate_bound = lambda record, **kwargs: evaluate_execution(
                 record, scope=scope_replay, **kwargs)
