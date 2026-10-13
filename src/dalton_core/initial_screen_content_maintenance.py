@@ -16,6 +16,7 @@ from .store import canonical_json, content_hash
 from . import initial_screen_validator_recovery as recovery
 
 CONTRACT = 'initial-screen-fixed-content-maintenance:0.1'
+CHILD_BINDING_CONTRACT = 'initial-screen-maintenance-transport-child:0.1'
 MARKER = ':initial-screen-content-maintenance:'
 TABLE = 'initial_screen_content_maintenance_grants'
 CLAIMS = 'initial_screen_content_maintenance_claims'
@@ -55,6 +56,17 @@ def permission(result):
     parent=result['slots']['document:1'][0]
     return 'initial-screen-content-permission:'+content_hash({'mission':parent['metadata']['mission_version_ref'],
         'company':result['context']['company']['company_ref'],'parent_work_ref':parent['id']})
+
+
+def _child_request_id(body, config):
+    """Exact ordinary Cockpit transport decoration, never an open suffix match.
+
+    The immutable grant still names the original semantic request. Transport
+    settings cannot create a second grant: the original single claim pins the
+    entire first Work, including its decorated request and budget.
+    """
+    from .cockpit_model import _transport_request_id
+    return _transport_request_id(body['request_id'], config)
 
 
 def _period_end(pack, entry):
@@ -304,9 +316,11 @@ class Authority:
         body=_row(scheduler.connection,TABLE,permission(self.result))
         if body is None:raise ValueError('initial-screen maintenance has no owner-issued permission')
         current,prompt=self.verify_record(body)
+        from .host_research_reconcile import resolved_model_config
+        config=resolved_model_config(self.state,self.model.config,'initial_screen')
         request=work.metadata.get('request_id','')
         if (work.metadata.get('purpose')!='initial_screen' or work.question!=prompt
-                or request!=body['request_id'] or work.metadata.get('mission_version_ref')!=self.mission['id']
+                or request!=_child_request_id(body,config) or work.metadata.get('mission_version_ref')!=self.mission['id']
                 or work.metadata.get('mission_version_hash',self.mission['content_hash'])!=self.mission['content_hash']
                 or int(Decimal(str(work.budget['max_cost_usd']))*1000000)>body['call_ceiling_micros']):
             raise ValueError('initial-screen maintenance child does not match its fixed permission')
@@ -353,7 +367,9 @@ def run(result, *, model, state, mission, authority, summary_dir=None, allow_pai
         _,prompt=live.verify_record(saved)
         if (canonical_json(work)!=workrow['work_order_json'] or content_hash(work)!=claim['work_order_hash'] or workrow['work_order_hash']!=claim['work_order_hash']
                 or claim['permission_hash']!=content_hash(saved) or claim['company_ref']!=saved['company_ref']
-                or work['metadata'].get('request_id')!=saved['request_id'] or work['question']!=prompt
+                or re.fullmatch(re.escape(saved['request_id'])
+                    +r'(?::capacity-policy:[0-9a-f]{16})?(?::transport-policy:[0-9a-f]{16})?',
+                    work['metadata'].get('request_id','')) is None or work['question']!=prompt
                 or work['metadata'].get('purpose')!='initial_screen' or work['metadata'].get('mission_version_ref')!=mission['id']
                 or work['metadata'].get('mission_version_hash',mission['content_hash'])!=mission['content_hash']):
             raise ValueError('initial-screen maintenance child hash changed')

@@ -1995,6 +1995,25 @@ def _capacity_retry(config: Mapping[str, Any]) -> dict[str, int]:
     })
 
 
+def _transport_request_id(request_id: str, config: Mapping[str, Any], *, timeout_recovery: Any = None) -> str:
+    """Canonical ordinary request decoration shared with deny-only owners."""
+    decorated = request_id
+    if "capacity_retry" in config and timeout_recovery is None:
+        suffix = ":capacity-policy:" + content_hash(_capacity_retry(config))[:16]
+        canonical = re.search(re.escape(suffix)
+            + r"(?::route-admission:[0-9a-f]{64})?"
+            + r"(?::operator-recovery:[0-9a-f]{16})?"
+            + r"(?::retired-rule:[0-9a-f]{16})?"
+            + r"(?::capacity-recovery:\d+:[0-9a-f]{16})?$", decorated)
+        if canonical is None:
+            decorated += suffix
+    if "transport_retry" in config and timeout_recovery is None:
+        suffix = ":transport-policy:" + content_hash(config["transport_retry"])[:16]
+        if suffix not in decorated:
+            decorated += suffix
+    return decorated
+
+
 def call_cost_micros(invocation: Any, route: Mapping[str, Any],
                      profile: Mapping[str, Any], reserved: int) -> tuple[int, str]:
     """What the link that actually served this call cost, and how we know.
@@ -2460,27 +2479,9 @@ class CockpitModel:
             request_id = request_identity["decorated_request_id"]
             base_request_id = request_id
         else:
-            base_request_id = request_id
-            if "capacity_retry" in self.config and _timeout_recovery is None:
-                policy_suffix = ":capacity-policy:" + content_hash(capacity_retry)[:16]
-                canonical = re.search(
-                    re.escape(policy_suffix)
-                    + r"(?::route-admission:[0-9a-f]{64})?"
-                    + r"(?::operator-recovery:[0-9a-f]{16})?"
-                    + r"(?::retired-rule:[0-9a-f]{16})?"
-                    + r"(?::capacity-recovery:\d+:[0-9a-f]{16})?$",
-                    base_request_id,
-                )
-                if canonical is None:
-                    base_request_id += policy_suffix
-                request_id = base_request_id
-            if "transport_retry" in self.config and _timeout_recovery is None:
-                retry_suffix = ":transport-policy:" + content_hash(
-                    self.config["transport_retry"]
-                )[:16]
-                if retry_suffix not in base_request_id:
-                    base_request_id += retry_suffix
-                request_id = base_request_id
+            base_request_id = _transport_request_id(request_id, self.config,
+                                                     timeout_recovery=_timeout_recovery)
+            request_id = base_request_id
         legacy_budget = {
             "max_input_tokens": self.max_input_tokens,
             "max_output_tokens": self.max_output_tokens,
