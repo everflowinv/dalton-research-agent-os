@@ -173,13 +173,10 @@ def normalize_sec_submissions(
         if not form_matches or filing_date < date_from or filing_date > date_to:
             continue
         revision = revisions[index]
-        if filing_form.endswith("/A") and revision is None:
-            # The SEC submissions document does not normally expose the
-            # amended accession. Without an explicit provider field this
-            # adapter cannot invent a revision edge.
-            raise SecPublicAdapterError(
-                "SEC amendment lacks explicit revision authority"
-            )
+        # An amendment is independently discoverable by its own accession,
+        # original form and primary document. SEC submissions generally do
+        # not identify its predecessor; null means no revision edge is
+        # asserted, not that the amendment replaces any earlier filing.
         if revision is not None:
             revision = _text(revision, f"amendmentOf[{index}]")
             if not _ACCESSION_RE.fullmatch(revision):

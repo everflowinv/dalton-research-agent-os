@@ -191,10 +191,9 @@ class AdapterTests(unittest.TestCase):
             )
         unbound_amendment = json.loads(json.dumps(payload()))
         del unbound_amendment["filings"]["recent"]["amendmentOf"]
-        with self.assertRaises(SecPublicAdapterError):
-            normalize_sec_submissions(
-                unbound_amendment, PARAMETERS, provider_status=200
-            )
+        independent = normalize_sec_submissions(unbound_amendment, PARAMETERS, provider_status=200)
+        self.assertIsNone(independent["records"][1]["revision_of_ref"])
+        self.assertEqual(independent["source_record_refs"], result["source_record_refs"])
 
     def test_credential_free_headers_deadline_and_bounded_retry_after(self):
         body = json.dumps(payload(), separators=(",", ":")).encode()
