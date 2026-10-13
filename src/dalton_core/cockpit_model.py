@@ -1234,6 +1234,7 @@ def _preserve_legacy_model_spec_transport_work(
 def _validate_structured_output_repair_authority(
     scheduler: Scheduler, binding: Mapping[str, Any], child_work: WorkOrder,
     config: Mapping[str, Any], *, maintenance_authority: Any | None = None,
+    financial_authority: Any | None = None,
 ) -> None:
     """Prove both named parent results before admitting a repair Work."""
 
@@ -1432,9 +1433,20 @@ def _validate_structured_output_repair_authority(
             raise CockpitModelError("diagnostic repair parent proof or existing slot differs") from exc
     elif bundle is not None:
         raise CockpitModelError("unexpected diagnostic bundle")
+    transported_proof = bundle if bundle is not None else typed_proof
+    from .model_spec_signed_expense_repair import ERROR_CODE as SIGNED_CODE
+    from .cash_flow_ratio_applicability import ERROR_CODE as RATIO_CODE
+    if binding["validation_error"]["code"] in (SIGNED_CODE, RATIO_CODE):
+        from .model_spec_financial_repair_authority import FinancialRepairAuthority
+        if type(financial_authority) is not FinancialRepairAuthority:
+            raise CockpitModelError("financial correction requires the live source validation owner")
+        try:
+            transported_proof = financial_authority.verify(binding, parent_text, mission_binding=expected_mission)
+        except (ValueError, KeyError, TypeError, ArithmeticError, CompanyModelSpecError) as exc:
+            raise CockpitModelError("financial repair parent source proof differs: " + str(exc)) from exc
     error = CompanyModelSpecError(
         binding["validation_error"]["message"],
-        code=binding["validation_error"]["code"], proof=bundle if bundle is not None else typed_proof,
+        code=binding["validation_error"]["code"], proof=transported_proof,
     )
     if child_work.question != _repair_prompt(parent_text, error):
         raise CockpitModelError("structured output repair prompt differs from its parent")
@@ -2640,7 +2652,8 @@ class CockpitModel:
             if _structured_output_repair is not None:
                 _validate_structured_output_repair_authority(
                     scheduler, _structured_output_repair, work, self.config,
-                    maintenance_authority=getattr(self, "_model_spec_maintenance_authority", None)
+                    maintenance_authority=getattr(self, "_model_spec_maintenance_authority", None),
+                    financial_authority=getattr(self, "_model_spec_financial_repair_authority", None)
                 )
             from .cockpit_timeout_recovery import (
                 reserve as timeout_reserve, verify as timeout_verify, consume as timeout_consume,

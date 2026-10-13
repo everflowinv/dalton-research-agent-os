@@ -475,6 +475,8 @@ def _repair_prompt(original_text: str, error: CompanyModelSpecError, *,
             f"DIAGNOSTIC_BUNDLE:\n{canonical_json(error.proof)}\n\n"
         )
     elif error.code == CASH_RATIO_CODE:
+        if not isinstance(getattr(error, "proof", None), Mapping):
+            raise CompanyModelSpecError("cash ratio financial repair proof is missing", code=error.code)
         head = (
             "The exact latest four cash quarters have proved original operands, but the declared ratio "
             "denominator is zero or crosses signs. This is method inapplicability, not a missing-period request. "
@@ -498,6 +500,8 @@ def _repair_prompt(original_text: str, error: CompanyModelSpecError, *,
             f"TYPED_FIELD_PROOF:\n{canonical_json(error.proof)}\n\n"
         )
     elif error.code == SIGNED_EXPENSE_REPAIR_CODE:
+        if not isinstance(getattr(error, "proof", None), Mapping):
+            raise CompanyModelSpecError("signed financial repair proof is missing", code=error.code)
         head = (
             "Correct only the exact coefficient_path identified by the source-proven "
             "signed expense proof in VALIDATION_ERROR, to its required_coefficient. Do not change "
@@ -751,6 +755,8 @@ def _validated_spec_with_repair(
                 raise
             if error.code not in REPAIR_CONTRACT["eligible_error_codes"]:
                 raise
+            if error.code in (SIGNED_EXPENSE_REPAIR_CODE, CASH_RATIO_CODE) and not isinstance(getattr(error, "proof", None), Mapping):
+                raise CompanyModelSpecError("financial repair proof is missing", code=error.code) from error
             if error.code == CASH_RATIO_CODE:
                 validate_cash_ratio_parent(parse_response(current_call['text']), error.proof)
             if error.code == SIGNED_EXPENSE_REPAIR_CODE:
@@ -891,6 +897,13 @@ def _validated_spec_with_repair(
                 # Different contract/error/proof is a new slot, not technical
                 # recovery of this exact immutable already-authorized question.
                 raise error
+            if error.code in (SIGNED_EXPENSE_REPAIR_CODE, CASH_RATIO_CODE):
+                if financial_validator is None:
+                    raise CompanyModelSpecError("financial repair source validator is missing", code=error.code)
+                from .model_spec_financial_repair_authority import FinancialRepairAuthority
+                model._model_spec_financial_repair_authority = FinancialRepairAuthority(
+                    state=state, mission=mission, decided_by=decided_by,
+                    financial_validator=financial_validator)
             repaired_call = model.call(
                 purpose="model_spec",
                 request_id="model-spec-repair:" + content_hash(binding)[:32],
@@ -1085,6 +1098,7 @@ def model_spec_validation_contract() -> dict[str, str]:
     """
 
     from .company_model_spec import ASSESSMENT_COMPATIBILITY_REF
+    from .model_spec_financial_repair_authority import CONTRACT_REF as FINANCIAL_REPAIR_ADMISSION_REF
     from .cash_flow_derived_base import CONTRACT_REF as DERIVED_CASH_BASE_REF
     from .cash_flow_filed_tie_base import RULE_REF as FILED_CASH_BASE_REF
     from .model_spec_assessment_replay import SIGNED_COMPATIBLE_REPLAY_REF
@@ -1104,6 +1118,7 @@ def model_spec_validation_contract() -> dict[str, str]:
     return {
         "contract": "company-model-spec-pre-persistence-validation:0.2",
         "fixed_maintenance_correction": "model-spec-fixed-maintenance-correction:0.1",
+        "financial_repair_admission": FINANCIAL_REPAIR_ADMISSION_REF,
         "proposal_method_completion": PROPOSAL_METHOD_COMPLETION_REF,
         "cash_flow_companion": CASH_FLOW_COMPANION_VALIDATION_CONTRACT_HASH,
         "cash_flow_derived_income_base": DERIVED_CASH_BASE_REF,
