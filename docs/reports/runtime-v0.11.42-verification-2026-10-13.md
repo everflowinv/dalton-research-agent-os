@@ -19,8 +19,8 @@
 
 ## 实际研究结果
 
-切换后的首次核对仍有 10/17 家公司拥有正式预测。ACN 在上一包运行期间于 12:28 保存修正模型，12:33 生成对应八季预测。Amazon 第 2 版初筛已自动完成新规则评分，剩余业绩公告引用与事实重复两项内容问题。新版的 NTR、CTVA、DE 自然任务结果继续观察。
+切换后的首次核对有 10/17 家公司拥有正式预测。13:06 UTC 再次核对，DE 已于 13:02:48 自动保存首份八季正式预测，增至 11/17 家。其版本为 `forecast-model-version:dda40d4de7d9cf2bbeb9ffe2349bce1d:1`，内容哈希 `2ecc9dbde7a76dc8287e822d2f5b9d125618e392162ff212b4da2d7450e5eba6`；正常任务零模型费用完成，正式表记录已强核。现金流假设仍需补齐。ACN 在上一包运行期间于 12:28 保存修正模型，12:33 生成对应八季预测。Amazon 第 2 版初筛已自动完成新规则评分，剩余业绩公告引用与事实重复两项内容问题。CTVA 新回答于 13:04 因派生公式未绑定精确申报科目被拒，未写入新正式模型；NTR 自然任务继续观察。
 
 AlphaEngine 共用额度为 260 次，现有项目与新增默认值一致；此前五项额度拒绝已全部通过自然调度完成检索。FMC 第二季度业绩会原文已取得。经营驱动资料进入模型、规划结构错误自动恢复及重复预测调度修复继续进行。
 
-验证收据保存在本机：`/tmp/root-v01142-union-and-canary-r01-20261013.json`、`/tmp/root-v01142-switch-r01-20261013.json`、`/tmp/root-v01142-health-public-ro-r02-20261013.json`、`/tmp/root-v01142-company-natural-products-postdeploy-ro-r02-20261013.json`、`/tmp/ar-v01142-independent-fee-gate-r01-20261013.json`、`/tmp/root-v01142-stop-reviewed-r01-20261013.json`。
+验证收据保存在本机：`/tmp/root-v01142-union-and-canary-r01-20261013.json`、`/tmp/root-v01142-switch-r01-20261013.json`、`/tmp/root-v01142-health-public-ro-r02-20261013.json`、`/tmp/root-v01142-company-natural-products-postdeploy-ro-r03-20261013.json`、`/tmp/ar-v01142-independent-fee-gate-r01-20261013.json`、`/tmp/root-v01142-stop-reviewed-r01-20261013.json`。
