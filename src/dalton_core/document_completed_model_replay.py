@@ -17,7 +17,8 @@ CHAIN_ERROR = "ResearchVerificationConflict: candidate version chain mismatch"
 UNIT_CONTRACT = "document-completed-model-source-unit:0.1"
 UNIT_ERROR = "CoverageMissionValidationError: existing figure uses different units; it cannot satisfy this directed numeric target"
 from .directed_numeric_promotion_reconciliation import REPLAY_CONTRACT as PROMOTION_CONTRACT
-CONTRACTS = frozenset({CONTRACT,CHAIN_CONTRACT,PROMOTION_CONTRACT,UNIT_CONTRACT})
+from .document_numeric_receipt_completion import CONTRACT as RECEIPT_CONTRACT
+CONTRACTS = frozenset({CONTRACT,CHAIN_CONTRACT,PROMOTION_CONTRACT,UNIT_CONTRACT,RECEIPT_CONTRACT})
 
 
 def candidate(coordinator, admission, ticket_ref):
@@ -81,5 +82,7 @@ def candidate(coordinator, admission, ticket_ref):
     if summary['error']==UNIT_ERROR:
         scope={k:body[k] for k in ('contract_ref','admission_ref','admission_hash')}
         ref=coordinator.launcher.TICKET_PREFIX+':'+content_hash(scope)[:24]
-        if coordinator.launcher._ticket_path(ref).exists():return None
+        if coordinator.launcher._ticket_path(ref).exists():
+            from .document_numeric_receipt_completion import candidate as receipt_candidate
+            return receipt_candidate(coordinator,admission,original_proof={**body,'content_hash':content_hash(body)},ticket_ref=ref)
     return {**body, "content_hash": content_hash(body)}

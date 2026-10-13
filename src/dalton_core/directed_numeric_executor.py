@@ -366,7 +366,17 @@ def management_answer(admission,source,completed,figures,proof,draft):
         'statements':statements}
 
 def complete_numeric_stage(executor,admission,works,*,failure_as_terminal=False):
-    work=works[3];lease=executor.scheduler.claim(executor.actor_ref,work_order_id=work['id'])
+    work=works[3]
+    # A receipt written before an expired completion is reusable, but only
+    # after the ordinary full source/fee/canonical checks. Do these expensive
+    # reads before a new lease; the original Work and receipt stay unchanged.
+    existing=executor.connection.execute('SELECT record_json,content_hash FROM mission_document_numeric_results WHERE admission_ref=?',(admission['id'],)).fetchone()
+    if existing is not None:
+        _verified_numeric_receipt(executor,admission,works,_read_receipt(existing,admission,works))
+    policy_row=executor.connection.execute('SELECT p.policy_json FROM scheduler_work_orders w JOIN scheduler_policy_versions p ON p.policy_version_id=w.policy_version_id WHERE w.work_order_id=?',(work['id'],)).fetchone()
+    if policy_row is None:raise DirectedNumericError('numeric local Work policy is absent')
+    lease_seconds=min(json.loads(policy_row[0])['max_lease_seconds'],work['budget']['max_seconds'])
+    lease=executor.scheduler.claim(executor.actor_ref,work_order_id=work['id'],lease_seconds=lease_seconds)
     if lease is None:return {'status':'pending','work_order_ref':work['id']}
     executor.scheduler.validate_lease_for_use(work['id'],lease['attempt']['attempt_number'],executor.actor_ref,
         lease['lease_token'],lease_revision_ref=lease['lease']['id'],lease_hash=lease['lease']['content_hash'],work_order_hash=lease['work_order_hash'])
@@ -392,7 +402,13 @@ def complete_numeric_stage(executor,admission,works,*,failure_as_terminal=False)
         with executor._transaction() as cur:
             cur.execute('INSERT INTO mission_document_numeric_results VALUES(?,?,?,?,?,?)',
                 (admission['id'],admission['content_hash'],work['id'],canonical_json(body),body['content_hash'],body['created_at']))
-    else:body=_read_receipt(row,admission,works)
+    else:
+        body=_read_receipt(row,admission,works)
+        if existing is None or row['record_json']!=existing['record_json'] or row['content_hash']!=existing['content_hash']:
+            raise DirectedNumericError('numeric receipt changed during free completion')
+        current=executor.authority.resolve_for_execution(admission['id'])
+        if current['content_hash']!=admission['content_hash']:
+            raise DirectedNumericError('numeric completion current authority differs')
     envelope=ResultEnvelope(schema_version='0.1',id='result-envelope:directed-numeric:'+body['content_hash'][:32],
         created_at=body['created_at'],work_order_ref=work['id'],invocation_ref='execution:directed-numeric:'+admission['identity_hash'][:32],
         status='succeeded',outputs=body,actual_side_effects=(),usage_refs=(),artifact_refs=(),error=None,
@@ -418,6 +434,17 @@ def read_numeric_result(executor,admission,works,formal,*,receipt_row=None,inclu
     receipt=_read_receipt(row,admission,works)
     if formal is None or formal['terminal_state']!='succeeded' or formal['result_envelope']['outputs']!=receipt:raise DirectedNumericError('numeric Scheduler final result differs')
     executor._stage_owned(works[3],formal)
+    result=_verified_numeric_receipt(executor,admission,works,receipt)
+    if include_supplement and receipt_row is None:
+        from .directed_numeric_measure_reconciliation import effective_result
+        supplement=effective_result(executor,admission)
+        if supplement is not None:return supplement
+    return result
+
+
+def _verified_numeric_receipt(executor,admission,works,receipt):
+    """Recheck the entire durable local result without asserting formal completion."""
+    from .claim_index_figures import MissionFigureAuthorityResolver
     proof,draft,verifier,accounting=_execution_proof(executor,admission,works)
     if (receipt['source_binding']!=_admitted_source_binding(executor.connection,admission) or receipt['source_proof_hash']!=proof['content_hash']
         or receipt['draft_proof_hash']!=draft['content_hash'] or receipt['verifier_proof_hash']!=verifier['content_hash'] or receipt['model_accounting_proofs']!=accounting):
@@ -583,10 +610,6 @@ def read_numeric_result(executor,admission,works,formal,*,receipt_row=None,inclu
     replayed=coverage(list(targets.values()),figures,company_ref=admission['company_ref'],document_ref=admission['request']['registration']['document_ref'],source_manifest_hash=receipt['source_binding']['source_manifest_hash'])
     if receipt['status']!=replayed['status'] or receipt['completed_targets']!=replayed['completed_targets'] or {x['target_ref'] for x in receipt['pending_targets']}!={x['target_ref'] for x in replayed['pending_targets']}:
         raise DirectedNumericError('numeric completion declaration differs from canonical target coverage')
-    if include_supplement and receipt_row is None:
-        from .directed_numeric_measure_reconciliation import effective_result
-        supplement=effective_result(executor,admission)
-        if supplement is not None:return supplement
     return {'status':'complete','research_status':'numeric_targets_completed' if receipt['status']=='completed' else 'numeric_waiting_evidence',
             'numeric_result':receipt,'canonical_claim_count':len(receipt['canonical_claims'])}
 
