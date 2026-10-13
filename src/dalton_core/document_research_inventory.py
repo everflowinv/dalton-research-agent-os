@@ -24,7 +24,7 @@ from .company_model_series import (
 from .document_research_strategy import (
     FINANCIAL_NOTE_TARGET_REF,
     FINANCIAL_NOTE_TARGET_SCHEMA_VERSION,
-    FINANCIAL_NOTE_HISTORY_TARGET_SCHEMA_VERSION, FINANCIAL_NOTE_FORMS,
+    FINANCIAL_NOTE_HISTORY_TARGET_SCHEMA_VERSION, FINANCIAL_NOTE_LINEAGE_TARGET_SCHEMA_VERSION, FINANCIAL_NOTE_FORMS,
     inventory_document,
     normalize_evidence_target,
 )
@@ -238,7 +238,7 @@ def financial_note_targets_for_registration(
         return _legacy_financial_note_targets_for_registration(
             connection=connection, mission=mission, company_ref=company_ref,
             registration=registration)
-    if target_schema_version not in {None, FINANCIAL_NOTE_HISTORY_TARGET_SCHEMA_VERSION}:
+    if target_schema_version not in {None, FINANCIAL_NOTE_HISTORY_TARGET_SCHEMA_VERSION, FINANCIAL_NOTE_LINEAGE_TARGET_SCHEMA_VERSION}:
         raise ValueError("unsupported financial note target schema")
     source_mission = financial_note_source_mission(
         connection=connection, mission=mission, company_ref=company_ref,
@@ -265,10 +265,19 @@ def financial_note_targets_for_registration(
     if len(rows) != 1:
         return []
     filing = dict(rows[0])
+    lineage_binding = None
+    cross_version = filing["dispatch_mission_version_ref"] != source_mission.get("id")
+    if target_schema_version == FINANCIAL_NOTE_LINEAGE_TARGET_SCHEMA_VERSION or (target_schema_version is None and cross_version):
+        from .financial_note_source_lineage import derive_binding
+        try:
+            lineage_binding = derive_binding(connection=connection, mission=mission,
+                company_ref=company_ref, registration=registration, filing=filing)
+        except (RuntimeError, KeyError, TypeError, ValueError):
+            return []
     if (filing["form"] not in FINANCIAL_NOTE_FORMS
             or filing["dispatch_form"] != filing["form"]
-            or filing["dispatch_mission_version_ref"] != source_mission.get("id")
-            or filing["dispatch_mission_version_hash"] != source_mission.get("content_hash")
+            or (lineage_binding is None and (cross_version
+                or filing["dispatch_mission_version_hash"] != source_mission.get("content_hash")))
             or filing["dispatch_company_ref"] != company_ref
             or filing["dispatch_status"] != "succeeded"):
         return []
@@ -316,7 +325,9 @@ def financial_note_targets_for_registration(
         if kind is None:
             continue
         targets.append(normalize_evidence_target({
-            "schema_version": FINANCIAL_NOTE_HISTORY_TARGET_SCHEMA_VERSION,
+            "schema_version": (FINANCIAL_NOTE_LINEAGE_TARGET_SCHEMA_VERSION if lineage_binding is not None
+                               else FINANCIAL_NOTE_HISTORY_TARGET_SCHEMA_VERSION),
+            **({"source_lineage_binding": lineage_binding} if lineage_binding is not None else {}),
             "target_ref": FINANCIAL_NOTE_TARGET_REF, "kind": "diluted_eps_numerator",
             "statement_ingest_ref": filing["ingest_id"],
             "statement_filing_hash": filing["content_hash"],

@@ -20,6 +20,8 @@ STRATEGY_VERSION = "directed-document:0.1"
 FINANCIAL_NOTE_TARGET_REF = "financial_note:diluted_eps_numerator:0.1"
 FINANCIAL_NOTE_TARGET_SCHEMA_VERSION = "financial-note-target-0.1"
 FINANCIAL_NOTE_HISTORY_TARGET_SCHEMA_VERSION = "financial-note-target-0.2"
+FINANCIAL_NOTE_LINEAGE_TARGET_SCHEMA_VERSION = "financial-note-target-0.3"
+HISTORY_TARGET_SCHEMAS = frozenset({FINANCIAL_NOTE_HISTORY_TARGET_SCHEMA_VERSION, FINANCIAL_NOTE_LINEAGE_TARGET_SCHEMA_VERSION})
 FINANCIAL_NOTE_FORMS = frozenset({"10-Q", "10-K", "10-Q/A", "10-K/A"})
 _STRATEGY_REQUIRED_FIELDS = frozenset({
     "strategy_version", "document_ref", "document_version_hash",
@@ -44,12 +46,14 @@ def normalize_evidence_target(value: Any) -> dict[str, Any]:
     """Validate the exact typed note target selected from document inventory."""
 
     fields = (FINANCIAL_NOTE_TARGET_FIELDS | {"statement_context_ref", "statement_context_hash"}
-              if isinstance(value, Mapping) and value.get("schema_version") == FINANCIAL_NOTE_HISTORY_TARGET_SCHEMA_VERSION
+              if isinstance(value, Mapping) and value.get("schema_version") in HISTORY_TARGET_SCHEMAS
               else FINANCIAL_NOTE_TARGET_FIELDS)
+    if isinstance(value, Mapping) and value.get("schema_version") == FINANCIAL_NOTE_LINEAGE_TARGET_SCHEMA_VERSION:
+        fields |= {"source_lineage_binding"}
     if not isinstance(value, Mapping) or set(value) != fields:
         raise DocumentResearchStrategyError("financial note target has an invalid closed shape")
     if (value["schema_version"] not in {FINANCIAL_NOTE_TARGET_SCHEMA_VERSION,
-                                        FINANCIAL_NOTE_HISTORY_TARGET_SCHEMA_VERSION}
+                                        *HISTORY_TARGET_SCHEMAS}
             or value["target_ref"] != FINANCIAL_NOTE_TARGET_REF
             or value["kind"] != "diluted_eps_numerator"
             or value["form"] not in (
@@ -67,16 +71,21 @@ def normalize_evidence_target(value: Any) -> dict[str, Any]:
     digest = value["statement_filing_hash"]
     if not isinstance(digest, str) or _HASH.fullmatch(digest) is None:
         raise DocumentResearchStrategyError("financial note statement hash is invalid")
-    if value["schema_version"] == FINANCIAL_NOTE_HISTORY_TARGET_SCHEMA_VERSION:
+    if value["schema_version"] in HISTORY_TARGET_SCHEMAS:
         ref, digest = value["statement_context_ref"], value["statement_context_hash"]
         if (ref is None) != (digest is None) or (ref is not None and (
                 not isinstance(ref, str) or re.fullmatch(r"statement-context:[0-9a-f]{32}", ref) is None
                 or not isinstance(digest, str) or _HASH.fullmatch(digest) is None)):
             raise DocumentResearchStrategyError("financial note statement context identity is invalid")
+    if value["schema_version"] == FINANCIAL_NOTE_LINEAGE_TARGET_SCHEMA_VERSION:
+        from .financial_note_source_lineage import normalize_binding
+        binding = normalize_binding(value["source_lineage_binding"])
+        if any(binding[k] != value[k] for k in ("statement_ingest_ref", "statement_filing_hash", "accession")):
+            raise DocumentResearchStrategyError("financial note lineage differs from target")
     periods = value["periods"]
     if not isinstance(periods, list) or not periods:
         raise DocumentResearchStrategyError("financial note target periods are empty")
-    if (value["schema_version"] == FINANCIAL_NOTE_HISTORY_TARGET_SCHEMA_VERSION
+    if (value["schema_version"] in HISTORY_TARGET_SCHEMAS
             and len(periods) != 1):
         raise DocumentResearchStrategyError("history note needs one exact period")
     normalized_periods = []
@@ -120,7 +129,7 @@ def validate_financial_note_target(value: Any) -> dict[str, Any]:
 def history_note_candidate_scope(target: Any) -> dict[str, str]:
     """Closed text-result scope for a single version0.2 statement period."""
     target = normalize_evidence_target(target)
-    if (target["schema_version"] != FINANCIAL_NOTE_HISTORY_TARGET_SCHEMA_VERSION
+    if (target["schema_version"] not in HISTORY_TARGET_SCHEMAS
             or len(target["periods"]) != 1):
         raise DocumentResearchStrategyError("history note needs one exact period")
     period = target["periods"][0]

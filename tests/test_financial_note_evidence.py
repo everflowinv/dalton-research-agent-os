@@ -389,6 +389,12 @@ class FinancialNoteResolverTests(unittest.TestCase):
         acquired_ref = fixture.store.connection.execute(
             "SELECT record_id FROM coverage_mission_discovered_documents "
             "WHERE document_ref=? AND status='acquired'", (document_ref,)).fetchone()[0]
+        if options.get("dual_source_mission"):
+            fixture.mission = document_fixtures.MissionDocumentResearchTests()._roll_mission(
+                fixture, budget={**fixture.mission["budget"], "max_daily_cost_usd": 9.0})
+            with CoverageMissionAuthority(fixture.store)._transaction() as cursor:
+                cursor.execute("UPDATE coverage_mission_discovered_documents SET mission_version_ref=? WHERE record_id=?",
+                               (fixture.mission["id"], acquired_ref))
         registration = registry.register_acquired_document(
             record_id=acquired_ref, purpose=PURPOSE)
         target = {
@@ -405,6 +411,12 @@ class FinancialNoteResolverTests(unittest.TestCase):
                            "statement_context_ref": None, "statement_context_hash": None,
                            "applicability_kind": options["kind"],
                            "periods": [{"period_start": options["start"], "period_end": options["end"]}]})
+        if options.get("dual_source_mission"):
+            from dalton_core.document_research_inventory import financial_note_targets_for_registration
+            targets = financial_note_targets_for_registration(connection=fixture.store.connection,
+                mission=fixture.mission, company_ref=COMPANY, registration=registration)
+            self.assertEqual(len(targets), 1)
+            target = targets[0]
         inquiry = {
             "rank": 0, "company_ref": COMPANY,
             "question": "What disclosed adjustment defines the diluted EPS numerator?",

@@ -1222,7 +1222,7 @@ def _derive(admission: Mapping[str, Any], scheduler: Scheduler,
                                     == DRAFT_CONTRACT_VERSION_V2 else draft_prompt)
         prompt = draft_prompt_builder(question=question, search_proof=proof)
         note_target = (admission["planner_inquiry"].get("directed_document") or {}).get("evidence_target")
-        if isinstance(note_target, Mapping) and note_target.get("schema_version") == "financial-note-target-0.2":
+        if isinstance(note_target, Mapping) and note_target.get("schema_version") in {"financial-note-target-0.2", "financial-note-target-0.3"}:
             from .document_research_strategy import normalize_evidence_target, history_note_candidate_scope
             note_target = normalize_evidence_target(note_target)
             body = json.loads(prompt)
@@ -1264,7 +1264,7 @@ def _derive(admission: Mapping[str, Any], scheduler: Scheduler,
             question=question, search_proof=proof,
             draft=draft["output"], producer_proof=producer)
         note_target = (admission["planner_inquiry"].get("directed_document") or {}).get("evidence_target")
-        if isinstance(note_target, Mapping) and note_target.get("schema_version") == "financial-note-target-0.2":
+        if isinstance(note_target, Mapping) and note_target.get("schema_version") in {"financial-note-target-0.2", "financial-note-target-0.3"}:
             from .document_research_strategy import normalize_evidence_target, history_note_candidate_scope
             note_target = normalize_evidence_target(note_target)
             body = json.loads(prompt)

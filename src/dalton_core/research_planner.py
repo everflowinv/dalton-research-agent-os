@@ -773,7 +773,7 @@ def project_state_for_prompt(
                 )
         return {
             "schema_version": "0.1",
-            "rule_ref": PROMPT_PROJECTION_REF,
+            "rule_ref": _projection_ref_for_state(projected),
             "rule_hash": _projection_hash_for_state(projected),
             "full_state_hash": state.get("content_hash"),
             "full_prompt_sha256": hashlib.sha256(full_prompt.encode("utf-8")).hexdigest(),
@@ -955,6 +955,11 @@ def project_state_for_prompt(
                 # precisely when the planner is asked to retry its open question.
                 reopened_refs.update(r.get("document_ref") for r in
                                      (company.get("numeric_reading_requirements") or {}).get("requirements") or ())
+                # These are executable source-bound capabilities, not prose
+                # hints. Keep their exact source/version/period alongside the
+                # output schema even when an older report has a recent quarter.
+                reopened_refs.update(document.get("document_ref") for document in documents
+                                     if _valid_note_targets(document))
                 pinned = sum(document.get("document_ref") in reopened_refs for document in documents)
                 retain = max(keep_per_company, pinned)
                 ordered = sorted(
@@ -1274,19 +1279,47 @@ def _has_initial_screen_feedback(state: Mapping[str, Any]) -> bool:
                for feedback in (company.get('initial_screen_validation_feedback'),))
 
 
+def _valid_note_targets(document: Mapping[str, Any]) -> bool:
+    from .document_research_strategy import normalize_evidence_target
+    for target in document.get("evidence_targets", ()):
+        try:
+            normalize_evidence_target(target)
+        except ValueError:
+            continue
+        return True
+    return False
+
+
+def _has_note_targets(state: Mapping[str, Any]) -> bool:
+    return any(_valid_note_targets(document)
+               for company in state.get("companies", ())
+               for document in company.get("readable_documents", ()))
+
+
+def _projection_ref_for_state(state: Mapping[str, Any]) -> str:
+    return ("rule:research-plan-input-projection:typed-note-directory-1"
+            if _has_note_targets(state) else PROMPT_PROJECTION_REF)
+
+
 def _projection_hash_for_state(state: Mapping[str, Any]) -> str:
-    if not any('initial_screen_validation_feedback' in company
-               for company in state.get('companies', ())):
+    has_feedback = any('initial_screen_validation_feedback' in company
+                       for company in state.get('companies', ()))
+    if not has_feedback and not _has_note_targets(state):
         return PROMPT_PROJECTION_HASH
-    rule = {**PROMPT_PROJECTION_RULE, 'company_core_fields': [
-        *PROMPT_PROJECTION_RULE['company_core_fields'], 'initial_screen_validation_feedback']}
+    rule = PROMPT_PROJECTION_RULE
+    if has_feedback:
+        rule = {**rule, 'company_core_fields': [
+            *rule['company_core_fields'], 'initial_screen_validation_feedback']}
+    if _has_note_targets(state):
+        rule = {**rule, "ref": _projection_ref_for_state(state),
+                "typed_note_directory": "retain all normalized exact source/version/period targets before recent documents"}
     return content_hash(rule)
 
 
 def _history_note_prompt_schema(state: Mapping[str, Any]) -> dict[str, Any]:
     # Ordinary and legacy planning prompts remain byte-identical. A new target
     # is an explicit state change and carries its exact extended output shape.
-    if not any(target.get("schema_version") == "financial-note-target-0.2"
+    if not any(target.get("schema_version") in {"financial-note-target-0.2", "financial-note-target-0.3"}
                for company in state.get("companies", ())
                for document in company.get("readable_documents", ())
                for target in document.get("evidence_targets", ())):
@@ -1302,7 +1335,21 @@ def _history_note_prompt_schema(state: Mapping[str, Any]) -> dict[str, Any]:
     target["form"] = {"enum": ["10-K", "10-Q", "10-K/A", "10-Q/A"]}
     target["statement_context_ref"] = {"type": ["string", "null"]}
     target["statement_context_hash"] = {"type": ["string", "null"]}
-    props["evidence_target"] = {"oneOf": [legacy, history]}
+    variants = [legacy, history]
+    if any(target.get("schema_version") == "financial-note-target-0.3"
+           for company in state.get("companies", ())
+           for document in company.get("readable_documents", ())
+           for target in document.get("evidence_targets", ())):
+        from .financial_note_source_lineage import FIELDS, SCHEMA
+        lineage = copy.deepcopy(history)
+        lineage["required"].append("source_lineage_binding")
+        lineage["properties"]["schema_version"] = {"const": "financial-note-target-0.3"}
+        lineage["properties"]["source_lineage_binding"] = {
+            "type": "object", "additionalProperties": False, "required": sorted(FIELDS),
+            "properties": {k: ({"const": SCHEMA} if k == "schema_version"
+                               else {"type": "string", "minLength": 1}) for k in sorted(FIELDS)}}
+        variants.append(lineage)
+    props["evidence_target"] = {"oneOf": variants}
     return schema
 
 
