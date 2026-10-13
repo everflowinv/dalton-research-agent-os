@@ -3810,6 +3810,47 @@ class CoverageMissionAuthority:
         return {'document_ref':doc_ref,'record_id':record_id,'review_id':review['review_id'],
                 'review_status':review['status'],'source_binding':exact['binding']}
 
+    def register_acquired_interim_attachments(self, parent_record_id: str, *,
+                                            state_dir: Any, spool: Any,
+                                            receipt_reader: Any,
+                                            requested_by: str) -> list[dict[str, Any]]:
+        """Register each strongly acquired original separately, never as a quarter."""
+        from .sec_interim_attachments import verified_sources
+        parent = self.connection.execute(
+            'SELECT * FROM coverage_mission_discovered_documents WHERE record_id=?',
+            (_text(parent_record_id, 'parent_record_id'),)).fetchone()
+        if parent is None or parent['status'] != 'acquired' or parent['source_ref'] != 'source:sec-edgar':
+            raise CoverageMissionConflict('interim attachments require an acquired SEC parent')
+        self.authorize_source_discovery(company_ref=parent['company_ref'], source_ref=parent['source_ref'],
+            requested_by=requested_by, mission_version_ref=parent['mission_version_ref'])
+        originals = verified_sources(self.store, spool, Path(state_dir), ticket_ref=parent['ticket_ref'],
+            parent_document_ref=parent['document_ref'], company_ref=parent['company_ref'], receipt_reader=receipt_reader)
+        result = []
+        for exact in originals:
+            doc_ref = exact['document_ref']
+            if doc_ref == parent['document_ref']:
+                continue
+            record_id = _ref('mission-discovered-document',
+                {'mission_version_ref': parent['mission_version_ref'], 'document_ref': doc_ref})
+            now = _now()
+            with self._transaction() as cur:
+                prior = cur.execute('SELECT * FROM coverage_mission_discovered_documents '
+                    'WHERE mission_version_ref=? AND document_ref=?', (parent['mission_version_ref'], doc_ref)).fetchone()
+                if prior is None:
+                    cur.execute('INSERT INTO coverage_mission_discovered_documents '
+                        '(record_id,mission_version_ref,company_ref,source_ref,document_ref,discovery_ref,status,ticket_ref,'
+                        'failure_reason,failure_retryable,created_at,updated_at,host) VALUES(?,?,?,?,?,?,?,?,?,?,?,?,?)',
+                        (record_id, parent['mission_version_ref'], parent['company_ref'], parent['source_ref'], doc_ref,
+                         parent['discovery_ref'], 'acquired', parent['ticket_ref'], None, None, now, now, 'www.sec.gov'))
+                else:
+                    record_id = prior['record_id']
+                    if any(prior[k] != parent[k] for k in ('mission_version_ref', 'company_ref', 'source_ref', 'discovery_ref', 'ticket_ref')) or prior['status'] != 'acquired':
+                        raise CoverageMissionConflict('interim attachment acquired-row identity differs')
+            review = self.register_document_review(record_id, requested_by=requested_by)
+            result.append({'document_ref': doc_ref, 'record_id': record_id, 'review_id': review['review_id'],
+                           'review_status': review['status'], 'source_binding': exact['binding']})
+        return result
+
     def backfill_document_reviews(
         self, mission_ref: str, *, limit: int = 100, deadline: float | None = None,
     ) -> list[dict[str, Any]]:

@@ -509,6 +509,25 @@ def verified_original(writer, review, row, limits, receipt_reader):
     source_ref = review["source_ref"]
     document_ref = review["document_ref"]
     launcher = acquisition_ticket_reader(writer, source_ref)
+    if source_ref == SEC_EDGAR_SOURCE_REF and document_ref.startswith('sec:interim:'):
+        from .sec_interim_attachments import verified_sources
+        from .acquired_document_source_chain import acquired_annual_parent
+        parts = document_ref.split(':', 3)
+        if len(parts) != 4:
+            raise ResearchVerificationConflict('interim original document identity differs')
+        parent_ref = 'sec:filing:' + parts[2]
+        acquired_annual_parent(writer, review, row, parent_ref)
+        sources = verified_sources(writer.store, acquisition_spool(writer, launcher, source_ref), writer.state_dir,
+            ticket_ref=row['ticket_ref'], parent_document_ref=parent_ref, company_ref=review['company_ref'],
+            receipt_reader=receipt_reader, max_source_chars=limits['max_document_chars'],
+            max_pdf_pages=limits['max_pdf_pages'], max_decompressed_bytes=limits['max_decompressed_bytes'])
+        choices = [item for item in sources if item['document_ref'] == document_ref]
+        if len(choices) != 1:
+            raise ResearchVerificationConflict('interim original member is not uniquely acquired')
+        exact = choices[0]; manifest = exact['manifest']; rendering = exact['rendering']; text = rendering['text']
+        return manifest, text, _hash_text(text), {'canonical_url': manifest['canonical_url'], 'host': manifest['host'],
+            'raw_media_type': manifest['raw_media_type'], 'body_sha256': manifest['body_sha256'],
+            'source_renderer': rendering['renderer'], 'source_truncated': False, 'interim_attachment': exact['binding']}
     if source_ref == SEC_EDGAR_SOURCE_REF and document_ref.startswith('sec:exhibit:'):
         from .sec_annual_report_exhibit import verified_exhibit_source, AnnualReportExhibitConflict
         accession=document_ref.split(':',3)[2]

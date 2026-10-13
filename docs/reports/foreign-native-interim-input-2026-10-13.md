@@ -89,3 +89,11 @@ forecast not-ready typed gap。正式非 XBRL line/role 接口在 A cell 合同�
   `a8ce0756891bcd5f2464adcf82858eab229626170f5ba39ce7ce9ecb38babd25`。
 - `/tmp/root-ntr-native-source-inventory-ro-r01-20261013.json` 提供已持有
   submissions 原缓存路径与原 SHA，未请求外网。
+
+## 获取与可读接线冻结（未部署）
+
+后继实现 `sec_interim_attachments`：正常公开网页获取子任务强重建已准入的 SEC query/profile/issuer/accession，再读取同 accession 的原文件索引；最多八件完整源附件逐件调用原 governed fetch，原 request 时间绑定于父请求，重放不重买。全部索引成员保留，主文件复用其原身份；附件分别使用 `sec:interim:<accession>:<filename>` 原件身份进入现有 review、document reader 和 corpus，原始半年期间不改成季度。原件/receipt/最终URL/全成员集合缺失、漂移或超界明确拒绝，不影响其他公司的普通候选。
+
+农业 6-K 检索窗口由原 effective 90 天扩大至明确 1095 天的新 immutable plan，只准备了官方 `coverage_list_change.write_plan` preview；source cap200、公司、mission、国内 specs 保持，selector/plan/current mission 均须 CAS，旧版本保留。该配置尚未 apply。
+
+这一包没有新增非 XBRL 正式三表合同或伪造 QName。真实 NTR 6-K 附件尚待正常 source lane 获取，不能以离线 fixture 称季度数据或预测已解决。已存在的年度 native document-set 尚需与通用原件材料目录贯通。季度原文 cell/实际期间/单位证明、原报告行角色选择及正式财务输入，转为下一架构版本的原件能力合同；旧 not-ready MR 在规格退休时需要 supersede/withdraw，而不能 `met=true`。

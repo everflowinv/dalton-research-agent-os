@@ -603,7 +603,28 @@ class PublicWebDocumentSourceAdapter:
         legacy: bool = False,
     ) -> tuple[dict[str, Any], str]:
         lookup_ref = _text(document_ref, "document_ref")
-        if acquisition_ticket_ref is None:
+        interim = None
+        if lookup_ref.startswith('sec:interim:'):
+            from .sec_interim_attachments import verified_sources
+            if not isinstance(acquisition_ticket_ref, str) or self.source_ref != 'source:sec-edgar':
+                raise DocumentResearchConflict('interim original requires an exact SEC acquisition ticket')
+            rows = self.core.connection.execute(
+                "SELECT DISTINCT company_ref FROM coverage_mission_discovered_documents "
+                "WHERE document_ref=? AND ticket_ref=? AND source_ref='source:sec-edgar' AND status='acquired' LIMIT 2",
+                (lookup_ref, acquisition_ticket_ref)).fetchall()
+            if len(rows) != 1:
+                raise DocumentResearchConflict('interim original has no unique acquired company binding')
+            parts = lookup_ref.split(':', 3)
+            sources = verified_sources(self.core, self.spool, self.launcher.state_dir,
+                ticket_ref=acquisition_ticket_ref, parent_document_ref='sec:filing:' + parts[2],
+                company_ref=rows[0]['company_ref'], receipt_reader=self.receipt_reader,
+                max_source_chars=self.max_source_chars, max_pdf_pages=self.max_pdf_pages,
+                max_decompressed_bytes=self.max_decompressed_bytes)
+            choices = [item for item in sources if item['document_ref'] == lookup_ref]
+            if len(choices) != 1:
+                raise DocumentResearchConflict('interim original member binding differs')
+            interim = choices[0]; manifest = interim['manifest']
+        elif acquisition_ticket_ref is None:
             binding = self.launcher.locate_completed_manifest_binding(lookup_ref)
             if not isinstance(binding, Mapping) or set(binding) != {"ticket_ref", "manifest"}:
                 raise DocumentResearchConflict(
@@ -646,12 +667,15 @@ class PublicWebDocumentSourceAdapter:
             )
         from .public_web_core_fetch import url_authority_from_discovery
 
-        authority = url_authority_from_discovery(
-            self.core.connection,
-            self.spool,
-            url_ref=lookup_ref,
-            source_envelope_ref=manifest["discovery_source_envelope_ref"],
-        )
+        if interim is None:
+            authority = url_authority_from_discovery(
+                self.core.connection, self.spool, url_ref=lookup_ref,
+                source_envelope_ref=manifest["discovery_source_envelope_ref"])
+        else:
+            from .sec_interim_attachments import attachment_authority
+            bound = interim['binding']; source = bound['source_identity']
+            authority = attachment_authority(source['primary_authority'], bound['member'],
+                issuer=source['issuer'], filing=source['filing'])
         if (
             authority.get("id") != manifest["url_authority_ref"]
             or authority.get("content_hash") != manifest["url_authority_hash"]

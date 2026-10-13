@@ -732,8 +732,15 @@ class DocumentExtractionCoordinator:
         attachments = register_held_annual_attachments(
             self.missions, state_dir=self.launcher.state_dir,
             spool_dir=getattr(self.launcher, 'spool_dir', None))
+        from .sec_interim_attachments import register_held
+        interim_attachments = register_held(self.missions, state_dir=self.launcher.state_dir,
+            spool_dir=getattr(self.launcher, 'spool_dir', None))
         awaiting, awaiting_fingerprint = self._awaiting_state()
         result: dict[str, Any] = {"awaiting": awaiting}
+        if interim_attachments['registered']:
+            result['interim_attachments'] = interim_attachments['registered']
+        if interim_attachments['refused']:
+            result['interim_attachment_refusals'] = interim_attachments['refused']
         if attachments['registered']:
             result['annual_report_attachments'] = attachments['registered']
         if attachments['refused']:
