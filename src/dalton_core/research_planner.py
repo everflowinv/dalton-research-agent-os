@@ -1706,7 +1706,8 @@ def _int(value: Any) -> int:
 
 
 def plan_from_response(
-    state: Mapping[str, Any], response_text: Any, *, created_at: str
+    state: Mapping[str, Any], response_text: Any, *, created_at: str,
+    canonical_binding_resolver: Any | None = None,
 ) -> dict[str, Any]:
     """A verified plan, or a refusal naming what the model invented.
 
@@ -1717,6 +1718,8 @@ def plan_from_response(
     """
 
     parsed = parse_response(response_text)
+    from .planner_structural_revalidation import normalize_wrappers
+    parsed, _ = normalize_wrappers(parsed)
     known = _known_work(state)
     repair_targets = _known_repair_targets(state)
     for index, directive in enumerate(parsed["directives"]):
@@ -1795,7 +1798,13 @@ def plan_from_response(
         if "canonical_question" in inquiry:
             from .canonical_document_questions import validate_state_binding
             try:
-                normalized["canonical_question"] = validate_state_binding(inquiry, state)
+                directed_inquiry = {**inquiry, 'directed_document': normalized.get('directed_document')}
+                try:
+                    normalized["canonical_question"] = validate_state_binding(directed_inquiry, state)
+                except ValueError:
+                    if canonical_binding_resolver is None:
+                        raise
+                    normalized["canonical_question"] = canonical_binding_resolver(directed_inquiry, state)
             except ValueError as exc:
                 raise ResearchPlanError(f"inquiry {index}: {exc}") from exc
         inquiries.append(normalized)

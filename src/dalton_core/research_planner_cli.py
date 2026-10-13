@@ -462,7 +462,17 @@ def record_attempt(state_dir: Path, state_hash: str, summary: Mapping[str, Any])
         "projection_rule_ref": PROMPT_PROJECTION_REF,
         "work_order_prompt_bound": MAX_WORK_ORDER_PROMPT_BYTES,
         "conservative_work_input_byte_bound": summary.get("conservative_work_input_byte_bound"),
+        **({"structural_revalidation_contract": (summary.get("structural_revalidation_contract")
+                 or previous.get("structural_revalidation_contract"))}
+           if summary.get("structural_revalidation_contract") or previous.get("structural_revalidation_contract") else {}),
     }
+    if (summary.get("plan_status") == "held" and previous.get("plan_status") in TERMINAL_PLAN_STATUSES
+            and ledger[state_hash].get("structural_revalidation_contract")):
+        # Free verification never turns an original terminal verdict into a
+        # transient retry. Preserve its time/count/reason and remember only
+        # the fixed free contract; changing model policy cannot buy it again.
+        ledger[state_hash] = {**previous, "structural_revalidation_contract":
+                              ledger[state_hash]["structural_revalidation_contract"]}
     ordered = sorted(ledger.items(), key=lambda item: str(item[1].get("at") or ""),
                      reverse=True)[:MAX_LEDGER_ENTRIES]
     try:
@@ -709,6 +719,44 @@ def run_planner(
         recovery = None
         attempts = read_attempt_ledger(state_dir)
         last_attempt = attempts.get(state['content_hash']) or {}
+        from .planner_structural_revalidation import (CONTRACT as STRUCTURAL_REVALIDATION,
+            candidate as revalidate_paid_plan, current_numeric_canonical_binding)
+        def canonical_resolver(inquiry, complete_state):
+            return current_numeric_canonical_binding(store.connection, mission, inquiry, complete_state)
+        if (not dry_run and model_config_path is not None
+                and last_attempt.get('plan_status') in {'refused', 'held'}
+                and last_attempt.get('structural_revalidation_contract') != STRUCTURAL_REVALIDATION):
+            summary['structural_revalidation_contract'] = STRUCTURAL_REVALIDATION
+            # An operational ledger is only a bounded hint. Eligibility comes
+            # from the exact immutable Work, complete state, receipts and fees.
+            try:
+                free = revalidate_paid_plan(state_dir=state_dir, scheduler_db=scheduler_db,
+                    config=effective_planner_model_config(state_dir=state_dir, model_config_path=model_config_path),
+                    state=state, mission=mission, validate=lambda text: plan_from_response(
+                        state, text, created_at=now.isoformat(timespec='microseconds'),
+                        canonical_binding_resolver=canonical_resolver))
+            except (ValueError, OSError, sqlite3.Error) as exc:
+                free = None
+                summary['structural_revalidation'] = {'status':'unverified','reason':f'{type(exc).__name__}: {exc}'}
+            if free is not None:
+                stored = missions.record_research_plan(free['plan'],
+                    decided_by=mission['autonomy']['automation_principal'],
+                    work_order_ref=free['proof']['work_ref'])
+                record_decision(state_dir,state_hash=state['content_hash'],
+                    planning_hash=state_planning_hash(state), planning_core_hash=state_planning_core_hash(state),
+                    settlement_hash=state_planning_settlement_hash(state),at=now.isoformat(timespec='microseconds'))
+                if state.get('reflection_followup_context'):
+                    from .research_followup_automation import FollowupAutomationAuthority
+                    summary['followup_planner_observations'] = [x['id'] for x in
+                        FollowupAutomationAuthority(store).observe_planner(
+                            context=state['reflection_followup_context'], stored_plan=stored, full_state=state)]
+                summary.update({'status':'succeeded','plan_status':stored['status'],'replayed':True,
+                    'plan_ref':stored['plan_id'],'directives':len(free['plan']['directives']),
+                    'inquiries':len(free['plan']['inquiries']),'sufficiency':len(free['plan'].get('sufficiency') or []),
+                    'assessment':free['plan']['assessment'], 'structural_revalidation':free['proof'],
+                    'reading_priorities':document_reading_priorities(free['plan']),
+                    'addressable_inquiries':sum(1 for row in gap_filling_inquiries(free['plan']) if row['addressable'])})
+                return summary
         if (not dry_run and model_config_path is not None
                 and last_attempt.get('plan_status') in {'model_unavailable', 'skipped:pool_exhausted'}):
             from .planner_paid_output_recovery import planner_candidate
@@ -836,7 +884,8 @@ def run_planner(
                         at=now.isoformat(timespec="microseconds"))
         try:
             plan = plan_from_response(
-                state, call["text"], created_at=now.isoformat(timespec="microseconds"))
+                state, call["text"], created_at=now.isoformat(timespec="microseconds"),
+                canonical_binding_resolver=canonical_resolver)
         except ResearchPlanError as exc:
             # Refused whole rather than partially applied: a ranking with the
             # invented parts removed no longer means what the model meant.

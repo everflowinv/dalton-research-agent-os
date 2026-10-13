@@ -364,8 +364,10 @@ class ResearchPlannerCoordinator:
 
         Not the state itself: building that reads the whole checklist, and the
         point of this is to decide whether spawning a process is worth it. Each
-        count is a table the state is derived from, so a change in any of them
-        can change the plan and a change in none of them cannot.
+        count or checked current-product identity is an input to the state.
+        Quality/forecast records can move without a new Claim; their bounded
+        strong identity hint wakes the child to rebuild the full current state.
+        This signature never authorizes a purchase or changes a paid Work.
         """
 
         def count(sql: str) -> int:
@@ -383,6 +385,7 @@ class ResearchPlannerCoordinator:
         from .investment_memo_planner_feedback import signature as memo_feedback_signature
         from .research_planner import TASK_HASH
         from .research_planner_cli import MAX_WORK_ORDER_PROMPT_BYTES, planner_input_byte_bound
+        from .planner_structural_revalidation import CONTRACT as STRUCTURAL_REVALIDATION, input_signature
 
         model_path = getattr(self.launcher, "model_config_path", None)
         input_bound = (planner_input_byte_bound(state_dir=self.launcher.state_dir,
@@ -394,6 +397,8 @@ class ResearchPlannerCoordinator:
             # previous attempt stopped before creating a model Work.
             "planner_work_order_prompt_bytes": MAX_WORK_ORDER_PROMPT_BYTES,
             "planner_task_hash": TASK_HASH,
+            "planner_structural_revalidation": STRUCTURAL_REVALIDATION,
+            "current_product_inputs": input_signature(self.store.connection),
             "planner_input_byte_bound": input_bound,
             # What is held, and what has been read out of it.
             "documents": count("SELECT COUNT(*) FROM coverage_mission_discovered_documents"),
