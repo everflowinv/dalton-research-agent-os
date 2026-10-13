@@ -143,6 +143,7 @@ class MemoMacroAccounting:
         self.import_error = None
         self.scan_error = None
         self.pending = None
+        self.pending_retry = None
         if not self.complete:
             self._import_legacy()
 
@@ -584,7 +585,7 @@ class MemoMacroAccounting:
                                       'LIMIT ?', (self.ref, MAX_TOTAL_REQUESTS+1)).fetchall()
             maintenance = self._registered_requests(rows,connection)
             reader = Scheduler.__new__(Scheduler); reader.connection = connection
-            bills = {}; latest = {}; entries = []
+            bills = {}; latest = {}; entries = []; ready_retries = {}
             imported = self._legacy_entries(connection)
             held_entries = {_body(row)['request_id']:_body(row) for row in rows}
             held_entries.update({e['request_id']:e for e in maintenance})
@@ -608,23 +609,31 @@ class MemoMacroAccounting:
                         if rowid <= self.scope['registered_work_rowid']:
                             raise ValueError('memo complete scope predates an unregistered normal Work')
                     formal = reader.formal_result(work.id)
-                    if formal is None:
-                        self.last = {'contract_ref': CONTRACT_REF, 'macro_ref': self.ref,
-                            'status': 'in_flight_fee_unknown', 'cost_complete': False,
-                            'unproved_work_ref':work.id, 'unproved_work_hash':authority['work_order_hash'],
-                            'retained_macro_reservation_micros':int(round(work.budget['max_cost_usd']*1_000_000)),
-                            'known_indexed_micros':sum(item['accounted_micros'] for item in bills.values())}
-                        raise ValueError('memo registered Work is in flight or lacks a formal result; reservation retained')
                     try:
-                        bill = accounted_bill(connection,router,budget,authority,formal)
+                        from .investment_memo_scheduler_retry import prove_ready_retry, retry_bill
+                        if formal is None:
+                            proof = prove_ready_retry(connection,work.id,mission=self.mission,now=self.model.clock())
+                            bill = retry_bill(connection,router,budget,authority,proof)
+                            ready_retries[work.id] = proof
+                        else:
+                            bill = accounted_bill(connection,router,budget,authority,formal)
+                            # A later success cannot erase an earlier completed
+                            # attempt whose real fee was never established.
+                            if formal['attempt_number'] > 1 and connection.execute(
+                                    "SELECT 1 FROM scheduler_attempt_events WHERE work_order_id=? AND state='retryable' LIMIT 1",
+                                    (work.id,)).fetchone():
+                                proof = prove_ready_retry(connection,work.id,mission={'id':work.metadata['mission_version_ref'],'content_hash':work.metadata['mission_version_hash']},now=self.model.clock(),_terminal=True)
+                                bill = retry_bill(connection,router,budget,authority,proof,terminal_bill=bill)
                     except ValueError:
                         self.last = {'contract_ref': CONTRACT_REF, 'macro_ref': self.ref,
-                            'status':'fee_authority_unproved','cost_complete':False,
+                            'status':'in_flight_fee_unknown' if formal is None else 'fee_authority_unproved','cost_complete':False,
                             'unproved_work_ref':work.id,'unproved_work_hash':authority['work_order_hash'],
                             'retained_macro_reservation_micros':int(round(work.budget['max_cost_usd']*1_000_000)),
                             'known_indexed_micros':sum(item['accounted_micros'] for item in bills.values())}
+                        if formal is None:
+                            raise ValueError('memo registered Work is in flight or lacks proved retryable completion; reservation retained')
                         raise
-                    if (formal['result_envelope'].get('error') or {}).get('code') == 'TIMEOUT':
+                    if formal is not None and (formal['result_envelope'].get('error') or {}).get('code') == 'TIMEOUT':
                         bill['accounted_micros'] = max(bill['accounted_micros'], int(round(work.budget['max_cost_usd']*1_000_000)))
                     bills[work.id] = bill
                 if works:
@@ -647,8 +656,9 @@ class MemoMacroAccounting:
                 raise ValueError('memo macro correction extra slot has no registered request')
             total = sum(item['accounted_micros'] for item in bills.values())
             self.last = {'contract_ref': CONTRACT_REF, 'macro_ref': self.ref,
-                         'status': 'complete' if self.complete else 'legacy_fee_audit_required',
-                         'cost_complete': self.complete,
+                         'status': 'retryable_fee_unknown' if ready_retries else ('complete' if self.complete else 'legacy_fee_audit_required'),
+                         'cost_complete': self.complete and not ready_retries,
+                         'ready_retry_work_refs': sorted(ready_retries),
                          'unknown_fee_retained_work_refs':sorted(k for k,v in bills.items() if v.get('unknown_fee_retained')),
                          'fee_certainty':'conservative_upper_bound' if any(v.get('unknown_fee_retained') for v in bills.values()) else 'settled',
                          'known_indexed_micros':total,
@@ -685,12 +695,22 @@ class MemoMacroAccounting:
             work, authority = works[-1]
             reader = Scheduler.__new__(Scheduler); reader.connection = connection
             formal = reader.formal_result(work.id)
+            self.pending_retry = None
             if formal is None:
-                self.last = {'contract_ref':CONTRACT_REF,'macro_ref':self.ref,
-                    'status':'in_flight_fee_unknown','cost_complete':False,
-                    'unproved_work_ref':work.id,'unproved_work_hash':authority['work_order_hash'],
-                    'retained_macro_reservation_micros':int(round(work.budget['max_cost_usd']*1_000_000))}
-                raise ValueError('memo registered request is still in flight or lacks a formal result')
+                if (work.question != kwargs['prompt'] or work.metadata.get('purpose') != kwargs['purpose']
+                        or (kwargs['mission']['id'],kwargs['mission']['content_hash']) != (self.mission['id'],self.mission['content_hash'])):
+                    raise ValueError('memo retry registered prompt/purpose/current mission differs')
+                from .investment_memo_scheduler_retry import prove_ready_retry
+                try:
+                    proof = prove_ready_retry(connection,work.id,mission=self.mission,now=self.model.clock())
+                except ValueError:
+                    self.last = {'contract_ref':CONTRACT_REF,'macro_ref':self.ref,
+                        'status':'in_flight_fee_unknown','cost_complete':False,
+                        'unproved_work_ref':work.id,'unproved_work_hash':authority['work_order_hash'],
+                        'retained_macro_reservation_micros':int(round(work.budget['max_cost_usd']*1_000_000))}
+                    raise ValueError('memo registered request is still in flight or lacks proved retryable completion')
+                self.pending_retry = proof
+                return None
         if work.question != kwargs['prompt']:
             raise ValueError('memo macro replay prompt differs')
         # A new mission version does not silently reset old bills or borrow an
@@ -761,6 +781,24 @@ class MemoMacroAccounting:
         index = 3 if role == 'verifier' else prompt_identity(kwargs['prompt'])[2]
         total, future = self.room(group_index=index, producer_micros=producer_micros,
                                   verifier_micros=0 if role == 'verifier' else verifier_micros)
+        retries = self.last.get('ready_retry_work_refs', [])
+        if retries:
+            proof = self.pending_retry
+            if (proof is None or retries != [proof['work_order_ref']]
+                    or content_hash(kwargs['prompt']) != proof['prompt_hash']
+                    or kwargs['purpose'] != proof['purpose']):
+                raise ValueError('memo pending retry permits only its original registered request')
+            from .planner_paid_output_recovery import _authority_connection
+            from .investment_memo_scheduler_retry import prove_ready_retry
+            with _authority_connection(self.model.scheduler_db) as connection:
+                current = prove_ready_retry(connection,proof['work_order_ref'],mission=self.mission,now=self.model.clock())
+                if current != proof:
+                    raise ValueError('memo retry Scheduler authority changed before admission')
+            # Deny-only: the normal Cockpit builder must reproduce this exact
+            # original Work, including its budget and transport policy.
+            kwargs['_existing_memo_retry'] = {key:proof[key] for key in ('work_order_ref','work_order_hash')}
+            current_bill = next(b for b in self.last['bills'] if b['work_ref']==proof['work_order_ref'])
+            kwargs['_existing_memo_retry']['max_accounted_work_micros'] = run_micros-future-(total-current_bill['accounted_micros'])
         if role == 'maintenance':
             future = max(future,(3-index)*producer_micros+verifier_micros)
         cost = verifier_micros if role == 'verifier' else producer_micros

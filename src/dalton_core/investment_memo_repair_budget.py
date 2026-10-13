@@ -92,6 +92,7 @@ class MemoRepairBudget:
                 if cached is None and cached_failure is None:
                     if maintenance is not None and not self.maintenance_enabled:
                         raise ValueError('memo group maintenance is disabled by the current repair policy')
+                    self._refresh_macro()
                     if self.macro_error is not None:
                         raise ValueError(self.macro_error)
                     self.macro.before_paid(kwargs, run_micros=self.run_micros,

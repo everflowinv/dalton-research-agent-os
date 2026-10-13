@@ -2275,6 +2275,7 @@ class CockpitModel:
              _model_spec_request_identity: Mapping[str, Any] | None = None,
              _structured_output_repair: Mapping[str, Any] | None = None,
              _timeout_recovery: Mapping[str, Any] | None = None,
+             _existing_memo_retry: Mapping[str, Any] | None = None,
              ) -> dict[str, Any]:
         """Run configured paid retries without retaining prior call contexts."""
 
@@ -2288,14 +2289,15 @@ class CockpitModel:
             _dossier_recovery_parent=_dossier_recovery_parent,
             _model_spec_request_identity=_model_spec_request_identity,
             _structured_output_repair=_structured_output_repair,
-            _timeout_recovery=_timeout_recovery)
+            _timeout_recovery=_timeout_recovery, _existing_memo_retry=_existing_memo_retry)
 
     def _call_resolved(self, *, purpose: str, request_id: str, prompt: str,
                        mission: Mapping[str, Any], producer_route_decision_refs: Sequence[str] = (),
                        _dossier_recovery_parent: Mapping[str, Any] | None = None,
                        _model_spec_request_identity: Mapping[str, Any] | None = None,
                        _structured_output_repair: Mapping[str, Any] | None = None,
-                       _timeout_recovery: Mapping[str, Any] | None = None) -> dict[str, Any]:
+                       _timeout_recovery: Mapping[str, Any] | None = None,
+                       _existing_memo_retry: Mapping[str, Any] | None = None) -> dict[str, Any]:
         while True:
             outcome = self._call_once(
                 purpose=purpose,
@@ -2307,6 +2309,7 @@ class CockpitModel:
                 _model_spec_request_identity=_model_spec_request_identity,
                 _structured_output_repair=_structured_output_repair,
                 _timeout_recovery=_timeout_recovery,
+                _existing_memo_retry=_existing_memo_retry,
             )
             if outcome.get(_RECLAIMED_LEASE):
                 continue
@@ -2403,6 +2406,7 @@ class CockpitModel:
                    _model_spec_request_identity: Mapping[str, Any] | None = None,
                    _structured_output_repair: Mapping[str, Any] | None = None,
                    _timeout_recovery: Mapping[str, Any] | None = None,
+                   _existing_memo_retry: Mapping[str, Any] | None = None,
                    ) -> dict[str, Any]:
         """Run one Scheduler attempt and request another through a private marker."""
         capacity_retry = _capacity_retry(self.config)
@@ -2620,6 +2624,30 @@ class CockpitModel:
             max_total_lease_seconds=lease_seconds * 2,
         ) as scheduler:
             work = _preserve_legacy_model_spec_transport_work(scheduler, work)
+            if _existing_memo_retry is not None:
+                allowed = _existing_memo_retry
+                if (purpose not in {'investment_memo','investment_memo_verifier'}
+                        or set(allowed) != {'work_order_ref','work_order_hash','max_accounted_work_micros'}
+                        or {key:allowed[key] for key in ('work_order_ref','work_order_hash')} !=
+                            {'work_order_ref':work.id,'work_order_hash':content_hash(work.to_dict())}
+                        or type(allowed['max_accounted_work_micros']) is not int or allowed['max_accounted_work_micros'] < 0
+                        or scheduler.work_order_authority(work.id) is None):
+                    raise CockpitModelError('memo retry must retain the exact existing Work and its original budget/policy')
+                if scheduler.formal_result(work.id) is None:
+                    from .investment_memo_scheduler_retry import prove_ready_retry, retry_bill
+                    from .planner_paid_output_recovery import recovery_readers
+                    try:
+                        proof = prove_ready_retry(scheduler.connection,work.id,mission=mission,now=self.clock())
+                        with recovery_readers(self.config['model_router_db'],self.config['budget_db'],now=self.clock()) as (router,budget):
+                            if budget is None:raise ValueError('memo retry fee authority is unavailable')
+                            bill = retry_bill(scheduler.connection,router,budget,scheduler.work_order_authority(work.id),proof)
+                        # Every internal retry has ordinary day/pool admission
+                        # below and must also retain this macro's old charges
+                        # and all future groups/verifier room.
+                        if bill['accounted_micros']+int(Decimal(str(work.budget['max_cost_usd']))*1_000_000)>allowed['max_accounted_work_micros']:
+                            raise ValueError('memo retry prior fees and next attempt exceed retained run room')
+                    except (ValueError,KeyError,OSError,sqlite3.Error) as exc:
+                        raise CockpitModelError('memo retry admission deferred: '+str(exc)) from exc
             from .initial_screen_content_maintenance import MARKER as SCREEN_MAINTENANCE_MARKER, Authority as ScreenMaintenanceAuthority
             if SCREEN_MAINTENANCE_MARKER in work.metadata.get('request_id', ''):
                 authority = getattr(self, '_initial_screen_content_maintenance_authority', None)

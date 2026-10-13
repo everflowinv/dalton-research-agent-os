@@ -59,7 +59,11 @@ class ProfileMaintenanceTests(unittest.TestCase):
     def test_inflight_child_still_locked_under_new_budget(self):
         self.seed();self.adapter.script={'profile:gpt-6-astra':KeyboardInterrupt('isolated crash')}
         with patch.object(profile,'read_profile_limits',side_effect=self.capability):
-            with self.assertRaises(KeyboardInterrupt):self.wrapper(112_000_000).call(**self.kw())
+            # A real process crash does not run finally. KeyboardInterrupt
+            # alone does: the owner then completes retryable and readies the
+            # next original attempt, which is no longer an in-flight case.
+            with patch('dalton_core.cockpit_model._ReleaseLeaseOnError.__exit__',return_value=False):
+                with self.assertRaises(KeyboardInterrupt):self.wrapper(112_000_000).call(**self.kw())
             before=self.fees();self.raise_policy(1800,140)
             with self.assertRaises(CockpitModelError):self.wrapper(140_000_000).call(**self.kw())
         self.assertEqual(self.fees(),before)
@@ -269,7 +273,8 @@ class ProfileMaintenanceTests(unittest.TestCase):
 
     def test_later_semantic_inflight_restart_never_rebuys(self):
         w,kwargs=self.maintenance_then_semantic(KeyboardInterrupt('isolated crash after semantic admission'))
-        with self.assertRaises(KeyboardInterrupt):w.call(**kwargs)
+        with patch('dalton_core.cockpit_model._ReleaseLeaseOnError.__exit__',return_value=False):
+            with self.assertRaises(KeyboardInterrupt):w.call(**kwargs)
         fees=self.fees();calls=len(self.adapter.served)
         with patch.object(profile,'read_profile_limits',side_effect=self.capability):
             with self.assertRaises(CockpitModelError):self.wrapper(112_000_000).call(**self.kw())
