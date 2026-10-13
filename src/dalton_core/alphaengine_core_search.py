@@ -372,6 +372,7 @@ class AlphaEngineCoreSearch:
         clock: Callable[[], datetime] | None = None,
         lease_seconds: int = 60,
         grant_seconds: int = 900,
+        quota_authority: Mapping[str, Any] | None = None,
     ) -> None:
         if type(store) is not DaltonStore:
             raise TypeError("search requires an exact DaltonStore")
@@ -401,6 +402,7 @@ class AlphaEngineCoreSearch:
         self.clock = clock or (lambda: datetime.now(timezone.utc))
         self.lease_seconds = lease_seconds
         self.grant_seconds = grant_seconds
+        self.quota_authority = quota_authority
         self.credentials = CredentialAuthorityStore(
             store, handle_resolver=lambda _grant: mcp_handle, clock=self.clock
         )
@@ -611,6 +613,9 @@ class AlphaEngineCoreSearch:
             },
             idempotency_key="alphaengine-search-library:rate-policy:v1",
         )
+        from .alphaengine_shared_quota import append_policy
+        rate_policy = append_policy(self.connectors, rate_policy, self.quota_authority,
+                                    operation=OPERATION, profile=profile)
         self._authorities = {
             "descriptor": descriptor,
             "binding": binding,

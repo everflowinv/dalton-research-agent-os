@@ -130,6 +130,8 @@ def run_acquisition(
     state = secure_dir(state_dir)
     out = secure_dir(summary_dir)
     spool_root = secure_dir(spool_dir if spool_dir is not None else state / "connector-spool")
+    from .alphaengine_shared_quota import load_authority
+    quota_authority = load_authority(state)
     core = DaltonStore(str(state / "core.sqlite"))
     connectors = ConnectorStore(core)
     observability = ObservabilityStore(core)
@@ -153,6 +155,7 @@ def run_acquisition(
         spool=spool,
         governance=governance,
         mcp_handle=handle,
+        quota_authority=quota_authority,
     )
     try:
         plan = acquisition.build_plan(document_ref, max_pages=max_pages)

@@ -41,7 +41,7 @@ from .alphaengine_core_search import (
     search_spec_hash,
 )
 from .capability_catalog import CapabilityCatalog
-from .connector import ConnectorStore
+from .connector import ConnectorStore, ConnectorQuotaExceeded
 from .coverage_mission import CoverageMissionAuthority, CoverageMissionError
 from .mission_source_discovery import (
     DiscoveryPlanError,
@@ -103,6 +103,8 @@ def run_discovery(
     state = secure_dir(state_dir)
     out = secure_dir(summary_dir)
     spool_root = secure_dir(spool_dir if spool_dir is not None else state / "connector-spool")
+    from .alphaengine_shared_quota import load_authority
+    quota_authority = load_authority(state)
     core = DaltonStore(str(state / "core.sqlite"))
     connectors = ConnectorStore(core)
     observability = ObservabilityStore(core)
@@ -183,6 +185,7 @@ def run_discovery(
             spool=spool,
             governance=governance,
             mcp_handle=handle,
+            quota_authority=quota_authority,
         )
         receipt = search.search(search.build_request(parameters))
         summary["search"] = {
@@ -229,6 +232,11 @@ def run_discovery(
             "in_authority_document_count": len(record["in_authority_document_refs"]),
         })
         return summary
+    except ConnectorQuotaExceeded as exc:
+        summary['failure_reason'] = f'ConnectorQuotaExceeded: {exc}'
+        summary['failure_detail'] = {'class': 'local_quota', 'code': 'LOCAL_QUOTA_EXHAUSTED',
+            'message': str(exc), 'retryable': True}
+        return summary  # No provider exception or unproved zero-fee inference.
     except (AlphaEngineCoreSearchError, CoverageMissionError, DiscoveryPlanError) as exc:
         summary["failure_reason"] = f"{type(exc).__name__}: {exc}"
         return summary

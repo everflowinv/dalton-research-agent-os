@@ -2894,6 +2894,9 @@ class MissionSourceDiscoveryCoordinator:
         if row['status'] == 'failed' and self.source_ref == ALPHAENGINE_SOURCE_REF:
             from .alphaengine_cursor_recovery import expired_cursor_restart_available
             from .alphaengine_desktop_recovery import desktop_module_recovered
+            from .alphaengine_shared_quota import quota_increase_recovered
+            if quota_increase_recovered(self, row):
+                return None
             if desktop_module_recovered(self, row):
                 return None
             if expired_cursor_restart_available(self, row):
