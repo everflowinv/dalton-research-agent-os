@@ -9,7 +9,8 @@ PERIODICITY_CODE = 'operating_metric_periodicity'
 ACQUISITIONS_CODE = 'acquisitions_forecast_method'
 IDENTITY_CODE = 'revenue_driver_identity'
 COST_SLOT_PAIR_CODE = 'expense_cost_slot_pair'
-COST_SLOT_PAIR_REF = 'model-spec-cost-slot-exclusive-pair:0.1'
+LEGACY_COST_SLOT_PAIR_REF = 'model-spec-cost-slot-exclusive-pair:0.1'
+COST_SLOT_PAIR_REF = 'model-spec-cost-slot-exclusive-pair:0.2'
 ERROR_CODES = (PERIODICITY_CODE, ACQUISITIONS_CODE, IDENTITY_CODE, COST_SLOT_PAIR_CODE)
 _MISSING = object()
 
@@ -19,7 +20,7 @@ def proof(body, code, paths, *, detail):
             'code': code, 'paths': copy.deepcopy(paths), 'detail': detail}
 
 
-def cost_slot_pair_scope(state, body, index):
+def legacy_cost_slot_pair_scope(state, body, index):
     """A legal template name plus a valid reason is an inconsistent pair.
 
     Template membership is not proof of an executable economic base. The
@@ -40,9 +41,34 @@ def cost_slot_pair_scope(state, body, index):
     return proof(body, COST_SLOT_PAIR_CODE, [
         ['expense_lines', index, 'cost_driver_slot'],
         ['expense_lines', index, 'cost_driver_unbound_reason']], detail={
-            'contract_ref': COST_SLOT_PAIR_REF, 'state_hash': state['state_hash'],
+            'contract_ref': LEGACY_COST_SLOT_PAIR_REF, 'state_hash': state['state_hash'],
             'classification': classification, 'original_slot': slot,
             'instruction': 'Keep the original slot and omit the unbound reason, or use null slot with a nonempty unbound reason. Do not change other fields; a valid slot name alone does not prove its economic base.'})
+
+
+def cost_slot_pair_scope(state, body, index):
+    """Collect every independently proved contradiction in this same answer."""
+    from .company_model_spec import MAX_EXPENSE_LINES
+    first = legacy_cost_slot_pair_scope(state, body, index)
+    lines = body.get('expense_lines') if isinstance(body, Mapping) else None
+    if first is None or not isinstance(lines, list) or not 1 <= len(lines) <= MAX_EXPENSE_LINES:
+        return None
+    pairs = []
+    for i, line in enumerate(lines):
+        if not isinstance(line, Mapping):
+            return None
+        if line.get('cost_driver_slot') is not None and line.get('cost_driver_unbound_reason') is not None:
+            candidate = legacy_cost_slot_pair_scope(state, body, i)
+            if candidate is None:
+                return None  # Unknown/invalid declarations are not a pair correction.
+            pairs.append((i, candidate['detail']['original_slot']))
+    first = legacy_cost_slot_pair_scope(state, body, pairs[0][0])
+    return proof(body, COST_SLOT_PAIR_CODE,
+        [p for i, _ in pairs for p in (['expense_lines', i, 'cost_driver_slot'],
+                                      ['expense_lines', i, 'cost_driver_unbound_reason'])], detail={
+            **first['detail'], 'contract_ref': COST_SLOT_PAIR_REF,
+            'original_slots': {str(i): slot for i, slot in pairs},
+            'instruction': 'Correct every listed pair in this single response: keep each original slot and omit its unbound reason, or use null slot with a nonempty unbound reason. Do not change other fields; a valid slot name alone does not prove its economic base.'})
 
 
 def _member_refs(state, concept, identity):
@@ -135,9 +161,13 @@ def validate_parent(body, scope, *, state):
         refuse()
     try:
         if scope['code'] == COST_SLOT_PAIR_CODE:
+            if not isinstance(scope['detail'], Mapping):
+                refuse()
             path = scope['paths'][0]
-            if (len(scope['paths']) != 2 or len(path) != 3 or path[0] != 'expense_lines'
-                    or content_hash(scope) != content_hash(cost_slot_pair_scope(state, body, path[1]))):
+            builder = (legacy_cost_slot_pair_scope if scope['detail'].get('contract_ref') == LEGACY_COST_SLOT_PAIR_REF
+                       else cost_slot_pair_scope)
+            if (len(path) != 3 or path[0] != 'expense_lines'
+                    or content_hash(scope) != content_hash(builder(state, body, path[1]))):
                 refuse()
             return
         if scope['code'] == IDENTITY_CODE:
@@ -183,14 +213,16 @@ def assert_only_typed_fields_changed(original, repaired, scope, *, state):
     frozen = copy.deepcopy(repaired)
     try:
         if scope['code'] == COST_SLOT_PAIR_CODE:
-            index = scope['paths'][0][1]
-            line = repaired['expense_lines'][index]
-            if not isinstance(line, Mapping):
-                refuse()
-            slot, reason = line.get('cost_driver_slot', _MISSING), line.get('cost_driver_unbound_reason', _MISSING)
-            if not ((slot == scope['detail']['original_slot'] and reason is _MISSING)
-                    or (slot is None and isinstance(reason, str) and reason.strip() and len(reason) <= 400)):
-                refuse()
+            for path in scope['paths'][::2]:
+                index = path[1]
+                line = repaired['expense_lines'][index]
+                if not isinstance(line, Mapping):
+                    refuse()
+                slot, reason = line.get('cost_driver_slot', _MISSING), line.get('cost_driver_unbound_reason', _MISSING)
+                original_slot = original['expense_lines'][index]['cost_driver_slot']
+                if not ((slot == original_slot and reason is _MISSING)
+                        or (slot is None and isinstance(reason, str) and reason.strip() and len(reason) <= 400)):
+                    refuse()
         for path in scope['paths']:
             old, new = _at(original, path), _at(repaired, path)
             if scope['code'] == PERIODICITY_CODE and new not in ('quarterly', 'annual'):

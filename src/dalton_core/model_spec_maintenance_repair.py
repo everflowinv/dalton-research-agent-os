@@ -15,14 +15,18 @@ from .contracts import WorkOrder
 from .model_spec_complete_diagnostics import diagnose, strong_result, _row
 
 CONTRACT_REF = "model-spec-fixed-maintenance-correction:0.1"
+PAIR_CONTRACT_REF = "model-spec-fixed-maintenance-correction:0.2"
 TABLE = "company_model_spec_maintenance_grants"
 CLAIMS = "company_model_spec_maintenance_claims"
 MAX_RECORDS = 64
-# Exact frozen first-error contract before complete independent diagnosis.
+# Exact frozen contracts with a narrowly proved omitted diagnosis (old annual
+# settings, or old single cost pair). This is not a general retry registry.
 # Unknown contracts cannot create a new maintenance entitlement.
 KNOWN_INCOMPLETE_CONTRACTS = {
     "contract:company-model-spec-structured-output-repair:0.12":
         "03fee2a3ba8923056af8c89f1e1d84a11c0a8c812eefb01d0a0e1f24fc8cb2e7",
+    "contract:company-model-spec-structured-output-repair:0.14":
+        "9f96225dc98567c5f2140d7ae29516231176e73d18ade3bcd607ee3f95bcbcab",
 }
 PROOF_KEYS = ("work_order_ref", "work_order_hash", "result_envelope_ref",
               "result_envelope_hash", "invocation_ref", "route_decision_ref")
@@ -64,22 +68,35 @@ def _proof(call):
 def _diagnostic_error(report):
     from .company_model_spec import CompanyModelSpecError
     from .model_spec_complete_diagnostics import ERROR_CODE
+    from .model_spec_typed_field_repair import COST_SLOT_PAIR_CODE
+    if report.get('code') == COST_SLOT_PAIR_CODE:
+        index = report['paths'][0][1]
+        return CompanyModelSpecError(f'expense_lines[{index}] binds a cost slot and cannot carry cost_driver_unbound_reason',
+                                     code=COST_SLOT_PAIR_CODE, proof=report)
     return CompanyModelSpecError("independent settings errors: " + ", ".join(
         f["rule"] for f in report["findings"]), code=ERROR_CODE, proof=report)
 
 
-def validate_report(body, proof):
+def validate_report(body, proof, *, state=None):
     from .company_model_spec import CompanyModelSpecError
+    from .model_spec_typed_field_repair import COST_SLOT_PAIR_CODE, validate_parent
+    if proof.get('code') == COST_SLOT_PAIR_CODE:
+        validate_parent(body, proof, state=state)
+        return
     actual = diagnose(body)
     if (actual["status"] != "complete" or not actual["findings"]
             or canonical_json(actual) != canonical_json(proof)):
         raise CompanyModelSpecError("maintenance diagnostic differs from its exact parent")
 
 
-def assert_changed(original, repaired, proof):
+def assert_changed(original, repaired, proof, *, state=None):
     # Reuse the whole-body/alternatives guard with an explicit one-finding
     # threshold; ordinary multi-error repair still requires two findings.
     from .model_spec_complete_diagnostics import assert_only_allowed_changed
+    from .model_spec_typed_field_repair import COST_SLOT_PAIR_CODE, assert_only_typed_fields_changed
+    if proof.get('code') == COST_SLOT_PAIR_CODE:
+        assert_only_typed_fields_changed(original, repaired, proof, state=state)
+        return
     validate_report(original, proof)
     assert_only_allowed_changed(original, repaired, proof, minimum_findings=1)
 
@@ -96,6 +113,33 @@ def _permission(missions, mission, company):
     missions._validate_constitution_binding(cur, current["bindings"]["constitution_version"], current["industry_ref"])
     missions._validate_mandate_binding(cur, current["bindings"]["mandate_version"], current["industry_ref"])
     return current
+
+
+def _pair_reports(state, original, repaired, binding):
+    """Prove the old one-pair answer fixed only its licensed pair and omitted another."""
+    from .model_spec_typed_field_repair import (
+        COST_SLOT_PAIR_CODE, LEGACY_COST_SLOT_PAIR_REF, cost_slot_pair_scope,
+        validate_parent, assert_only_typed_fields_changed)
+    old = binding.get('typed_field_proof')
+    if (binding.get('repair_contract_ref') != 'contract:company-model-spec-structured-output-repair:0.14'
+            or not isinstance(old, Mapping) or old.get('code') != COST_SLOT_PAIR_CODE
+            or old.get('detail', {}).get('contract_ref') != LEGACY_COST_SLOT_PAIR_REF):
+        raise ValueError('maintenance needs the proved old single-pair contract')
+    validate_parent(original, old, state=state)
+    assert_only_typed_fields_changed(original, repaired, old, state=state)
+    index = old['paths'][0][1]
+    initial = cost_slot_pair_scope(state, original, index)
+    if initial is None or len(initial['paths']) < 4:
+        raise ValueError('maintenance original diagnosis did not omit another pair')
+    remaining = [p[1] for p in initial['paths'][::2]
+                 if repaired['expense_lines'][p[1]].get('cost_driver_slot') is not None
+                 and repaired['expense_lines'][p[1]].get('cost_driver_unbound_reason') is not None]
+    if not remaining or index in remaining:
+        raise ValueError('maintenance old single-pair correction did not close its own pair')
+    report = cost_slot_pair_scope(state, repaired, remaining[0])
+    if report is None or [p[1] for p in report['paths'][::2]] != remaining:
+        raise ValueError('maintenance remaining pairs differ from the original omitted declarations')
+    return initial, report
 
 
 def qualify(connection, *, missions, model, state, mission, root_ref, parent_ref):
@@ -149,23 +193,31 @@ def qualify(connection, *, missions, model, state, mission, root_ref, parent_ref
         raise ValueError("maintenance original root has additional unproved repair consumption")
     original = parse_response(root_call["text"])
     repaired = parse_response(parent_call["text"])
-    initial_report = diagnose(original)
-    report = diagnose(repaired)
-    if (initial_report["status"] != "complete" or len(initial_report["findings"]) < 2
-            or report["status"] != "complete" or not report["findings"]):
-        raise ValueError("maintenance requires independent omitted settings, not arbitrary financial failure")
-    # An old paid correction may fix a subset only; everything else must be
-    # exactly the original body and its choices must remain contract-legal.
-    # Permit unchanged diagnosed paths, without accepting an invalid new value.
-    changed_report = copy.deepcopy(initial_report)
-    changed_report["findings"] = [f for f in initial_report["findings"] if any(
-        _path(original, p) != _path(repaired, p) for p in f["paths"])]
-    if not changed_report["findings"]:
-        raise ValueError("maintenance old repair did not correct any diagnosed setting")
-    _assert_subset_changed(original, repaired, initial_report, changed_report["findings"])
+    pair = binding.get('validation_error', {}).get('code') == 'expense_cost_slot_pair'
+    if pair:
+        initial_report, report = _pair_reports(state, original, repaired, binding)
+    else:
+        if binding['repair_contract_ref'] != 'contract:company-model-spec-structured-output-repair:0.12':
+            raise ValueError('maintenance annual diagnosis needs its original incomplete contract')
+        initial_report = diagnose(original)
+        report = diagnose(repaired)
+        if (initial_report["status"] != "complete" or len(initial_report["findings"]) < 2
+                or report["status"] != "complete" or not report["findings"]):
+            raise ValueError("maintenance requires independent omitted settings, not arbitrary financial failure")
+        # Old annual corrections preserve the exact 0.1 qualification bytes.
+        changed_report = copy.deepcopy(initial_report)
+        changed_report["findings"] = [f for f in initial_report["findings"] if any(
+            _path(original, p) != _path(repaired, p) for p in f["paths"])]
+        if not changed_report["findings"]:
+            raise ValueError("maintenance old repair did not correct any diagnosed setting")
+        _assert_subset_changed(original, repaired, initial_report, changed_report["findings"])
     try:
         spec_from_response(state, root_call["text"], decided_by=current["autonomy"]["automation_principal"])
     except CompanyModelSpecError as error:
+        if pair:
+            if error.code != 'expense_cost_slot_pair':
+                raise ValueError('maintenance original first error is not the frozen pair error') from error
+            error.proof = binding['typed_field_proof']  # Already rederived from this exact root body/state.
         if (binding.get("validation_error") != {"code": error.code, "message": str(error)}
                 or parent["question"] != _repair_prompt(root_call["text"],error,contract=old_contract,output_schema=old_schema)):
             raise ValueError("maintenance old first-error diagnosis differs") from error
@@ -180,7 +232,7 @@ def qualify(connection, *, missions, model, state, mission, root_ref, parent_ref
                != (old_mission["id"], old_mission["content_hash"])):
         raise ValueError("maintenance historical mission/company binding differs")
     fees = [settled_call(model, call, old_mission, purpose="model_spec") for call in (root_call, parent_call)]
-    return {"contract_ref": CONTRACT_REF, "company_ref": state["company_ref"],
+    return {"contract_ref": PAIR_CONTRACT_REF if pair else CONTRACT_REF, "company_ref": state["company_ref"],
             "mission_ref": current["mission_ref"], "state_hash": state["state_hash"], "task_hash": TASK_HASH,
             "root_original": root_proof, "repair_parent": _proof(parent_call),
             "original_text_sha256": _sha(root_call["text"]), "parent_text_sha256": _sha(parent_call["text"]),
@@ -302,10 +354,12 @@ class MaintenanceAuthority:
         current, root, parent = qualify(connection, missions=self.missions, model=self.model,
             state=self.state, mission=self.mission, root_ref=grant["root_ref"], parent_ref=body["repair_parent"]["work_order_ref"])
         self._issued_permission(body)
-        if (current != {k:v for k,v in body.items() if k != "authorization_at_issue"} or binding["root_original"] != body["root_original"]
+        scope_field = 'typed_field_proof' if body['contract_ref'] == PAIR_CONTRACT_REF else 'diagnostic_bundle'
+        if (current != {k:v for k,v in body.items() if k != "authorization_at_issue"}
+                or grant['contract_ref'] != body['contract_ref'] or binding["root_original"] != body["root_original"]
                 or binding["repair_parent"] != body["repair_parent"]
                 or binding["state_hash"] != body["state_hash"] or binding["task_hash"] != body["task_hash"]
-                or binding["diagnostic_bundle"] != body["diagnostic_bundle"]
+                or binding[scope_field] != body["diagnostic_bundle"]
                 or binding["parent_text_sha256"] != body["parent_text_sha256"]
                 or binding["original_text_sha256"] != body["original_text_sha256"]
                 or binding["repair_config"] != {"max_attempts":1} or binding["repair_number"] != 2
@@ -354,17 +408,39 @@ def _no_send(connection, model, claim):
              "pool_rejection":result.metadata.get("pool_rejection")}) is not None
 
 
-def binding_for(body, parent_text):
-    from .company_model_cli import REPAIR_CONTRACT_REF,REPAIR_CONTRACT_HASH,_repair_prompt
+def binding_for(body, parent_text, *, contract=None, output_schema=None):
+    from .company_model_cli import REPAIR_CONTRACT,_repair_prompt
+    contract = REPAIR_CONTRACT if contract is None else contract
     error = _diagnostic_error(body["diagnostic_bundle"])
-    prompt = _repair_prompt(parent_text,error)
+    prompt = _repair_prompt(parent_text,error,contract=contract,output_schema=output_schema)
     binding = {"schema_version":"company-model-spec-repair-binding-0.1",
-        **{k:copy.deepcopy(body[k]) for k in ("root_original","repair_parent","original_text_sha256","parent_text_sha256","state_hash","task_hash","diagnostic_bundle")},
+        **{k:copy.deepcopy(body[k]) for k in ("root_original","repair_parent","original_text_sha256","parent_text_sha256","state_hash","task_hash")},
+        ('typed_field_proof' if body['contract_ref'] == PAIR_CONTRACT_REF else 'diagnostic_bundle'): copy.deepcopy(body['diagnostic_bundle']),
         "validation_error":{"code":error.code,"message":str(error)},
-        "repair_contract_ref":REPAIR_CONTRACT_REF,"repair_contract_hash":REPAIR_CONTRACT_HASH,
+        "repair_contract_ref":contract['ref'],"repair_contract_hash":content_hash(contract),
         "repair_prompt_sha256":_sha(prompt),"repair_config":{"max_attempts":1},"repair_number":2,
-        "maintenance_grant":{"contract_ref":CONTRACT_REF,"root_ref":body["root_original"]["work_order_ref"],"content_hash":content_hash(body)}}
+        "maintenance_grant":{"contract_ref":body['contract_ref'],"root_ref":body["root_original"]["work_order_ref"],"content_hash":content_hash(body)}}
     return binding,prompt
+
+
+def _paid_child_matches(body, parent_text, work, claim, binding, prompt):
+    """Read old successful authority under its frozen contract, never reissue it."""
+    actual = work['metadata'].get('structured_output_repair')
+    if actual != binding:
+        if not isinstance(actual, Mapping) or actual.get('repair_contract_ref') != 'contract:company-model-spec-structured-output-repair:0.14':
+            return False
+        try:
+            contract = json.JSONDecoder().raw_decode(work['question'].split('REPAIR_CONTRACT:\n',1)[1])[0]
+            schema = json.JSONDecoder().raw_decode(work['question'].split('OUTPUT_SCHEMA:\n',1)[1])[0]
+        except (IndexError, ValueError, TypeError):
+            return False
+        from .company_model_cli import OUTPUT_SCHEMA
+        if (content_hash(contract) != KNOWN_INCOMPLETE_CONTRACTS[actual['repair_contract_ref']]
+                or contract.get('ref') != actual['repair_contract_ref'] or schema != OUTPUT_SCHEMA):
+            return False
+        binding, prompt = binding_for(body,parent_text,contract=contract,output_schema=schema)
+    return (actual == binding and work['question'] == prompt and content_hash(work) == claim['work_hash']
+            and work['metadata'].get('request_id','').startswith('model-spec-repair:'+content_hash(binding)[:32]))
 
 
 def execute(authority, candidate, *, decided_by, repairs, note_evidence_resolver=None, financial_validator=None):
@@ -393,8 +469,7 @@ def execute(authority, candidate, *, decided_by, repairs, note_evidence_resolver
             result = strong_result(connection,claim['work_ref'])
             if result is not None and result['terminal_state']=='succeeded':
                 work,call = _load(connection,claim['work_ref'])
-                if (work['metadata'].get('structured_output_repair')!=binding
-                        or work['question']!=prompt or content_hash(work)!=claim['work_hash']):
+                if not _paid_child_matches(body,parent['text'],work,claim,binding,prompt):
                     raise CompanyModelSpecError('maintenance paid answer differs from grant')
                 from .investment_memo_quiesce import settled_call
                 old = authority.missions._mission_record(work['metadata']['mission_version_ref'])
@@ -435,7 +510,7 @@ def execute(authority, candidate, *, decided_by, repairs, note_evidence_resolver
     repairs.append({**{k:call.get(k) for k in PROOF_KEYS},'repair_number':2,
         'maintenance_grant_hash':grant_hash,'replayed':bool(call.get('replayed')),
         'cost_micros':int(call.get('cost_micros') or 0),'binding_hash':content_hash(binding)})
-    assert_changed(parse_response(parent['text']),parse_response(call['text']),body['diagnostic_bundle'])
+    assert_changed(parse_response(parent['text']),parse_response(call['text']),body['diagnostic_bundle'],state=authority.state)
     spec = spec_from_response(authority.state,call['text'],decided_by=decided_by,
         note_evidence_resolver=note_evidence_resolver)
     if financial_validator is not None: financial_validator(spec)

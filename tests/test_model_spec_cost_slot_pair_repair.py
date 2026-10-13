@@ -195,7 +195,7 @@ class CostSlotPairRepairTests(unittest.TestCase):
 
     def test_primary_task_and_prompt_unchanged_only_repair_contract_is_versioned(self):
         self.assertEqual(specs.TASK_HASH,'608338bcd6cf70cbe6e012acd5f579b99d34f9d990d5bc846c4059a198eda9af')
-        self.assertEqual(cli.REPAIR_CONTRACT_REF,'contract:company-model-spec-structured-output-repair:0.14')
+        self.assertEqual(cli.REPAIR_CONTRACT['cost_slot_exclusive_pair']['ref'],'model-spec-cost-slot-exclusive-pair:0.2')
         state,_,_=case();prompt=specs.build_prompt(state)
         self.assertIn('Bind each proposed expense line to one cost slot, or use null',prompt)
         self.assertEqual(cli.DEFAULT_REPAIR_ATTEMPTS,1)

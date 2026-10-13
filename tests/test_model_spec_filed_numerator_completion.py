@@ -94,7 +94,7 @@ class FiledNumeratorCompletionTests(unittest.TestCase):
         self.assertNotEqual(cli.model_spec_validation_contract_hash(),OLD_VALIDATION_HASH)
         self.assertEqual(cli.model_spec_validation_contract()['proposal_method_completion'],PROPOSAL_METHOD_COMPLETION_REF)
         self.assertNotEqual(cli.REPAIR_CONTRACT_HASH,OLD_REPAIR_HASH)
-        self.assertEqual(cli.REPAIR_CONTRACT_REF,'contract:company-model-spec-structured-output-repair:0.14')
+        self.assertEqual(cli.REPAIR_CONTRACT_REF,'contract:company-model-spec-structured-output-repair:0.15')
         self.assertEqual(specs.TASK_HASH,'608338bcd6cf70cbe6e012acd5f579b99d34f9d990d5bc846c4059a198eda9af')
         self.assertEqual(cli.DEFAULT_REPAIR_ATTEMPTS,1)
         prompt=cli._repair_prompt('{}',specs.CompanyModelSpecError('EPS numerator must use the company-specific diluted EPS numerator role',code='structure'))

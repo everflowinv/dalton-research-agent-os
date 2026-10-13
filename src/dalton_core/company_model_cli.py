@@ -110,7 +110,7 @@ from .cash_flow_ratio_applicability import (
     assert_only_allowed_changed as assert_cash_ratio_only_changed,
 )
 
-REPAIR_CONTRACT_REF = "contract:company-model-spec-structured-output-repair:0.14"
+REPAIR_CONTRACT_REF = "contract:company-model-spec-structured-output-repair:0.15"
 # One repair call, which is the number every other lane in this repository
 # uses for the same bargain (``draft_contract_repair.MAX_REPAIR_ATTEMPTS``).
 DEFAULT_REPAIR_ATTEMPTS = 1
@@ -176,7 +176,7 @@ REPAIR_CONTRACT = {
         "scope": "exact_parent_paths_only_with_source_group_reconstruction_for_identity",
         "validation": "full_spec_and_financial_validation_after_every_new_or_replayed_answer"},
     "cost_slot_exclusive_pair": {"ref": COST_SLOT_PAIR_REF,
-        "scope": "one_exact_expense_pair_only_original_slot_or_explicit_unbound",
+        "scope": "all_proved_exclusive_expense_pairs_in_one_exact_parent_only_original_slot_or_explicit_unbound",
         "preserve": "all_other_parent_fields_and_all_financial_source_authorities"},
     "independent_settings_bundle": {"ref": COMPLETE_DIAGNOSTICS_REF,
         "rules": ["shares_annual_semantics", "eps_annual_semantics", "operating_cash_base_reference"],
@@ -371,7 +371,7 @@ def validate_structured_output_repair_binding(
         "repair_number",
     }
     binding = dict(value)
-    if set(binding) not in (expected, expected | {"cash_ratio_proof"}, expected | {"typed_field_proof"}, expected | {"diagnostic_bundle"}, expected | {"diagnostic_bundle", "maintenance_grant"}) or binding.get("schema_version") != (
+    if set(binding) not in (expected, expected | {"cash_ratio_proof"}, expected | {"typed_field_proof"}, expected | {"diagnostic_bundle"}, expected | {"diagnostic_bundle", "maintenance_grant"}, expected | {"typed_field_proof", "maintenance_grant"}) or binding.get("schema_version") != (
         "company-model-spec-repair-binding-0.1"
     ):
         raise CockpitModelError("structured output repair binding is invalid")
@@ -444,12 +444,15 @@ def validate_structured_output_repair_binding(
     if bundled and not isinstance(binding["diagnostic_bundle"], Mapping):
         raise CockpitModelError("diagnostic bundle is invalid")
     if "maintenance_grant" in binding:
-        from .model_spec_maintenance_repair import CONTRACT_REF as MAINTENANCE_REF
+        from .model_spec_maintenance_repair import CONTRACT_REF as MAINTENANCE_REF, PAIR_CONTRACT_REF
         grant = binding["maintenance_grant"]
-        if (not bundled or number != 2 or config != {"max_attempts": 1}
+        pair_maintenance = (typed and error['code'] == 'expense_cost_slot_pair'
+                            and isinstance(grant, Mapping) and grant.get('contract_ref') == PAIR_CONTRACT_REF)
+        if (not (bundled and isinstance(grant, Mapping) and grant.get('contract_ref') == MAINTENANCE_REF
+                 or pair_maintenance) or number != 2 or config != {"max_attempts": 1}
                 or not isinstance(grant, Mapping)
                 or set(grant) != {"contract_ref", "root_ref", "content_hash"}
-                or grant["contract_ref"] != MAINTENANCE_REF
+                or grant["contract_ref"] not in {MAINTENANCE_REF, PAIR_CONTRACT_REF}
                 or grant["root_ref"] != binding["root_original"]["work_order_ref"]
                 or not isinstance(grant["content_hash"], str)
                 or len(grant["content_hash"]) != 64
@@ -499,6 +502,10 @@ def _repair_prompt(original_text: str, error: CompanyModelSpecError, *,
             "A missing reconciliation remains a gap, not a forecast. Return the complete original JSON with only the named fields corrected.\n\n"
             f"TYPED_FIELD_PROOF:\n{canonical_json(error.proof)}\n\n"
         )
+        if (error.code == 'expense_cost_slot_pair'
+                and error.proof.get('detail', {}).get('contract_ref') == COST_SLOT_PAIR_REF):
+            head = head.replace('For a cost slot pair either ',
+                                'For every cost slot pair listed in the proof, either ')
     elif error.code == SIGNED_EXPENSE_REPAIR_CODE:
         if not isinstance(getattr(error, "proof", None), Mapping):
             raise CompanyModelSpecError("signed financial repair proof is missing", code=error.code)
@@ -806,12 +813,12 @@ def _validated_spec_with_repair(
                         parse_response(prior["text"]), error.proof)
                 if error.code in TYPED_FIELD_ERROR_CODES:
                     assert_only_typed_fields_changed(parse_response(current_call["text"]),
-                        parse_response(prior["text"]), error.proof, state=state)
+                        parse_response(prior["text"]), prior.get("typed_field_proof") or error.proof, state=state)
                     typed_repair_applied = True
                 current_call = {
                     key: value for key, value in prior.items()
                     if key not in {"binding_hash", "repair_contract_hash",
-                                   "repair_number"}
+                                   "repair_number", "typed_field_proof"}
                 }
                 continue
             try:
@@ -1054,7 +1061,7 @@ def _prior_contract_repair(
         text = (envelope.get("outputs") or {}).get("text")
         if not isinstance(text, str):
             continue
-        if binding.get("diagnostic_bundle") is not None:
+        if binding.get("diagnostic_bundle") is not None or binding.get("typed_field_proof") is not None:
             try:
                 try:
                     checked_connection = connect_read_only(path)
@@ -1082,6 +1089,8 @@ def _prior_contract_repair(
             "binding_hash": content_hash(dict(binding)),
             "repair_contract_hash": binding.get("repair_contract_hash"),
             "repair_number": binding.get("repair_number"),
+            **({"typed_field_proof": binding["typed_field_proof"]}
+               if binding.get("typed_field_proof") is not None else {}),
         }
     return None
 
@@ -1118,6 +1127,7 @@ def model_spec_validation_contract() -> dict[str, str]:
     return {
         "contract": "company-model-spec-pre-persistence-validation:0.2",
         "fixed_maintenance_correction": "model-spec-fixed-maintenance-correction:0.1",
+        "fixed_cost_pair_maintenance_correction": "model-spec-fixed-maintenance-correction:0.2",
         "financial_repair_admission": FINANCIAL_REPAIR_ADMISSION_REF,
         "proposal_method_completion": PROPOSAL_METHOD_COMPLETION_REF,
         "cash_flow_companion": CASH_FLOW_COMPANION_VALIDATION_CONTRACT_HASH,
@@ -1135,6 +1145,7 @@ def model_spec_validation_contract() -> dict[str, str]:
         "series_duplicate_facts": DUPLICATE_FACT_POLICY_REF,
         "repair_replay": REPAIR_REPLAY_POLICY_REF,
         "typed_field_repair": TYPED_FIELD_REPAIR_REF,
+        "cost_slot_exclusive_pairs": COST_SLOT_PAIR_REF,
         "assessment_compatible_replay": ASSESSMENT_COMPATIBILITY_REF,
         "assessment_compatible_signed_repair": SIGNED_COMPATIBLE_REPLAY_REF,
         "joint_signed_filed_income_sum": JOINT_SIGNED_REPAIR_REF,
