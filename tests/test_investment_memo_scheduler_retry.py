@@ -209,3 +209,26 @@ class MemoMaintenanceSchedulerRetryTests(unittest.TestCase):
         self.assertGreaterEqual(resumed.accounted_micros,proof['accounted_micros'])
         self.assertEqual(self.outcome(self.wrapper(),1)['status'],'drafted')
         self.assertEqual(len(self.adapter.served),calls+1)
+
+
+    def test_maintenance_internal_retry_retains_floor_even_when_later_groups_are_free(self):
+        from tests import test_cockpit_model_fallback as models
+        wrapper,outcome=self.seeded()
+        self.assertEqual(self.outcome(wrapper,2)['status'],'drafted')
+        self.assertEqual(self.outcome(wrapper,3)['status'],'drafted')
+        body=wrapper.prepare_maintenance(context=self.contexts[1],outcome=outcome,remaining_groups=2)
+        self.assertIsNotNone(body)
+        wrapper.begin_stage(max_units=4,allow_technical=False,maintenance=body)
+        kwargs={**self.kw(1),'prompt':body['prompt'],'request_id':body['entry']['request_id']}
+        with patch('dalton_core.cockpit_model._admit_through_lock',side_effect=sqlite3.OperationalError('fixture lock')):
+            with self.assertRaises(sqlite3.OperationalError):wrapper.call(**kwargs)
+        original=self.fees()
+        adapter=models.ReturnedProviderSequenceAdapter(['RATE_LIMITED','PROVIDER_INTERNAL_ERROR'])
+        self.model.adapter_factory=lambda router:adapter
+        resumed=self.maintenance_fixture.MemoGroupMaintenanceTests.wrapper(self,run=84_000_000)
+        with patch('time.sleep',side_effect=lambda seconds:self.clock.advance(seconds)):
+            with self.assertRaisesRegex(CockpitModelError,'retained run room'):
+                resumed.call(**self.kw(1))
+        self.assertEqual(len(adapter.served),1)
+        self.assertEqual(self.fees()[0][:len(original[0])],original[0])
+        self.assertEqual(self.fees()[1][:len(original[1])],original[1])

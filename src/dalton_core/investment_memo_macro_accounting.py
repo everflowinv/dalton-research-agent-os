@@ -781,6 +781,8 @@ class MemoMacroAccounting:
         index = 3 if role == 'verifier' else prompt_identity(kwargs['prompt'])[2]
         total, future = self.room(group_index=index, producer_micros=producer_micros,
                                   verifier_micros=0 if role == 'verifier' else verifier_micros)
+        if role == 'maintenance':
+            future = max(future,(3-index)*producer_micros+verifier_micros)
         retries = self.last.get('ready_retry_work_refs', [])
         if retries:
             proof = self.pending_retry
@@ -799,8 +801,6 @@ class MemoMacroAccounting:
             kwargs['_existing_memo_retry'] = {key:proof[key] for key in ('work_order_ref','work_order_hash')}
             current_bill = next(b for b in self.last['bills'] if b['work_ref']==proof['work_order_ref'])
             kwargs['_existing_memo_retry']['max_accounted_work_micros'] = run_micros-future-(total-current_bill['accounted_micros'])
-        if role == 'maintenance':
-            future = max(future,(3-index)*producer_micros+verifier_micros)
         cost = verifier_micros if role == 'verifier' else producer_micros
         if total + future + cost > run_micros:
             raise ValueError('memo macro historical costs and retained future reservations exceed the run ceiling')
