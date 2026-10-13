@@ -642,7 +642,9 @@ def run_memo(*, store: DaltonStore, frozen: Mapping[str, Any], model: Any, verif
                 "reason": str(exc), "cost_micros": cost_micros}
     checks = _checks(sections, answers, frozen["material"])
     if any(check["status"] != "pass" for check in checks):
+        from .investment_memo_question_gaps import build as question_gaps
         return {"status": "refused", "memo_status": "deterministic_gate_failed", "checks": checks,
+                "key_question_gaps": question_gaps(frozen, answers, calls),
                 "cost_micros": cost_micros}
     summary = "Investment Memo candidate; human approval is still required."
     fields = {"kind": "investment_memo", "subject_ref": company["company_ref"],

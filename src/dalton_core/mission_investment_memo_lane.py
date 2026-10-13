@@ -56,6 +56,7 @@ def company_signature(frozen: Mapping[str, Any], launcher: Any) -> str:
     from .mission_deliverable import SECTION_NUMBERS_VALIDATION_CONTRACT, NUMBER_SOURCE_CONTRACT_VERSION
     from .derived_number_display import CONTRACT_REF as DERIVED_DISPLAY_REF
     from .investment_memo_scheduler_retry import CONTRACT_REF as SCHEDULER_RETRY_REF
+    from .investment_memo_question_gaps import CONTRACT_REF as QUESTION_GAPS_REF
     from .store import content_hash
 
     mission = frozen["mission"]
@@ -82,6 +83,7 @@ def company_signature(frozen: Mapping[str, Any], launcher: Any) -> str:
         "number_source_validation_contract": NUMBER_SOURCE_CONTRACT_VERSION,
         "derived_display_validation_contract": DERIVED_DISPLAY_REF,
         "scheduler_retry_validation_contract": SCHEDULER_RETRY_REF,
+        "key_question_gap_feedback_contract": QUESTION_GAPS_REF,
         "macro_accounting_contract": MACRO_ACCOUNTING_REF,
         "legacy_accounting_contract": LEGACY_ACCOUNTING_REF,
         # Free re-validation wakes old content holds. Fixed owner permissions
