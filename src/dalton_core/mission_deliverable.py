@@ -114,7 +114,7 @@ _PERIOD_TOKEN_RE = re.compile(
     # Batch D: a rolling-window label is a period, not a figure -- 「30 日 ADV」,
     # 「52 周区间」, "30-day ADV". Narrow on purpose: only when a window noun
     # follows, so 「30 日内上涨 5%」's 30 is still a figure to source.
-    r"|\d{1,3}\s?(?:日|天|周|个交易日)(?=\s?(?:ADV|均量|成交|区间|高点|低点|滚动|移动|平均|波动))"
+    r"|\d{1,3}\s?(?:日|天|周|个交易日)(?=\s?(?:ADV|(?:日|周|月)均(?:成交|交易|量|价|额)|均量|成交|区间|高点|低点|滚动|移动|平均|波动))"
     r"|\d{1,3}[-\s]?(?:day|week)(?=\s?(?:ADV|average|moving|volume|range|high|low))",
     re.IGNORECASE,
 )
@@ -156,7 +156,7 @@ _DAY_MONTH_RE = re.compile(
     r"Apr(?:il)?|May|Jun(?:e)?|Jul(?:y)?|Aug(?:ust)?|Sep(?:t|tember)?|Oct(?:ober)?|"
     r"Nov(?:ember)?|Dec(?:ember)?)(?![A-Za-z])(?:,?\s+((?:19|20)\d{2})(?!\d))?",
 )
-NUMBER_SOURCE_CONTRACT_VERSION = "number-source-contract:0.10"
+NUMBER_SOURCE_CONTRACT_VERSION = "number-source-contract:0.11"
 
 
 def number_source_contract_fingerprint() -> str:
