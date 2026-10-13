@@ -66,6 +66,7 @@ class PendingOriginalTests(unittest.TestCase):
         verdict = {"met": False, "partial": False, "items": [], "reason": "not yet acquired"}
         rung = ma.TargetedSourceRung("sec_edgar")
         with patch.object(ma, "targeted_query_status", return_value={"status": "succeeded"}), \
+             patch("dalton_core.material_targeted_sec.archive_pending_for_material", return_value=False), \
              patch.object(ma, "evaluate_acceptance", return_value=verdict), \
              patch.object(ma, "_dispatch_settled", return_value=False), \
              patch.object(ma, "enqueue_targeted_query") as dispatch:
@@ -81,3 +82,41 @@ class PendingOriginalTests(unittest.TestCase):
             verdict["met"] = True
             self.assertEqual(rung.settle(before).outcome, "accepted")
             dispatch.assert_not_called()
+
+    def test_verified_archive_continuation_waits_beyond_search_grace_without_new_search(self):
+        previous = {"created_at": "2026-09-08T00:00:00+00:00",
+                    "query": {"targeted_query": "query:archive"}}
+        request = {"deadline": "2026-09-09T00:00:00+00:00"}
+        verdict = {"met": False, "partial": False, "items": [], "reason": "not yet acquired"}
+        rung = ma.TargetedSourceRung("sec_edgar")
+        with patch.object(ma, "targeted_query_status", return_value={"status": "succeeded"}), \
+             patch.object(ma, "evaluate_acceptance", return_value=verdict), \
+             patch("dalton_core.material_targeted_sec.archive_pending_for_material", return_value=True) as archive, \
+             patch.object(ma, "_dispatch_settled", return_value=True), \
+             patch.object(ma, "enqueue_targeted_query") as dispatch:
+            before = ma.RungContext(self.state, request, {}, [],
+                                   "2026-09-08T08:00:00+00:00", previous)
+            result = rung.settle(before)
+            self.assertEqual(result.outcome, "waiting")
+            self.assertEqual((result.calls, result.cost_micros), (0, 0))
+            archive.assert_called_once_with(self.state, "query:archive")
+            after = ma.RungContext(self.state, request, {}, [],
+                                  "2026-09-09T00:00:00+00:00", previous)
+            self.assertEqual(rung.settle(after).outcome, "empty")
+            self.assertEqual(archive.call_count, 1)
+            verdict["met"] = True
+            self.assertEqual(rung.settle(before).outcome, "accepted")
+            self.assertEqual(archive.call_count, 1)
+            dispatch.assert_not_called()
+
+    def test_unverified_archive_does_not_extend_completed_empty_search(self):
+        previous = {"created_at": "2026-09-08T00:00:00+00:00",
+                    "query": {"targeted_query": "query:archive"}}
+        verdict = {"met": False, "partial": False, "items": [], "reason": "no original"}
+        with patch.object(ma, "targeted_query_status", return_value={"status": "succeeded"}), \
+             patch.object(ma, "evaluate_acceptance", return_value=verdict), \
+             patch("dalton_core.material_targeted_sec.archive_pending_for_material", return_value=False), \
+             patch.object(ma, "_dispatch_settled", return_value=True):
+            ctx = ma.RungContext(self.state, {"deadline": "2026-09-09T00:00:00+00:00"},
+                                 {}, [], "2026-09-08T08:00:00+00:00", previous)
+            self.assertEqual(ma.TargetedSourceRung("sec_edgar").settle(ctx).outcome, "empty")

@@ -1004,11 +1004,6 @@ class TargetedSourceRung:
         verdict = evaluate_acceptance(ctx.state_dir, ctx.request, identity=ctx.identity, now=ctx.now)
         if verdict["met"]:
             return RungResult("accepted", query=ctx.queries, items=verdict["items"], detail=verdict["reason"])
-        if self.name=="sec_edgar" and query_id and age < RUNG_WAIT_HOURS:
-            from .material_targeted_sec import archive_pending_for_material
-            if archive_pending_for_material(ctx.state_dir,query_id):
-                return RungResult("waiting",detail="SEC 原始索引已保存，等待其强绑定归档页正常执行")
-        settled = _dispatch_settled(ctx.state_dir, status, now=ctx.now)
         # A finished search can leave original documents queued behind the
         # source's daily allowance. The search grace period is not an expiry
         # for that acquisition. Keep the original request deadline and never
@@ -1017,6 +1012,11 @@ class TargetedSourceRung:
         current = _parse_ts(ctx.now)
         acquisition_wait_open = (current < deadline if current and deadline
                                  else age < mr.DEFAULT_DEADLINE_HOURS)
+        if self.name == "sec_edgar" and query_id and acquisition_wait_open:
+            from .material_targeted_sec import archive_pending_for_material
+            if archive_pending_for_material(ctx.state_dir, query_id):
+                return RungResult("waiting", detail="已找到历史申报目录，等待读取其中的原始文件")
+        settled = _dispatch_settled(ctx.state_dir, status, now=ctx.now)
         if not settled and acquisition_wait_open:
             return RungResult("waiting", detail="检索已执行，等待候选原文取回并核对；无需重复检索")
         return RungResult("partial" if verdict["partial"] else "empty", query=ctx.queries,
