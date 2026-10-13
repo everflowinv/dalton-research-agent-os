@@ -331,9 +331,9 @@ def forecast_reporting_boundary(missions: Any, connection: Any, company_ref: str
     from .forecast_assumption_sources import preliminary_quarter
     filings = missions.statement_filings(company_ref)
     actual_dates = [str(f["report_date"]) for f in filings
-                    if f.get("form") in {"10-Q", "10-K"} and f.get("report_date")]
+                    if f.get("form") in {"10-Q", "10-K", "10-Q/A", "10-K/A"} and f.get("report_date")]
     annual_dates = [str(f["report_date"]) for f in filings
-                    if f.get("form") == "10-K" and f.get("report_date")]
+                    if f.get("form") in {"10-K", "10-K/A"} and f.get("report_date")]
     result = {"latest_actual_end": max(actual_dates) if actual_dates else None,
               "fiscal_year_end": max(annual_dates) if annual_dates else None}
     from .model_forecast_driver import CONCEPT_ROLES, REVENUE
