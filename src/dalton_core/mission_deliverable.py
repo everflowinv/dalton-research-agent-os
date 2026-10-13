@@ -882,8 +882,16 @@ def validate_derived_number(item: Mapping[str, Any], cited: Sequence[Mapping[str
     if result.lstrip("-") not in stated:
         raise MissionDeliverableConflict(
             f"a derived number entry's text must state its result {result}")
+    prose_text = _without_verified_expression(text, expression)
+    from .derived_number_display import prove_displays, without_proved_displays
+    try:
+        displays = prove_displays(prose_text, expression=expression, result=result,
+                                  period=item.get('period'), unit=item.get('unit'))
+        prose_text = without_proved_displays(prose_text, displays)
+    except (ValueError, SyntaxError, ZeroDivisionError, OverflowError) as exc:
+        raise MissionDeliverableConflict(str(exc)) from exc
     prose = [_bare(_normalise_number(token)) for token in
-             value_tokens(_without_verified_expression(text,expression),include_small=True)]
+             value_tokens(prose_text,include_small=True)]
     stray = [token for token in prose if token != result.lstrip("-") and token not in sourced]
     if stray and check_stray:
         raise MissionDeliverableConflict(
