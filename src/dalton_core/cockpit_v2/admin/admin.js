@@ -1217,6 +1217,27 @@
           return { purpose: p.purpose, kind: "call", budget: { max_cost_usd: Number(cost.value) }, expected_shared_policy_hash: p.call_budget.shared_call_cost.policy_hash }; },
         after: () => reload("budget") }));
   }
+  function memoContentRepairPolicy(models) {
+    const memo = (models.purposes || []).find(p => p.purpose === "investment_memo");
+    const view = memo && memo.run_budget;
+    const shared = view && view.shared_call_cost;
+    if (!view || !view.effective || !shared || !shared.policy_hash)
+      return empty("备忘录正文修正策略尚未绑定全部研究项目的共用设置。");
+    const field = "max_content_maintenance_rounds_per_group";
+    const rounds = Number(view.effective[field] || 1);
+    const pick = h("select", { "aria-label": "每组正文自动修正次数" },
+      [1, 2].map(n => h("option", { value: String(n) }, `${n} 次`)));
+    pick.value = String(rounds);
+    return h("div", null,
+      h("p", { class: "adm-explain" }, `每份备忘录分为四组正文。完成原有起草流程后，每组正文可追加最多 ${rounds} 次自动修正；每轮备忘录费用上限为 ${usd(view.effective.max_cost_usd)}。缺少原始资料或投资授权的问题会继续研究，不通过文字修正补造答案。`),
+      writeForm({ action: "model_budget", label: "保存正文修正次数（全部研究项目）", danger: true,
+        extra: h("label", { class: "adm-field" }, h("span", null, "每组正文自动修正次数"), pick),
+        confirmText: "这会同步全部现有和新建研究项目。已发生的费用和已用修正次数保留；增加一次修正仍需通过原资料核验、每轮及每日预算。每次修正仍按当前单次调用费用上限计费。",
+        validate: () => ([1, 2].includes(Number(pick.value)) ? null : "请选择 1 或 2 次"),
+        payload: () => ({ purpose: "investment_memo", kind: "run",
+          budget: { [field]: Number(pick.value) }, expected_shared_policy_hash: shared.policy_hash }),
+        after: () => reload("budget") }));
+  }
   function budgetIssues(costs) {
     const out = [];
     if (!costs.mission) out.push({ level: "info", problem: "还没有发布研究目标，因此没有研究预算",
@@ -1239,6 +1260,7 @@
       section("研究预算上限", "全部研究项目与新建项目共用；达到上限暂停相应调用，次日按日额度恢复。",
         costs.host_settings ? h("p", { class: "adm-explain" }, costs.host_settings.note) : null,
         budgetCapsForm(costs.mission, null, costs.host_settings)),
+      section("备忘录正文自动修正", "只修正可核验的正文问题；缺少资料的问题仍回到研究规划。", memoContentRepairPolicy(models)),
       section("费用：今天与近 7 天", txt(costs.note, ""), costTables(costs)),
       section("各环节调用上限（技术参数）", "每次 AI 调用的费用、回答长度与超时上限；与上面的业务预算分开，一般不需要调整。",
         h("details", { class: "adm-more" }, h("summary", null, "展开各环节调用上限"), purposeCaps(models))));

@@ -510,7 +510,11 @@ def _validated_group(store, outcome, material):
                 'reason':'memo_source_proof_unavailable: '+str(exc)}
     from .mission_deliverable import pack_passage_resolver
     checked=[];findings=list(outcome.get('findings') or []) if parse_refused else []
+    from .investment_memo_number_diagnostics import findings as number_findings
     for section in candidate_sections:
+        numeric_findings=number_findings(section,live_claim_refs=index['claims'],
+            resolve_cell=lambda cell:index['cells'].get(str(cell.get('ref')))==dict(cell),
+            resolve_passage=pack_passage_resolver(None,passages),resolve_number=index['numbers'].get)
         try:
             checked.append(validate_section(section,live_claim_refs=index['claims'],
                 resolve_cell=lambda cell:index['cells'].get(str(cell.get('ref')))==dict(cell),
@@ -519,7 +523,13 @@ def _validated_group(store, outcome, material):
         except MissionDeliverableError as exc:
             findings.append({'section':section['title'],'code':'section_authority',
                              'detail':str(exc)[:700]})
+        findings.extend(f for f in numeric_findings if f not in findings)
     if findings:
+        if len(findings)>128:
+            return {**outcome,'status':'refused','repairable':False,'failure_class':'diagnostic_overflow',
+                'reason':'memo complete validator diagnostics exceed the fixed correction proof bound',
+                'findings':findings[:128],'findings_count':len(findings),
+                'omitted_findings_hash':content_hash(findings[128:])}
         return {**outcome,'status':'refused','repairable':True,'failure_class':'content','findings':findings,
                 'reason':((outcome['reason']+'; complete diagnostics: ') if parse_refused else
                           'section authority rejected: ')+json.dumps(findings,ensure_ascii=False),
@@ -590,11 +600,15 @@ def run_memo(*, store: DaltonStore, frozen: Mapping[str, Any], model: Any, verif
             outcome = _validated_group(store,draft_group(model, **kwargs, repair=first),frozen['material'])
             cost_micros += int(outcome.get("model", {}).get("cost_micros") or outcome.get("cost_micros") or 0)
             repaired.append(first)
-        if (max_repairs > 0 and isinstance(repair_budget,MemoRepairBudget)
+        for _maintenance_round in range(2):
+            if not (max_repairs > 0 and isinstance(repair_budget,MemoRepairBudget)
                 and outcome.get('status') != 'drafted' and outcome.get('failure_class') == 'content'):
+                break
             context = {key:kwargs[key] for key in ('group','section_titles','questions','material','company')}
             maintenance = repair_budget.prepare_maintenance(context=context,outcome=outcome,
                 remaining_groups=len(GROUPS)-group_index-1)
+            if maintenance is None:
+                break
             if maintenance is not None:
                 repair_budget.begin_stage(max_units=max_units,allow_technical=False,quiesce=quiesce,
                                           maintenance=maintenance)

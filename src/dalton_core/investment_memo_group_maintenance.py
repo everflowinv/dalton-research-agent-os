@@ -13,6 +13,7 @@ LEGACY_CONTRACT_REF = 'investment-memo-group-maintenance:0.1'
 CONTRACT_REF = 'investment-memo-group-maintenance:0.2'
 TABLE = 'investment_memo_group_maintenance_authorizations'
 MAX_GROUPS = 4
+MAX_PERMISSION_RECORDS = 8
 
 
 def _context(macro, context):
@@ -36,22 +37,40 @@ def validate_answer(macro, context, call):
                             outcome, context['material'])
 
 
-def _parent(macro, context, work_ref, *, through_rowid=None, _issued_diagnostics=None):
+def _parent(macro, context, work_ref, *, through_rowid=None, _issued_diagnostics=None,
+            _first_maintenance=None):
     from .scheduler import Scheduler
     from .contracts import WorkOrder
     from .cockpit_model import CockpitModel
-    from .investment_memo_macro_accounting import _works, _body, REQUESTS, EXTRA
+    from .investment_memo_macro_accounting import _works, _body, REQUESTS, EXTRA, MAX_TOTAL_REQUESTS
     from .planner_paid_output_recovery import _authority_connection
     from .investment_memo_quiesce import settled_call
     index = _context(macro, context)
+    first = None
+    if _first_maintenance is not None:
+        # Only an actual Scheduler owner row can extend the parent candidate
+        # set. A caller's diagnostics or self-hashed proof is not authority.
+        with _authority_connection(macro.model.scheduler_db) as source:
+            row = source.execute(f'SELECT * FROM {TABLE} WHERE permission_ref=?',
+                (macro.ref+':group-maintenance:'+str(index),)).fetchone()
+            if row is None:
+                raise ValueError('second memo correction lacks the original fixed owner permission')
+            first = _body(row)
+        if (first['permission_ref'] != _first_maintenance or first['context'] != context
+                or first['mission'] != {k:macro.mission[k] for k in ('id','content_hash')}
+                or _replay_issued(macro,first) != first):
+            raise ValueError('second memo correction original permission/source/current mission differs')
     with _authority_connection(macro.model.scheduler_db) as connection:
         reader = Scheduler.__new__(Scheduler); reader.connection = connection
         authority = reader.work_order_authority(work_ref)
         if authority is None:
             raise ValueError('memo maintenance parent Work is absent')
         work = WorkOrder.from_dict(authority['work_order'])
-        entries = [_body(row) for row in connection.execute(
-            f'SELECT * FROM {REQUESTS} WHERE macro_binding=? LIMIT 11',(macro.ref,)).fetchall()]
+        rows = connection.execute(f'SELECT * FROM {REQUESTS} WHERE macro_binding=? LIMIT ?',
+            (macro.ref,MAX_TOTAL_REQUESTS+1)).fetchall()
+        if len(rows)>MAX_TOTAL_REQUESTS:
+            raise ValueError('memo maintenance request history exceeds its closed bound')
+        entries = [_body(row) for row in rows]
         entries += macro._legacy_entries(connection, check_growth=False)
         extra_row=connection.execute(f'SELECT * FROM {EXTRA} WHERE macro_ref=?',(macro.ref,)).fetchone()
         original_extra = (None if macro.legacy is None else macro.legacy['extra']) if extra_row is None else _body(extra_row)
@@ -79,13 +98,19 @@ def _parent(macro, context, work_ref, *, through_rowid=None, _issued_diagnostics
                 raise ValueError('memo exhausted legacy technical attempt is absent')
         candidates = {}
         for entry in entries:
-            if entry['role'] not in {'normal','semantic'} or entry['group_index'] != index:
+            if entry['group_index'] != index:
+                continue
+            if entry['role'] not in {'normal','semantic'} and (first is None or entry != first['entry']):
                 continue
             for candidate, record in _works(connection,entry):
                 if through_rowid is None or record['append_rowid'] <= through_rowid:
                     candidates[candidate.id] = (candidate, record)
         if not candidates or max(candidates.values(),key=lambda item:item[1]['append_rowid'])[0].id != work_ref:
             raise ValueError('memo maintenance parent is not the latest original same-group answer')
+        if first is not None:
+            first_works = _works(connection,first['entry'])
+            if not first_works or first_works[-1][0].id != work_ref:
+                raise ValueError('second memo correction parent is not the actual first maintenance answer')
         parent_rowid = candidates[work_ref][1]['append_rowid']
         if through_rowid is not None and parent_rowid != through_rowid:
             raise ValueError('memo maintenance parent append boundary differs')
@@ -221,13 +246,22 @@ def _replay_issued(macro, record, *, include_parent=False):
 def read_entries(macro, connection):
     from .investment_memo_macro_accounting import _body
     rows = connection.execute(f'SELECT * FROM {TABLE} WHERE macro_binding=? ORDER BY permission_ref LIMIT ?',
-                              (macro.ref,MAX_GROUPS+1)).fetchall()
-    if len(rows)>MAX_GROUPS:
-        raise ValueError('memo maintenance exceeds four fixed group permissions')
+                              (macro.ref,MAX_PERMISSION_RECORDS+1)).fetchall()
+    if len(rows)>MAX_PERMISSION_RECORDS:
+        raise ValueError('memo maintenance exceeds two fixed corrections in each of four groups')
     entries = []
     for row in rows:
         record = _body(row)
         entry = record['entry']
+        from .investment_memo_second_maintenance import CONTRACT_REF as SECOND_REF, replay_issued
+        if record['contract_ref'] == SECOND_REF:
+            from copy import copy
+            original = copy(macro); original.mission = {**macro.mission, **record['mission']}
+            if (row['permission_ref'] != record['permission_ref'] or row['macro_binding'] != macro.ref
+                    or replay_issued(original,record) != record):
+                raise ValueError('memo second correction stored source/parent differs')
+            entries.append(entry)
+            continue
         if (record['contract_ref'] not in {LEGACY_CONTRACT_REF,CONTRACT_REF} or record['macro_ref'] != macro.ref
                 or record['permission_ref'] != macro.ref+':group-maintenance:'+str(entry['group_index'])
                 or row['permission_ref'] != record['permission_ref']
@@ -244,10 +278,16 @@ def read_entries(macro, connection):
     return entries
 
 
-def record_for(macro, connection, index):
+def record_for(macro, connection, index, *, round_number=None):
     from .investment_memo_macro_accounting import _body
-    row = connection.execute(f'SELECT * FROM {TABLE} WHERE permission_ref=?',
-                             (macro.ref+':group-maintenance:'+str(index),)).fetchone()
+    key = macro.ref+':group-maintenance:'+str(index)
+    if round_number in (None,2):
+        row = connection.execute(f'SELECT * FROM {TABLE} WHERE permission_ref=?',(key+':round2',)).fetchone()
+        if row is not None:
+            return _body(row)
+    if round_number == 2:
+        return None
+    row = connection.execute(f'SELECT * FROM {TABLE} WHERE permission_ref=?',(key,)).fetchone()
     return None if row is None else _body(row)
 
 
@@ -271,7 +311,9 @@ def free_revalidated_parent(macro, kwargs):
             or kwargs['mission']['content_hash']!=macro.mission['content_hash']
             or kwargs['request_id']!=request_id(record['context']['group'],kwargs['prompt'])):
         raise ValueError('memo free parent replay cannot borrow another mission/group')
-    rebuilt,parent = _replay_issued(macro,record,include_parent=True)
+    from .investment_memo_second_maintenance import CONTRACT_REF as SECOND_REF, replay_issued
+    rebuilt,parent = (replay_issued(macro,record,include_parent=True) if record['contract_ref']==SECOND_REF
+                      else _replay_issued(macro,record,include_parent=True))
     if rebuilt!=record:
         raise ValueError('memo maintenance original parent/source/diagnostics no longer replay')
     call=parent[1]

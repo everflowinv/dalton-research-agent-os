@@ -10,7 +10,7 @@ from pathlib import Path
 from typing import Any, Mapping
 
 from .call_budget import freeze_shared_budget_policy
-from .shared_call_budget_policy import (LIMITS_SCHEMA_VERSION,
+from .shared_call_budget_policy import (LIMITS_SCHEMA_VERSIONS,
     load_shared_call_budget_policy)
 from .store import content_hash
 
@@ -21,7 +21,7 @@ MAX_PRIOR_POLICIES = 64
 def execution_config_binding(config: Mapping[str, Any]) -> dict[str, str]:
     frozen = freeze_shared_budget_policy(config)
     policy = frozen.get("shared_call_budget_policy_snapshot")
-    if policy is None or policy["schema_version"] != LIMITS_SCHEMA_VERSION:
+    if policy is None or policy["schema_version"] not in LIMITS_SCHEMA_VERSIONS:
         return {"config_hash": content_hash(config)}
     body = dict(frozen)
     # Each task's Work binds its own resolved call budget separately. Including

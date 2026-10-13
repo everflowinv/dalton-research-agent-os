@@ -3,6 +3,7 @@
 from __future__ import annotations
 
 import hashlib
+import json
 from pathlib import Path
 from typing import Any, Callable, Mapping
 
@@ -57,6 +58,7 @@ def company_signature(frozen: Mapping[str, Any], launcher: Any) -> str:
     from .derived_number_display import CONTRACT_REF as DERIVED_DISPLAY_REF
     from .investment_memo_scheduler_retry import CONTRACT_REF as SCHEDULER_RETRY_REF
     from .investment_memo_question_gaps import CONTRACT_REF as QUESTION_GAPS_REF
+    from .investment_memo_second_maintenance import CONTRACT_REF as SECOND_MAINTENANCE_REF, scheduling_rounds
     from .store import content_hash
 
     mission = frozen["mission"]
@@ -89,6 +91,7 @@ def company_signature(frozen: Mapping[str, Any], launcher: Any) -> str:
         # Free re-validation wakes old content holds. Fixed owner permissions
         # and paid request identities do not depend on this scheduling marker.
         "group_maintenance_contract": GROUP_MAINTENANCE_REF,
+        "second_group_maintenance_contract": SECOND_MAINTENANCE_REF,
         "terminal_maintenance_contract": TERMINAL_MAINTENANCE_REF,
         "profile_maintenance_contract": "investment-memo-profile-capability-maintenance:0.1",
     }
@@ -99,6 +102,11 @@ def company_signature(frozen: Mapping[str, Any], launcher: Any) -> str:
             parts.append(hashlib.sha256(Path(path).read_bytes()).hexdigest())
         except OSError:
             parts.append("config:missing")
+    try:
+        parts.append('shared-memo-corrections:'+str(scheduling_rounds(
+            json.loads(Path(launcher.model_config_path).read_text()))))
+    except (OSError,ValueError,TypeError):
+        parts.append('shared-memo-corrections:unavailable')
     return f"{payload['company_ref']}|{hashlib.sha256('|'.join(parts).encode()).hexdigest()}"
 
 

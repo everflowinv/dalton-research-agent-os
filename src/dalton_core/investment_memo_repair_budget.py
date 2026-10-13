@@ -58,7 +58,7 @@ class MemoRepairBudget:
         # A failed or unproved call retains its full reservation. Its returned
         # prose and reported cost alone cannot authorize another paid call.
         reserved = self.producer_micros
-        cached = None; cached_failure = None
+        cached = None; cached_failure = None; maintenance = None
         if self.macro_error is not None and self.macro is None:
             from .cockpit_model import CockpitModelError
             raise CockpitModelError('memo_macro_fee_audit_required: '+self.macro_error)
@@ -113,7 +113,12 @@ class MemoRepairBudget:
                 if PROFILE_MARKER in kwargs.get('request_id',''):
                     call=profile_call(self,kwargs)
                 else:
-                    call = call_existing(self,kwargs) if MARKER in kwargs.get('request_id','') else self.model.call(**kwargs)
+                    from .investment_memo_second_maintenance import CONTRACT_REF as SECOND_REF, call_existing as second_call
+                    if maintenance is not None and maintenance['contract_ref']==SECOND_REF:
+                        call=second_call(self.model,self.macro,maintenance,kwargs,run_micros=self.run_micros,
+                            producer_micros=self.producer_micros,verifier_micros=self.verifier_micros)
+                    else:
+                        call = call_existing(self,kwargs) if MARKER in kwargs.get('request_id','') else self.model.call(**kwargs)
         except BaseException as exc:
             self.accounted_micros += reserved
             from .cockpit_model import CockpitModelError
@@ -182,8 +187,7 @@ class MemoRepairBudget:
     def prepare_maintenance(self, *, context, outcome, remaining_groups):
         """A new fixed permission only after the original slot is consumed."""
         self.maintenance_hold = None
-        if (not self.maintenance_enabled or self.macro is None or self.macro_error is not None
-                or self.selected_maintenance is not None):
+        if (not self.maintenance_enabled or self.macro is None or self.macro_error is not None):
             return None
         try:
             body = self.macro.prepare_maintenance(context,outcome)

@@ -27,7 +27,7 @@ SCANS = 'investment_memo_accounting_legacy_scans'
 PAGES = 'investment_memo_accounting_import_pages'
 SCAN_BATCH = 128
 MAX_REQUESTS = 6  # four producer groups, one optional redo, one verifier
-MAX_TOTAL_REQUESTS = MAX_REQUESTS + 4  # independently proved maintenance permissions
+MAX_TOTAL_REQUESTS = MAX_REQUESTS + 8  # two independently proved corrections per group
 MAX_WORKS = 16
 
 
@@ -413,7 +413,7 @@ class MemoMacroAccounting:
         ordinary = [entry for entry in entries if entry['role'] != 'maintenance']
         if (len(entries)>MAX_TOTAL_REQUESTS or len(ordinary)>MAX_REQUESTS
                 or any(entry['role'] not in {'normal','semantic','verifier','maintenance'} for entry in entries)):
-            raise ValueError('memo macro exceeds six original or four maintenance requests')
+            raise ValueError('memo macro exceeds six original or eight maintenance requests')
         # The extra entries cannot be manufactured by the ordinary registrar.
         from .investment_memo_group_maintenance import read_entries
         proved = read_entries(self,connection)
@@ -431,12 +431,18 @@ class MemoMacroAccounting:
             raise ValueError('memo original extra slot must be used before group maintenance')
         index = _context(self,context)
         with _authority_connection(self.model.scheduler_db) as connection:
-            if record_for(self,connection,index) is not None:
+            first = record_for(self,connection,index,round_number=1)
+            if record_for(self,connection,index,round_number=2) is not None:
                 raise ValueError('memo fixed group maintenance was already attempted')
+        if first is not None:
+            from .investment_memo_second_maintenance import derive as second
+            return second(self,context,outcome['model']['work_order_ref'])
         return derive(self,context,outcome['model']['work_order_ref'])
 
     def register_maintenance(self, body, kwargs):
         from .investment_memo_group_maintenance import derive, TABLE
+        from .investment_memo_second_maintenance import CONTRACT_REF as SECOND_REF, derive as second, replay_issued
+        is_second = body['contract_ref'] == SECOND_REF
         if (not self.complete or body['mission'] != {k:self.mission[k] for k in ('id','content_hash')}
                 or kwargs != {'purpose':'investment_memo','request_id':body['entry']['request_id'],
                               'prompt':body['prompt'],'mission':self.mission}):
@@ -454,10 +460,11 @@ class MemoMacroAccounting:
                 registered=connection.execute(f'SELECT * FROM {REQUESTS} WHERE request_key=?',
                     (self.ref+':'+issued['entry']['request_id'],)).fetchone()
                 if (issued != body or row['macro_binding']!=self.ref
-                        or _replay_issued(self,issued)!=issued or registered is None
+                        or (replay_issued(self,issued) if is_second else _replay_issued(self,issued))!=issued or registered is None
                         or _body(registered)!=issued['entry']):
                     raise ValueError('memo maintenance stored diagnostics/source differ before registration')
                 return
+        derive = second if is_second else derive
         if derive(self,body['context'],body['parent']['work_order_ref'],
                   through_rowid=body['parent_append_rowid']) != body:
             raise ValueError('memo maintenance parent diagnostics/source differ before registration')
@@ -783,6 +790,13 @@ class MemoMacroAccounting:
                                   verifier_micros=0 if role == 'verifier' else verifier_micros)
         if role == 'maintenance':
             future = max(future,(3-index)*producer_micros+verifier_micros)
+            from .planner_paid_output_recovery import _authority_connection
+            from .investment_memo_group_maintenance import record_for
+            from .investment_memo_second_maintenance import CONTRACT_REF as SECOND_REF, policy
+            with _authority_connection(self.model.scheduler_db) as connection:
+                record=record_for(self,connection,index)
+            if record is not None and record['contract_ref']==SECOND_REF:
+                policy(self.model)  # live policy can deny new spending, never erase old charges
         retries = self.last.get('ready_retry_work_refs', [])
         if retries:
             proof = self.pending_retry
