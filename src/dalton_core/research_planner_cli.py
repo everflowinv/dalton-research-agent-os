@@ -351,11 +351,21 @@ def build_state(store: DaltonStore, missions: CoverageMissionAuthority,
             for entry in checklist}
     except (OSError, ValueError, KeyError, TypeError):
         screen_feedback = {}
+    from .investment_memo_planner_feedback import read_feedback as read_memo_feedback
+    memo_feedback = {}
+    try:
+        memo_config = json.loads((state_dir/'dossier-model-config.json').read_text())
+        memo_feedback = {entry['company_ref']: read_memo_feedback(store.connection,
+            state_dir=state_dir, mission=mission, company_ref=entry['company_ref'], config=memo_config)
+            for entry in checklist}
+    except (OSError, ValueError, KeyError, TypeError):
+        pass
     state = build_research_state(
         mission=mission, checklist=checklist, industry=industry,
         figures_by_company=figures, financial_models_by_company=financial_models,
         metrics_by_company=metrics,
         initial_screen_feedback_by_company=screen_feedback,
+        memo_question_feedback_by_company=memo_feedback,
         contested_by_company=disputed, acquisition_by_company=acquisition,
         dossier_feedback_by_company=read_dossier_repair_feedback(
             Path(store.path).parent),

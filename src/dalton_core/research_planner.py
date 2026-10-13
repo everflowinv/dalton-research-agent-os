@@ -171,7 +171,7 @@ PROMPT_PROJECTION_RULE = {
         "filed_statement_figures", "reading_pipeline",
         "readable_documents", "readable_documents_summary",
         "document_execution_availability", "document_execution_failures", "numeric_reading_requirements", "canonical_document_questions",
-        "model_execution_failures", "model_execution_failure_summary",
+        "model_execution_failures", "model_execution_failure_summary", "memo_question_feedback",
         "numeric_source_refusal_ids", "numeric_source_refusals", "numeric_waiting_targets", "numeric_completed_context",
         "document_research_feedback_summary", "dossier_feedback.repair_target_ids",
         "dossier_feedback.material", "document_research_reopened",
@@ -212,7 +212,7 @@ _COMPANY_CORE_FIELDS: tuple[str, ...] = (
     "filed_statement_figures", "reading_pipeline",
     "readable_documents", "readable_documents_summary",
     "document_execution_availability", "document_execution_failures", "numeric_reading_requirements", "canonical_document_questions",
-    "model_execution_failures", "model_execution_failure_summary", "initial_screen_validation_feedback",
+    "model_execution_failures", "model_execution_failure_summary", "memo_question_feedback", "initial_screen_validation_feedback",
     "document_research_feedback_summary",
     "document_research_reopened", "document_research_reopened_omitted",
 )
@@ -423,6 +423,7 @@ TASK_HASH = content_hash({
     "task": TASK_REF,
     "output": OUTPUT_SCHEMA,
     "authority": "proposes_work_only_within_the_state_it_was_given",
+    "memo_question_feedback": "investment-memo-planner-feedback:0.1",
 })
 
 
@@ -1501,7 +1502,13 @@ def build_prompt(state: Mapping[str, Any]) -> str:
         "omitted feedback. Seek original disclosures: context identifiers are not amounts. Excerpted reasons "
         "include full_reason_hash. Under planner-numeric-waiting-source-bindings:0.1, zero-based "
         "source_binding_index selects the same company's source_bindings; copy document/version/result hashes "
-        "exactly.\ndocument_research_feedback records attempted directed reads. query_miss/no_verified_claim means "
+        "exactly.\nmemo_question_feedback lists source-checked unanswered investment-memo questions. "
+        "It is an operational research gap, never evidence, an answer, a trading instruction or budget permission. "
+        "Use each question and falsifier to choose precise missing sources, metrics and periods through ordinary "
+        "directives/inquiries and the current material catalogue. Existing document counts do not answer these questions. "
+        "For missing portfolio permissions preserve the human authority boundary; do not invent authorization "
+        "or repeatedly search for a private decision. Group compatible source requests and reuse held originals.\n"
+        "document_research_feedback records attempted directed reads. query_miss/no_verified_claim means "
         "unresolved, not source absence: refine tried terms/context, select another available document or request "
         "missing material. Never repeat an unsuccessful same-version/query by changing rationale. candidate_staged"
         " awaits publication, not a Claim/Dossier fix; recovery_required blocks execution, not the answer. "

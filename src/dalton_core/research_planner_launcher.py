@@ -380,6 +380,7 @@ class ResearchPlannerCoordinator:
             document_research_feedback_signature, document_research_settlement_signature,
         )
 
+        from .investment_memo_planner_feedback import signature as memo_feedback_signature
         from .research_planner import TASK_HASH
         from .research_planner_cli import MAX_WORK_ORDER_PROMPT_BYTES, planner_input_byte_bound
 
@@ -398,6 +399,7 @@ class ResearchPlannerCoordinator:
             "documents": count("SELECT COUNT(*) FROM coverage_mission_discovered_documents"),
             "document_versions": document_inventory_signature(self.store, Path(self.store.path).parent),
             "document_research_feedback": document_research_feedback_signature(self.store),
+            "memo_question_feedback": memo_feedback_signature(Path(self.store.path).parent),
             # 2026-10-01: an owner withdrawal writes no observation, Claim or
             # document, so nothing above moved when legacy's 27 were withdrawn
             # and the lane held "nothing changed" for the next hour.  Which
